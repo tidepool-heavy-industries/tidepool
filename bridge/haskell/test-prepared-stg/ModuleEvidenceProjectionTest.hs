@@ -44,6 +44,7 @@ import Tidepool.TypePolicy qualified as TypePolicy
 verifyModuleEvidenceProjection :: IO ()
 verifyModuleEvidenceProjection = do
   verifyGroupSelection context prepared
+  verifyTopImportScopes context prepared
   groups <- project prepared
   assert (length groups == 3) "module evidence fixture lost a group"
   (firstBody, secondBody, emptyBody) <- case groups of
@@ -308,6 +309,97 @@ verifyGroupSelection context prepared = do
     , preparedAuthorityDependent = True
     , preparedIntrinsicNames = Set.fromList (map varName owners)
     , preparedExpectedEntries = ProvisionalEntries (Map.fromList [(varName identifier, identifier) | identifier <- owners]) }
+
+data ReferencePosition = SameGroup | OtherGroup | UnknownTop
+  deriving (Eq, Show)
+
+-- Vary the known domain independently of the local group, name kind and current
+-- original selection. Observe production projection rather than exposing scope
+-- constructors or granting compiler admission to these structural inputs.
+verifyTopImportScopes :: ProjectionContext -> PreparedModule -> IO ()
+verifyTopImportScopes context prepared = do
+  forM_ [SameGroup, OtherGroup, UnknownTop] $ \position ->
+    forM_ [False, True] $ \external ->
+      forM_ [0, 3] $ \extras ->
+        forM_ [False, True] $ \current -> do
+          let reference = referenceBinder external
+              primary = (StgTopLifted (case position of
+                SameGroup -> StgRec [(entry, call reference), (reference, value)]
+                _ -> StgNonRec entry (call reference)), emptyVarSet)
+              other = case position of
+                OtherGroup -> [(StgTopLifted (StgNonRec reference value), emptyVarSet)]
+                _ -> []
+              module_ = base { preparedBindings = primary : other ++
+                [(StgTopStringLit (externalBinder (20 + index) ("extra" ++ show index))
+                  "unused", emptyVarSet) | index <- [1 .. extras]] }
+              names = preparedTopIdentityBindings [module_]
+              sourceNames = Set.fromList [varName identifier
+                | (binding, _) <- pmBindings module_, identifier <- topBinders binding]
+              symbol = SymbolIdentity "main" "ModuleEvidence"
+                (if external then "value" else "local") "reference" Nothing
+              locals = Set.fromList [identity | identifier <- topBinders (fst primary)
+                , Just identity <- [Map.lookup (varName identifier) names]]
+              outside = Set.fromList (Map.elems names) `Set.difference` locals
+              selected = context
+                { projectionEntry = entrySymbol
+                , projectionCurrentOriginals = if current
+                    then Map.singleton (varName reference) symbol else Map.empty }
+              groupResult = projectPreparedModuleGroupsSelected selected module_
+                (Just (Set.singleton 0))
+              wholeResult = projectPrepared selected [module_]
+              label = show (position, external, extras, current)
+          assert (Map.keysSet names == sourceNames)
+            ("top identity domain differs from actual top binders: " ++ label)
+          assert (Map.lookup (varName reference) names ==
+              if position == UnknownTop then Nothing else Just symbol)
+            ("reference premise does not match known domain: " ++ label)
+          case groupResult of
+            Right [group] -> do
+              assert (position /= UnknownTop) ("unknown group reference admitted: " ++ label)
+              assert (map globalIdentity (projectedGlobals (projectedBody group)) ==
+                  if symbol `Set.member` outside then [symbol] else [])
+                ("group imports differ from independent full-complement oracle: " ++ label)
+            Left failure -> assertUnknown position external failure label
+            outcome -> fail ("group scope returned the wrong group roster: " ++ show outcome)
+          case wholeResult of
+            Right program -> do
+              assert (position /= UnknownTop) ("unknown whole-program reference admitted: " ++ label)
+              assert (map globalIdentity (programGlobals program) ==
+                  if current && position == OtherGroup then [symbol] else [])
+                ("whole-program current-original selection changed: " ++ label)
+            Left failure -> assertUnknown position external failure label
+  let reference = referenceBinder True
+      module_ = base { preparedBindings =
+        [(StgTopLifted (StgNonRec entry (call reference)), emptyVarSet)] }
+      retained = context { projectionEntry = entrySymbol
+        , projectionRetainedGenerations = Map.singleton
+            (SymbolIdentity "main" "ModuleEvidence" "value" "reference" Nothing) 9 }
+  groups <- either (fail . show) pure (projectPreparedModuleGroupsSelected retained module_
+    (Just (Set.singleton 0)))
+  assert (case groups of
+      [group] -> map globalRequiredGeneration (projectedGlobals (projectedBody group)) == [Just 9]
+      _ -> False) "retained generation did not precede unknown home-top refusal"
+  putStrLn "top import scope: 24 varied inputs, 48 scope outcomes and retained-generation precedence passed"
+ where
+  assert condition message = unless condition (fail message)
+  assertUnknown position external failure label = assert
+    (position == UnknownTop && case failure of
+      MissingPreparedTop{} -> external
+      UnboundPreparedInternal{} -> not external
+      _ -> False)
+    ("scope changed typed unknown-top refusal: " ++ label ++ " " ++ show failure)
+  base = prepared { preparedPreparedSites = [], preparedSiteRejections = []
+    , preparedTypeGraph = TypeGraph IntMap.empty IntMap.empty }
+  externalBinder index occurrence = mkVanillaGlobal
+    (mkExternalName (mkUnique 's' index) (pmModule prepared) (mkVarOcc occurrence) noSrcSpan) addrPrimTy
+  entry = externalBinder 1 "scopeEntry"
+  entrySymbol = SymbolIdentity "main" "ModuleEvidence" "value" "scopeEntry" Nothing
+  referenceBinder True = externalBinder 2 "reference"
+  referenceBinder False = mkVanillaGlobal
+    (mkSystemName (mkUnique 's' 2) (mkVarOcc "reference")) addrPrimTy
+  call identifier = StgRhsClosure emptyDVarSet dontCareCCS ReEntrant []
+    (StgApp identifier []) addrPrimTy
+  value = StgRhsClosure emptyDVarSet dontCareCCS ReEntrant [] (StgLit LitNullAddr) addrPrimTy
 
 compareFilterOracle :: ProjectionContext -> PreparedModule -> IO ()
 compareFilterOracle context prepared = do

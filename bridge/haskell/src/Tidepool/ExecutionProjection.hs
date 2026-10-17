@@ -194,6 +194,17 @@ data ProjectionPurpose
 
 data EntryContractAdmission = FinalEntryContracts | DeferredEntryContracts
 
+-- Import classification applies only after resolving a symbol through topSymbols.
+-- Whole-program projection retains its selected current originals; an original
+-- group keeps its complete local binder set and imports other resolved tops.
+data PreparedTopScope
+  = WholeProgramScope (Set SymbolIdentity)
+  | OriginalGroupScope (Set SymbolIdentity)
+
+importsResolvedTop :: PreparedTopScope -> SymbolIdentity -> Bool
+importsResolvedTop (WholeProgramScope originals) symbol = symbol `Set.member` originals
+importsResolvedTop (OriginalGroupScope local) symbol = symbol `Set.notMember` local
+
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv (JoinId, [RuntimeRep])
@@ -222,8 +233,7 @@ data PState = PState
   , timeAuthority :: Maybe TimeAuthority
   , jsonAuthority :: Maybe JsonAuthority
   , textUnit :: Maybe TextUnitAuthority
-  -- Tops outside the group currently being projected become explicit imports.
-  , externalizedTops :: Set SymbolIdentity
+  , topScope :: PreparedTopScope
   , projectionPurpose :: ProjectionPurpose
   , entryContractAdmission :: EntryContractAdmission
   , entryContractFailures :: [ProjectionError]
@@ -269,7 +279,7 @@ projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionErr
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
   (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
     0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers []) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
-    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget FinalEntryContracts [])
+    machine Map.empty Set.empty Nothing Nothing Nothing Nothing (WholeProgramScope Set.empty) ExecutableTarget FinalEntryContracts [])
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -745,7 +755,6 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
   | (ordinal, item, onlyGroup) <- surviving]
   where
     identities = buildTopIdentityMap [prepared]
-    originals = pmBindings prepared
     evidenceIndex = indexPreparedEvidence prepared
     surviving =
       [ (ordinal, item, onlyGroup)
@@ -754,10 +763,6 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
       , not (null (topBinders binding))
       , keepPreparedTop context binding
       , maybe True (Set.member ordinal) selection ]
-    allSymbols = Set.fromList
-      [ symbol
-      | (binding, _) <- originals, binder <- topBinders binding
-      , Just symbol <- [lookupVarEnv identities binder] ]
     groupBinderSymbols (binding, _) =
       mapMaybe (lookupVarEnv identities) (topBinders binding)
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
@@ -773,14 +778,17 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
       binders <- traverse (\binder -> maybe
         (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
         (lookupVarEnv identities binder)) (topBinders binding)
-      let outside = allSymbols `Set.difference` Set.fromList binders
+      -- identities contains exactly this module's topBinders, including
+      -- introduced tops and constructor workers. Every resolved symbol outside
+      -- this complete local binder set therefore belongs to another group.
+      let scope = OriginalGroupScope (Set.fromList binders)
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
             Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty (pmIdentityResolver prepared) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
-            (projectionJsonAuthority context) (projectionTextUnit context) outside purpose FinalEntryContracts []
+            (projectionJsonAuthority context) (projectionTextUnit context) scope purpose FinalEntryContracts []
       evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
         (do auxiliary <- validatePreparedEvidence context [onlyGroup] [evidence] []
@@ -872,7 +880,7 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         boundJsonAuthority
         (projectionTextUnit context)
-        (Set.fromList (Map.elems (projectionCurrentOriginals context)))
+        (WholeProgramScope (Set.fromList (Map.elems (projectionCurrentOriginals context))))
         ExecutableTarget DeferredEntryContracts []
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
@@ -2814,12 +2822,12 @@ projectReference binder = do
         else do
           topNames <- gets topSymbols
           tops <- gets topValues
-          offGroup <- gets externalizedTops
+          scope <- gets topScope
           let symbol = lookupVarEnv topNames binder
           case symbol of
             Just home -> case Map.lookup home tops of
               Just identity -> pure (Local identity)
-              Nothing | home `Set.member` offGroup -> Global <$> internGlobal binder
+              Nothing | importsResolvedTop scope home -> Global <$> internGlobal binder
               Nothing -> lift (Left (MissingPreparedTop home))
             Nothing -> case nullaryWorkerConstructor binder of
               Just con -> Local <$> internNullaryWorker binder con
@@ -2829,11 +2837,11 @@ deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
 deferredFunctionReference binder deferred = do
   topNames <- gets topSymbols
   tops <- gets topValues
-  offGroup <- gets externalizedTops
+  scope <- gets topScope
   case lookupVarEnv topNames binder of
     Just symbol -> case Map.lookup symbol tops of
       Just identity -> pure identity
-      Nothing | symbol `Set.member` offGroup -> internDeferredFunction binder deferred
+      Nothing | importsResolvedTop scope symbol -> internDeferredFunction binder deferred
       Nothing -> lift (Left (MissingPreparedTop symbol))
     Nothing -> internDeferredFunction binder deferred
 
@@ -3017,10 +3025,10 @@ withScope action = do
 internGlobal :: Id -> P GlobalId
 internGlobal binder = do
   names <- gets topSymbols
-  offGroup <- gets externalizedTops
+  scope <- gets topScope
   let mapped = lookupVarEnv names binder
-      groupImport = maybe False (`Set.member` offGroup) mapped
-  if groupImport then internExternalGlobal binder
+      explicitImport = maybe False (importsResolvedTop scope) mapped
+  if explicitImport then internExternalGlobal binder
   else if not (isExternalName (varName binder)) then
     lift (Left (UnboundPreparedInternal
       (Text.pack (occNameString (nameOccName (varName binder))))))
