@@ -1602,6 +1602,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         );
         for chosen in [&left, &right] {
             let private = OriginalCompilerInputs {
+                demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
                 projection: projection.clone(),
                 artifacts: retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
                 native_offers: vec![chosen.clone()],
@@ -1887,6 +1888,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
     let private = OriginalCompilerInputs {
+        demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
         projection: projection.clone(),
         artifacts: retain_native_offers(&b, &offers).unwrap(),
         native_offers: offers,
@@ -4584,6 +4586,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let private = OriginalCompilerInputs {
+            demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
             projection: projection.clone(),
             artifacts: custody.clone(),
             native_offers: vec![offer],
@@ -6168,11 +6171,14 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
     assert!(!b_groups.contains(&historical_child));
     let support = fixture_compiler_support(projection.clone(), right.clone());
     let original_graph = support.artifacts().capture_graph_selection();
-    for extra in [
-        vec![b.clone()],
-        vec![a.clone(), b.clone()],
-        vec![b.clone(), a.clone()],
-        vec![a.clone(), b.clone(), parent_offer.clone()],
+    let fresh = product("FreshAlongsideSelectedIssuer", 135);
+    for (extra, mixed_fresh) in [
+        (vec![b.clone()], false),
+        (vec![a.clone(), b.clone()], false),
+        (vec![b.clone(), a.clone()], false),
+        (vec![a.clone(), b.clone(), parent_offer.clone()], false),
+        (vec![a.clone(), b.clone(), parent_offer.clone()], true),
+        (vec![b.clone(), a.clone()], true),
     ] {
         let includes_a = extra.iter().any(|offer| offer == &a);
         let includes_parent = extra.iter().any(|offer| offer == &parent_offer);
@@ -6222,7 +6228,11 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("native-issuance-does-not-read-manifest"),
             by_owner: BTreeMap::new(),
-            native_availability: vec![native.clone()],
+            native_availability: if mixed_fresh {
+                vec![native.clone(), fresh.clone()]
+            } else {
+                vec![native.clone()]
+            },
             catalog_owner: None,
             input_transport: Vec::new(),
         };
@@ -6239,6 +6249,15 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(reused))
             .unwrap();
         assert_eq!(exact_groups(&request.compiler_inputs().artifacts), b_groups);
+        assert_eq!(
+            request
+                .compiler_inputs()
+                .artifacts
+                .selected_native_groups()
+                .len(),
+            2,
+            "fresh availability cannot add executable demand beside selected B"
+        );
         if includes_parent {
             assert!(
                 request
@@ -6290,5 +6309,139 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
                 original_ordinal: 9001
             }
         ])
+    );
+}
+
+#[test]
+fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
+    use crate::artifact_inventory::{ArtifactBindingNode, ExactArtifactSelection};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("PublishedCandidateDemand", 136);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let target = Arc::new(ArtifactEntry::canonical(
+        product("PublishedCandidateTarget", 137)
+            .module_interface()
+            .unwrap()
+            .clone(),
+    ));
+    let inventory = ArtifactInventory::default();
+    let view = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone(), target.clone()])
+        .unwrap();
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()]).unwrap();
+    let source = ExactDeclarationContext::from_authenticated_execution(
+        producer.sha256(),
+        &view,
+        projection,
+        vec![
+            ExactLexicalNode {
+                owner: target.descriptor.owner.clone(),
+                imports: vec![entry.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: entry.descriptor.owner.clone(),
+                imports: vec![],
+            },
+        ],
+        target.descriptor.owner.clone(),
+        &[
+            target.descriptor.owner.clone(),
+            entry.descriptor.owner.clone(),
+        ],
+    )
+    .unwrap();
+    let publication = source
+        .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+        .unwrap();
+    let published = publication.context();
+    let role =
+        published.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].clone();
+    let policy =
+        crate::artifact_inventory::NativeOriginalRequirement::from_role(role.clone()).unwrap();
+    assert!(policy
+        .selection
+        .graph_selection()
+        .roots
+        .iter()
+        .any(|node| matches!(node, ArtifactBindingNode::Group(_))));
+    let mut graph = published.artifact_view().capture_graph_selection();
+    let groups = graph
+        .roots
+        .iter()
+        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    graph
+        .roots
+        .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
+    graph.custody_roots.extend(groups);
+    graph.custody_roots.sort();
+    graph.custody_roots.dedup();
+    let namespace = graph
+        .namespace
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect();
+    let withdrawn = published
+        .artifact_view()
+        .select_issued(
+            namespace,
+            &ExactArtifactSelection::from_recovered_graph_selection(graph),
+        )
+        .unwrap();
+    assert!(withdrawn.selected_native_groups().is_empty());
+    let support = recover_fixture_compiler_support(
+        published.compiler_input_projection().clone(),
+        withdrawn,
+        published
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .cloned(),
+    )
+    .unwrap();
+    let context = published
+        .as_ref()
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support);
+    assert_eq!(
+        context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
+        role
+    );
+    let candidates = crate::module_candidates::CandidateSet {
+        manifest_path: PathBuf::from("candidate-native-issuance-only"),
+        by_owner: BTreeMap::new(),
+        native_availability: vec![native],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+        .unwrap()
+        .unwrap();
+    assert!(reused
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    assert!(reused
+        .selected_demand_source()
+        .unwrap()
+        .selected_native_groups()
+        .is_empty());
+    let directory = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(context))
+        .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(reused))
+        .unwrap();
+    assert!(
+        request
+            .compiler_inputs()
+            .artifacts
+            .selected_native_groups()
+            .is_empty(),
+        "published policy cannot resurrect withdrawn source demand"
+    );
+    assert_eq!(
+        request.compiler_inputs().projection.snapshot_roles()[&entry.descriptor.owner],
+        role
     );
 }

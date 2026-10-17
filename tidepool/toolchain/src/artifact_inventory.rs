@@ -915,6 +915,10 @@ enum CompilerInputValidation {
 
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
+    SourceSelections {
+        left: Option<&'a ArtifactView>,
+        right: Option<&'a ArtifactView>,
+    },
     ExtendInterfaces,
     SelectedOriginals(&'a crate::certified_products::SelectedOriginalClosure),
 }
@@ -6414,7 +6418,13 @@ impl ArtifactView {
             baseline.projection(),
             fragment.issued_artifacts(),
             fragment.role_projection(),
-            CompilerNativeDemand::RoleIssuer,
+            match fragment.selected_demand_source() {
+                Some(source) => CompilerNativeDemand::SourceSelections {
+                    left: Some(baseline.artifacts()),
+                    right: Some(source),
+                },
+                None => CompilerNativeDemand::RoleIssuer,
+            },
             CompilerInputValidation::ReceivedFragment,
         )
     }
@@ -6427,7 +6437,10 @@ impl ArtifactView {
             left.role_projection(),
             right.issued_artifacts(),
             right.role_projection(),
-            CompilerNativeDemand::RoleIssuer,
+            CompilerNativeDemand::SourceSelections {
+                left: left.selected_demand_source(),
+                right: right.selected_demand_source(),
+            },
             CompilerInputValidation::FragmentPair,
         )
     }
@@ -6486,15 +6499,48 @@ impl ArtifactView {
                 }
                 _ => None,
             };
-            let requirement = if let Some(originals) = closure {
+            let selected_sources = match &demand {
+                CompilerNativeDemand::SourceSelections { left, right } => {
+                    let mut sources = Vec::new();
+                    if projection.snapshot_roles().get(owner) == Some(role) {
+                        if let Some(left) = left {
+                            sources.push(*left);
+                        }
+                    }
+                    if incoming.snapshot_roles().get(owner) == Some(role) {
+                        if let Some(right) = right {
+                            sources.push(*right);
+                        }
+                    }
+                    sources
+                }
+                _ => Vec::new(),
+            };
+            let requirements = if !selected_sources.is_empty() {
+                // An explicit empty source selection stays empty. Role policy
+                // cannot resurrect groups after source demand was withdrawn.
+                selected_sources
+                    .into_iter()
+                    .map(|selected| {
+                        NativeOriginalRequirement::from_selected_view(original, selected)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            } else if let Some(originals) = closure {
                 NativeOriginalRequirement::from_selected_view(original, originals.native_closure())?
+                    .into_iter()
+                    .collect()
             } else {
                 match NativeOriginalRequirement::from_role(role.clone()) {
                     Some(issued) => Some(issued),
                     None => NativeOriginalRequirement::from_selected_view(original, source)?,
                 }
+                .into_iter()
+                .collect()
             };
-            for requirement in requirement {
+            for requirement in requirements {
                 for root in &requirement.selection.graph_selection().roots {
                     let ArtifactBindingNode::Group(group) = root else {
                         continue;

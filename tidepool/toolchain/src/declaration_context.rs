@@ -323,7 +323,15 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// This retains exact native roles and their custody without publishing either
 /// authored lexical rights or persistent source-reuse roles.
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum OriginalInputDemand {
+    RolePolicy,
+    // This is the existing immutable selection owner, not a census of its custody.
+    SelectedSource(ArtifactView),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OriginalCompilerInputs {
+    demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
@@ -436,6 +444,13 @@ impl OriginalCompilerInputs {
         )
     }
 
+    pub(crate) fn selected_demand_source(&self) -> Option<&ArtifactView> {
+        match &self.demand {
+            OriginalInputDemand::RolePolicy => None,
+            OriginalInputDemand::SelectedSource(source) => Some(source),
+        }
+    }
+
     pub(crate) fn issued_offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
         &self.native_offers
     }
@@ -540,6 +555,7 @@ impl OriginalCompilerInputs {
                 context.facts.compiler_support.native_offers(),
             )?;
             Some(Self {
+                demand: OriginalInputDemand::RolePolicy,
                 projection,
                 artifacts: retain_native_offers(context.artifact_view(), &native_offers)?,
                 native_offers,
@@ -568,15 +584,64 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
-        let carried = Self::reuse_selected_authored(context)?;
-        if configured.is_empty() {
+        let mut carried = Self::reuse_selected_authored(context)?;
+        let metadata = context.compiler_metadata_snapshot()?;
+        let mut reused = BTreeSet::new();
+        let mut fresh = Vec::new();
+        for product in configured {
+            let owner = identity(&product.owner().unit, &product.owner().module);
+            let is_selected = metadata.entries.get(&owner).is_some_and(|entry| {
+                matches!(&entry.payload, ArtifactPayload::Original(selected)
+                    if selected.same_durable_artifact(product))
+            });
+            if is_selected {
+                if metadata.entries[&owner].descriptor.producer_sha256 != producer.sha256() {
+                    return Err(failure(
+                        "reused candidate belongs to another canonical producer",
+                    ));
+                }
+                reused.insert(owner);
+            } else {
+                fresh.push(product.clone());
+            }
+        }
+        if !reused.is_empty() {
+            let source = &context.facts.compiler_support;
+            let projection = source.projection().for_source_owners(&reused);
+            let reused = Self {
+                demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+                projection,
+                artifacts: source.artifacts().clone(),
+                native_offers: source.native_offers().to_vec(),
+            };
+            carried = Some(match carried {
+                Some(carried) => reused.merge(&carried)?,
+                None => reused,
+            });
+        }
+        if fresh.is_empty() {
             return Ok(carried);
+        }
+        // Fresh bodies own their new issuance. Existing external demand comes
+        // from the source's selected groups, never all historical offer roots.
+        let mut selected_requirements = Vec::new();
+        for role in context.compiler_input_projection().roles() {
+            if let Some(original) = role.original() {
+                if let Some(requirement) =
+                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                        original,
+                        context.facts.compiler_support.artifacts(),
+                    )?
+                {
+                    selected_requirements.push(requirement);
+                }
+            }
         }
         let configured = Self::from_native_availability_with_requirements(
             context,
             producer,
-            configured,
-            &native_requirement_facts(context.facts.compiler_support.native_offers()),
+            &fresh,
+            &selected_requirements,
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -648,6 +713,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(&artifacts, &native_offers)?;
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         Ok(Self {
+            demand: OriginalInputDemand::RolePolicy,
             projection,
             artifacts,
             native_offers,
@@ -896,6 +962,7 @@ impl OriginalCompilerInputs {
             &native_original_requirements,
         )?;
         Ok(Self {
+            demand: OriginalInputDemand::RolePolicy,
             projection,
             artifacts,
             native_offers,
@@ -934,6 +1001,7 @@ impl OriginalCompilerInputs {
         let native_offers = preserve_native_offers(&projection, support, &self.native_offers)?;
         let artifacts = retain_native_offers(support, &native_offers)?;
         Ok(Self {
+            demand: self.demand.clone(),
             projection,
             artifacts,
             native_offers,
@@ -950,7 +1018,15 @@ impl OriginalCompilerInputs {
                 native_offers.push(offer.clone());
             }
         }
+        let demand = if self.selected_demand_source().is_some()
+            || other.selected_demand_source().is_some()
+        {
+            OriginalInputDemand::SelectedSource(artifacts.clone())
+        } else {
+            OriginalInputDemand::RolePolicy
+        };
         Ok(Self {
+            demand,
             projection,
             artifacts,
             native_offers,
