@@ -4202,13 +4202,16 @@ mod tests {
                             restored.semantic_digest(),
                             capsule.source.semantic_digest()
                         ),
-                        1 => proptest::prop_assert!(matches!(
-                            restored.prepared_entries(),
-                            Some(SourceEntryStorage::FreshCompilation {
-                                directory, preparation,
-                            }) if directory == reload.fresh_entry_storage.directory()
-                                && *preparation == fresh_preparation(&reload)
-                        )),
+                        1 => proptest::prop_assert!(
+                            matches!(
+                                restored.prepared_entries(),
+                                Some(SourceEntryStorage::FreshCompilation {
+                                    directory, preparation,
+                                }) if directory == reload.fresh_entry_storage.directory()
+                                    && *preparation == fresh_preparation(&reload)
+                            ),
+                            "fresh source recovery changed its selected preparation"
+                        ),
                         2 => {
                             let Some(SourceEntryStorage::CompletedOriginal {
                                 directory,
