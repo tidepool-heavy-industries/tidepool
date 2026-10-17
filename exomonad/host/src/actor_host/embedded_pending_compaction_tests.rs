@@ -226,7 +226,7 @@ impl ResponsesTransport for CompactionTransport {
                     })),
                 ],
                 usage: harness::transport::Usage {
-                    input_tokens: 100_001,
+                    input_tokens: Some(100_001),
                     ..Default::default()
                 },
             }),
@@ -558,7 +558,7 @@ impl ResponsesTransport for FailedCompactionTransport {
                     "input":"hold until the test cancels the Engine"
                 }))],
                 usage: harness::transport::Usage {
-                    input_tokens: 100_001,
+                    input_tokens: Some(100_001),
                     ..Default::default()
                 },
             }),

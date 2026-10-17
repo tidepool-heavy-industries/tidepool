@@ -48,7 +48,7 @@ fn usage_turn(response_id: &str, text: &str, input_tokens: u64) -> ResponsesTurn
     // A final answer waits for pending jobs before another Engine iteration.
     // Commentary triggers compaction while the actual resident call is parked.
     turn.items[0].0["phase"] = json!("commentary");
-    turn.usage.input_tokens = input_tokens;
+    turn.usage.input_tokens = Some(input_tokens);
     turn
 }
 

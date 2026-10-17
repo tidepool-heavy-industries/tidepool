@@ -2775,7 +2775,7 @@ mod tests {
             turn.items[2].tool_call().unwrap().unwrap().execution,
             harness::item::ToolExecution::Asynchronous
         );
-        assert!(turn.usage.reported);
+        assert!(turn.usage.has_reported_totals());
     }
 
     #[test]

@@ -3000,7 +3000,7 @@ mod tests {
                 response_id: format!("park-{round}"),
                 items,
                 usage: harness::transport::Usage {
-                    input_tokens: if round == 2 { 100_001 } else { 0 },
+                    input_tokens: Some(if round == 2 { 100_001 } else { 0 }),
                     ..Default::default()
                 },
             })

@@ -115,7 +115,7 @@ fn message_turn(id: &str, tokens: u64, phase: MessagePhase) -> ResponsesTurn {
             "content":[{"type":"output_text","text":"The typed operation remains retained."}]
         }))],
         usage: Usage {
-            input_tokens: tokens,
+            input_tokens: Some(tokens),
             ..Usage::default()
         },
     }

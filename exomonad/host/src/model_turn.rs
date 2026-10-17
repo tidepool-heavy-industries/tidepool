@@ -608,9 +608,8 @@ mod tests {
             response_id: uuid::Uuid::new_v4().to_string(),
             items,
             usage: Usage {
-                reported: true,
-                input_tokens: 1,
-                output_tokens: 1,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
                 ..Usage::default()
             },
         }
