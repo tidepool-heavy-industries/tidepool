@@ -3,10 +3,13 @@ use super::runtime;
 use tidepool_codegen::prepared_program::ProgramId;
 use tidepool_repr::execution_schema::{DefinitionsView, JsonLayout};
 
-pub(super) fn json_layout(program: DefinitionsView<'_>) -> JsonLayout<tidepool_repr::DataConId> {
+pub(super) fn json_layout(
+    program: DefinitionsView<'_>,
+    owner: &str,
+) -> JsonLayout<tidepool_repr::DataConId> {
     program
         .json_layout()
-        .expect("compiler-issued Value layout")
+        .unwrap_or_else(|| panic!("compiler-issued Value layout missing from {owner}"))
         .try_map(|id| {
             program
                 .constructors()

@@ -328,11 +328,14 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
         .expect("install the target and its complete certified native closure");
     let table = state.session_table().clone();
+    let payload_group = reached_payload_construction(&compiled);
     let payload_layout = crate::typed_receive_test_support::json_layout(
-        compiled.targets["__payload"]
-            .prepared
-            .prepared()
-            .definitions(),
+        payload_group.group().definitions(),
+        &format!(
+            "{:?} original group {} authored payload",
+            payload_group.owner(),
+            payload_group.group().original_ordinal()
+        ),
     );
     let mut producer = crate::session::PersistentSession::new(None, 4096);
     let payload_program = crate::install_compiled_target(&mut producer, &compiled, "__payload")
@@ -351,4 +354,58 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     );
     assert!(state.prepared_mut().unwrap().unpin(program));
     assert!(producer.prepared_mut().unwrap().unpin(payload_program));
+}
+
+fn reached_payload_construction(
+    compiled: &crate::CompiledArtifacts,
+) -> &tidepool_toolchain::certified_products::PendingCertifiedGroup {
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+    let mut pending = compiled.targets["__payload"]
+        .pending_imports
+        .iter()
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    let mut payload = None;
+    while let Some(import) = pending.pop() {
+        let PendingImportOwner::Source {
+            owner,
+            original_ordinal,
+            binder,
+        } = import
+        else {
+            continue;
+        };
+        let mut matches = compiled.certified_groups.iter().filter(|group| {
+            group.owner() == owner && group.group().original_ordinal() == *original_ordinal
+        });
+        let group = matches
+            .next()
+            .unwrap_or_else(|| panic!("missing certified source group for {import:?}"));
+        assert!(
+            matches.next().is_none(),
+            "duplicate certified source group for {import:?}"
+        );
+        assert!(
+            group.group().binders().contains(binder),
+            "certified group does not export exact dependency {import:?}"
+        );
+        if binder.unit == "main"
+            && binder.module == "RetainedReceiveConsumer"
+            && binder.namespace == "value"
+            && binder.occurrence == "payload"
+            && binder.record_parent.is_none()
+        {
+            if let Some(previous) = payload {
+                assert!(
+                    std::ptr::eq(previous, group),
+                    "multiple reached authored payload construction owners"
+                );
+            }
+            payload = Some(group);
+        }
+        if visited.insert((owner.clone(), *original_ordinal)) {
+            pending.extend(group.imports());
+        }
+    }
+    payload.expect("__payload must reach the exact certified authored payload construction")
 }

@@ -157,7 +157,8 @@ fn assert_typed_receive_json(prepared: PreparedProgram, table: tidepool_repr::Da
     assert!(receive
         .constructor_replies()
         .contains(&(ConstructorId(receiver as u32), ConstructorReply::AtSite)));
-    let layout = typed_receive_test_support::json_layout(receive);
+    let layout =
+        typed_receive_test_support::json_layout(receive, "standalone JsonReply.__prepared");
     let mut live_sites = receive
         .sites()
         .iter()
@@ -181,7 +182,10 @@ fn assert_typed_receive_json(prepared: PreparedProgram, table: tidepool_repr::Da
         DecodeLimits::default(),
     )
     .expect("genuine self-contained compiler-produced typed payloads");
-    let payload_layout = typed_receive_test_support::json_layout(payload.definitions());
+    let payload_layout = typed_receive_test_support::json_layout(
+        payload.definitions(),
+        "standalone JsonReply.__payload",
+    );
     let (mut producer, payload_program) =
         tidepool_runtime::prepared_execution::PreparedEngine::bootstrap_with_nursery_bytes(
             payload, 4096,
