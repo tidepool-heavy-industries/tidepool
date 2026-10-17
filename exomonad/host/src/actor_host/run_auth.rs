@@ -47,6 +47,20 @@ impl RunAuth {
         }
     }
 
+    pub(super) fn validate_for(
+        &self,
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+    ) -> Result<(), String> {
+        if self.backend() != settings.provider {
+            return Err("preadmitted transport differs from configured run backend".into());
+        }
+        let admission = self.admission().map_err(|error| error.to_string())?;
+        if admission.contract().limits != settings.inference_limits.resolve(settings.provider) {
+            return Err("preadmitted transport differs from configured inference limits".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn backend(&self) -> exomonad_actor::Backend {
         match self {
             Self::OpenAIPlan(_) => exomonad_actor::Backend::OpenAIPlan,

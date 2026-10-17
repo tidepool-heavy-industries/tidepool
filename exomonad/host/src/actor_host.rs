@@ -1816,7 +1816,8 @@ async fn run_owned(
     if config.model.value().trim().is_empty() {
         return Err(runtime_error("run model must be nonempty"));
     }
-    if config.inference_auth.is_some() {
+    if let Some(auth) = &config.inference_auth {
+        auth.validate_for(settings).map_err(runtime_error)?;
         display_output::require_unopened_run_store(config.run_directory.path())
             .map_err(runtime_error)?;
     }
