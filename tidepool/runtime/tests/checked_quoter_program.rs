@@ -166,7 +166,10 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let original = originals[0];
         // Quotation expands during compilation. The fixture's opaque runtime
         // wrapper independently supplies a fresh original for durable recovery.
-        assert!(sealed.certified_groups.iter().any(|group| {
+        let quoted_item = &program.items()[1];
+        assert_eq!(quoted_item.checked_item().index(), 1);
+        let quoted_products = quoted_item.native_products().unwrap();
+        assert!(quoted_products.certified_groups.iter().any(|group| {
             group.owner() == original.owner()
                 && group.group().binders().iter().any(|binder| {
                     binder.unit == "main"
@@ -174,7 +177,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                         && binder.occurrence == "describe"
                 })
         }));
-        assert!(program.items()[1]
+        assert!(quoted_item
             .native()
             .unwrap()
             .target_owned()
