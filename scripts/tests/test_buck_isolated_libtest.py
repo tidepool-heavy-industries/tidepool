@@ -1090,6 +1090,15 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--setenv=DECLARED_FIXTURE=/declared/fixture', command)
         self.assertFalse(any('UNDECLARED_FIXTURE' in word for word in command))
 
+    def test_frozen_offline_compilers_cross_delegation_from_selected_environment(self):
+        selected = {'EXOMONAD_OFFLINE_RUSTC': '/nix/store/selected-rust/bin/rustc',
+                    'EXOMONAD_OFFLINE_CC': '/nix/store/selected-cc/bin/cc'}
+        with patch.dict(os.environ, {'EXOMONAD_OFFLINE_RUSTC': '/ambient/rustc'}):
+            command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {}, environment=selected)
+        for name, value in selected.items():
+            self.assertIn(f'--setenv={name}={value}', command)
+        self.assertFalse(any('/ambient/rustc' in word for word in command))
+
     def test_actor_layout_diagnostics_cross_delegation_explicitly(self):
         command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
             environment={'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS': '1',

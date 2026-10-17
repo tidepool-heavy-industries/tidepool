@@ -56,7 +56,7 @@ Workspace overrides, unmatched ordered rows and explicit live policies keep
 their existing routes.
 
 Named source snapshot metadata is version 2, qualification descriptors are
-version 3, and prepared workspace selections are version 9. Completed preparation
+version 4, and prepared workspace selections are version 9. Completed preparation
 retains the exact initial run and helper revisions in its authenticated workspace
 inventory. Rebuild, refreeze and reprepare with this reader; it does not infer
 missing named-entry provenance or an original helper for older selections.
@@ -272,7 +272,7 @@ and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The browser driver and its locked npm inputs are assembled by the declared
 native bundle action and checked against its source contract. Freeze cannot
-substitute a separately supplied driver. Schema 3 descriptors require that
+substitute a separately supplied driver. Schema 4 descriptors require that
 contract; historical frozen bundles retain their own qualification program.
 
 Every runtime cohort seals `owned-resident` compilation into its descriptor,
@@ -750,3 +750,26 @@ with actual Preparation requests and overlapping Foreground work, separately
 from frozen Harness latency. Their report records granted widths, physical
 service concurrency, throughput and sampled worker RSS; sampled RSS is not a
 cgroup or whole-run peak.
+
+The `deepseek-offline-hosted` cohort seals the single ignored real local-HTTP
+parent/two-worker campaign. It uses one test process, owned-resident compilation
+with at least two workers, foreground/preparation allowances1/1, minimal tracing
+by default and the sealed1800s watchdog. Missing flags select those owned defaults;
+smaller worker counts or different allowances refuse before launch. It retains
+actual tool receipts, source edits, compiled Rust test results and cleanup. The
+fixture rejects proxy variables and uses only its admitted loopback endpoint and
+synthetic credential reference. Existing M3 remains explicit OpenAI/scripted
+qualification. Neither cohort authorizes a live provider call.
+
+Schema4 requires the exact declared rustc and C linker executables in addition
+to GHC, browser and runtime-tools. Assembly records their immutable executable
+paths; freezing seals their NAR identities and GC roots through the existing
+external-input closure owner. The frozen runner exports only those paths as
+EXOMONAD_OFFLINE_RUSTC/CC, overriding ambient selections. Rebuild and refreeze;
+the new reader rejects schema3, whose original frozen reader remains valid.
+
+```sh
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort deepseek-offline-hosted --output "$DEEPSEEK_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```

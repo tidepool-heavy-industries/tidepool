@@ -157,6 +157,8 @@ def native_runtime_bundle(name, catalog_backed):
         "qualification": ":qualification_script",
         "entrypoint": ":native_entrypoint",
         "runtime-tools": "toolchains//:exomonad_runtime_tools",
+        "offline-rustc": "toolchains//:rustc",
+        "offline-cc": "toolchains//:cc",
         "build-sources": "//build/rust:native_qualification_sources",
         "workspace-gitlink": "//build/rust:workspace_gitlink",
         "workspace-git-bundle": "//build/rust:workspace_git_bundle",
@@ -181,6 +183,7 @@ def native_runtime_bundle(name, catalog_backed):
       --host "$PWD/$(location //exomonad/host:exomonad)" \
       --view-helper "$PWD/$(location //exomonad/host:exomonad-view-helper)" \
       --libtest "$PWD/$(location //exomonad/host:exomonad_host_unit_tests)" \
+      --rustc "$(exe toolchains//:rustc)" --cc "$(exe toolchains//:cc)" \
       --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
       --test-fixtures "$PWD/$(location //bridge/testing:haskell_test_fixtures)" \
       --fixture-manifest "$PWD/$(location //:test_fixture_manifest)" \

@@ -137,6 +137,7 @@ def _kill_and_reap(process):
 # Only declared runtime selections, standard test campaign controls and
 # user-service coordinates cross this boundary. Provider credentials remain in the user's own authentication owner.
 DELEGATED_ENVIRONMENT = (
+    'EXOMONAD_OFFLINE_RUSTC', 'EXOMONAD_OFFLINE_CC',
     'PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
     'LD_LIBRARY_PATH', 'TMPDIR', 'TMP', 'TEMP', 'TEMPDIR',
     'TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT',

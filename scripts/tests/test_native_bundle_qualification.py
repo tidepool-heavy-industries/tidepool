@@ -32,6 +32,18 @@ def runtime_tools_fixture(root):
     return tools
 
 
+def offline_compiler_fixture(root):
+    """Permission/identity fixture; never executed as a compiler."""
+    result = {}
+    for name in qualification.OFFLINE_COMPILERS:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('declared compiler permission fixture\n')
+        path.chmod(0o755)
+        result[name] = str(path)
+    return result
+
+
 def browser_driver_fixture(source, driver):
     """Small source/artifact identity fixture; no browser execution evidence."""
     inputs = {}
@@ -575,6 +587,7 @@ class NativeQualificationTests(unittest.TestCase):
             harness_revision = root / 'harness-revision'; harness_revision.write_text('revision\n')
             entrypoint = root / 'entrypoint.sh'; entrypoint.write_text('#!/bin/bash\nexec "$@"\n')
             tools = root / 'runtime-tools'; tools.mkdir()
+            compilers = offline_compiler_fixture(tools)
             ghc = root / 'ghc-libdir'; ghc.mkdir()
             output = root / 'assembled'
             browser_driver = root / 'browser-driver'
@@ -593,6 +606,7 @@ class NativeQualificationTests(unittest.TestCase):
                 workspace_gitlink=workspace_gitlink, workspace_git_bundle=workspace_bundle,
                 sources=sources, assets=root / 'assets', libraries=libraries,
                 harness_revision=harness_revision, runtime_tools=tools, ghc_libdir=ghc,
+                rustc=compilers['EXOMONAD_OFFLINE_RUSTC'], cc=compilers['EXOMONAD_OFFLINE_CC'],
                 entrypoint_template=entrypoint, browser_driver=browser_driver, profile='fast-dev')
             with patch.object(qualification, 'native_runtime_tools', return_value=tools), \
                  patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
@@ -1616,6 +1630,78 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
                     self.assertEqual(measured["status"], "partial")
 
+    def test_offline_compiler_selection_is_exact_immutable_and_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = offline_compiler_fixture(root)
+            with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)):
+                self.assertEqual(qualification.offline_compilers(selected), selected)
+                for bad in ({}, {**selected, 'extra': selected['EXOMONAD_OFFLINE_CC']},
+                            {**selected, 'EXOMONAD_OFFLINE_CC': 7},
+                            {**selected, 'EXOMONAD_OFFLINE_CC': 'relative'}):
+                    with self.subTest(selection=bad), self.assertRaises(ValueError):
+                        qualification.offline_compilers(bad)
+                Path(selected['EXOMONAD_OFFLINE_CC']).chmod(0o644)
+                with self.assertRaisesRegex(ValueError, 'not executable'):
+                    qualification.offline_compilers(selected)
+            with self.assertRaisesRegex(ValueError, 'immutable Nix paths'):
+                qualification.offline_compilers(selected)
+
+    def test_schema_four_refuses_old_descriptor_before_any_runtime_query(self):
+        self.assertEqual(qualification.QUALIFICATION_SCHEMA, 4)
+        self.assertEqual(qualification.EXTERNAL_INPUTS, {
+            'TIDEPOOL_GHC_LIBDIR', 'TIDEPOOL_BROWSER_NODE', 'PLAYWRIGHT_BROWSERS_PATH',
+            'runtime_tools', 'EXOMONAD_OFFLINE_RUSTC', 'EXOMONAD_OFFLINE_CC'})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / qualification.DESCRIPTOR
+            qualification.write_json(path, {'bundle_root': str(root), 'schema': 3,
+                                           'kind': 'native-runtime-qualification'})
+            with patch.object(qualification, 'verify_frozen_inventory') as query:
+                with self.assertRaisesRegex(ValueError, 'unsupported schema'):
+                    qualification.verify(path)
+                query.assert_not_called()
+
+    def test_deepseek_cohort_seals_defaults_and_refuses_invalid_or_missing_inputs_before_launch(self):
+        class ObserveLaunch(Exception):
+            pass
+        cohort = qualification.cohorts()['deepseek-offline-hosted']
+        self.assertEqual((cohort['expected_count'], cohort['ignored'], cohort['timeout']), (1, True, 1800))
+        for mutation in ('default', 'one_worker', 'wrong_foreground', 'wrong_preparation', 'missing_rustc'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = {name: '/declared/' + name for name in cohort['required_environment']}
+                if mutation == 'missing_rustc':
+                    del env['EXOMONAD_OFFLINE_RUSTC']
+                descriptor = {'external_inputs': {'runtime_tools': {'path': '/declared/tools'}},
+                              'cohorts': {'deepseek-offline-hosted': cohort}, 'environment': env,
+                              'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                              'programs': {'runner': '/declared/runner', 'libtest': '/declared/libtest'}}
+                args = SimpleNamespace(descriptor=root / 'descriptor', output=root / 'out',
+                                       cohort='deepseek-offline-hosted', jobs=1, delegated_service=True,
+                                       service_slice='qualified.slice', compiler_workers=1 if mutation == 'one_worker' else None,
+                                       foreground_jobs=2 if mutation == 'wrong_foreground' else None,
+                                       preparation_jobs=2 if mutation == 'wrong_preparation' else None)
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.dict(os.environ, {'EXOMONAD_OFFLINE_RUSTC': '/ambient/rustc'}), \
+                     patch.object(qualification, 'run_owned_qualification_runner', side_effect=ObserveLaunch) as launch:
+                    if mutation == 'default':
+                        with self.assertRaises(ObserveLaunch):
+                            qualification.run_cohort(args)
+                        command, child_env = launch.call_args.args[:2]
+                        for flag, value in [('--compiler-workers', '2'), ('--foreground-jobs', '1'),
+                                            ('--preparation-jobs', '1'), ('--trace-profile', 'minimal'),
+                                            ('--timeout', '1800'), ('--expected-count', '1')]:
+                            self.assertEqual(command[command.index(flag) + 1], value)
+                        self.assertIn('--ignored', command)
+                        self.assertEqual(child_env['EXOMONAD_OFFLINE_RUSTC'], env['EXOMONAD_OFFLINE_RUSTC'])
+                        resources = [command[i + 1] for i, word in enumerate(command) if word == '--resource-env']
+                        self.assertTrue(set(qualification.OFFLINE_COMPILERS) <= set(resources))
+                    else:
+                        with self.assertRaises(ValueError):
+                            qualification.run_cohort(args)
+                        launch.assert_not_called()
+
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):
             with patch.object(qualification, 'verify') as verify:
@@ -2541,6 +2627,7 @@ class CatalogSourceTests(unittest.TestCase):
             'producer_target': '//tidepool/toolchain:tidepool-module-package',
             'product_inventory': entry_products, **selected_entry})
         contract = {'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared', 'native_catalog': selected,
+                    'offline_compilers': offline_compiler_fixture(tools),
                     'native_root_entry': selected_entry,
                     'generated_root_source': qualification.catalog_source_metadata(original)['root_entry']}
         contract['native_builtin_entries'] = {}
@@ -2692,6 +2779,7 @@ class CatalogSourceTests(unittest.TestCase):
             'TIDEPOOL_BROWSER_NODE': browser_node,
             'PLAYWRIGHT_BROWSERS_PATH': playwright,
             'runtime_tools': tools,
+            **{name: Path(value) for name, value in contract['offline_compilers'].items()},
         }
         external = {
             name: {'path': str(path), 'store_path': str(path.resolve())}
@@ -2714,6 +2802,7 @@ class CatalogSourceTests(unittest.TestCase):
             'source_inputs': contract['source_inputs'],
             'source_inputs_sha256': contract['source_inputs_sha256'],
             'artifacts': contract['artifacts'], 'browser_driver': contract['browser_driver'],
+            'offline_compilers': contract['offline_compilers'],
             'native_catalog': contract['native_catalog'],
             'native_root_entry': contract['native_root_entry'],
             'generated_root_source': contract['generated_root_source'],
@@ -2766,6 +2855,24 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(qualification.verify(descriptor_path), descriptor)
             self.assertEqual(verify_catalog.call_count, 1)
             self.assertEqual(verify_root.call_count, 3)
+
+            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema'):
+                changed = json.loads(json.dumps(descriptor))
+                if mutation == 'missing_compiler':
+                    del changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']
+                elif mutation == 'extra_compiler':
+                    changed['external_inputs']['other'] = changed['external_inputs']['runtime_tools']
+                elif mutation == 'wrong_store':
+                    changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']['store_path'] = '/unselected/store'
+                elif mutation == 'wrong_nar':
+                    first = next(iter(changed['nix_closure']['nar_hashes']))
+                    changed['nix_closure']['nar_hashes'][first] = 'changed-nar'
+                else:
+                    changed['schema'] = 3
+                qualification.write_json(descriptor_path, changed)
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    qualification.verify(descriptor_path)
+            qualification.write_json(descriptor_path, descriptor)
 
             with self.assertRaises(TypeError):
                 qualification.native_environment(bundle, verified_catalog=contract['native_catalog'])

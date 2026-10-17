@@ -148,7 +148,7 @@ PREPARED_CHILD_TESTS = [
     "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
-QUALIFICATION_SCHEMA = 3
+QUALIFICATION_SCHEMA = 4
 PRODUCTION_ENTRY_SCHEMA = 4
 BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
 BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
@@ -164,6 +164,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
     "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
+    "EXOMONAD_OFFLINE_RUSTC", "EXOMONAD_OFFLINE_CC",
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
@@ -173,8 +174,9 @@ ARTIFACT_TARGETS = {
     "bin/tidepool-extract-bin": "//bridge/haskell:tidepool_extract_bin",
     "bin/tidepool-tests": "//exomonad/host:exomonad_host_unit_tests",
 }
-EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
-BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver", "recipe_workspace")
+OFFLINE_COMPILERS = ("EXOMONAD_OFFLINE_RUSTC", "EXOMONAD_OFFLINE_CC")
+EXTERNAL_INPUTS = {*OFFLINE_COMPILERS, "TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
+BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver", "recipe_workspace", "offline_compilers")
 CATALOG_SOURCE_METADATA = "catalog-sources.json"
 CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors", "jev": "jev/core"}
 RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
@@ -319,6 +321,17 @@ def cohorts() -> dict:
                 "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "two-children-concurrent",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
+            "deepseek-offline-hosted": {
+                "tests": ["actor_host::deepseek_offline_acceptance::hosted_deepseek_edits_tests_and_joins_two_workers"],
+                "expected_count": 1, "ignored": True, "timeout": 1800,
+                "compiler_mode": "owned-resident", "max_jobs": 1,
+                "minimum_compiler_workers": 2,
+                "required_foreground_jobs": 1, "required_preparation_jobs": 1,
+                "retain_artifacts": True, "require_confirmed_cleanup": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT",
+                                         *OFFLINE_COMPILERS]},
             "m3-recursive": {
                 "tests": M3_RECURSIVE_TESTS, "expected_count": len(M3_RECURSIVE_TESTS),
                 "ignored": True, "timeout": 1800, "compiler_mode": "owned-resident",
@@ -706,6 +719,21 @@ def nix_path(path: Path) -> Path:
     if not str(resolved).startswith("/nix/store/"):
         raise ValueError(f"toolchain inputs must be declared immutable Nix paths: {path}")
     return resolved
+
+
+def offline_compilers(selection: dict) -> dict:
+    """Exact declared executables; NAR identity and retention belong to the closure owner."""
+    if not isinstance(selection, dict) or set(selection) != set(OFFLINE_COMPILERS):
+        raise ValueError("offline qualification requires both declared compiler executables")
+    result = {}
+    for name, value in selection.items():
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise ValueError(f"offline compiler must be an absolute executable: {name}")
+        selected = nix_path(Path(value))
+        if not selected.is_file() or not os.access(selected, os.X_OK):
+            raise ValueError(f"offline compiler is not executable: {name}")
+        result[name] = str(selected)
+    return result
 
 
 def native_runtime_tools(path: Path) -> Path:
@@ -1642,6 +1670,7 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
     }
 
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    environment.update(offline_compilers(contract.get("offline_compilers")))
     if contract["stdlib_mode"] == "catalog-backed":
         if (not isinstance(verified_catalog, _VerifiedNativeCatalog)
                 or verified_catalog._issuer is not _VERIFIED_CATALOG_ISSUER
@@ -1695,6 +1724,7 @@ class NativeRunnerResources(NamedTuple):
     @classmethod
     def from_environment(cls, environment: dict, *, require_catalog: bool = False):
         return cls(tuple(name for name in (
+            *OFFLINE_COMPILERS,
             "TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
             "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
         ) if name in environment or (require_catalog and name == "TIDEPOOL_COMPILER_MODULES")))
@@ -1748,6 +1778,7 @@ def loader_evidence(root: Path, environment: dict) -> dict:
 
 def assemble(args) -> None:
     tools, ghc = native_runtime_tools(args.runtime_tools), nix_path(args.ghc_libdir)
+    compilers = offline_compilers(dict(zip(OFFLINE_COMPILERS, (str(args.rustc), str(args.cc)))))
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "bin").mkdir(exist_ok=True)
@@ -1783,6 +1814,7 @@ def assemble(args) -> None:
     contract = {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed", "startup_mode": "unprepared",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
+        "offline_compilers": compilers,
         "browser_driver": browser_driver_record(shared / "browser-driver", source_inputs),
         "test_fixtures": fixture_record,
         "recipe_workspace": recipe_record,
@@ -1899,7 +1931,7 @@ def freeze(args) -> Path:
         if authority[key] != selected:
             raise ValueError(f"compiler manifest does not bind its final deployment path: {key}")
     external = {}
-    for key in ("TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH"):
+    for key in ("TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", *OFFLINE_COMPILERS):
         path = nix_path(Path(environment[key]))
         external[key] = {"path": str(path), "store_path": str(store_root(path))}
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -2079,6 +2111,17 @@ def _run_cohort(args) -> int:
     required_compiler_mode = cohort.get("compiler_mode")
     if required_compiler_mode not in ("direct", "owned-resident"):
         raise ValueError(f"{args.cohort} requires an explicit sealed compiler mode")
+    minimum_workers = cohort.get("minimum_compiler_workers", 1)
+    if compiler_workers is None and "minimum_compiler_workers" in cohort:
+        compiler_workers = minimum_workers
+    if compiler_workers is not None and compiler_workers < minimum_workers:
+        raise ValueError(f"{args.cohort} requires at least {minimum_workers} compiler workers")
+    for name in allowances:
+        required = cohort.get("required_" + name)
+        if required is not None:
+            if allowances[name] is not None and allowances[name] != required:
+                raise ValueError(f"{args.cohort} requires {name} {required}")
+            allowances[name] = required
     compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode
     if compiler_mode != required_compiler_mode:
         raise ValueError(f"{args.cohort} requires compiler mode {required_compiler_mode}")
@@ -2460,7 +2503,7 @@ def main(argv=None) -> int:
     stage.add_argument("--root-entry", type=Path)
     stage.add_argument("--workbench-entry", type=Path)
     stage.add_argument("--async-workbench-entry", type=Path)
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "recipe-workspace", "browser-driver"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "rustc", "cc", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "recipe-workspace", "browser-driver"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")
