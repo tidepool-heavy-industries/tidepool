@@ -520,8 +520,9 @@ its file-read continuation across cells. It requires confirmed process, host
 and compiler cleanup and runs serially with a 900-second per-case budget.
 The separate `model-call-policy` supplement executes the frozen libtest's
 typed model selection, frozen alias policy and refusal control. That case uses
-the real Store and scheduler in-process; it does not start a physical host or
-compiler, so absent host/compiler cleanup observations are not successful
+the real Store and scheduler in-process and issues no compiler work. Its runner
+still owns the resident compiler lifecycle; the test does not exercise a
+physical host. Absent cleanup observations remain distinct from successful
 release evidence for those domains. Both supplements use the existing counted
 runner and must execute their complete sealed rosters. They do not establish
 live provider availability.
