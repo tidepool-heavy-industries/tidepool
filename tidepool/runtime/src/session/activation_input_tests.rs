@@ -2839,6 +2839,279 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
     assert!(resident.parked_holes().is_empty());
 }
 
+/// One genuine compiler output supplies the witness, selected canonical roles
+/// and retained native carriers. No metadata codec fixture issues this proof.
+#[test]
+fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use tidepool_toolchain::artifact_inventory::{
+        ArtifactBindingNode, ArtifactDependency, ArtifactKind,
+    };
+    use tidepool_toolchain::checked_cell::ExactHostBindingPrototype;
+    use tidepool_toolchain::declaration_join::ExactModuleIdentity;
+
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-opaque.hs"),
+        true,
+        SessionId(1793),
+    );
+    let certification = fixture
+        .producer
+        .certification
+        .as_ref()
+        .expect("original compiler bundle");
+    let original = certification
+        .original_compile_input
+        .as_ref()
+        .expect("real original input proof");
+    let context = original
+        .original_interface_context(
+            &fixture.producer.prepared(),
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &fixture.producer.table(),
+            &fixture.producer.asks,
+        )
+        .expect("authenticate the original producer's exact interface context");
+    let (site, witness) = fixture
+        .producer
+        .asks
+        .iter()
+        .find_map(|site| {
+            site.input_type_witnesses
+                .first()
+                .and_then(Option::as_ref)
+                .filter(|witness| {
+                    witness
+                        .interface_seals()
+                        .any(|(_, module, _)| module == "ActivationInputOriginal")
+                })
+                .map(|witness| (site, witness.clone()))
+        })
+        .expect("real opaque home input witness");
+    let before_roles = context.compiler_input_roles();
+    let before_graph = context.snapshot().graph_selection().unwrap();
+    let before_edges = context.artifact_view().binding_dependencies();
+    let before_groups = context.artifact_view().selected_native_groups();
+    let before_lexical = context.lexical_graph().to_vec();
+    let before_bytes = witness.original_bytes().to_vec();
+    let before_digest = witness.metadata_digest();
+    let before_commitment = witness.commitment();
+    let producer = context.toolchain_identity_sha256();
+    assert_ne!(producer, [0; 32]);
+    let descriptors = context.artifact_view().descriptors();
+    // Roles come from the authenticated compiler proof. Custody descriptors
+    // are used only to observe this test's contrasting native/history premise.
+    let selected = before_roles
+        .iter()
+        .map(|role| {
+            let descriptor = descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == role.interface())
+                .unwrap();
+            assert_ne!(descriptor.kind, ArtifactKind::OriginalModule);
+            (descriptor.owner.clone(), descriptor)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let owner = ExactModuleIdentity {
+        unit: "main".into(),
+        module: "ActivationInputOriginal".into(),
+    };
+    let canonical = *selected
+        .get(&owner)
+        .expect("opaque input has a selected canonical role");
+    assert_eq!(canonical.kind, ArtifactKind::CanonicalModuleInterface);
+    assert_eq!(canonical.producer_sha256, producer);
+    let owned_originals = descriptors
+        .iter()
+        .filter(|descriptor| {
+            descriptor.owner == owner && descriptor.kind == ArtifactKind::OriginalModule
+        })
+        .collect::<Vec<_>>();
+    eprintln!(
+        "ORIGINAL_TYPE_PREMISE {}",
+        serde_json::json!({
+            "site": site.site, "owner": owner, "selected_canonical": canonical.id,
+            "witness_seals": witness.interface_seals().collect::<Vec<_>>(),
+            "native_custody": owned_originals.iter().map(|original| original.id).collect::<Vec<_>>(),
+            "other_canonical_custody": descriptors.iter().filter(|descriptor| descriptor.owner == canonical.owner && descriptor.kind == ArtifactKind::CanonicalModuleInterface && descriptor.id != canonical.id).map(|descriptor| descriptor.id).collect::<Vec<_>>(),
+        })
+    );
+    assert!(
+        !owned_originals.is_empty(),
+        "fixture premise: the actual selected type retains its issued native carrier"
+    );
+    assert!(owned_originals
+        .iter()
+        .all(|original| original.id != canonical.id));
+    let current_seal = canonical
+        .interface_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(witness
+        .interface_seals()
+        .any(|(unit, module, seal)| unit == owner.unit
+            && module == owner.module
+            && seal == current_seal));
+    let binding_for = |id| {
+        *before_graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == id)
+            .expect("selected canonical retains its exact issued binding")
+    };
+    let input_roots = witness
+        .interface_seals()
+        .filter_map(|(unit, module, seal)| {
+            let owner = ExactModuleIdentity {
+                unit: unit.into(),
+                module: module.into(),
+            };
+            selected.get(&owner).map(|descriptor| {
+                assert_eq!(
+                    descriptor
+                        .interface_sha256
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    seal
+                );
+                binding_for(descriptor.id)
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(input_roots.contains(&binding_for(canonical.id)));
+    // This reference walk observes only the issuer's recorded type edges. It
+    // does not call either production consumer's owner/root selection logic.
+    let type_closure =
+        |roots: BTreeSet<tidepool_toolchain::artifact_inventory::ArtifactBinding>| {
+            let mut expected = roots;
+            let mut pending = expected.iter().copied().collect::<Vec<_>>();
+            while let Some(binding) = pending.pop() {
+                for (from, to, dependency) in &before_edges {
+                    if *from != ArtifactBindingNode::Artifact(binding)
+                        || *dependency != ArtifactDependency::Interface
+                    {
+                        continue;
+                    }
+                    if let ArtifactBindingNode::Artifact(target) = to {
+                        if expected.insert(*target) {
+                            pending.push(*target);
+                        }
+                    }
+                }
+            }
+            expected
+        };
+    let expected_input = type_closure(input_roots);
+    let mut request_roots = site
+        .input_type_witnesses
+        .iter()
+        .flatten()
+        .flat_map(|witness| {
+            witness.interface_seals().filter_map(|(unit, module, _)| {
+                selected
+                    .get(&ExactModuleIdentity {
+                        unit: unit.into(),
+                        module: module.into(),
+                    })
+                    .map(|descriptor| binding_for(descriptor.id))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    for name in site
+        .request_type_signatures
+        .iter()
+        .flat_map(|signatures| std::iter::once(signatures.reply()).chain(signatures.progress()))
+        .flat_map(|signature| signature.names())
+    {
+        if let Some(descriptor) = selected.get(&ExactModuleIdentity {
+            unit: name.unit().into(),
+            module: name.module().into(),
+        }) {
+            request_roots.insert(binding_for(descriptor.id));
+        }
+    }
+    let expected_request = type_closure(request_roots);
+    // Install the existing bounded diagnostic target only after physical
+    // compilation. Both real consumers run even when the first one refuses.
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "off,tidepool::certified_products::source_closure_trace=debug",
+        ))
+        .finish();
+    let (plan, prototype) = tracing::subscriber::with_default(subscriber, || {
+        (
+            CompiledProvenancePlan::build(&fixture.producer.code()),
+            ExactHostBindingPrototype::from_original_input(witness.clone(), context.clone()),
+        )
+    });
+    eprintln!(
+        "ORIGINAL_TYPE_CONSUMERS {}",
+        serde_json::json!({
+            "program_provenance": plan.as_ref().err().map(ToString::to_string),
+            "host_prototype": prototype.as_ref().err().map(ToString::to_string),
+        })
+    );
+    assert_eq!(context.compiler_input_roles(), before_roles);
+    assert_eq!(context.snapshot().graph_selection().unwrap(), before_graph);
+    assert_eq!(context.artifact_view().binding_dependencies(), before_edges);
+    assert_eq!(
+        context.artifact_view().selected_native_groups(),
+        before_groups
+    );
+    assert_eq!(context.lexical_graph(), before_lexical);
+    assert_eq!(witness.original_bytes(), before_bytes);
+    assert_eq!(witness.metadata_digest(), before_digest);
+    assert_eq!(witness.commitment(), before_commitment);
+    let plan = plan.expect("actual program provenance selects its issuer's canonical type roles");
+    let prototype =
+        prototype.expect("actual host prototype selects its issuer's canonical type roles");
+    let request_types = &plan
+        .authenticated_inputs
+        .get(&site.site)
+        .expect("actual selected request site authenticated")
+        .0;
+    for (types, expected) in [
+        (request_types.as_ref(), &expected_request),
+        (prototype.context().as_ref(), &expected_input),
+    ] {
+        assert_eq!(types.toolchain_identity_sha256(), producer);
+        assert!(types
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(types.artifact_view().selected_native_groups().is_empty());
+        assert!(types.lexical_graph().is_empty());
+        let actual = types
+            .snapshot()
+            .graph_selection()
+            .unwrap()
+            .namespace
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            &actual, expected,
+            "type context preserves exact canonical bindings and type closure"
+        );
+    }
+    let retained_witness = prototype
+        .original_input_type()
+        .expect("original witness retained");
+    assert_eq!(retained_witness, &witness);
+    assert_eq!(retained_witness.original_bytes(), before_bytes);
+    assert_eq!(retained_witness.metadata_digest(), before_digest);
+    // An actually owned native ID is still an invalid interface root. The
+    // positive path must change its query domain, not relax this refusal.
+    assert!(matches!(
+        context.select_interface_roots(vec![owned_originals[0].id]),
+        Err(crate::CompileError::ExtractFailed(_))
+    ));
+}
+
 #[test]
 fn native_input_generation_retains_original_type_owner_after_source_readers_drop() {
     let fixture = InputFixture::compile(
