@@ -1151,12 +1151,24 @@ impl AppliedCampaignTrace {
     }
 }
 
+fn campaign_trace_writer(
+    explicit: Option<std::ffi::OsString>,
+    artifact_root: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    explicit
+        .map(std::path::PathBuf::from)
+        .or_else(|| artifact_root.map(|root| std::path::PathBuf::from(root).join("host.jsonl")))
+}
+
 /// Only successful installation issues applied-profile evidence. Ordinary
 /// tests may keep their custom observer; retained measurements record that
 /// observer as unverified. The existing subscriber remains the sole owner.
 fn install_tracing() -> Result<AppliedCampaignTrace, UnverifiedCampaignTrace> {
     let profile = CampaignTraceProfile::selected();
-    let writer = std::env::var_os("TIDEPOOL_TEST_TRACE").map(std::path::PathBuf::from);
+    let writer = campaign_trace_writer(
+        std::env::var_os("TIDEPOOL_TEST_TRACE"),
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT"),
+    );
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_ansi(false)
@@ -1169,7 +1181,7 @@ fn install_tracing() -> Result<AppliedCampaignTrace, UnverifiedCampaignTrace> {
             .create(true)
             .append(true)
             .open(path)
-            .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
+            .unwrap_or_else(|error| panic!("campaign trace writer {path:?}: {error}"));
         subscriber
             .with_writer(std::sync::Mutex::new(file))
             .try_init()
@@ -1195,14 +1207,11 @@ pub(super) fn ensure_campaign_tracing() {
 
 /// Keep operation spans outside the runner's bounded stdout capture.
 pub(super) fn retain_campaign_trace(fallback: &std::path::Path) -> std::path::PathBuf {
-    let path = std::env::var_os("TIDEPOOL_TEST_TRACE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| fallback.to_path_buf())
-                .join("host.jsonl")
-        });
+    let path = campaign_trace_writer(
+        std::env::var_os("TIDEPOOL_TEST_TRACE"),
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT"),
+    )
+    .unwrap_or_else(|| fallback.join("host.jsonl"));
     std::env::set_var("TIDEPOOL_TEST_TRACE", &path);
     path
 }
@@ -2761,6 +2770,54 @@ mod tests {
             harness::item::ToolExecution::Asynchronous
         );
         assert!(turn.usage.reported);
+    }
+
+    #[test]
+    fn campaign_trace_writer_prefers_explicit_path_and_retains_case_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let explicit = directory.path().join("explicit.jsonl");
+        assert_eq!(campaign_trace_writer(None, None), None);
+        assert_eq!(
+            campaign_trace_writer(
+                Some(explicit.clone().into_os_string()),
+                Some(directory.path().as_os_str().to_owned())
+            ),
+            Some(explicit)
+        );
+        let path =
+            campaign_trace_writer(None, Some(directory.path().as_os_str().to_owned())).unwrap();
+        assert_eq!(path, directory.path().join("host.jsonl"));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter(campaign_trace_filter_for(CampaignTraceProfile::Full))
+            .with_writer(std::sync::Mutex::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap(),
+            ))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            AppliedCampaignTrace {
+                profile: CampaignTraceProfile::Full,
+                writer: Some(path.clone()),
+            }
+            .emit();
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", "late refusal retained");
+        });
+        let rows = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows[0]["fields"]["writer"], path.to_string_lossy().as_ref());
+        assert_eq!(
+            rows[1]["target"],
+            "tidepool::artifact_inventory::ambiguity_trace"
+        );
+        assert_eq!(rows[1]["fields"]["message"], "late refusal retained");
     }
 
     #[test]
