@@ -5512,7 +5512,6 @@ fn compile_invocation_inner(
                 publication,
             )?;
         }
-        artifacts.exact_source_admission = exact_source;
         if exact_request.is_none()
             && !matches!(
                 &policy,
@@ -5527,6 +5526,7 @@ fn compile_invocation_inner(
                 &artifacts.module_products[..fresh_count],
             );
         }
+        artifacts.exact_source_admission = exact_source;
         Ok(artifacts)
     })();
     let artifacts = assembled.map_err(|error| match &policy {
