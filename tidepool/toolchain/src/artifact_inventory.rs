@@ -14850,7 +14850,7 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
-            native_offers: PublishedNativeOfferReferences::default(),
+            native_offers: PublishedNativeOfferReferences::capture(&[]).unwrap(),
         };
         let mut projection = CompilerInputProjection::default();
         projection

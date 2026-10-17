@@ -36,7 +36,7 @@ pub(crate) fn validate_consumed_native_namespace(
 pub struct NativeOfferObservationId([u8; 32]);
 
 /// The canonical exact offer set selected once by a publication issuer.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct PublishedNativeOfferReferences(BTreeSet<NativeOfferObservationId>);
 
@@ -72,9 +72,11 @@ impl PublishedNativeOfferReferences {
         let mut selected = Vec::new();
         for offer in offers {
             let id = offer.observation_id()?;
-            if self.0.contains(&id) {
-                missing.remove(&id);
+            if missing.remove(&id) {
                 selected.push(offer.clone());
+                if missing.is_empty() {
+                    break;
+                }
             }
         }
         if !missing.is_empty() {
@@ -496,5 +498,47 @@ impl IssuedNativeOffer {
             body: NativeOfferBody::Partial(proof.clone()),
             custody: self.0.custody.clone(),
         }))))
+    }
+}
+
+#[cfg(test)]
+mod published_reference_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_publication_references_stop_before_unrelated_proof_observation() {
+        let make_offer = |name: &str| {
+            let entry = Arc::new(ArtifactEntry::original([2; 32],
+                crate::certified_products::tests::recovered_witness_fixtures(&[
+                    crate::certified_products::fixture_finalized_product(
+                        crate::certified_products::tests::original_groups_fixture_with_interface(
+                            name, vec![(7, vec![])], 1, &BTreeMap::new(), name.as_bytes().to_vec(),
+                        ), [2; 32],
+                    ),
+                ]).remove(0).product,
+            ).unwrap());
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                .unwrap();
+            let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &view)
+                .unwrap()
+                .unwrap();
+            IssuedNativeOffer::issue(entry.descriptor.id, &view, Some(proof)).unwrap()
+        };
+        let selected = make_offer("SelectedReference");
+        let unrelated = make_offer("UnrelatedReference");
+        let references = PublishedNativeOfferReferences::capture(&[selected.clone()]).unwrap();
+        let untouched = &unrelated.proof().unwrap().selection;
+        assert!(untouched.0.observation.get().is_none());
+        let resolved = references
+            .resolve(&[selected.clone(), selected.clone(), unrelated.clone()])
+            .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(Arc::ptr_eq(&resolved[0].0, &selected.0));
+        assert!(
+            untouched.0.observation.get().is_none(),
+            "lookup does not hash an unrelated proof once all saved references are resolved"
+        );
     }
 }

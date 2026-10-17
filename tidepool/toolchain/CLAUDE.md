@@ -253,12 +253,18 @@ belongs only to the absence of a supplied or selected proof.
 `CompilerSourceSupport` carries issued roles, graph custody and immutable native
 offers together through context publication and retained values. Narrowing type
 or execution selection does not reissue body availability. Requests consume
-carried offers; they do not census broader context custody. Context snapshot v3
+carried offers; they do not census broader context custody. Context snapshot v4
 records exact offer selections and Empty/Partial/Full mode. Reopening authenticates
 those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
+Published source policy captures its exact native-offer reference set once
+from the issuer's scoped support. Reopening resolves only those references to
+retained authenticated handles; later relevant offers cannot substitute. The
+references are lookup keys, not authentication. Recovery restores offer facts
+before completing context validation. Context v3 lacks this association and
+requires regeneration; graph-only recovery refuses missing offer evidence.
 Older snapshots require regeneration.
 
 Compiler transport combines authenticated body availability while retaining each

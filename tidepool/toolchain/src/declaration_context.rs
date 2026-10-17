@@ -2233,7 +2233,7 @@ impl RecoveredArtifactInventory {
     }
 
     /// Standalone callers explicitly request every authenticated original group.
-    /// Exact durable restoration uses `context_with_graph_selection`.
+    /// Exact durable restoration, including publication offers, uses `context_with_snapshot`.
     pub fn context_all_groups(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
@@ -10197,6 +10197,7 @@ mod tests {
             original_input_identity,
             selection,
             selection_sha256,
+            native_offers,
         } = &roles[0]
         else {
             panic!("issuer must retain published policy")
@@ -10219,6 +10220,7 @@ mod tests {
                 "original_input_identity": original_input_identity,
                 "selection": selection.observation_digest().unwrap(),
                 "selection_sha256": selection_sha256,
+                "native_offers": native_offers,
             }])
         );
         assert!(
@@ -11025,22 +11027,27 @@ mod tests {
         } else {
             panic!("selected root must carry published policy");
         }
+        let mut changed_snapshot = selection.context().snapshot();
+        changed_snapshot.roles = CompilerInputProjection::restore(view, &changed)
+            .unwrap()
+            .snapshot_roles()
+            .clone();
+        assert!(
+            inventory.context_with_snapshot(&changed_snapshot).is_err(),
+            "a valid inventory and retained offers cannot repair changed publication facts"
+        );
         assert!(
             inventory
                 .context_with_graph_selection(
                     &graph,
-                    &changed,
+                    &selection.context().compiler_input_roles(),
                     selection.context().facts.lexical.to_vec()
                 )
                 .is_err(),
-            "a valid inventory cannot repair changed publication facts"
+            "graph-only recovery cannot supply issued native offer owners"
         );
         assert!(inventory
-            .context_with_graph_selection(
-                &graph,
-                &selection.context().compiler_input_roles(),
-                selection.context().facts.lexical.to_vec()
-            )
+            .context_with_snapshot(&selection.context().snapshot())
             .is_ok());
     }
 

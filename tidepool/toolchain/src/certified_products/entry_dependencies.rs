@@ -158,7 +158,7 @@ mod tests {
             original_input_identity: "input identity".into(),
             selection: ExactArtifactSelection::capture(&inventory.empty_view()),
             selection_sha256: [0; 32],
-            native_offers: crate::artifact_inventory::PublishedNativeOfferReferences::default(),
+            native_offers: crate::artifact_inventory::PublishedNativeOfferReferences::capture(&[]).unwrap(),
         };
         let wire = serde_json::to_value(&published).unwrap();
         assert!(serde_json::from_value::<CompilerInputRole>(wire.clone()).is_ok());

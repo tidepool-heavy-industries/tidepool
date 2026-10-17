@@ -346,11 +346,18 @@ fn old_selection_and_context_versions_are_rejected() {
         lexical: lexical.root().clone(),
         offers: lexical.root().clone(),
     };
-    let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
-    install(&store, materializer.finish().unwrap());
-    assert!(
-        matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
-    );
+    for version in [2, 3] {
+        let descriptor = ContextDescriptor {
+            version,
+            ..descriptor.clone()
+        };
+        let mut materializer = Materializer::new(&store);
+        let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
+        install(&store, materializer.finish().unwrap());
+        assert!(
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
+        );
+    }
 }
 
 #[test]

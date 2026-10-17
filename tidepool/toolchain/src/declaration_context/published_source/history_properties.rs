@@ -192,6 +192,17 @@ fn restored(
     context: &ExactDeclarationContext,
     roles: &[CompilerInputRole],
 ) -> Result<ExactDeclarationContext, CompileError> {
+    let mut snapshot = context.snapshot();
+    snapshot.roles = CompilerInputProjection::restore(context.artifact_view(), roles)?
+        .snapshot_roles()
+        .clone();
+    restore_snapshot(context, &snapshot)
+}
+
+fn restore_snapshot(
+    context: &ExactDeclarationContext,
+    snapshot: &crate::exact_context::ExactContextSnapshot,
+) -> Result<ExactDeclarationContext, CompileError> {
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let (products, interfaces) = context
@@ -214,15 +225,11 @@ fn restored(
     )
     .unwrap()
     .context_with_snapshot(&{
-        let mut snapshot = context.snapshot();
-        snapshot.roles = CompilerInputProjection::restore(view, roles)?
-            .snapshot_roles()
-            .clone();
         let store = fvm_ipld_blockstore::MemoryBlockstore::default();
         use fvm_ipld_blockstore::Blockstore;
         let mut materializer = crate::exact_context::Materializer::new(&store);
         let retained = materializer
-            .materialize_context(None, &snapshot)
+            .materialize_context(None, snapshot)
             .map_err(failure)?;
         for (cid, bytes) in materializer.finish().map_err(failure)?.into_blocks() {
             store.put_keyed(&cid, &bytes).map_err(failure)?;
@@ -333,6 +340,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     context = context
                         .with_published_source_originals(&publication)
                         .unwrap();
+                    // Composition selects the frozen role issuer's execution policy.
+                    // Later demand stays available as custody and may be selected again.
+                    demanded = BTreeSet::from([ORDINALS[initial]]);
                 }
                 Operation::Recover => {
                     observed[2].set(observed[2].get() + 1);
@@ -616,7 +626,7 @@ fn unrelated_later_native_offer_does_not_change_reopened_publication() {
 }
 
 #[test]
-fn composing_same_publication_preserves_later_executable_demand() {
+fn composing_publication_selects_issued_policy_and_retains_later_custody() {
     let (root, helper, publication) = fixture(0);
     let published = publication.context();
     let ArtifactPayload::Original(product) = &root.payload else {
@@ -674,9 +684,18 @@ fn composing_same_publication_preserves_later_executable_demand() {
     );
     assert_eq!(
         composed.artifact_view().selected_native_groups(),
-        expected,
-        "composing the same source publication does not erase the caller's later executable demand"
+        BTreeSet::from([NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 3
+        }]),
+        "composition selects the frozen publication's execution policy"
     );
+    for group in view.capture_graph_selection().native_groups {
+        assert!(
+            composed.artifact_view().contains_issued_native_group(group),
+            "later demand remains authenticated custody after policy composition"
+        );
+    }
 }
 
 #[test]
@@ -755,5 +774,82 @@ fn same_owner_later_proof_does_not_change_reopened_publication() {
     assert_eq!(
         reopened[0].context().semantic_sha256(),
         published.semantic_sha256()
+    );
+}
+
+#[test]
+fn publication_offer_references_require_exact_owners_through_snapshot_recovery() {
+    let (root, _, publication) = fixture(0);
+    let published = publication.context();
+    let snapshot = published.snapshot();
+    let restored = restore_snapshot(published, &snapshot).unwrap();
+    assert_eq!(restored.semantic_sha256(), published.semantic_sha256());
+    let root_ids = snapshot
+        .offers
+        .iter()
+        .filter(|(_, facts)| facts.original == root.descriptor.id)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    assert!(!root_ids.is_empty());
+    let mut missing = snapshot.clone();
+    for id in &root_ids {
+        missing.offers.remove(id);
+    }
+    assert!(
+        restore_snapshot(published, &missing).is_err(),
+        "valid graph and roles cannot replace missing saved offer owners"
+    );
+    let later = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+        published.compiler_input_projection().clone(),
+        published.artifact_view().clone(),
+    )
+    .unwrap();
+    let later_root = later
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == root.descriptor.id)
+        .unwrap()
+        .snapshot_facts();
+    assert!(!root_ids.contains(&later_root.identity().unwrap()));
+    let mut substitute = missing;
+    substitute
+        .offers
+        .insert(later_root.identity().unwrap(), later_root.clone());
+    assert!(
+        restore_snapshot(published, &substitute).is_err(),
+        "later same-owner and same-interface proof cannot satisfy an absent saved reference"
+    );
+    let mut swapped = snapshot.clone();
+    swapped.offers.insert(root_ids[0], later_root);
+    assert!(
+        restore_snapshot(published, &swapped).is_err(),
+        "the snapshot reader authenticates offer observation keys against their actual facts"
+    );
+    let mut roles = serde_json::to_value(published.compiler_input_roles()).unwrap();
+    let row = roles
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["kind"] == "published_source_original")
+        .unwrap();
+    let references = row["native_offers"].as_array().unwrap().clone();
+    assert!(!references.is_empty());
+    row.as_object_mut().unwrap().remove("native_offers");
+    assert!(
+        serde_json::from_value::<Vec<CompilerInputRole>>(roles.clone()).is_err(),
+        "old publication rows cannot infer missing offer associations"
+    );
+    let row = roles
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["kind"] == "published_source_original")
+        .unwrap();
+    let mut duplicate = references;
+    duplicate.insert(0, duplicate[0].clone());
+    row["native_offers"] = serde_json::Value::Array(duplicate);
+    assert!(
+        serde_json::from_value::<Vec<CompilerInputRole>>(roles).is_err(),
+        "published references require canonical sorted unique transport"
     );
 }
