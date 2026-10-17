@@ -32,7 +32,7 @@ impl WorkbenchCompilationAuthority {
             .1
     }
 
-    pub(super) fn admit(
+    pub(crate) fn admit(
         context: ActorSessionContext,
         source: crate::CheckpointSourceLayer,
         installed_tools: Option<crate::InstalledToolLease>,

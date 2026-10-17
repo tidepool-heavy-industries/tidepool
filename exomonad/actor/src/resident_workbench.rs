@@ -1656,6 +1656,7 @@ pub(crate) struct PreparedActorGeneration {
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
 }
 
+#[cfg(test)]
 static_assertions::assert_not_impl_any!(PreparedActorGeneration: Clone, Copy);
 
 /// Immutable rendering evidence, never publication authority.
