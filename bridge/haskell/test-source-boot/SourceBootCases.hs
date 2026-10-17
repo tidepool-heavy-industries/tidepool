@@ -4096,21 +4096,60 @@ candidateCompactInventory = withScratch $ \work -> do
     (envelope symbols globalTable (take 1 rows ++ take 1 rows))
   refuse "oversized-symbol-table" "table exceeds" (envelope (TList (replicate 65537 TNull)) globalTable rows)
   refuse "oversized-global-table" "table exceeds" (envelope symbols (TList (replicate 65537 TNull)) rows)
+  forM_ [("oversized-binder-list",badGroup (replicate 65537 (TInt 65535)) [])
+      ,("oversized-global-list",badGroup [] (replicate 65537 (TInt 65535)))] $ \(label,invalidRows) ->
+    refuse label "candidate inventory exceeds bound" (envelope symbols globalTable invalidRows)
+  refuse "oversized-group-list" "too many original groups" (envelope symbols globalTable
+    [TList (replace 10 (TList (replicate 65537 TNull)) firstRow)])
+  let lifted = TList [TString "lifted",TInt 0]
+      oversizedSignature arguments results = TList [TList
+        [TInt 0,lifted,TList [TList arguments,TList [TString "returns",TList results]],TBool False,TNull]]
+  refuse "oversized-signature-arguments" "candidate inventory exceeds bound"
+    (envelope symbols (oversizedSignature (replicate 257 lifted) []) rows)
+  refuse "oversized-signature-results" "candidate inventory exceeds bound"
+    (envelope symbols (oversizedSignature [] (replicate 257 lifted)) rows)
+  let oversizedPath = work </> "oversized-wire.cbor"
+  BS.writeFile oversizedPath (BS.replicate (4 * 1024 * 1024 + 1) 0)
+  readModuleCandidates oversizedPath >>= \case
+    Left reason | "candidate manifest exceeds four MiB" `isInfixOf` reason -> pure ()
+    result -> fail ("candidate compact decoder did not enforce captured wire bound: " ++ show result)
   expandedPath <- writeCandidateCodecFixture work BoundedExpandedCandidateInventory
-  _ <- readModuleCandidates expandedPath >>= either fail pure
   expanded <- readCodecTerm expandedPath
   expandedAggregate <- case expanded of
     TList values@[_,_,_,_,TList [TList row],_,_,_] -> pure (TList
       (replace 4 (TList [TList row,TList (replace 1 (TString "Other") row)]) values))
     _ -> fail "production expanded-bound fixture has another candidate envelope"
-  refuse "expanded-aggregate" "expanded candidate inventory exceeds" expandedAggregate
+  shared <- readFixture "shared-aggregate" expandedAggregate >>= either fail pure
+  let sharedBinders = concatMap (concatMap candidateGroupBinders . candidateGroups) shared
+      sharedGlobals = concatMap (concatMap candidateGroupGlobals . candidateGroups) shared
+      longIdentity = identity {symbolOccurrence=T.replicate 2048 "x"}
+      longSignature = Signature (replicate 256 LiftedRefRep) (Returns (replicate 256 (IntRep 64)))
+      longGlobal = CandidateGlobal longIdentity LiftedRefRep (Just longSignature) False Nothing
+      expectedGroup = CandidateGroup 0 (replicate 1536 longIdentity) (replicate 1536 longGlobal)
+      -- Occurrence text alone exceeds the old expanded budget. This lower
+      -- bound does not reproduce the retired decoder's size calculation.
+      repeatedTextBytes = sum (map (BS.length . TE.encodeUtf8 . symbolOccurrence) sharedBinders)
+  unless (map candidateModule shared == ["Fixture","Other"]
+      && map candidateGroups shared == [[expectedGroup],[expectedGroup]]
+      && repeatedTextBytes > 4 * 1024 * 1024) $
+    fail "compact fixture did not preserve its oversized hypothetical expansion and exact values"
+  sharedValues "symbol identities" sharedBinders
+  sharedValues "globals" sharedGlobals
+  sharedValues "signatures" (mapMaybe candidateGlobalSignature sharedGlobals)
   -- Historical decoder refusals retain only their unsupported framing.
   refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList rows])
   refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList rows,fields !! 5])
-  putStrLn "candidate compact inventory: production codec values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, table/expanded bounds and unsupported6/7 passed"
+  putStrLn "candidate compact inventory: production codec values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, shared identities/globals/signatures beyond legacy expansion, table/list/signature/wire bounds and unsupported6/7 passed"
   where
     replace index value fields = [if ordinal == index then value else field
       | (ordinal,field) <- zip [0::Int ..] fields]
+    sharedValues label values = case values of
+      first:rest | not (null rest) -> do
+        original <- evaluate first >>= makeStableName
+        forM_ rest $ \value -> do
+          repeated <- evaluate value >>= makeStableName
+          unless (original == repeated) (fail ("compact inventory copied shared " ++ label))
+      _ -> fail ("compact fixture lacks repeated " ++ label)
 
 -- This exercises framing only: decoding a descriptor does not open its FD or
 -- issue a canonical proof. Artifact admission separately authenticates bytes.
