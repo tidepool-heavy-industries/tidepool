@@ -218,17 +218,17 @@ impl CompilerCloseOwner {
 
 /// Direct fixtures supply the existing lifecycle owner explicitly.
 #[cfg(test)]
-fn with_test_compiler_owner<T>(
-    operation: impl std::future::Future<Output = T>,
+pub(crate) fn with_test_compiler_owner<T, F: std::future::Future<Output = T>>(
+    operation: impl FnOnce(crate::CompilerPreparationClient) -> F,
 ) -> impl std::future::Future<Output = T> {
-    // Allocate before building the wrapper so its initial state does not retain
-    // the operation inline through each owner and unwind boundary.
-    let operation = Box::pin(operation);
+    // Keep caller payload and operation state behind heap boundaries before
+    // composing owner, unwind, and cleanup adapters.
+    let operation = Box::new(operation);
     async move {
         let mut owner = crate::CompilerPreparationOwner::new();
         let cleanup = owner.cleanup();
         let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-            owner.scope(operation),
+            owner.scope_with_client(move |client| Box::pin(operation(client))),
         ))
         .await;
         let observation = cleanup
@@ -246,6 +246,14 @@ fn with_test_compiler_owner<T>(
 }
 
 #[cfg(test)]
+fn with_test_bound_source<T, F: std::future::Future<Output = T>>(
+    config: ActorWorkbenchSource,
+    operation: impl FnOnce(BoundActorWorkbenchSource) -> F,
+) -> impl std::future::Future<Output = T> {
+    with_test_compiler_owner(move |client| operation(config.bind_preparation(client)))
+}
+
+#[cfg(test)]
 #[test]
 fn compiler_owner_wrapper_size_does_not_scale_with_operation_state() {
     fn operation<const N: usize>() -> impl std::future::Future<Output = ()> {
@@ -257,8 +265,17 @@ fn compiler_owner_wrapper_size_does_not_scale_with_operation_state() {
     let small = operation::<1>();
     let large = operation::<65536>();
     assert!(std::mem::size_of_val(&large) > std::mem::size_of_val(&small));
-    let small = with_test_compiler_owner(small);
-    let large = with_test_compiler_owner(large);
+    let small = with_test_compiler_owner(|_| small);
+    let large = with_test_compiler_owner(|_| large);
+    assert_eq!(std::mem::size_of_val(&large), std::mem::size_of_val(&small));
+    let small_payload = [0_u8; 1];
+    let large_payload = [0_u8; 65536];
+    let small = with_test_compiler_owner(move |_| async move {
+        std::hint::black_box(small_payload);
+    });
+    let large = with_test_compiler_owner(move |_| async move {
+        std::hint::black_box(large_payload);
+    });
     assert_eq!(std::mem::size_of_val(&large), std::mem::size_of_val(&small));
 }
 
@@ -466,8 +483,36 @@ pub struct ActorWorkbenchSource {
     toolset_support: Arc<[PathBuf]>,
     toolset_support_manifests:
         Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
-    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
     prepared_toolset: Option<PreparedSourceToolset>,
+}
+
+/// Source configuration bound to one run's preparation lifetime. Clones share
+/// pending work, including separate bindings to the same issued client.
+/// Independently issued owner lifetimes have independent preparation state.
+#[derive(Clone)]
+pub struct BoundActorWorkbenchSource {
+    config: ActorWorkbenchSource,
+    preparation: crate::CompilerPreparationClient,
+    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+}
+
+impl BoundActorWorkbenchSource {
+    pub fn config(&self) -> &ActorWorkbenchSource {
+        &self.config
+    }
+    /// Change authored configuration while preserving the exact run and shared
+    /// preparation owner. New recipes remain independently keyed by the owner.
+    pub fn with_config(
+        mut self,
+        update: impl FnOnce(ActorWorkbenchSource) -> ActorWorkbenchSource,
+    ) -> Self {
+        self.config = update(self.config);
+        self
+    }
+
+    pub fn into_config(self) -> ActorWorkbenchSource {
+        self.config
+    }
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -579,7 +624,7 @@ struct WorkbenchCompilation {
     injected: Vec<String>,
 }
 
-impl ActorWorkbenchSource {
+impl BoundActorWorkbenchSource {
     /// Prepare one exact granted and supported row from an owned immutable run
     /// source graph. Preparation does not install tools or borrow actor heaps.
     /// The caller selects urgency; required startup is foreground and optional
@@ -632,14 +677,15 @@ impl ActorWorkbenchSource {
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
         validation: Option<&SourceImports>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        let (recipe, resolved) = self.installer_recipe_selected(
+        self.preparation.claim(|| ())?;
+        let (recipe, resolved) = self.config.installer_recipe_selected(
             &source,
             granted_effects,
             supported_effects,
             validation,
         )?;
         let effects = recipe.effects.clone();
-        if let Some(ready) = &self.prepared_toolset {
+        if let Some(ready) = &self.config.prepared_toolset {
             let exact_selection = match ready.selection() {
                 Some(crate::ToolsetProgramSelection::BuiltinDeploymentProgram { .. }) => true,
                 Some(crate::ToolsetProgramSelection::WorkspaceOriginal { recipe, original }) => {
@@ -653,12 +699,19 @@ impl ActorWorkbenchSource {
                 && ready.selection().map(|selection| selection.recipe())
                     == Some(installer_program_recipe(&recipe)?)
             {
-                return Ok(ready.clone());
+                return self.preparation.claim(|| ready.clone());
             }
         }
         let prepared = self
             .toolset_preparation
-            .prepare(workload, recipe, resolved, source, registry)
+            .prepare(
+                &self.preparation,
+                workload,
+                recipe,
+                resolved,
+                source,
+                registry,
+            )
             .await
             .map_err(|failure| match failure {
                 crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
@@ -689,6 +742,7 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        self.preparation.claim(|| ())?;
         if source
             .generation_evidence()
             .is_none_or(|evidence| evidence.reference.sha256() != &installation.source_sha256)
@@ -697,7 +751,7 @@ impl ActorWorkbenchSource {
                 "recovered installer selects a different source artifact".into(),
             ));
         }
-        let mut pinned = self.clone();
+        let mut pinned = self.config.clone();
         pinned.spec = installation.entry().map(Arc::from);
         // Metadata is resolved against immutable source with the persisted
         // entry pin. These imports are never used to locate or load the entry.
@@ -728,6 +782,7 @@ impl ActorWorkbenchSource {
         let prepared = self
             .toolset_preparation
             .restore(
+                &self.preparation,
                 workload,
                 recipe,
                 resolved,
@@ -753,7 +808,9 @@ impl ActorWorkbenchSource {
             })?;
         Ok(PreparedSourceToolset { prepared, effects })
     }
+}
 
+impl ActorWorkbenchSource {
     /// Recompute deployment coverage against the same source, imports and
     /// actual interpreter support used by installer acquisition, without
     /// looking up readiness or admitting compiler work.
@@ -949,6 +1006,17 @@ impl ActorWorkbenchSource {
     }
 
     #[must_use]
+    pub fn bind_preparation(
+        self,
+        preparation: crate::CompilerPreparationClient,
+    ) -> BoundActorWorkbenchSource {
+        BoundActorWorkbenchSource {
+            config: self,
+            toolset_preparation: preparation.preparation(),
+            preparation,
+        }
+    }
+
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
             preamble: preamble.into(),
@@ -967,7 +1035,6 @@ impl ActorWorkbenchSource {
             tool_surface_validator: None,
             request_evidence: None,
             request_helper_recipe: Default::default(),
-            toolset_preparation: Default::default(),
             prepared_toolset: None,
         }
     }
@@ -2322,7 +2389,7 @@ pub type HandlerEffectSupport<H> =
 
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
-    source: ActorWorkbenchSource,
+    source: BoundActorWorkbenchSource,
     handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
@@ -2429,7 +2496,7 @@ impl Drop for CancelCompilerTransactionOnDrop {
 }
 
 impl<H, O> ResidentMachineAccess<H, O> {
-    fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+    fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: BoundActorWorkbenchSource) -> Self {
         Self {
             machines,
             source,
@@ -4425,12 +4492,20 @@ impl ResidentRequest {
 
 impl<H, O> ResidentActorRunner<H, O> {
     #[cfg(test)]
+    pub(crate) fn preparation_source(&self) -> BoundActorWorkbenchSource {
+        self.access.source.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn machines_for_test(&self) -> &Arc<ActorMachineRegistry<H, O>> {
         &self.access.machines
     }
 
     #[must_use]
-    pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+    pub fn new(
+        machines: Arc<ActorMachineRegistry<H, O>>,
+        source: BoundActorWorkbenchSource,
+    ) -> Self {
         Self {
             access: ResidentMachineAccess::new(machines, source),
         }
@@ -4924,7 +4999,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     ) -> ResidentActorWorkbench<H, O> {
         let mut access = self.access.sharing();
-        access.source.request_evidence = Some(evidence);
+        access.source.config.request_evidence = Some(evidence);
         ResidentActorWorkbench::from_access(
             access,
             Some(RequestWorkbenchScope { response, request }),
@@ -4958,7 +5033,7 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     #[must_use]
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,
-        source: ActorWorkbenchSource,
+        source: BoundActorWorkbenchSource,
         request_scope: Option<RequestWorkbenchScope>,
     ) -> Self {
         Self::from_access(ResidentMachineAccess::new(machines, source), request_scope)
@@ -4983,13 +5058,13 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         mut self,
         keys: Vec<exomonad_tool::ToolEffectKey>,
     ) -> Self {
-        let mut support = self.access.source.installed_effect_support.to_vec();
+        let mut support = self.access.source.config.installed_effect_support.to_vec();
         for key in keys {
             if !support.contains(&key) {
                 support.push(key);
             }
         }
-        self.access.source.installed_effect_support = support.into();
+        self.access.source.config.installed_effect_support = support.into();
         self
     }
 
@@ -5585,7 +5660,7 @@ where
             // `ResidentMachineAccess::image_registry`.
             session.set_image_registry(Arc::clone(registry));
         }
-        let source = self.source.clone();
+        let source = self.source.config.clone();
         let machines = Arc::clone(&self.machines);
         let child_cleanup = self.sharing();
 
@@ -5837,8 +5912,8 @@ where
         // AgentSpec, so every actor discovers the run's current spec.
         let roots = context
             .source_layer
-            .include_paths(&self.access.source.base_include);
-        crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
+            .include_paths(&self.access.source.config.base_include);
+        crate::agent_spec::resolve(roots, self.access.source.config.spec.as_deref())
     }
 
     /// Prepare immutable source/native code against actual assembled support.
@@ -5859,7 +5934,12 @@ where
         granted_effects: Vec<crate::ActorEffectKey>,
         validation: Option<&SourceImports>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        let source_support = self.access.source.installed_effect_support().to_vec();
+        let source_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         let admitted_support = self
             .access
@@ -5947,7 +6027,12 @@ where
         granted_effects: Vec<crate::ActorEffectKey>,
         recovered: &PersistedActorInstallation,
     ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
-        let source_support = self.access.source.installed_effect_support().to_vec();
+        let source_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         let support = self
             .access
@@ -6129,7 +6214,12 @@ where
         metadata: serde_json::Value,
     ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
         let expected = crate::tool_contract::decode_installation(metadata)?;
-        let support = self.access.source.installed_effect_support().to_vec();
+        let support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let expected = crate::tool_contract::admit_reply_spec_metadata(expected, &support)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let tools = self
@@ -6203,7 +6293,12 @@ where
         );
         Box::pin(
             async move {
-                let support = self.access.source.installed_effect_support().to_vec();
+                let support = self
+                    .access
+                    .source
+                    .config
+                    .installed_effect_support()
+                    .to_vec();
                 let observer = self.access.handler_effect_support.clone();
                 let requested = granted_effects.clone();
                 let admitted_base = self
@@ -6285,8 +6380,13 @@ where
             Some(installation_scope.clone()),
         );
         let registration = abort_guard.registration();
-        let tool_surface_validator = self.access.source.tool_surface_validator.clone();
-        let installed_effect_support = self.access.source.installed_effect_support().to_vec();
+        let tool_surface_validator = self.access.source.config.tool_surface_validator.clone();
+        let installed_effect_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
         let (step, pending_originals, source_original) = registration
             .scope(self.access.with_compiler_machine(compile_context.clone(), {
@@ -6779,10 +6879,10 @@ where
         let execution = private_owner.clone();
         let reply_declaration = reply_declaration.filter(|_| {
             reply_declaration_modules.iter().any(|module| {
-                declaration_worth_showing(module, &self.access.source.workspace_modules)
+                declaration_worth_showing(module, &self.access.source.config.workspace_modules)
             })
         });
-        let mut source = self.access.source.clone().for_activation(&context);
+        let mut source = self.access.source.config.clone().for_activation(&context);
         source.request_evidence = Some(input.type_evidence().clone());
 
         #[cfg(test)]
@@ -7213,9 +7313,9 @@ where
             kind.type_name()
         );
         let mut installer = Self::from_access(self.access.sharing(), None);
-        installer.access.source.workbench_imports = kind.imports();
-        installer.access.source.request_evidence = None;
-        installer.access.source.request_helper_recipe =
+        installer.access.source.config.workbench_imports = kind.imports();
+        installer.access.source.config.request_evidence = None;
+        installer.access.source.config.request_helper_recipe =
             tidepool_toolchain::declaration_join::RequestHelperRecipe::None;
         let (checked, prepared) = Box::pin(installer.prepare_checked_host_cell(
             context.clone(),
@@ -7328,7 +7428,7 @@ where
         }
         let snapshot_execution = purpose.execution().cloned();
         let pure_host_carrier = matches!(purpose, CellPreparationPurpose::HostCarrier { .. });
-        let snapshot_source = self.access.source.clone();
+        let snapshot_source = self.access.source.config.clone();
 
         let request_scope = self.request_scope.clone();
         let mounted_input = leased_input
@@ -7530,7 +7630,7 @@ where
     ) -> Result<String, ResidentActorWorkbenchError> {
         let request_scope = self.request_scope.clone();
 
-        let source = self.access.source.clone();
+        let source = self.access.source.config.clone();
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let source = source.for_workbench(context, request_scope.as_ref());
@@ -7571,6 +7671,7 @@ where
         let source = self
             .access
             .source
+            .config
             .clone()
             .for_workbench(&context, self.request_scope.as_ref());
 
@@ -7884,7 +7985,7 @@ where
         query: tidepool_runtime::session::NameQuery,
         kind: StructuredInspectionKind,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let source = self.access.source.clone();
+        let source = self.access.source.config.clone();
         let snapshot_source = source.clone();
         let query_scope = query.scope.clone();
         let snapshot = self
@@ -8614,7 +8715,12 @@ where
                 "reply decoder preparation requires its captured machine session".into(),
             ));
         }
-        let mut support = self.access.source.installed_effect_support().to_vec();
+        let mut support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         self.access
             .with_machine(context, move |machine, _, _| {
@@ -8639,9 +8745,14 @@ where
         crate::tool_contract::SpecValidationError,
     > {
         use crate::tool_contract::SpecValidationError;
-        let support = self.access.source.installed_effect_support().to_vec();
+        let support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
-        let validate_surface = self.access.source.tool_surface_validator.clone();
+        let validate_surface = self.access.source.config.tool_surface_validator.clone();
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = (|| {
@@ -13505,9 +13616,40 @@ pub(crate) mod request_tests {
     use super::*;
 
     #[tokio::test]
+    async fn bound_source_rebinding_preserves_exact_issuer_pending_state() {
+        with_test_compiler_owner(|client| async move {
+            let config = ActorWorkbenchSource::new("", Vec::new());
+            let first = config.clone().bind_preparation(client.clone());
+            let rebound = config.clone().bind_preparation(client);
+            assert!(Arc::ptr_eq(
+                &first.toolset_preparation,
+                &rebound.toolset_preparation
+            ));
+            with_test_compiler_owner(|independent| async move {
+                let other = config.bind_preparation(independent);
+                assert!(!Arc::ptr_eq(
+                    &first.toolset_preparation,
+                    &other.toolset_preparation
+                ));
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn empty_checkpoint_retirement_preserves_nonempty_machine_admission() {
+        with_test_compiler_owner(empty_checkpoint_retirement_preserves_nonempty_machine_admission_with_preparation_client).await
+    }
+
+    async fn empty_checkpoint_retirement_preserves_nonempty_machine_admission_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let runner = ResidentActorRunner::new(machines.clone(), source);
+        let runner = ResidentActorRunner::new(
+            machines.clone(),
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let id = context.placement.session;
         let mut checkout = machines.checkout_run(id).unwrap();
         let scope = checkout.machine().mint_isolated_scope();
@@ -13989,10 +14131,10 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn typed_host_mount_carriers_compile_and_bind() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (machines, context, mut source, _root) = actor_registry_fixture();
             source.workbench_imports.extend_text("qualified Data.Text as TidepoolHostText");
-            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
+            let (workbench, context) = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None)
                 .with_json_input(Some(serde_json::json!({
                     "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
                 })))
@@ -14006,7 +14148,7 @@ pub(crate) mod request_tests {
             workbench.execute_cell_for_test(context,
                 "textSeen <- pure (if tool_result == TidepoolHostText.pack \"tool output\" then () else error \"unexpected mounted text\")")
                 .await.expect("whole-cell execution reads the accepted Text carrier");
-        }).await;
+        }).await
     }
 
     /// A split compile takes its `ActorCompileView` snapshot, compiles
@@ -14172,9 +14314,16 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cleanup_scope_captures_compiler_owner_when_polled() {
+        with_test_compiler_owner(cleanup_scope_captures_compiler_owner_when_polled_with_client)
+            .await;
+    }
+
+    async fn cleanup_scope_captures_compiler_owner_when_polled_with_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let workbench = ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
             Arc::new(crate::ActorMachineRegistry::new()),
-            ActorWorkbenchSource::new("", Vec::new()),
+            ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation_client),
             None,
         );
         let descriptor = crate::ActorDescriptor::new(
@@ -14540,17 +14689,22 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job() {
-        with_test_compiler_owner(command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
+        let (workbench, context) = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(public.clone())
+        .await
+        .unwrap();
         let mut dispatcher_context = context.clone();
         dispatcher_context.haskell_effects_alias = format!(
             "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
@@ -14560,6 +14714,7 @@ pub(crate) mod request_tests {
         assert!(!workbench
             .access
             .source
+            .config
             .preamble
             .contains("import qualified Tidepool.Effects.Core"));
         let first = workbench
@@ -14702,18 +14857,35 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn tool_result_mounts_retain_original_checked_interfaces() {
         with_test_compiler_owner(
-            tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner(),
+            tool_result_mounts_retain_original_checked_interfaces_with_preparation_client,
         )
+        .await
+    }
+
+    async fn tool_result_mounts_retain_original_checked_interfaces_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner() {
+    async fn tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
+        let (workbench, context) = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(public.clone())
+        .await
+        .unwrap();
         workbench
             .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
             .await
@@ -14824,16 +14996,21 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only() {
-        with_test_compiler_owner(successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
+        let (workbench, private) = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(public.clone())
+        .await
+        .unwrap();
         workbench
             .execute_cell_for_test(
                 private.clone(),
@@ -14931,16 +15108,21 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
-        with_test_compiler_owner(cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
+        let (workbench, private) = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(public.clone())
+        .await
+        .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         workbench
             .bind_command_job(private.clone(), "prototype job".into())
@@ -15038,12 +15220,25 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn whole_cell_bind_and_discard_preserve_settlement() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            whole_cell_bind_and_discard_preserve_settlement_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn whole_cell_bind_and_discard_preserve_settlement_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
-                .admit_private_cell_for_test(context)
-                .await
-                .unwrap();
+            let (workbench, context) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
             let (checked, prepared) = workbench
                 .prepare_cell(
                     context.clone(),
@@ -15104,12 +15299,16 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn mutation_after_whole_cell_preparation_refuses_stale_item_and_fresh_preparation_succeeds(
     ) {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
-                .admit_private_cell_for_test(context)
-                .await
-                .unwrap();
+            let (workbench, context) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
             let text = "x <- pure (1 :: Int)";
             let (checked, prepared) = workbench
                 .prepare_cell(context.clone(), text.into())
@@ -15189,7 +15388,7 @@ pub(crate) mod request_tests {
             };
             assert_eq!(installed_bindings, vec!["x".to_owned()]);
         })
-        .await;
+        .await
     }
 
     fn schema_constructor_table(effect: tidepool_protocol::schema::Effect) -> DataConTable {
@@ -15632,17 +15831,23 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let initial = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (initial, private_context) = initial
             .admit_private_cell_for_test(context.clone())
             .await
@@ -15655,7 +15860,11 @@ pub(crate) mod request_tests {
             .publish_completed_cell_for_test(private_context)
             .await
             .unwrap();
-        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -16059,18 +16268,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn authored_cell_requires_both_source_and_private_execution_admission() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             authored_cell_requires_both_source_and_private_execution_admission_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn authored_cell_requires_both_source_and_private_execution_admission_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None)
-            .with_json_input(Some(serde_json::json!(42)));
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_json_input(Some(serde_json::json!(42)));
         let scope = crate::call_timing::CallScope::new(
             "cell",
             context.actor.id.0,
@@ -16109,14 +16324,19 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits() {
-        with_test_compiler_owner(planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         for mutate_own in [false, true] {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let initial = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                (source.clone()).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (initial, private_context) = initial
                 .admit_private_cell_for_test(context.clone())
                 .await
@@ -16129,8 +16349,11 @@ pub(crate) mod request_tests {
                 .publish_completed_cell_for_test(private_context)
                 .await
                 .unwrap();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let workbench = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                (source.clone()).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (workbench, context) = workbench
                 .admit_private_cell_for_test(context)
                 .await
@@ -16172,8 +16395,11 @@ pub(crate) mod request_tests {
                 for scope in [sibling, child] {
                     let mut changing = context.clone();
                     changing.placement.lexical_scope = scope;
-                    let changing_workbench =
-                        ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+                    let changing_workbench = ResidentActorWorkbench::new(
+                        Arc::clone(&machines),
+                        (source.clone()).bind_preparation(preparation_client.clone()),
+                        None,
+                    );
                     let (changing_workbench, private_context) = changing_workbench
                         .admit_private_cell_for_test(changing)
                         .await
@@ -16241,7 +16467,16 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn installed_effect_imports_reach_lookup_and_batched_type_queries() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            installed_effect_imports_reach_lookup_and_batched_type_queries_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn installed_effect_imports_reach_lookup_and_batched_type_queries_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (machines, mut context, source, _root) = actor_lookup_registry_fixture();
             let installation = crate::agent_spec::installation_expression("Fixture.agentSpec", &[
                 crate::ActorEffectKey::Watches, crate::ActorEffectKey::Replies,
@@ -16256,7 +16491,7 @@ pub(crate) mod request_tests {
             assert!(!preamble.contains("import qualified Tidepool.Agent.Watch.Internal"));
             assert!(!preamble.contains("import qualified Tidepool.Agent.Reply.Internal"));
             let source = ActorWorkbenchSource::new(preamble.clone(), source.base_include.to_vec());
-            let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+            let workbench = ResidentActorWorkbench::new(machines, (source.clone()).bind_preparation(preparation_client.clone()), None);
             let (view, inputs, prepared) = workbench.access.with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &source)?;
                 let inputs = session.capture_inspection_inputs(view.session_view())
@@ -16336,12 +16571,25 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn lookup_batches_qualified_export_facts_in_one_compiler_request() {
         with_test_compiler_owner(
-            lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner(),
+            lookup_batches_qualified_export_facts_in_one_compiler_request_with_preparation_client,
         )
+        .await
+    }
+
+    async fn lookup_batches_qualified_export_facts_in_one_compiler_request_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner() {
+    async fn lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         use crate::lookup::LookupOutcome;
         use std::cell::{Cell, RefCell};
 
@@ -16390,7 +16638,11 @@ pub(crate) mod request_tests {
         let mut include = source.base_include.to_vec();
         include.push(modules.path().to_owned());
         let source = ActorWorkbenchSource::new(preamble, include);
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -16558,14 +16810,31 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
         with_test_compiler_owner(
-            lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner(),
+            lookup_inspects_checked_bound_value_on_repeated_requests_with_preparation_client,
         )
+        .await
+    }
+
+    async fn lookup_inspects_checked_bound_value_on_repeated_requests_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner() {
+    async fn lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let mut sibling_context = context.clone();
         sibling_context.placement.lexical_scope = workbench
             .access
@@ -16578,8 +16847,11 @@ pub(crate) mod request_tests {
         let mut checked_workbenches = Vec::new();
         for public_context in [context, sibling_context] {
             let public_scope = public_context.placement.lexical_scope;
-            let checked_workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let checked_workbench = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                (source.clone()).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (checked_workbench, private_context) = checked_workbench
                 .admit_private_cell_for_test(public_context)
                 .await
@@ -16795,19 +17067,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         for sibling_write in [false, true] {
             let (machines, context, source, _root) = actor_lookup_registry_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let workbench = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                (source.clone()).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (workbench, context) = workbench
                 .admit_private_cell_for_test(context)
                 .await
@@ -16981,14 +17258,31 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn actor_empty_snapshot_answers_uncancelled_type_search() {
         with_test_compiler_owner(
-            actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner(),
+            actor_empty_snapshot_answers_uncancelled_type_search_with_preparation_client,
         )
+        .await
+    }
+
+    async fn actor_empty_snapshot_answers_uncancelled_type_search_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner() {
+    async fn actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -17033,14 +17327,31 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn parked_actor_snapshot_answers_uncancelled_type_search() {
         with_test_compiler_owner(
-            parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner(),
+            parked_actor_snapshot_answers_uncancelled_type_search_with_preparation_client,
         )
+        .await
+    }
+
+    async fn parked_actor_snapshot_answers_uncancelled_type_search_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner() {
+    async fn parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -17069,6 +17380,7 @@ pub(crate) mod request_tests {
         let source = workbench
             .access
             .source
+            .config
             .clone()
             .for_workbench(&context, workbench.request_scope.as_ref());
         let (view, inputs, prepared) = workbench
@@ -17133,16 +17445,23 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
-        with_test_compiler_owner(
-            parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner()
-    {
+    async fn parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -17206,10 +17525,16 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
+        with_test_compiler_owner(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_preparation_client).await
+    }
+
+    async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let mut owner = crate::CompilerPreparationOwner::new();
         let cleanup = owner.cleanup();
         owner
-            .scope(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner())
+            .scope(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner(preparation_client.clone(), ))
             .await;
         let observation = cleanup.wait_for_settlement(Duration::from_secs(5)).await;
         assert!(observation.admission_closed, "{observation:?}");
@@ -17248,9 +17573,14 @@ pub(crate) mod request_tests {
     }
 
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -17360,6 +17690,12 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation(
     ) {
+        with_test_compiler_owner(source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation_with_preparation_client).await
+    }
+
+    async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         use tracing::instrument::WithSubscriber;
 
         let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
@@ -17370,6 +17706,7 @@ pub(crate) mod request_tests {
             .finish();
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let (_, _, source, _session_root) = host_mount_fixture();
+        let source = source.bind_preparation(preparation_client.clone());
         let retained = crate::RetainedActorExit::new();
         let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
         let source_layer = crate::CheckpointSourceLayer::default();
@@ -17524,8 +17861,169 @@ pub(crate) mod request_tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_pre_actor_preparation_scope_stops_and_joins_physical_work() {
+        let (_, _, config, _session_root) = host_mount_fixture();
+        let mut lifetime = crate::CompilerPreparationOwner::new();
+        let cleanup = lifetime.cleanup();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancellation_seen) = tokio::sync::oneshot::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let mut operation = Box::pin(lifetime.scope_with_client(|client| async move {
+            let source = config.bind_preparation(client);
+            let barrier = parking_lot::Mutex::new(Some((entered, cancelled, finish)));
+            source
+                .toolset_preparation
+                .observe_fresh_launch(Arc::new(move || {
+                    let (entered, cancelled, finish) = barrier.lock().take().unwrap();
+                    entered.send(()).unwrap();
+                    while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
+                        std::thread::yield_now();
+                    }
+                    cancelled.send(()).unwrap();
+                    finish
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                }));
+            source
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CheckpointSourceLayer::default(),
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await
+        }));
+        tokio::select! {
+            entered = started => entered.unwrap(),
+            _ = &mut operation => panic!("preparation completed before controlled retirement"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => panic!("preparation never entered"),
+        }
+        drop(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cleanup.observation().is_confirmed());
+        release.send(()).unwrap();
+        assert!(cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(15))
+            .await
+            .is_confirmed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_retirement_stops_source_preparation_and_retains_physical_settlement() {
+        source_preparation_retirement_history(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_control_failure_stops_source_preparation_without_claiming_cleanup() {
+        source_preparation_retirement_history(true).await;
+    }
+
+    async fn source_preparation_retirement_history(control_failure: bool) {
+        let (_, _, config, _session_root) = host_mount_fixture();
+        let (run, task) = crate::LocalActorDirectory::start().await.unwrap();
+        let source = config.bind_preparation(run.preparation_client());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancellation_seen) = tokio::sync::oneshot::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let barrier = parking_lot::Mutex::new(Some((entered, cancelled, finish)));
+        source
+            .toolset_preparation
+            .observe_fresh_launch(Arc::new(move || {
+                let (entered, cancelled, finish) = barrier.lock().take().unwrap();
+                entered.send(()).unwrap();
+                while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
+                    std::thread::yield_now();
+                }
+                cancelled.send(()).unwrap();
+                finish
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }));
+        let pending = tokio::spawn({
+            let source = source.clone();
+            async move {
+                let mut observer = crate::CompilerPreparationOwner::new();
+                observer
+                    .scope(source.prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CheckpointSourceLayer::default(),
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), started)
+            .await
+            .unwrap()
+            .unwrap();
+        if control_failure {
+            run.stop_owner_for_test().await;
+        } else {
+            run.seal().await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            run.settle_run_preparations(std::time::Duration::from_millis(10))
+                .await,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        let late = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CheckpointSourceLayer::default(),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await;
+        assert!(matches!(
+            late,
+            Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        release.send(()).unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(outcome.action.is_err());
+        assert!(outcome.cleanup.observation().is_confirmed());
+        let settled = run
+            .settle_run_preparations(std::time::Duration::from_secs(2))
+            .await;
+        if control_failure {
+            assert!(matches!(
+                settled,
+                crate::CleanupComponentOutcome::Unconfirmed(_)
+            ));
+        } else {
+            assert_eq!(settled, crate::CleanupComponentOutcome::Confirmed);
+            assert_eq!(
+                run.shutdown_run_resources().await,
+                crate::CleanupComponentOutcome::Confirmed
+            );
+            run.finish_run().await.unwrap();
+        }
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn prepared_source_instance_and_effect_order_execute_original_native_semantics() {
+        with_test_compiler_owner(prepared_source_instance_and_effect_order_execute_original_native_semantics_with_preparation_client).await
+    }
+
+    async fn prepared_source_instance_and_effect_order_execute_original_native_semantics_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,
             identity: Vec<String>,
@@ -17548,7 +18046,9 @@ pub(crate) mod request_tests {
             }
         }
         let (_, _, source, _session_root) = host_mount_fixture();
-        let source = source.with_spec("PreparedInstanceAgentSpec.agentSpec");
+        let source = source
+            .with_spec("PreparedInstanceAgentSpec.agentSpec")
+            .bind_preparation(preparation_client.clone());
         let authored = Arc::new(tempfile::tempdir().unwrap());
         let issuer = crate::SourceLayerIssuer::default();
         let snapshot = |value: &str| {
@@ -17675,7 +18175,7 @@ pub(crate) mod request_tests {
     }
 
     async fn run_native_instance_effect_probe(
-        source: ActorWorkbenchSource,
+        source: BoundActorWorkbenchSource,
         prepared: &PreparedSourceToolset,
         support: &[exomonad_tool::ToolEffectKey],
         expected: &str,
@@ -17778,7 +18278,7 @@ pub(crate) mod request_tests {
     async fn run_native_quoted_probe(
         mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: crate::ActorSessionContext,
-        source: ActorWorkbenchSource,
+        source: BoundActorWorkbenchSource,
         prepared: &tidepool_runtime::session::PreparedSourceEntry,
         expected: &str,
     ) {
@@ -17846,6 +18346,12 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay() {
+        with_test_compiler_owner(retained_quoted_toolset_loads_selected_original_without_compiler_replay_with_preparation_client).await
+    }
+
+    async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,
             identities: Vec<String>,
@@ -17918,7 +18424,9 @@ pub(crate) mod request_tests {
                 entries,
             }))
         };
-        let mut source = source.with_spec("QuotedAgentSpec.agentSpec");
+        let source = source
+            .with_spec("QuotedAgentSpec.agentSpec")
+            .bind_preparation(preparation_client.clone());
         let mut compiler_owner = crate::CompilerPreparationOwner::new();
         let fresh = compiler_owner
             .scope(source.prepare_source_toolset(
@@ -17949,18 +18457,22 @@ pub(crate) mod request_tests {
         std::fs::write(&input, "42").unwrap();
         let first_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         let before_handoff = tidepool_extract_cmd::extract_spawn_count();
-        let handoff_source = source.clone().with_prepared_toolset(Some(fresh.clone()));
+        let handoff_source = source
+            .clone()
+            .with_config(|config| config.with_prepared_toolset(Some(fresh.clone())));
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
-        let immediate = with_test_compiler_owner(handoff_source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            snapshot(crate::SourceEntryStorage::CompletedOriginal {
-                directory: storage.path().to_owned(),
-                selections: [(recipe.to_owned(), original)].into_iter().collect(),
-            }),
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
+        let immediate = with_test_compiler_owner(|_| {
+            handoff_source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                snapshot(crate::SourceEntryStorage::CompletedOriginal {
+                    directory: storage.path().to_owned(),
+                    selections: [(recipe.to_owned(), original)].into_iter().collect(),
+                }),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+        })
         .await
         .unwrap();
         assert!(Arc::ptr_eq(&fresh.prepared, &immediate.prepared));
@@ -17980,16 +18492,18 @@ pub(crate) mod request_tests {
             first_executions,
             "immediate immutable handoff must not execute the quoter again"
         );
-        let successor = with_test_compiler_owner(source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            snapshot(crate::SourceEntryStorage::FreshCompilation {
-                directory: storage.path().to_owned(),
-                preparation: uuid::Uuid::new_v4(),
-            }),
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
+        let successor = with_test_compiler_owner(|_| {
+            source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                snapshot(crate::SourceEntryStorage::FreshCompilation {
+                    directory: storage.path().to_owned(),
+                    preparation: uuid::Uuid::new_v4(),
+                }),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+        })
         .await
         .unwrap();
         assert_ne!(
@@ -18018,10 +18532,11 @@ pub(crate) mod request_tests {
             completed_executions,
             "executing the successor native body must not replay its quotation"
         );
-        let reselected = with_test_compiler_owner(
-            source
+        let reselected = with_test_compiler_owner(|_| async {
+            let selected_source = source
                 .clone()
-                .with_prepared_toolset(Some(fresh.clone()))
+                .with_config(|config| config.with_prepared_toolset(Some(fresh.clone())));
+            selected_source
                 .prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     snapshot(crate::SourceEntryStorage::CompletedOriginal {
@@ -18036,8 +18551,9 @@ pub(crate) mod request_tests {
                     &[],
                     &[],
                     Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                ),
-        )
+                )
+                .await
+        })
         .await
         .unwrap();
         assert_eq!(reselected.selection(), successor.selection());
@@ -18047,8 +18563,8 @@ pub(crate) mod request_tests {
         );
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.
-        source.toolset_preparation = Default::default();
-        source.toolset_support_manifests = Default::default();
+        let mut cold_config = source.config.clone();
+        cold_config.toolset_support_manifests = Default::default();
         let selected = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: [fresh
@@ -18059,78 +18575,83 @@ pub(crate) mod request_tests {
             .collect(),
         });
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let load_control = crate::WorkbenchExecutionControl::untracked();
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let (release, proceed) = std::sync::mpsc::channel();
-        let proceed = parking_lot::Mutex::new(proceed);
-        source.toolset_preparation.observe_completed_load(Arc::new({
-            let entered = entered.clone();
-            move || {
-                entered.notify_one();
-                proceed
-                    .lock()
-                    .recv_timeout(Duration::from_secs(15))
-                    .unwrap();
-            }
-        }));
-        let loading = tokio::spawn({
-            let source = source.clone();
-            let selected = selected.clone();
-            let owner = CompilerCloseOwner::Hosted(load_control.clone());
+        with_test_bound_source(cold_config.clone(), |source| {
+            let fresh = fresh.clone();
             async move {
-                owner
-                    .scope(source.prepare_source_toolset(
-                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                        selected,
-                        &[],
-                        &[],
-                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                    ))
+                let load_control = crate::WorkbenchExecutionControl::untracked();
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let (release, proceed) = std::sync::mpsc::channel();
+                let proceed = parking_lot::Mutex::new(proceed);
+                source.toolset_preparation.observe_completed_load(Arc::new({
+                    let entered = entered.clone();
+                    move || {
+                        entered.notify_one();
+                        proceed
+                            .lock()
+                            .recv_timeout(Duration::from_secs(15))
+                            .unwrap();
+                    }
+                }));
+                let loading = tokio::spawn({
+                    let source = source.clone();
+                    let selected = selected.clone();
+                    let owner = CompilerCloseOwner::Hosted(load_control.clone());
+                    async move {
+                        owner
+                            .scope(source.prepare_source_toolset(
+                                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                                selected,
+                                &[],
+                                &[],
+                                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                            ))
+                            .await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(15), entered.notified())
                     .await
+                    .unwrap();
+                assert!(matches!(
+                    load_control.compiler_close_observations().as_slice(),
+                    [crate::termination::CompilerWorkClose::Pending]
+                ));
+                assert!(load_control.request_cancellation());
+                assert!(load_control.publication_decision().claim_commit().is_none());
+                release.send(()).unwrap();
+                let loaded = tokio::time::timeout(Duration::from_secs(15), loading)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    load_control.compiler_close_observations().as_slice(),
+                    [crate::termination::CompilerWorkClose::Settled(
+                        tidepool_runtime::CompilerTransactionClose::NotStarted
+                    )]
+                ));
+                assert!(matches!(
+                    loaded.acquisition(),
+                    crate::ToolsetAcquisition::DeploymentOriginal { .. }
+                ));
+                assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
+                assert_eq!(
+                    fresh.prepared.entry.compiled().prepared(),
+                    loaded.prepared.entry.compiled().prepared()
+                );
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+
+                run_native_quoted_probe(
+                    session,
+                    context,
+                    source.clone(),
+                    &loaded.prepared.entry,
+                    "41",
+                )
+                .await;
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
             }
-        });
-        tokio::time::timeout(Duration::from_secs(15), entered.notified())
-            .await
-            .unwrap();
-        assert!(matches!(
-            load_control.compiler_close_observations().as_slice(),
-            [crate::termination::CompilerWorkClose::Pending]
-        ));
-        assert!(load_control.request_cancellation());
-        assert!(load_control.publication_decision().claim_commit().is_none());
-        release.send(()).unwrap();
-        let loaded = tokio::time::timeout(Duration::from_secs(15), loading)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            load_control.compiler_close_observations().as_slice(),
-            [crate::termination::CompilerWorkClose::Settled(
-                tidepool_runtime::CompilerTransactionClose::NotStarted
-            )]
-        ));
-        assert!(matches!(
-            loaded.acquisition(),
-            crate::ToolsetAcquisition::DeploymentOriginal { .. }
-        ));
-        assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
-        assert_eq!(
-            fresh.prepared.entry.compiled().prepared(),
-            loaded.prepared.entry.compiled().prepared()
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-
-        run_native_quoted_probe(
-            session,
-            context,
-            source.clone(),
-            &loaded.prepared.entry,
-            "41",
-        )
+        })
         .await;
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
         let retried_source = snapshot(crate::SourceEntryStorage::FreshCompilation {
             directory: storage.path().to_owned(),
@@ -18143,58 +18664,70 @@ pub(crate) mod request_tests {
             .join("entry/raw/meta.cbor");
         let original_metadata = std::fs::read(&metadata).unwrap();
         std::fs::write(&metadata, b"post-publication fault").unwrap();
-        source.toolset_preparation = Default::default();
-        assert!(with_test_compiler_owner(source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            retried_source.clone(),
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .is_err());
-        std::fs::write(&metadata, original_metadata).unwrap();
-        let retried = with_test_compiler_owner(source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            retried_source,
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .unwrap();
-        assert!(matches!(
-            retried.acquisition(),
-            crate::ToolsetAcquisition::ExistingRunOriginal { .. }
-        ));
-        assert_eq!(
-            retried.completed_entry_selection().unwrap(),
-            (recipe, original)
-        );
-        assert_eq!(
-            retried.prepared.entry.compiled().prepared(),
-            fresh.prepared.entry.compiled().prepared()
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-        assert_eq!(
-            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
-            completed_executions
-        );
+        with_test_bound_source(cold_config.clone(), |source| {
+            let fresh = fresh.clone();
+            let input = input.clone();
+            let completed_executions = completed_executions.clone();
+            async move {
+                assert!(source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        retried_source.clone(),
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+                    .is_err());
+                std::fs::write(&metadata, original_metadata).unwrap();
+                let retried = source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        retried_source,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    retried.acquisition(),
+                    crate::ToolsetAcquisition::ExistingRunOriginal { .. }
+                ));
+                assert_eq!(
+                    retried.completed_entry_selection().unwrap(),
+                    (recipe, original)
+                );
+                assert_eq!(
+                    retried.prepared.entry.compiled().prepared(),
+                    fresh.prepared.entry.compiled().prepared()
+                );
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+                assert_eq!(
+                    std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+                    completed_executions
+                );
+            }
+        })
+        .await;
         let invalid = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: [(recipe.to_owned(), uuid::Uuid::new_v4())]
                 .into_iter()
                 .collect(),
         });
-        source.toolset_preparation = Default::default();
         assert!(
-            with_test_compiler_owner(source.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                invalid,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            ))
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        invalid,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
             .await
             .is_err(),
             "a missing owner-selected original cannot fall back to source"
@@ -18205,25 +18738,27 @@ pub(crate) mod request_tests {
             completed_executions
         );
 
-        source.toolset_preparation = Default::default();
         let uncovered = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: Default::default(),
         });
         assert!(matches!(
-            with_test_compiler_owner(source.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                uncovered,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            ))
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        uncovered,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
             .await,
             Err(ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
         ));
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
-        source.toolset_preparation = Default::default();
         let missing = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: authored.path().join("absent-entries"),
             selections: [fresh
@@ -18233,15 +18768,21 @@ pub(crate) mod request_tests {
             .into_iter()
             .collect(),
         });
-        assert!(with_test_compiler_owner(source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            missing,
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .is_err());
+        assert!(
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        missing,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
+            .await
+            .is_err()
+        );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
     }
 
@@ -18366,29 +18907,131 @@ pub(crate) mod request_tests {
             "generated source-publication histories reuse immutable original custody without compiler work");
     }
 
+    async fn assert_restore_preparation_stops_with_its_run(
+        config: ActorWorkbenchSource,
+        captured: crate::CheckpointSourceLayer,
+        installation: PersistedActorInstallation,
+    ) {
+        let (run, task) = crate::LocalActorDirectory::start().await.unwrap();
+        let source = config.bind_preparation(run.preparation_client());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancellation_seen) = tokio::sync::oneshot::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let barrier = parking_lot::Mutex::new(Some((entered, cancelled, finish)));
+        source
+            .toolset_preparation
+            .observe_completed_load(Arc::new(move || {
+                let (entered, cancelled, finish) = barrier.lock().take().unwrap();
+                entered.send(()).unwrap();
+                while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
+                    std::thread::yield_now();
+                }
+                cancelled.send(()).unwrap();
+                finish
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }));
+        let pending = tokio::spawn({
+            let source = source.clone();
+            let captured = captured.clone();
+            let installation = installation.clone();
+            async move {
+                let mut observer = crate::CompilerPreparationOwner::new();
+                observer
+                    .scope(source.restore_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        captured,
+                        &installation,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), started)
+            .await
+            .unwrap()
+            .unwrap();
+        run.seal().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            run.settle_run_preparations(std::time::Duration::from_millis(10))
+                .await,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert!(matches!(
+            source
+                .restore_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    captured,
+                    &installation,
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await,
+            Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        release.send(()).unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            outcome.action.is_err(),
+            "retired run cannot issue a restored result"
+        );
+        assert!(outcome.cleanup.observation().is_confirmed());
+        assert_eq!(
+            run.settle_run_preparations(std::time::Duration::from_secs(2))
+                .await,
+            crate::CleanupComponentOutcome::Confirmed
+        );
+        assert_eq!(
+            run.shutdown_run_resources().await,
+            crate::CleanupComponentOutcome::Confirmed
+        );
+        run.finish_run().await.unwrap();
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
-        with_test_compiler_owner(
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(None),
-        ).await;
+        with_test_compiler_owner(|preparation_client|
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), None),
+        ).await
     }
 
     #[tokio::test]
     async fn quoted_source_original_survives_coherent_generation_replacement() {
         with_test_compiler_owner(
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(Some(crate::ActorPersistencePolicy::Durable)),
+            quoted_source_original_survives_coherent_generation_replacement_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn quoted_source_original_survives_coherent_generation_replacement_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_|
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Durable)),
         ).await;
     }
 
     #[tokio::test]
     async fn quoted_source_original_survives_ephemeral_generation_replacement() {
-        with_test_compiler_owner(
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(Some(crate::ActorPersistencePolicy::Ephemeral)),
-        ).await;
+        with_test_compiler_owner(|preparation_client|
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral)),
+        ).await
     }
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
     ) {
         let mut recovery = None;
@@ -18424,7 +19067,8 @@ pub(crate) mod request_tests {
         roots.push(authored.path().canonicalize().unwrap());
         let source = source
             .with_toolset_support_roots(roots.clone())
-            .with_spec("QuotedAgentSpec.agentSpec");
+            .with_spec("QuotedAgentSpec.agentSpec")
+            .bind_preparation(preparation_client.clone());
         struct GenerationSource {
             _owner: Arc<tempfile::TempDir>,
             _entries: Arc<tempfile::TempDir>,
@@ -18542,6 +19186,21 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap()
         });
+        if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
+            let lease = InstalledToolLease::new(
+                context.actor,
+                generation_source.clone(),
+                Some(first.clone()),
+            );
+            let installation =
+                PersistedActorInstallation::capture(&lease, &source_reference).unwrap();
+            assert_restore_preparation_stops_with_its_run(
+                source.config().clone(),
+                generation_source.clone(),
+                installation,
+            )
+            .await;
+        }
         let initial_originals = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
@@ -19508,14 +20167,14 @@ pub(crate) mod request_tests {
             "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
             installation.effect_row,
         );
-        let mut imports = source.workbench_imports.clone();
+        let mut imports = source.config.workbench_imports.clone();
         imports.extend_text("qualified QuotedAgentSpec");
         imports.extend_text("qualified Tidepool.Agent.Contract");
         imports.extend_text("qualified Tidepool.Effects.Core");
         imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
         imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
         let templates = resident_workbench_templates(
-            &source.preamble,
+            &source.config.preamble,
             &dispatcher_effects,
             &imports.template_text(),
         );
@@ -19690,7 +20349,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, mut source, _root) = host_mount_fixture();
             let authored = tempfile::tempdir().unwrap();
             std::fs::write(
@@ -19705,7 +20364,7 @@ pub(crate) mod request_tests {
                 insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller").into();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let (workbench, private_context) = ResidentActorWorkbench::new(machines, source, None)
+            let (workbench, private_context) = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None)
                 .admit_private_cell_for_test(context.clone())
                 .await
                 .unwrap();
@@ -19894,12 +20553,21 @@ pub(crate) mod request_tests {
                 Err(crate::ResidentToolError::Unavailable(_))
             ));
         })
-        .await;
+        .await
     }
 
     #[tokio::test]
     async fn explicit_spawn_installer_requires_exactly_one_request_receiver() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            explicit_spawn_installer_requires_exactly_one_request_receiver_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn explicit_spawn_installer_requires_exactly_one_request_receiver_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (session, public_context, mut source, _root) = host_mount_fixture();
             let authored = tempfile::tempdir().unwrap();
             std::fs::write(
@@ -19914,10 +20582,14 @@ pub(crate) mod request_tests {
                 insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller").into();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(public_context.placement.session, Box::new(session));
-            let (workbench, private_context) = ResidentActorWorkbench::new(machines, source, None)
-                .admit_private_cell_for_test(public_context.clone())
-                .await
-                .unwrap();
+            let (workbench, private_context) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .admit_private_cell_for_test(public_context.clone())
+            .await
+            .unwrap();
             workbench
                 .execute_cell_for_test(
                     private_context.clone(),
@@ -20134,14 +20806,18 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn explicit_replacement_fence_refuses_changed_dispatch_and_retired_actor() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, _root) = host_mount_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None)
-                .with_compilation_authority(
-                    crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-                );
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
             let first = Arc::new(
                 workbench
                     .prepare_tools(context.clone(), 1, vec![])
@@ -20195,18 +20871,31 @@ pub(crate) mod request_tests {
                 "replacement cannot resurrect a retired installation"
             );
         })
-        .await;
+        .await
     }
 
     #[tokio::test]
     async fn tool_installation_preserves_durable_child_private_admission() {
         with_test_compiler_owner(
-            tool_installation_preserves_durable_child_private_admission_with_compiler_owner(),
+            tool_installation_preserves_durable_child_private_admission_with_preparation_client,
         )
+        .await
+    }
+
+    async fn tool_installation_preserves_durable_child_private_admission_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            tool_installation_preserves_durable_child_private_admission_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn tool_installation_preserves_durable_child_private_admission_with_compiler_owner() {
+    async fn tool_installation_preserves_durable_child_private_admission_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let mut recovery = None;
         let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
             let fixture =
@@ -20227,10 +20916,14 @@ pub(crate) mod request_tests {
             .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_compilation_authority(
+            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+        );
         let before = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
@@ -20369,7 +21062,9 @@ pub(crate) mod request_tests {
         )
     }
 
-    fn child_admission_fixture() -> (
+    fn child_admission_fixture(
+        preparation_client: crate::CompilerPreparationClient,
+    ) -> (
         Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
         crate::ActorSessionContext,
@@ -20391,7 +21086,8 @@ pub(crate) mod request_tests {
         machines.insert_idle(id, Box::new(session));
         let runner = ResidentActorRunner::new(
             Arc::clone(&machines),
-            ActorWorkbenchSource::new("", Vec::new()),
+            (ActorWorkbenchSource::new("", Vec::new()))
+                .bind_preparation(preparation_client.clone()),
         );
         (machines, runner, context, root)
     }
@@ -20407,13 +21103,27 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn fork_child_admission_prior_retirement_refuses_ready_checkout() {
         with_test_compiler_owner(
-            fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner(),
+            fork_child_admission_prior_retirement_refuses_ready_checkout_with_preparation_client,
         )
+        .await
+    }
+
+    async fn fork_child_admission_prior_retirement_refuses_ready_checkout_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner() {
-        let (machines, runner, context, _root) = child_admission_fixture();
+    async fn fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        let (machines, runner, context, _root) =
+            child_admission_fixture(preparation_client.clone());
         let retirement = crate::RetainedActorExit::new();
         let terminal = retirement.request_shutdown(child_retirement());
         let result = runner
@@ -20438,13 +21148,27 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn fork_child_admission_retirement_removes_queued_checkout() {
         with_test_compiler_owner(
-            fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner(),
+            fork_child_admission_retirement_removes_queued_checkout_with_preparation_client,
         )
+        .await
+    }
+
+    async fn fork_child_admission_retirement_removes_queued_checkout_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner() {
-        let (machines, runner, context, _root) = child_admission_fixture();
+    async fn fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        let (machines, runner, context, _root) =
+            child_admission_fixture(preparation_client.clone());
         let id = context.placement.session;
         let (session, receipt) = machines.checkout_run(id).unwrap().into_parts();
         let retirement = crate::RetainedActorExit::new();
@@ -20475,12 +21199,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn fork_child_admission_claimed_operation_keeps_result_during_retirement() {
-        with_test_compiler_owner(fork_child_admission_claimed_operation_keeps_result_during_retirement_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| fork_child_admission_claimed_operation_keeps_result_during_retirement_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn fork_child_admission_claimed_operation_keeps_result_during_retirement_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (machines, runner, context, _root) = child_admission_fixture();
+        let (machines, runner, context, _root) =
+            child_admission_fixture(preparation_client.clone());
         let id = context.placement.session;
         let retirement = crate::RetainedActorExit::new();
         let (entered, observe) = tokio::sync::oneshot::channel();
@@ -20644,12 +21370,25 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn cancelling_child_preparation_cannot_register_a_late_machine() {
         with_test_compiler_owner(
-            cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner(),
+            cancelling_child_preparation_cannot_register_a_late_machine_with_preparation_client,
         )
+        .await
+    }
+
+    async fn cancelling_child_preparation_cannot_register_a_late_machine_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner() {
+    async fn cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let id = tidepool_repr::SessionId(810);
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
@@ -20662,7 +21401,8 @@ pub(crate) mod request_tests {
         let wait = std::sync::Mutex::new(wait);
         let runner = ResidentActorRunner::new(
             Arc::clone(&machines),
-            ActorWorkbenchSource::new("", Vec::new()),
+            (ActorWorkbenchSource::new("", Vec::new()))
+                .bind_preparation(preparation_client.clone()),
         )
         .with_child_bootstrap_program(child_bootstrap_fixture())
         .with_child_session_factory(Arc::new(move |id, _, _settlement| {
@@ -20701,12 +21441,25 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn prepared_child_registration_remains_owned_by_retirement() {
         with_test_compiler_owner(
-            prepared_child_registration_remains_owned_by_retirement_with_compiler_owner(),
+            prepared_child_registration_remains_owned_by_retirement_with_preparation_client,
         )
+        .await
+    }
+
+    async fn prepared_child_registration_remains_owned_by_retirement_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            prepared_child_registration_remains_owned_by_retirement_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn prepared_child_registration_remains_owned_by_retirement_with_compiler_owner() {
+    async fn prepared_child_registration_remains_owned_by_retirement_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let id = tidepool_repr::SessionId(811);
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
@@ -20715,7 +21468,8 @@ pub(crate) mod request_tests {
         let factory_dropped = Arc::clone(&dropped);
         let runner = ResidentActorRunner::new(
             Arc::clone(&machines),
-            ActorWorkbenchSource::new("", Vec::new()),
+            (ActorWorkbenchSource::new("", Vec::new()))
+                .bind_preparation(preparation_client.clone()),
         )
         .with_child_bootstrap_program(child_bootstrap_fixture())
         .with_child_session_factory(Arc::new(move |id, _, _settlement| {
@@ -20749,7 +21503,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn child_publication_issues_drop_custody_without_claiming_collision_peers() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let id = tidepool_repr::SessionId(812);
             let root = tempfile::tempdir().unwrap();
             let root_path = root.path().to_path_buf();
@@ -20758,7 +21512,8 @@ pub(crate) mod request_tests {
             let factory_dropped = dropped.clone();
             let runner = ResidentActorRunner::new(
                 machines.clone(),
-                ActorWorkbenchSource::new("", Vec::new()),
+                (ActorWorkbenchSource::new("", Vec::new()))
+                    .bind_preparation(preparation_client.clone()),
             )
             .with_child_bootstrap_program(child_bootstrap_fixture())
             .with_child_session_factory(Arc::new(move |id, _, _settlement| {
@@ -20813,22 +21568,38 @@ pub(crate) mod request_tests {
             );
             assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
         })
+        .await
+    }
+
+    #[tokio::test]
+    async fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle() {
+        with_test_compiler_owner(|client| async move {
+            child_session_factory_builds_a_type_checking_session_and_inserts_it_idle_with_client(
+                client,
+            )
+        })
         .await;
     }
 
-    #[test]
-    fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle() {
+    fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle_with_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(1));
         // Keep the fixture's tempdir alive for the factory's one call — a
         // production factory instead captures the run's real session root.
         let held_root = std::sync::Mutex::new(None);
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
-            .with_child_session_factory(Arc::new(move |session_id, _source_layer, _settlement| {
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+        )
+        .with_child_session_factory(Arc::new(
+            move |session_id, _source_layer, _settlement| {
                 let (session, root) = bare_session_at(session_id);
                 *held_root.lock().unwrap() = Some(root);
                 Ok(Box::new(session))
-            }));
+            },
+        ));
         assert_eq!(machines.kind(child_id), None, "not present before spawning");
         tidepool_testing::with_settlement(|settlement| {
             runner.spawn_child_session(child_id, settlement)
@@ -20929,12 +21700,25 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn transfer_custody_moves_a_value_between_two_resident_sessions() {
         with_test_compiler_owner(
-            transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner(),
+            transfer_custody_moves_a_value_between_two_resident_sessions_with_preparation_client,
         )
+        .await
+    }
+
+    async fn transfer_custody_moves_a_value_between_two_resident_sessions_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner() {
+    async fn transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
             .expect("materialize minimal effect surface");
@@ -21025,7 +21809,10 @@ pub(crate) mod request_tests {
             surface.include_paths().to_vec(),
         );
         let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
-            ResidentActorRunner::new(Arc::clone(&machines), source);
+            ResidentActorRunner::new(
+                Arc::clone(&machines),
+                (source).bind_preparation(preparation_client.clone()),
+            );
 
         async fn handle_count(
             runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -21102,10 +21889,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session() {
-        with_test_compiler_owner(cancelling_child_startup_during_custody_transfer_discards_only_the_child_session_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| cancelling_child_startup_during_custody_transfer_discards_only_the_child_session_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         use std::future::Future;
         use std::task::Poll;
@@ -21169,13 +21957,16 @@ pub(crate) mod request_tests {
             surface.include_paths().to_vec(),
         );
         let child_root = std::sync::Mutex::new(None);
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
-            .with_child_session_factory(Arc::new(move |id, _source_layer, _settlement| {
-                let (session, root) = bare_session_at(id);
-                *child_root.lock().unwrap() = Some(root);
-                Ok(Box::new(session))
-            }))
-            .with_child_bootstrap_program(Arc::new(compiled));
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+        )
+        .with_child_session_factory(Arc::new(move |id, _source_layer, _settlement| {
+            let (session, root) = bare_session_at(id);
+            *child_root.lock().unwrap() = Some(root);
+            Ok(Box::new(session))
+        }))
+        .with_child_bootstrap_program(Arc::new(compiled));
         let owner = RealmId::fresh();
         let provisioned = runner
             .provision_child_session(child_id, owner, None, &[])
@@ -21237,25 +22028,41 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget() {
-        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
-            "nestedNamed",
-            2,
-            2,
-        ))
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            compiled_named_watch_fixture_with_compiler_owner(
+                preparation_client.clone(),
+                "nestedNamed",
+                2,
+                2,
+            )
+        })
+        .await
     }
 
     #[tokio::test]
     async fn compiled_poll_watch_retains_an_inflight_read_after_root_forget() {
-        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
-            "pollNamed",
-            1,
-            1,
-        ))
+        with_test_compiler_owner(
+            compiled_poll_watch_retains_an_inflight_read_after_root_forget_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn compiled_poll_watch_retains_an_inflight_read_after_root_forget_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            compiled_named_watch_fixture_with_compiler_owner(
+                preparation_client.clone(),
+                "pollNamed",
+                1,
+                1,
+            )
+        })
         .await;
     }
 
     async fn compiled_named_watch_fixture_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
         entry: &str,
         source_count: usize,
         projection_count: usize,
@@ -21316,7 +22123,10 @@ pub(crate) mod request_tests {
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(session_id, Box::new(session));
         let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
-        let runner = ResidentActorRunner::new(machines, source);
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let owner = crate::ActorRef::first(crate::ActorId(0xCA03));
         let mut context = crate::ActorDescriptor::new(
             "named-observer",
@@ -21446,14 +22256,17 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots() {
-        with_test_compiler_owner(
-            progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner()
-    {
+    async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         use crate::request::sources::{RequestSourceKind, SourceDelivery, SourceEvent};
         use crate::request::{RequestRegistry, WatchRequirement};
         use ractor::{Actor, ActorProcessingErr};
@@ -21833,7 +22646,10 @@ pub(crate) mod request_tests {
         machines.insert_idle(publisher_id, Box::new(publisher));
         machines.insert_idle(observer_id, Box::new(observer));
         let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let context = crate::ActorDescriptor::new(
             "progress-observer",
             crate::ActorPlacement {
@@ -22154,14 +22970,17 @@ pub(crate) mod request_tests {
     /// custodies are independently discardable with no double-free.
     #[tokio::test]
     async fn import_shared_custody_lets_two_observers_read_one_published_root() {
-        with_test_compiler_owner(
-            import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner()
-    {
+    async fn import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
             .expect("materialize minimal effect surface");
@@ -22252,7 +23071,10 @@ pub(crate) mod request_tests {
             surface.include_paths().to_vec(),
         );
         let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
-            ResidentActorRunner::new(Arc::clone(&machines), source);
+            ResidentActorRunner::new(
+                Arc::clone(&machines),
+                (source).bind_preparation(preparation_client.clone()),
+            );
 
         async fn handle_count(
             runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -22349,11 +23171,23 @@ pub(crate) mod request_tests {
         );
     }
 
-    #[test]
-    fn spawn_child_session_without_an_installed_factory_is_a_named_error() {
+    #[tokio::test]
+    async fn spawn_child_session_without_an_installed_factory_is_a_named_error() {
+        with_test_compiler_owner(|client| async move {
+            spawn_child_session_without_an_installed_factory_is_a_named_error_with_client(client)
+        })
+        .await;
+    }
+
+    fn spawn_child_session_without_an_installed_factory_is_a_named_error_with_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, _context, source, _root) = actor_registry_fixture();
         let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
-            ResidentActorRunner::new(machines, source);
+            ResidentActorRunner::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+            );
         let error = tidepool_testing::with_settlement(|settlement| {
             runner.spawn_child_session(tidepool_repr::SessionId(999_999), settlement)
         })
@@ -22361,7 +23195,9 @@ pub(crate) mod request_tests {
         assert!(error.contains("no child-session factory"));
     }
 
-    fn child_session_with_outstanding_custody() -> (
+    fn child_session_with_outstanding_custody(
+        preparation_client: crate::CompilerPreparationClient,
+    ) -> (
         ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
         Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         tidepool_repr::SessionId,
@@ -22417,7 +23253,10 @@ pub(crate) mod request_tests {
             .expect("the mounted binding resolves to a live custody token");
         machines.insert_idle(child_id, Box::new(child_session));
 
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+        );
         runner
             .access
             .child_sessions
@@ -22427,14 +23266,16 @@ pub(crate) mod request_tests {
         (runner, machines, child_id, custody)
     }
 
-    fn child_session_with_binding_lease() -> (
+    fn child_session_with_binding_lease(
+        preparation_client: crate::CompilerPreparationClient,
+    ) -> (
         ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
         Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         tidepool_repr::SessionId,
         tidepool_runtime::session::resident::BindingLease,
         tempfile::TempDir,
     ) {
-        let (machines, runner, context, root) = child_admission_fixture();
+        let (machines, runner, context, root) = child_admission_fixture(preparation_client.clone());
         let id = context.placement.session;
         runner.access.child_sessions.lock().unwrap().insert(id);
         let (mut session, receipt) = machines.checkout_run(id).unwrap().into_parts();
@@ -22474,13 +23315,27 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup() {
         with_test_compiler_owner(
-            reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner(),
+            reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_preparation_client,
         )
+        .await
+    }
+
+    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner() {
-        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        let (runner, machines, id, lease, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         runner.retire_child_session(id, false).await.unwrap();
         assert!(
             machines.kind(id).is_some(),
@@ -22500,12 +23355,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker() {
-        with_test_compiler_owner(reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+        let (runner, machines, id, lease, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         runner.retire_child_session(id, false).await.unwrap();
         let owner = runner
             .access
@@ -22546,12 +23403,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker() {
-        with_test_compiler_owner(reaper_release_panicked_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| reaper_release_panicked_checkout_clears_membership_and_finishes_worker_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+        let (runner, _machines, id, lease, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         runner.retire_child_session(id, false).await.unwrap();
         let owner = runner
             .access
@@ -22579,12 +23438,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker() {
-        with_test_compiler_owner(reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (_machines, runner, context, _root) = child_admission_fixture();
+        let (_machines, runner, context, _root) =
+            child_admission_fixture(preparation_client.clone());
         let id = tidepool_repr::SessionId(context.placement.session.0 + 1);
         runner.access.child_sessions.lock().unwrap().insert(id);
         let retirement = runner.retire_child_session(id, false);
@@ -22614,15 +23475,19 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn reaper_release_terminal_cleanup_preserves_different_worker_owner() {
-        with_test_compiler_owner(
-            reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner()
-    {
-        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+    async fn reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        let (runner, _machines, id, lease, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         let owner = Arc::new(PendingChildTeardown::new());
         runner
             .access
@@ -22657,16 +23522,19 @@ pub(crate) mod request_tests {
     /// down; the test waits for both registry removal and worker completion.
     #[tokio::test]
     async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             retiring_a_child_session_defers_then_completes_once_custody_clears_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn retiring_a_child_session_defers_then_completes_once_custody_clears_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let (runner, machines, child_id, custody) =
+            child_session_with_outstanding_custody(preparation_client.clone());
         runner
             .retire_child_session(child_id, false)
             .await
@@ -22722,13 +23590,27 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn concurrent_child_retirements_share_one_cleanup_owner() {
         with_test_compiler_owner(
-            concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner(),
+            concurrent_child_retirements_share_one_cleanup_owner_with_preparation_client,
         )
+        .await
+    }
+
+    async fn concurrent_child_retirements_share_one_cleanup_owner_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner() {
-        let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
+    async fn concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        let (runner, machines, child_id, custody, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         let (first, second) = tokio::join!(
             runner.retire_child_session(child_id, false),
             runner.retire_child_session(child_id, false),
@@ -22765,12 +23647,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops() {
-        with_test_compiler_owner(canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
+        let (runner, machines, child_id, custody, _root) =
+            child_session_with_binding_lease(preparation_client.clone());
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let blocker_access = runner.access.sharing();
@@ -22880,14 +23764,31 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn planned_cell_defers_declaration_until_its_admitted_item() {
         with_test_compiler_owner(
-            planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner(),
+            planned_cell_defers_declaration_until_its_admitted_item_with_preparation_client,
         )
+        .await
+    }
+
+    async fn planned_cell_defers_declaration_until_its_admitted_item_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner() {
+    async fn planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let public_context = context.clone();
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
@@ -22977,7 +23878,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn request_annotations_survive_checked_prologue_adoption_and_publication() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, public_context, mut source, inputs, _root) =
                 activation_input_fixture(|_| {});
             let evidence = inputs[0].type_evidence().clone();
@@ -22997,10 +23898,14 @@ pub(crate) mod request_tests {
                 tidepool_mcp::CapturedOutput,
             >::new());
             machines.insert_idle(public_context.placement.session, Box::new(session));
-            let (workbench, private_context) = ResidentActorWorkbench::new(machines, source, None)
-                .admit_private_cell_for_test(public_context.clone())
-                .await
-                .unwrap();
+            let (workbench, private_context) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .admit_private_cell_for_test(public_context.clone())
+            .await
+            .unwrap();
             let (checked, prepared) = workbench
                 .prepare_cell(
                     private_context.clone(),
@@ -23126,21 +24031,26 @@ pub(crate) mod request_tests {
                 .unwrap();
             drop(inputs);
         })
-        .await;
+        .await
     }
 
     /// The native program retains its mounted request input across preparation;
     /// later items and closures retain the exact original input after a new mount.
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
-        with_test_compiler_owner(planned_cell_keeps_request_json_input_owned_across_native_preparation_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| planned_cell_keeps_request_json_input_owned_across_native_preparation_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None)
-            .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
         let (workbench, context) = workbench
             .admit_private_cell_for_test(public.clone())
             .await
@@ -23431,12 +24341,25 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn scope_live_closure_survives_body_realm_retirement() {
         with_test_compiler_owner(
-            scope_live_closure_survives_body_realm_retirement_with_compiler_owner(),
+            scope_live_closure_survives_body_realm_retirement_with_preparation_client,
         )
+        .await
+    }
+
+    async fn scope_live_closure_survives_body_realm_retirement_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            scope_live_closure_survives_body_realm_retirement_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn scope_live_closure_survives_body_realm_retirement_with_compiler_owner() {
+    async fn scope_live_closure_survives_body_realm_retirement_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (session, context, mut source, _root) = host_mount_fixture_with_effects(
             |_| {},
             &[tidepool_mcp::resource_scopes_decl()],
@@ -23447,7 +24370,11 @@ pub(crate) mod request_tests {
             .extend_text("qualified Tidepool.Scope as Scope");
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -23568,18 +24495,35 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn current_request_cell_compiles_closed_site_evidence() {
         with_test_compiler_owner(
-            current_request_cell_compiles_closed_site_evidence_with_compiler_owner(),
+            current_request_cell_compiles_closed_site_evidence_with_preparation_client,
         )
+        .await
+    }
+
+    async fn current_request_cell_compiles_closed_site_evidence_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            current_request_cell_compiles_closed_site_evidence_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn current_request_cell_compiles_closed_site_evidence_with_compiler_owner() {
+    async fn current_request_cell_compiles_closed_site_evidence_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -23688,7 +24632,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn repeated_activation_fixtures_preserve_exact_nominal_constructor_identity() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|_| async {
             for _ in 0..2 {
                 drop(activation_session_fixture(|_| {}));
             }
@@ -23698,7 +24642,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn activation_fixture_interleaving_distinguishes_initialization_from_reset() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|_| async {
             let construct = |phase| {
                 eprintln!("activation fixture interleaving phase={phase} begin");
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -24289,12 +25233,17 @@ pub(crate) mod request_tests {
         }
     }
 
-    pub(crate) async fn activation_publication_phase_fixture() -> ActivationPublicationPhaseFixture
-    {
-        with_test_compiler_owner(activation_publication_phase_fixture_with_compiler_owner()).await
+    pub(crate) async fn activation_publication_phase_fixture(
+        preparation_client: crate::CompilerPreparationClient,
+    ) -> ActivationPublicationPhaseFixture {
+        with_test_compiler_owner(|_| {
+            activation_publication_phase_fixture_with_compiler_owner(preparation_client.clone())
+        })
+        .await
     }
 
     async fn activation_publication_phase_fixture_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) -> ActivationPublicationPhaseFixture {
         let mut recovery = None;
         let (mut session, mut context, source, mut inputs, run_root) =
@@ -24331,7 +25280,10 @@ pub(crate) mod request_tests {
         .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let runner = ResidentActorRunner::new(machines.clone(), source.clone());
+        let runner = ResidentActorRunner::new(
+            machines.clone(),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         let execution = Arc::new(
             runner
                 .begin_private_execution(
@@ -24344,8 +25296,12 @@ pub(crate) mod request_tests {
         );
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope;
-        let workbench = ResidentActorWorkbench::new(machines.clone(), source, None)
-            .with_private_execution(execution);
+        let workbench = ResidentActorWorkbench::new(
+            machines.clone(),
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_private_execution(execution);
         let prepared = workbench
             .mount_activation_input(
                 private_context,
@@ -24618,10 +25574,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn activation_inputs_preserve_durable_private_admission_across_replacement() {
-        with_test_compiler_owner(activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let mut recovery = None;
         let (mut session, mut context, source, inputs, _root) = activation_input_fixture(|lib| {
@@ -24655,10 +25612,14 @@ pub(crate) mod request_tests {
         .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_compilation_authority(
+            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+        );
         let mut previous = None;
         let mut captured = None;
         for input in inputs {
@@ -24788,20 +25749,37 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn activation_refuses_reserved_declaration_without_public_mutation() {
         with_test_compiler_owner(
-            activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner(),
+            activation_refuses_reserved_declaration_without_public_mutation_with_preparation_client,
         )
+        .await
+    }
+
+    async fn activation_refuses_reserved_declaration_without_public_mutation_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner() {
+    async fn activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (session, context, source, mut inputs, _root) = activation_input_fixture(|_| {});
         let public_scope = context.placement.lexical_scope;
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .with_compilation_authority(
+            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+        );
         workbench
             .publish_cell_for_test(context.clone(), "sessionInput = ()")
             .await
@@ -24916,12 +25894,12 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn twenty_distinct_activation_values_share_one_renderer_after_parent_failure() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, inputs, _root) = distinct_renderer_input_fixture();
             assert_eq!(inputs.len(), 20);
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let workbench = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
             let mut bindings = std::collections::BTreeSet::new();
             let mut generations = std::collections::BTreeSet::new();
@@ -24993,16 +25971,25 @@ pub(crate) mod request_tests {
             assert_eq!(generations.len(), 20);
             assert_eq!(scopes.len(), 20);
         })
-        .await;
+        .await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn four_concurrent_distinct_values_share_prepared_native_renderer() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            four_concurrent_distinct_values_share_prepared_native_renderer_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn four_concurrent_distinct_values_share_prepared_native_renderer_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (session, context, source, inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let workbench = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None);
             let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let sealed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let mut tasks = Vec::new();
@@ -25018,7 +26005,7 @@ pub(crate) mod request_tests {
                     }
                     Ok(())
                 }));
-                tasks.push(tokio::spawn(with_test_compiler_owner(async move {
+                tasks.push(tokio::spawn(with_test_compiler_owner(|_| async move {
                     activation.mount_activation_input(context, input, None, "()".into(), None, Vec::new()).await
                 })));
             }
@@ -25037,11 +26024,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn renderer_producer_and_waiter_release_machine_checkout() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            renderer_producer_and_waiter_release_machine_checkout_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn renderer_producer_and_waiter_release_machine_checkout_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines.clone(), source, None);
+            let workbench = ResidentActorWorkbench::new(
+                machines.clone(),
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (mut first, first_context) =
                 renderer_activation_workbench(&workbench, &context).await;
             let (mut second, second_context) =
@@ -25165,11 +26165,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancelled_renderer_producer_retains_sealed_code_for_fresh_child() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            cancelled_renderer_producer_retains_sealed_code_for_fresh_child_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn cancelled_renderer_producer_retains_sealed_code_for_fresh_child_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (mut first, first_context) =
                 renderer_activation_workbench(&workbench, &context).await;
             let (second, second_context) =
@@ -25240,11 +26253,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancelled_renderer_producer_retries_only_after_native_close() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            cancelled_renderer_producer_retries_only_after_native_close_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn cancelled_renderer_producer_retries_only_after_native_close_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            );
             let (mut first, first_context) =
                 renderer_activation_workbench(&workbench, &context).await;
             let (mut second, second_context) =
@@ -25334,11 +26360,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cached_renderer_recheckout_refuses_stale_mount_and_preserves_ready_code() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines.clone(), source, None);
+            let workbench = ResidentActorWorkbench::new(machines.clone(), (source).bind_preparation(preparation_client.clone()), None);
             let (first, first_context) = renderer_activation_workbench(&workbench, &context).await;
             let (mut stale, stale_context) = renderer_activation_workbench(&workbench, &context).await;
             let (third, third_context) = renderer_activation_workbench(&workbench, &context).await;
@@ -25373,7 +26399,7 @@ pub(crate) mod request_tests {
             assert_ne!(fresh.binding, warm.binding);
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 4,
                 "stale affine authority cannot invalidate retained renderer code");
-        }).await;
+        }).await
     }
 
     fn workbench_runner_for_test(
@@ -25387,35 +26413,57 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
         with_test_compiler_owner(
-            request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner(),
+            request_scope_alias_borrow_refuses_a_shadowed_mount_with_preparation_client,
         )
+        .await
+    }
+
+    async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner() {
-        assert_current_request_alias_borrow(true, false).await;
+    async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        assert_current_request_alias_borrow(preparation_client.clone(), true, false).await;
     }
 
     #[tokio::test]
     async fn current_request_private_cell_borrows_scope_alias_without_extra_root() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        assert_current_request_alias_borrow(false, false).await;
+        assert_current_request_alias_borrow(preparation_client.clone(), false, false).await;
     }
 
     #[tokio::test]
     async fn current_request_refuses_a_different_result_type_without_issuing_reply() {
-        with_test_compiler_owner(assert_current_request_alias_borrow(false, true)).await;
+        with_test_compiler_owner(|preparation_client| {
+            assert_current_request_alias_borrow(preparation_client.clone(), false, true)
+        })
+        .await
     }
 
-    async fn assert_current_request_alias_borrow(shadowed: bool, mismatched_result: bool) {
+    async fn assert_current_request_alias_borrow(
+        preparation_client: crate::CompilerPreparationClient,
+        shadowed: bool,
+        mismatched_result: bool,
+    ) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -25427,8 +26475,15 @@ pub(crate) mod request_tests {
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Ref.Internal as Ref");
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let runner = ResidentActorRunner::new(machines, source.clone());
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         workbench
             .publish_cell_for_test(context.clone(), "sourceValue <- pure ()")
             .await
@@ -25674,19 +26729,39 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn current_request_without_an_activation_returns_typed_refusal() {
         with_test_compiler_owner(
-            current_request_without_an_activation_returns_typed_refusal_with_compiler_owner(),
+            current_request_without_an_activation_returns_typed_refusal_with_preparation_client,
         )
+        .await
+    }
+
+    async fn current_request_without_an_activation_returns_typed_refusal_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            current_request_without_an_activation_returns_typed_refusal_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn current_request_without_an_activation_returns_typed_refusal_with_compiler_owner() {
+    async fn current_request_without_an_activation_returns_typed_refusal_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let runner = ResidentActorRunner::new(machines, source);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -25770,10 +26845,11 @@ pub(crate) mod request_tests {
     /// unsplit single checkout held across the whole compile would force.
     #[tokio::test]
     async fn planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile() {
-        with_test_compiler_owner(planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, mut context_a, mut context_b, source, _root) =
             actor_registry_fixture_two_scopes();
@@ -25789,15 +26865,22 @@ pub(crate) mod request_tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let (wb_a, context_a) =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None)
-                .admit_private_cell_for_test(context_a)
-                .await
-                .unwrap();
-        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(context_b)
-            .await
-            .unwrap();
+        let (wb_a, context_a) = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(context_a)
+        .await
+        .unwrap();
+        let (wb_b, context_b) = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(context_b)
+        .await
+        .unwrap();
         // Both cells compile outside the machine checkout. The larger cell
         // exercises ordered references while the sibling takes its own snapshot.
         let cell_a =
@@ -25874,12 +26957,25 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn whole_cell_installs_bindings_before_and_after_native_bootstrap() {
-        with_test_compiler_owner(async {
+        with_test_compiler_owner(
+            whole_cell_installs_bindings_before_and_after_native_bootstrap_with_preparation_client,
+        )
+        .await
+    }
+
+    async fn whole_cell_installs_bindings_before_and_after_native_bootstrap_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| async {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
-                .admit_private_cell_for_test(context)
-                .await
-                .unwrap();
+            let (workbench, context) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client.clone()),
+                None,
+            )
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
             let (checked, prepared) = workbench
                 .prepare_cell(
                     context.clone(),
@@ -25954,14 +27050,22 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities() {
-        with_test_compiler_owner(public_visibility_snapshot_pairs_declaration_and_exact_binding_identities_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| public_visibility_snapshot_pairs_declaration_and_exact_binding_identities_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let runner = ResidentActorRunner::new(machines, source.clone());
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         let before = runner
             .public_visibility_snapshot(context.clone())
             .await
@@ -26000,18 +27104,26 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
-        with_test_compiler_owner(answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
             .unwrap();
-        let runner = ResidentActorRunner::new(machines, source.clone());
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         let step = workbench
             .begin_cell_for_test(
                 context.clone(),
@@ -26045,14 +27157,22 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children(
     ) {
-        with_test_compiler_owner(captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         let baseline_handles = workbench
             .access
             .with_machine(context.clone(), |session, _, _| {
@@ -26333,13 +27453,17 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry() {
-        with_test_compiler_owner(checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let scope = runner
             .capture_context_scope(context.clone())
             .await
@@ -26418,12 +27542,19 @@ pub(crate) mod request_tests {
         AfterPublication,
     }
 
-    async fn assert_installer_deferred_rejection(stage: InstallerDeferredStage) {
+    async fn assert_installer_deferred_rejection(
+        preparation_client: crate::CompilerPreparationClient,
+        stage: InstallerDeferredStage,
+    ) {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -26530,43 +27661,70 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame() {
-        with_test_compiler_owner(tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        assert_installer_deferred_rejection(InstallerDeferredStage::BeforePublication).await;
+        assert_installer_deferred_rejection(
+            preparation_client.clone(),
+            InstallerDeferredStage::BeforePublication,
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame() {
-        with_test_compiler_owner(tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        assert_installer_deferred_rejection(InstallerDeferredStage::AfterPublication).await;
+        assert_installer_deferred_rejection(
+            preparation_client.clone(),
+            InstallerDeferredStage::AfterPublication,
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn external_work_releases_machine_until_its_failure_settles() {
         with_test_compiler_owner(
-            external_work_releases_machine_until_its_failure_settles_with_compiler_owner(),
+            external_work_releases_machine_until_its_failure_settles_with_preparation_client,
         )
+        .await
+    }
+
+    async fn external_work_releases_machine_until_its_failure_settles_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            external_work_releases_machine_until_its_failure_settles_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn external_work_releases_machine_until_its_failure_settles_with_compiler_owner() {
+    async fn external_work_releases_machine_until_its_failure_settles_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
             .unwrap();
         let runner = Arc::new(ResidentActorRunner::new(
             Arc::clone(&machines),
-            source.clone(),
+            (source.clone()).bind_preparation(preparation_client.clone()),
         ));
         let (block, _) = suspending_fragment();
         let step = workbench
@@ -26687,16 +27845,21 @@ pub(crate) mod request_tests {
     /// its resuming checkout must retire the exact guarded hole.
     #[tokio::test]
     async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole() {
-        with_test_compiler_owner(dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let mut suspend_context = context.clone();
         suspend_context.haskell_effects_alias =
             "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, suspend_context) = workbench
             .admit_private_cell_for_test(suspend_context)
             .await
@@ -26786,19 +27949,27 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes() {
-        with_test_compiler_owner(actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
             .unwrap();
-        let runner = ResidentActorRunner::new(machines, source.clone());
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source.clone()).bind_preparation(preparation_client.clone()),
+        );
         let cell = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
             context.clone(),
@@ -26890,13 +28061,17 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners() {
-        with_test_compiler_owner(actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let runner = ResidentActorRunner::new(machines, source);
+        let runner = ResidentActorRunner::new(
+            machines,
+            (source).bind_preparation(preparation_client.clone()),
+        );
         let outcome = ResidentOutcome::Suspended {
             output: vec![],
             hole: ResidentHole::plain("successor"),
@@ -26946,15 +28121,32 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn late_parked_hole_registration_aborts_only_its_own_continuation() {
         with_test_compiler_owner(
-            late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner(),
+            late_parked_hole_registration_aborts_only_its_own_continuation_with_preparation_client,
         )
+        .await
+    }
+
+    async fn late_parked_hole_registration_aborts_only_its_own_continuation_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner() {
+    async fn late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -27027,20 +28219,27 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout() {
-        with_test_compiler_owner(
-            cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner()
-    {
+    async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let (workbench, context) = ResidentActorWorkbench::new(Arc::clone(&machines), source, None)
-            .admit_private_cell_for_test(context)
-            .await
-            .unwrap();
+        let (workbench, context) = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source).bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(context)
+        .await
+        .unwrap();
         let workbench = Arc::new(workbench);
         let (block, _) = suspending_fragment();
         let unrelated = workbench
@@ -27162,17 +28361,24 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole() {
-        with_test_compiler_owner(
-            cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner(),
-        )
-        .await;
+        with_test_compiler_owner(|preparation_client| {
+            cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
-    async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner()
-    {
+    async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -27245,40 +28451,60 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn failed_abort_retains_frame_authority_until_owning_realm_retirement() {
-        with_test_compiler_owner(
+        with_test_compiler_owner(|preparation_client| {
             failed_abort_retains_frame_authority_until_owning_realm_retirement_with_compiler_owner(
-            ),
-        )
-        .await;
+                preparation_client.clone(),
+            )
+        })
+        .await
     }
 
     async fn failed_abort_retains_frame_authority_until_owning_realm_retirement_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        failed_abort_frame_owner(false).await;
+        failed_abort_frame_owner(preparation_client.clone(), false).await;
     }
 
     #[tokio::test]
     async fn failed_abort_releases_frame_authority_after_confirmed_native_machine_loss() {
-        with_test_compiler_owner(failed_abort_releases_frame_authority_after_confirmed_native_machine_loss_with_compiler_owner()).await;
+        with_test_compiler_owner(|preparation_client| failed_abort_releases_frame_authority_after_confirmed_native_machine_loss_with_compiler_owner(preparation_client.clone(), )).await
     }
 
     async fn failed_abort_releases_frame_authority_after_confirmed_native_machine_loss_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
     ) {
-        failed_abort_frame_owner(true).await;
+        failed_abort_frame_owner(preparation_client.clone(), true).await;
     }
 
     #[tokio::test]
     async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment() {
         with_test_compiler_owner(
-            exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner(),
+            exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_preparation_client,
         )
+        .await
+    }
+
+    async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_preparation_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
+        with_test_compiler_owner(|_| {
+            exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner(
+                preparation_client.clone(),
+            )
+        })
         .await;
     }
 
-    async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner() {
+    async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines.clone(),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -27333,10 +28559,17 @@ pub(crate) mod request_tests {
         drop(guard);
     }
 
-    async fn failed_abort_frame_owner(lose_machine: bool) {
+    async fn failed_abort_frame_owner(
+        preparation_client: crate::CompilerPreparationClient,
+        lose_machine: bool,
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
+        let workbench = ResidentActorWorkbench::new(
+            machines.clone(),
+            (source.clone()).bind_preparation(preparation_client.clone()),
+            None,
+        );
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await

@@ -259,7 +259,6 @@ impl PreparationTask {
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
     state: Mutex<PreparationState>,
-    compiler_owner: crate::RetainedActorExit,
     #[cfg(test)]
     fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -339,13 +338,16 @@ impl ToolsetPreparation {
 
     pub(crate) async fn prepare(
         self: &Arc<Self>,
+        client: &crate::CompilerPreparationClient,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
         source: crate::CheckpointSourceLayer,
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
-        let (task, disposition) = self.lookup(&recipe);
+        let (task, disposition) = client
+            .claim(|| self.lookup(&recipe))
+            .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         tracing::info!(
             target: "exomonad_actor::toolset_preparation",
             phase = "lookup",
@@ -356,12 +358,8 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let admitted =
-                crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
-                    owner
-                        .shared_preparation(self.compiler_owner.clone())
-                        .register_work()
-                });
+            let admitted = crate::resident_workbench::CompilerCloseOwner::current()
+                .and_then(|owner| owner.shared_preparation(client.producer()).register_work());
             let compiler_work = match admitted {
                 Ok(ticket) => ticket,
                 Err(error) => {
@@ -436,13 +434,21 @@ impl ToolsetPreparation {
                 .with_current_subscriber(),
             );
         }
-        task.wait_observed(disposition).await
+        let outcome = task.wait_observed(disposition).await;
+        if outcome.is_ok() {
+            client
+                .claim(|| outcome)
+                .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?
+        } else {
+            outcome
+        }
     }
 
     /// Reopen the exact completed original selected by durable installation
     /// evidence. Initial-install imports are not the candidate's recipe.
     pub(crate) async fn restore(
         self: &Arc<Self>,
+        client: &crate::CompilerPreparationClient,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
@@ -451,11 +457,7 @@ impl ToolsetPreparation {
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let compiler_work = crate::resident_workbench::CompilerCloseOwner::current()
-            .and_then(|owner| {
-                owner
-                    .shared_preparation(self.compiler_owner.clone())
-                    .register_work()
-            })
+            .and_then(|owner| owner.shared_preparation(client.producer()).register_work())
             .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         let preparation = uuid::Uuid::new_v4();
         let mut wait_timing = crate::call_timing::PreparationWait::restore(preparation);
@@ -463,6 +465,8 @@ impl ToolsetPreparation {
             crate::call_timing::PreparationInterval::new(preparation, PreparationPhase::Producer);
         let span = tracing::info_span!(target: "exomonad_actor::toolset_preparation",
             "toolset_preparation", %preparation, source_revision = %recipe.source_revision, entry = %recipe.entry, restore = true);
+        #[cfg(test)]
+        let observer_owner = Arc::clone(self);
         let pending = span.in_scope(|| {
             tidepool_runtime::spawn_blocking_in_span(move || {
                 let mut service_timing = crate::call_timing::PreparationInterval::new(
@@ -470,6 +474,10 @@ impl ToolsetPreparation {
                     PreparationPhase::Service,
                 );
                 let outcome = compiler_work.run_for_workload(workload, |_settlement| {
+                    #[cfg(test)]
+                    if let Some(observer) = observer_owner.completed_load_observer.lock().take() {
+                        observer();
+                    }
                     restore_installer(recipe, resolved, source, acquisition, registry)
                 });
                 service_timing.complete(outcome.is_ok());
@@ -481,7 +489,13 @@ impl ToolsetPreparation {
             .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
         producer_timing.complete(outcome.is_ok());
         wait_timing.complete(outcome.is_ok());
-        outcome
+        if outcome.is_ok() {
+            client
+                .claim(|| outcome)
+                .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?
+        } else {
+            outcome
+        }
     }
 
     fn settle(
@@ -609,6 +623,59 @@ pub(crate) mod tests {
             entry: entry.into(),
             effects: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn issued_preparation_clients_share_pending_keys_only_within_their_lifetime() {
+        let mut independent = crate::CompilerPreparationOwner::new();
+        let outcome = independent
+            .scope_with_client(|other| async move {
+                let mut first = crate::CompilerPreparationOwner::new();
+                let first_outcome = first
+                    .scope_with_client(|client| async move {
+                        let state = client.preparation();
+                        let rebound = client.clone().preparation();
+                        let separate = other.preparation();
+                        assert!(Arc::ptr_eq(&state, &rebound));
+                        assert!(!Arc::ptr_eq(&state, &separate));
+                        // Only cache-key metadata is constructed here, never a compiled
+                        // entry, source capability or installation publication.
+                        let key = recipe("same-key");
+                        let (pending, disposition) = state.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::New);
+                        let (joined, disposition) = rebound.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::JoinedPending);
+                        assert!(Arc::ptr_eq(&pending, &joined));
+                        let (distinct, disposition) = separate.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::New);
+                        assert!(!Arc::ptr_eq(&pending, &distinct));
+                        let (changed_task, changed) = state.lookup(&recipe("changed-key"));
+                        assert_eq!(changed, PreparationLookupDisposition::New);
+                        state.settle(
+                            recipe("changed-key"),
+                            &changed_task,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        state.settle(
+                            key.clone(),
+                            &pending,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        separate.settle(
+                            key,
+                            &distinct,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        (client, other)
+                    })
+                    .await;
+                assert!(first_outcome.cleanup.observation().is_confirmed());
+                let (closed, other) = first_outcome.action;
+                assert!(closed.claim(|| ()).is_err());
+                assert!(other.claim(|| ()).is_ok());
+            })
+            .await;
+        assert!(outcome.cleanup.observation().is_confirmed());
     }
 
     /// The consumer supplies a genuinely issued entry; this exercises cache

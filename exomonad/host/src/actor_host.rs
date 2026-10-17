@@ -3711,12 +3711,6 @@ pub(crate) async fn prepare_workspace_toolsets(
     );
     let mut supported = host_context_support();
     supported.extend(exomonad_tool::InstalledEffectSupport::installed_effect_support(&handlers));
-    let machine = ResidentSession::unbootstrapped(
-        handlers,
-        CapturedOutput::new(),
-        DEFAULT_NURSERY_SIZE,
-        None,
-    );
     let runtime = embedded_harness::EmbeddedHarnessRuntime::open(
         runtime_directory.path(),
         settings.concurrent_jobs,
@@ -3728,23 +3722,19 @@ pub(crate) async fn prepare_workspace_toolsets(
         temporary.clone(),
     )
     .await?;
-    let (forest, _) = ResidentForest::new(
-        workbench.clone(),
-        tidepool_runtime::session::fresh_session_id(),
-        machine,
-        None,
-        exomonad_actor::Incarnation::FIRST,
-    )
-    .await?;
-    let forest = with_host_interpreters(
-        forest,
-        Some(source.clone()),
-        &config,
-        &runtime,
-        recovery,
-        cell_model::admitted_runtime_factory(&runtime, &settings, &config),
-    )?;
-    for key in forest.installed_intrinsic_effect_support() {
+    runtime
+        .configure_context_models(&config)
+        .map_err(runtime_error)?;
+    let source_layers: exomonad_actor::ActorSourceLayerResolver = source.clone();
+    let jev = jev_backend(&config);
+    let models = cell_model::admitted_runtime_factory(&runtime, &settings, &config);
+    let conversation = embedded_reflect::run_conversation_reader(runtime.store(), recovery);
+    for key in exomonad_actor::installed_intrinsic_effect_support(
+        Some(&source_layers),
+        &jev,
+        Some(&models),
+        Some(&conversation),
+    ) {
         if !supported.contains(&key) {
             supported.push(key);
         }
@@ -3759,7 +3749,8 @@ pub(crate) async fn prepare_workspace_toolsets(
     // warming continues to use Preparation urgency after its root is ready.
     let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
     let outcome = compiler_owner
-        .scope(async {
+        .scope_with_client(|client| async move {
+            let workbench = workbench.bind_preparation(client);
             let ready = workbench
                 .prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,

@@ -2270,15 +2270,23 @@ mod tests {
             .contains_key(current_key));
         let before = tidepool_extract_cmd::extract_spawn_count();
         let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
-        let refusal = compiler_owner
-            .scope(workbench.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                current.clone(),
-                &requested,
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            ))
+        let lifetime = compiler_owner
+            .scope_with_client(|client| async {
+                let workbench = workbench.bind_preparation(client);
+                let mut waiter = exomonad_actor::CompilerPreparationOwner::new();
+                waiter
+                    .scope(workbench.prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        current.clone(),
+                        &requested,
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    ))
+                    .await
+            })
             .await;
+        assert!(lifetime.cleanup.observation().is_confirmed());
+        let refusal = lifetime.action;
         assert!(matches!(
             refusal.action,
             Err(exomonad_actor::ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
@@ -4099,10 +4107,17 @@ mod tests {
 
     #[tokio::test]
     async fn coherent_candidate_single_compile_checks_added_deleted_and_warmed_modules() {
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
+        let outcome = owner.scope_with_client(coherent_candidate_history).await;
+        assert!(outcome.cleanup.observation().is_confirmed());
+    }
+
+    async fn coherent_candidate_history(client: exomonad_actor::CompilerPreparationClient) {
         use exomonad_actor::ActorSourceLayers;
         let (project, reload) = generation_owner();
         let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
-        let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
+        let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new())
+            .bind_preparation(client);
         let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
         let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         std::fs::write(
@@ -4166,6 +4181,7 @@ mod tests {
             cold.observe(&restored).unwrap().active.identity,
             cold.observe(&restored).unwrap().disk.identity
         );
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         let warm = owner
             .scope(workbench.prepare_source_toolset_with_validation(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -4183,6 +4199,7 @@ mod tests {
             .clone()
             .stage_reload(PrincipalId::SYSTEM, b.source(), &["Project.New".to_owned()])
             .unwrap();
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         let missing = owner
             .scope(workbench.prepare_source_toolset_with_validation(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -4202,8 +4219,8 @@ mod tests {
             .clone()
             .stage_reload(PrincipalId::SYSTEM, b.source(), &[])
             .unwrap();
-        // A failed preparation closes its admission owner. The next proposal
-        // receives a fresh lifecycle while the shared native cache survives.
+        // Each waiter owns its receipt; the shared preparation lifetime spans
+        // the complete history, including a failed proposal and its retry.
         let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         let deleted = owner
             .scope(workbench.prepare_source_toolset_with_validation(

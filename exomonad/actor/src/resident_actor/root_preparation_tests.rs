@@ -104,7 +104,7 @@ async fn killed_root_producer_retires_minted_native_placement_once() {
     );
     let settlement = forest
         .directory
-        .settle_preparations(std::time::Duration::from_secs(5))
+        .settle_root_preparations(std::time::Duration::from_secs(5))
         .await;
     assert!(
         matches!(settlement, crate::CleanupComponentOutcome::Unconfirmed(_)),
@@ -215,7 +215,7 @@ async fn native_mint_after_producer_death_still_reaches_actual_cleanup() {
     );
     let lost = forest
         .directory
-        .settle_preparations(std::time::Duration::from_secs(5))
+        .settle_root_preparations(std::time::Duration::from_secs(5))
         .await;
     assert!(matches!(
         lost,
@@ -334,7 +334,7 @@ async fn refused_control_notification_keeps_supervisor_owned_native_cleanup() {
     assert!(matches!(
         forest
             .directory
-            .settle_preparations(std::time::Duration::from_secs(5))
+            .settle_root_preparations(std::time::Duration::from_secs(5))
             .await,
         crate::CleanupComponentOutcome::Confirmed
     ));

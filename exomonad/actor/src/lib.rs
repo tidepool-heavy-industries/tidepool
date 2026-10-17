@@ -185,10 +185,11 @@ pub use resident_workbench::request::{
 };
 pub use resident_workbench::{
     ActivationCompileStage, ActorInstallationRecoveryError, ActorMachineRegistry,
-    ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease, PersistedActorInstallation,
-    PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner, ResidentActorWorkbench,
-    ResidentActorWorkbenchError, ResidentMachineMeasurement, SourceToolsetRecipe,
-    SpecReplacementDefinition, SpecReplacementError, ToolDispatchError, ToolDispatchReply,
+    ActorWorkbenchSource, BoundActorWorkbenchSource, ChildSessionFactory, InstalledToolLease,
+    PersistedActorInstallation, PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner,
+    ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
+    SourceToolsetRecipe, SpecReplacementDefinition, SpecReplacementError, ToolDispatchError,
+    ToolDispatchReply,
 };
 pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{
@@ -207,8 +208,8 @@ pub use start::{
 pub use termination::{
     ActorCompilerCloseOwner, ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle,
     ActorLifecycleConnection, ActorTerminal, CompilerPreparationCleanup,
-    CompilerPreparationCleanupObservation, CompilerPreparationOutcome, CompilerPreparationOwner,
-    CompilerWorkClose, RetainedActorExit,
+    CompilerPreparationCleanupObservation, CompilerPreparationClient, CompilerPreparationOutcome,
+    CompilerPreparationOwner, CompilerWorkClose, RetainedActorExit,
 };
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
@@ -220,3 +221,5 @@ pub(crate) use runtime_observation::ProviderTurnLease;
 
 #[path = "generated/nominal_keys.rs"]
 mod nominal_keys;
+
+pub use resident_actor::installed_intrinsic_effect_support;

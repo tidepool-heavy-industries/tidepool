@@ -3,6 +3,27 @@
 use super::{DispatchEffect, OutputSink, ResidentEnvironment, ResidentForest};
 use exomonad_tool::{ActorEffectKey, ToolEffectKey};
 
+/// Observe interpreter structure from the actual installed service handles.
+/// This does not establish external credentials or provider availability.
+#[must_use]
+pub fn installed_intrinsic_effect_support(
+    source_layers: Option<&crate::ActorSourceLayerResolver>,
+    jev: &crate::JevBackendHandle,
+    models: Option<&std::sync::Arc<dyn crate::CellModelFactory>>,
+    conversation: Option<&crate::ConversationReader>,
+) -> Vec<ToolEffectKey> {
+    crate::resident_workbench::intrinsic_effect_families()
+        .into_iter()
+        .filter(|effect| match effect {
+            ToolEffectKey::Actor(ActorEffectKey::Source) => source_layers.is_some(),
+            ToolEffectKey::Actor(ActorEffectKey::Jev) => jev.is_installed(),
+            ToolEffectKey::Actor(ActorEffectKey::ModelCall) => models.is_some(),
+            ToolEffectKey::Actor(ActorEffectKey::Reflect) => conversation.is_some(),
+            _ => true,
+        })
+        .collect()
+}
+
 impl<H, O> ResidentEnvironment<H, O> {
     pub(super) fn application_workbench(&self) -> crate::ResidentActorWorkbench<H, O> {
         self.runner
@@ -28,18 +49,12 @@ impl<H, O> ResidentEnvironment<H, O> {
     }
 
     pub(super) fn intrinsic_effect_support(&self) -> Vec<ToolEffectKey> {
-        crate::resident_workbench::intrinsic_effect_families()
-            .into_iter()
-            .filter(|effect| match effect {
-                ToolEffectKey::Actor(ActorEffectKey::Source) => self.source_layers.is_some(),
-                ToolEffectKey::Actor(ActorEffectKey::Jev) => self.jev.is_installed(),
-                ToolEffectKey::Actor(ActorEffectKey::ModelCall) => {
-                    self.cell_model_factory.is_some()
-                }
-                ToolEffectKey::Actor(ActorEffectKey::Reflect) => self.conversation_reader.is_some(),
-                _ => true,
-            })
-            .collect()
+        installed_intrinsic_effect_support(
+            self.source_layers.as_ref(),
+            &self.jev,
+            self.cell_model_factory.as_ref(),
+            self.conversation_reader.as_ref(),
+        )
     }
 }
 

@@ -161,7 +161,7 @@ async fn semantic_and_metadata_publication_retries_do_not_repeat_executed_effect
     let mut compiler = crate::CompilerPreparationOwner::new();
     let cleanup = compiler.cleanup();
     let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        compiler.scope(counted_publication_history()),
+        compiler.scope_with_client(counted_publication_history),
     ))
     .await;
     assert!(cleanup
@@ -173,7 +173,7 @@ async fn semantic_and_metadata_publication_retries_do_not_repeat_executed_effect
     }
 }
 
-async fn counted_publication_history() {
+async fn counted_publication_history(preparation: crate::CompilerPreparationClient) {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec());
@@ -229,7 +229,8 @@ async fn counted_publication_history() {
     }
     let machines = Arc::new(ActorMachineRegistry::new());
     machines.insert_idle(session_id, Box::new(session));
-    let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+    let runner =
+        ResidentActorRunner::new(Arc::clone(&machines), source.bind_preparation(preparation));
     let (counted, private, execution) =
         admit(&runner, contexts[0].clone(), Arc::clone(&owners[0])).await;
     let outputs = execute(
@@ -350,7 +351,7 @@ async fn activation_metadata_retry_preserves_input_and_unrelated_public_owner() 
     let mut compiler = crate::CompilerPreparationOwner::new();
     let cleanup = compiler.cleanup();
     let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        compiler.scope(activation_metadata_history()),
+        compiler.scope_with_client(activation_metadata_history),
     ))
     .await;
     assert!(cleanup
@@ -362,7 +363,7 @@ async fn activation_metadata_retry_preserves_input_and_unrelated_public_owner() 
     }
 }
 
-async fn activation_metadata_history() {
+async fn activation_metadata_history(preparation: crate::CompilerPreparationClient) {
     let mut recovery = None;
     let (mut session, mut context, source, parked, _root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
@@ -401,7 +402,8 @@ async fn activation_metadata_history() {
     let before_unrelated = recovery.public_owner(&durable_owners[1]);
     let machines = Arc::new(ActorMachineRegistry::new());
     machines.insert_idle(context.placement.session, Box::new(session));
-    let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+    let runner =
+        ResidentActorRunner::new(Arc::clone(&machines), source.bind_preparation(preparation));
     let (mut private, authority) =
         WorkbenchCompilationAuthority::admit(context.clone(), Default::default(), None, None)
             .unwrap();

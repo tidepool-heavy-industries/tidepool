@@ -45,14 +45,14 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
         .is_none());
     assert!(
         matches!(
-            control.settle_preparations(Duration::from_millis(20)).await,
+            control.settle_root_preparations(Duration::from_millis(20)).await,
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ),
         "an outstanding prepared reservation still owns unsettled custody"
     );
     drop(reservation);
     assert!(matches!(
-        control.settle_preparations(Duration::from_secs(2)).await,
+        control.settle_root_preparations(Duration::from_secs(2)).await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -68,7 +68,7 @@ async fn finalizing_run_refuses_late_prepared_submission_without_running_produce
     let (control, task) = RunControlClient::start().await.unwrap();
     control.seal().await.unwrap();
     assert!(matches!(
-        control.settle_preparations(Duration::from_secs(2)).await,
+        control.settle_root_preparations(Duration::from_secs(2)).await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -203,11 +203,118 @@ proptest::proptest! {
             for observer in observers.into_iter().flatten().chain(dropped_observers) {
                 if let Err(error) = observer.await { assert!(error.is_cancelled(), "producer observer panicked: {error}"); }
             }
-            assert!(matches!(control.settle_preparations(Duration::from_secs(2)).await, crate::CleanupComponentOutcome::Confirmed));
+            assert!(matches!(control.settle_root_preparations(Duration::from_secs(2)).await, crate::CleanupComponentOutcome::Confirmed));
             assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), admitted);
             assert!(matches!(control.shutdown_run_resources().await, crate::CleanupComponentOutcome::Confirmed));
             control.finish_run().await.unwrap();
             task.await.unwrap();
         });
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let (other_control, other_task) = RunControlClient::start().await.unwrap();
+    let other_ticket = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+        other_control.preparation_client().producer(),
+    )
+    .register_work()
+    .unwrap();
+    let other_cancellation = other_ticket.cancellation().host_admission_cancellation();
+    let client = control.preparation_client();
+    let observer = crate::RetainedActorExit::new();
+    let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
+        .shared_preparation(client.producer());
+    let ticket = owner.register_work().unwrap();
+    let cancellation = ticket.cancellation().host_admission_cancellation();
+    let observed_cancellation = cancellation.clone();
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (cancelled, stopped) = tokio::sync::oneshot::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let physical = tokio::task::spawn_blocking(move || {
+        ticket.run(|_| {
+            started.send(()).unwrap();
+            while cancellation.checkpoint().is_ok() {
+                std::thread::yield_now();
+            }
+            cancelled.send(()).unwrap();
+            finish.recv_timeout(Duration::from_secs(10)).unwrap();
+        })
+    });
+    entered.await.unwrap();
+    // One caller's retirement owns observation, never the producer stop edge.
+    observer.request_shutdown(ActorTerminal::new(
+        ActorExitKind::Cancelled,
+        "waiter stopped",
+    ));
+    assert!(client.claim(|| ()).is_ok());
+    observed_cancellation.checkpoint().unwrap();
+    control.seal().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), stopped)
+        .await
+        .unwrap()
+        .unwrap();
+    other_cancellation.checkpoint().unwrap();
+    assert!(client.claim(|| ()).is_err());
+    assert!(
+        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
+            .register_work()
+            .is_err()
+    );
+    assert!(!control.shared_cleanup.observation().is_confirmed());
+    assert!(matches!(
+        control
+            .settle_run_preparations(Duration::from_millis(10))
+            .await,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    assert_eq!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert!(
+        control.finish_run().await.is_err(),
+        "resource settlement cannot finalize pending shared compilation"
+    );
+    release.send(()).unwrap();
+    physical.await.unwrap();
+    assert_eq!(
+        control
+            .settle_run_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    other_ticket.run(|_| ());
+    other_control.seal().await.unwrap();
+    assert_eq!(
+        other_control
+            .settle_run_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    other_control.owner.stop(None);
+    other_task.await.unwrap();
+    control.owner.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn observing_root_preparations_preserves_open_shared_admission() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    assert_eq!(
+        control.settle_root_preparations(Duration::from_secs(1)).await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert!(control.preparation_client().claim(|| ()).is_ok());
+    assert!(!control.shared_cleanup.observation().is_confirmed());
+    control.seal().await.unwrap();
+    assert_eq!(
+        control
+            .settle_run_preparations(Duration::from_secs(1))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    control.owner.stop(None);
+    task.await.unwrap();
 }

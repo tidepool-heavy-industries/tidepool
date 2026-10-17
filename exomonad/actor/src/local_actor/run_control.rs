@@ -131,6 +131,7 @@ pub(crate) enum RunPhase {
 }
 
 pub(super) struct RunState {
+    shared_compiler: crate::CompilerPreparationOwner,
     phase: RunPhase,
     entries: HashMap<ActorRef, DirectoryEntry>,
     sessions: HashMap<ActorRef, crate::ActorSessionContext>,
@@ -159,6 +160,7 @@ pub(super) struct RunState {
 impl Default for RunState {
     fn default() -> Self {
         Self {
+            shared_compiler: crate::CompilerPreparationOwner::new(),
             phase: RunPhase::Running,
             entries: HashMap::new(),
             sessions: HashMap::new(),
@@ -538,6 +540,12 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    SharedCompilerClient {
+        reply: oneshot::Sender<(
+            crate::CompilerPreparationClient,
+            crate::CompilerPreparationCleanup,
+        )>,
+    },
     FinishRun {
         members: Vec<crate::kernel::lifecycle::SuccessorDrainReceipt>,
         reply: oneshot::Sender<Result<Vec<RunRetirementGrant>, DirectoryError>>,
@@ -893,6 +901,7 @@ impl Actor for RunControl {
                             })
                     });
                 let confirmed = state.phase == RunPhase::Retired
+                    && state.shared_compiler.cleanup().observation().is_confirmed()
                     && matches!(
                         state.resource_retirement,
                         ResourceRetirement::Settled(crate::CleanupComponentOutcome::Confirmed)
@@ -925,19 +934,25 @@ impl Actor for RunControl {
             }
             RunControlMessage::FinalizationTargets { reply } => {
                 let result = match state.phase {
-                    RunPhase::Retired => Ok(RunFinalizationTargets::Retire(
-                        state
-                            .reservations
-                            .values()
-                            .filter(|record| matches!(record.phase, ReservationPhase::Registered))
-                            .filter_map(|record| {
-                                record.lifecycle.clone().map(|lifecycle| {
-                                    let cell = record.executor.clone();
-                                    (lifecycle, cell)
+                    RunPhase::Retired
+                        if state.shared_compiler.cleanup().observation().is_confirmed() =>
+                    {
+                        Ok(RunFinalizationTargets::Retire(
+                            state
+                                .reservations
+                                .values()
+                                .filter(|record| {
+                                    matches!(record.phase, ReservationPhase::Registered)
                                 })
-                            })
-                            .collect(),
-                    )),
+                                .filter_map(|record| {
+                                    record.lifecycle.clone().map(|lifecycle| {
+                                        let cell = record.executor.clone();
+                                        (lifecycle, cell)
+                                    })
+                                })
+                                .collect(),
+                        ))
+                    }
                     RunPhase::Finalizing => Ok(RunFinalizationTargets::Finalize(
                         state.finalization_grants(),
                     )),
@@ -947,6 +962,7 @@ impl Actor for RunControl {
             }
             RunControlMessage::CompleteRun { reply } => {
                 if state.phase == RunPhase::Finalizing
+                    && state.shared_compiler.cleanup().observation().is_confirmed()
                     && state.reservations.values().all(|record| {
                         record
                             .executor
@@ -1961,8 +1977,15 @@ impl Actor for RunControl {
                 }
                 let _ = reply.send(terminal);
             }
+            RunControlMessage::SharedCompilerClient { reply } => {
+                let _ = reply.send((
+                    state.shared_compiler.client(),
+                    state.shared_compiler.cleanup(),
+                ));
+            }
             RunControlMessage::Seal { reply } => {
                 if state.phase == RunPhase::Running {
+                    state.shared_compiler.close();
                     state.phase = RunPhase::RetiringPreparations;
                     for record in state.reservations.values_mut() {
                         // Prepared input already owns effects. Its producer must
@@ -2044,8 +2067,13 @@ impl Actor for RunControl {
 #[derive(Clone)]
 pub struct RunControlClient {
     owner: RactorRef<RunControlMessage>,
+    shared_compiler: crate::CompilerPreparationClient,
+    shared_cleanup: crate::CompilerPreparationCleanup,
 }
 impl RunControlClient {
+    pub(crate) fn preparation_client(&self) -> crate::CompilerPreparationClient {
+        self.shared_compiler.clone()
+    }
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         self.owner.get_id() == other.owner.get_id()
     }
@@ -2060,7 +2088,18 @@ impl RunControlClient {
             Actor::spawn_linked(None, PreparationSupervisor, owner.clone(), owner.get_cell())
                 .await?;
         drop(supervisor_task);
-        let client = Self { owner };
+        let (reply, receiver) = oneshot::channel();
+        owner
+            .send_message(RunControlMessage::SharedCompilerClient { reply })
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let (shared_compiler, shared_cleanup) = receiver
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let client = Self {
+            owner,
+            shared_compiler,
+            shared_cleanup,
+        };
         client
             .ask(|reply| RunControlMessage::AttachPreparationSupervisor { supervisor, reply })
             .await
@@ -2508,7 +2547,32 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::ReserveExistingInput { incarnation, reply })
             .await?
     }
-    pub(crate) async fn settle_preparations(
+    /// Whole-run observation after seal, including independently owned shared
+    /// compiler producers. Root-record observation remains valid while running.
+    pub(crate) async fn settle_run_preparations(
+        &self,
+        timeout: Duration,
+    ) -> crate::CleanupComponentOutcome {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
+        let preparations = tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
+            .await
+            .unwrap_or_else(|_| {
+                crate::CleanupComponentOutcome::Unconfirmed(
+                    "root preparation cleanup remains in flight".into(),
+                )
+            });
+        if shared.is_confirmed() {
+            preparations
+        } else {
+            crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "shared compiler {shared:?}; preparations {preparations:?}"
+            ))
+        }
+    }
+    /// Observe the currently admitted root-preparation records, without closing
+    /// run admission or claiming that future preparations have been excluded.
+    pub(crate) async fn settle_root_preparations(
         &self,
         timeout: Duration,
     ) -> crate::CleanupComponentOutcome {

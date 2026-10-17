@@ -9237,7 +9237,7 @@ mod tests {
             release.notify_one();
             let preparations = context
                 .directory
-                .settle_preparations(Duration::from_secs(1))
+                .settle_root_preparations(Duration::from_secs(1))
                 .await;
             if cancel {
                 assert!(matches!(

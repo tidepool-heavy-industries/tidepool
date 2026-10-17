@@ -599,7 +599,7 @@ async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_conf
     assert!(matches!(
         forest
             .directory
-            .settle_preparations(Duration::from_secs(2))
+            .settle_root_preparations(Duration::from_secs(2))
             .await,
         crate::CleanupComponentOutcome::Confirmed
     ));

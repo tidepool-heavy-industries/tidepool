@@ -65,6 +65,7 @@ mod status_rendering;
 mod terminal_transfer_tests;
 mod terminal_wait;
 mod tool_support;
+pub use tool_support::installed_intrinsic_effect_support;
 mod workbench_ledger;
 
 #[cfg(test)]
@@ -14229,6 +14230,7 @@ where
         let (directory, control_task) = crate::LocalActorDirectory::start().await?;
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
+        let source = source.bind_preparation(directory.preparation_client());
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let environment = ResidentEnvironment::new(runner, deployments, fork_workspaces);
@@ -14634,7 +14636,7 @@ where
                 )];
             }
         };
-        let preparation = self.directory.settle_preparations(budget).await;
+        let preparation = self.directory.settle_run_preparations(budget).await;
         // A transfer admitted before seal can change the independent roots.
         let roots = match self.directory.independent_roots().await {
             Ok(roots) => roots,

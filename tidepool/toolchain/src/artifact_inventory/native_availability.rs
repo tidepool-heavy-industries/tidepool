@@ -61,6 +61,12 @@ enum NativeOfferBody {
 }
 
 impl IssuedNativeOffer {
+    /// The same immutable issuance also retains the same acquisition owners.
+    /// Semantic offer equality alone does not establish this relationship.
+    pub(super) fn same_issuance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// The immutable declaration context is an issuance ingress. Capture its
     /// own roles and graph before merging any private input. Protected roles
     /// whose carrier is not present here wait for their exact private offer.

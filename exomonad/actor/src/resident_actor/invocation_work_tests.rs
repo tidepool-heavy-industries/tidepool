@@ -890,7 +890,8 @@ impl Fixture {
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let runner = ResidentActorRunner::new(
             Arc::new(ActorMachineRegistry::new()),
-            ActorWorkbenchSource::new("", Vec::new()),
+            ActorWorkbenchSource::new("", Vec::new())
+                .bind_preparation(directory.preparation_client()),
         );
         let environment = ResidentEnvironment::new(runner, deployments, None);
         Self {

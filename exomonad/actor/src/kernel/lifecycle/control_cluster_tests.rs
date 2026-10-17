@@ -42,6 +42,16 @@ enum RetirementSourceCase {
 }
 
 async fn resident_retirement_source_lifetime(case: RetirementSourceCase) {
+    crate::resident_workbench::with_test_compiler_owner(move |preparation| {
+        resident_retirement_source_lifetime_with_preparation(case, preparation)
+    })
+    .await;
+}
+
+async fn resident_retirement_source_lifetime_with_preparation(
+    case: RetirementSourceCase,
+    preparation: crate::CompilerPreparationClient,
+) {
     use crate::request::{test_support, RequestRegistry};
 
     let baseline = test_support::outstanding_custody();
@@ -70,7 +80,7 @@ async fn resident_retirement_source_lifetime(case: RetirementSourceCase) {
     let context = descriptor.session_context(owner.identity());
     let runner = crate::ResidentActorRunner::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
         Arc::new(crate::ActorMachineRegistry::new()),
-        crate::ActorWorkbenchSource::new("", Vec::new()),
+        crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation),
     );
     owner
         .configure_resident(
