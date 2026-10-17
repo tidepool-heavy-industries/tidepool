@@ -3489,7 +3489,7 @@ mod tests {
         fn read<C: HasSourceInspection>(
             services: &C,
             source: &exomonad_actor::CheckpointSourceLayer,
-        ) -> Result<(String, String), exomonad_actor::SourceInspectionError> {
+        ) -> std::result::Result<(String, String), exomonad_actor::SourceInspectionError> {
             services
                 .source_inspection()
                 .read_from(source, "Project.Work")

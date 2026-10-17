@@ -4,7 +4,7 @@ use super::test_campaign::{
     hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
 };
-use exomonad_actor::{HasSourceInspection, SourceInspection};
+use exomonad_actor::HasSourceInspection;
 use serde_json::Value;
 use std::{
     collections::VecDeque,
