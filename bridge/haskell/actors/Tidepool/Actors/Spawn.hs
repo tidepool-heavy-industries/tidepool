@@ -22,7 +22,7 @@ module Tidepool.Actors.Spawn
   , currentWorkspace
   , SpawnOptions
   , spawnModel
-  , spawnEffort
+  , spawnReasoning
   , spawnInstructions
   , spawnLabel
   , spawnLifetime
@@ -67,7 +67,7 @@ import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
 import Tidepool.Actors.Internal.Agent (installRequestReceiver)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
-  ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
+  ( AgentLaunch (..), CheckpointRefusal, Model, Reasoning
   , WorkerLifetime (..), SpawnContextWire (..)
   , SpawnCleanup (..)
   , SpecReplacementError (..), SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..), SpecProviderValidation (..)
@@ -138,7 +138,7 @@ limitsWire (SpawnLimits (DescendantDepth depth) (ActiveDescendants active)) = (d
 data SpawnOptions tools childEffects = SpawnOptions
   { selectedSpawnSpec :: SpawnSpec tools childEffects
   , spawnModel :: Maybe Model
-  , spawnEffort :: Maybe ForkEffort
+  , spawnReasoning :: Maybe Reasoning
   , spawnInstructions :: Maybe Text
   , spawnLabel :: Maybe Text
   , spawnLifetime :: WorkerLifetime
@@ -218,7 +218,7 @@ spawnSubagent context workspace options = do
       (effectKeys (knownEffects @childEffects))
       (spawnLabel options)
       (spawnModel options)
-      (spawnEffort options)
+      (spawnReasoning options)
       (spawnInstructions options)
       (spawnLifetime options)
       (limitsWire <$> spawnLimits options)

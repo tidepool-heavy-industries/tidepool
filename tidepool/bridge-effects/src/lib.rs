@@ -20,25 +20,116 @@ use tidepool_bridge_derive::{HaskellRecord, ToHaskell};
 pub mod generated;
 pub use generated::*;
 
-impl Model {
-    /// Frozen workspace key for configured tiers and custom aliases.
+impl Backend {
     #[must_use]
-    pub fn workspace_key(&self) -> Option<&str> {
+    pub fn config_name(&self) -> &'static str {
         match self {
-            Self::Luna => Some("luna"),
-            Self::Sol => Some("sol"),
-            Self::Astra => Some("astra"),
-            Self::CustomAlias(alias) => Some(alias),
-            Self::ProviderModel(_) => None,
+            Self::DeepSeek => "deepseek",
+            Self::OpenAIPlan => "chatgpt_plan",
         }
     }
 
-    /// Requested selector text for presentation; configuration owns resolution.
+    pub fn from_config_name(name: &str) -> Result<Self, String> {
+        match name {
+            "deepseek" => Ok(Self::DeepSeek),
+            "chatgpt_plan" => Ok(Self::OpenAIPlan),
+            _ => Err("unknown inference backend".into()),
+        }
+    }
+}
+
+impl Model {
+    /// Model identifiers are interpreted only within an explicitly selected backend.
+    #[must_use]
+    pub fn for_backend(backend: Backend, id: &str) -> Self {
+        match (&backend, id) {
+            (Backend::DeepSeek, "deepseek-flash") => Self::DeepSeekFlash,
+            (Backend::DeepSeek, "deepseek-v4-pro") => Self::DeepSeekPro,
+            (Backend::OpenAIPlan, "gpt-6.1-sol") => Self::OpenAIModel(OpenAIModel::Gpt61Sol),
+            (Backend::OpenAIPlan, "gpt-6-sol") => Self::OpenAIModel(OpenAIModel::Gpt6Sol),
+            (Backend::OpenAIPlan, "gpt-6-astra") => Self::OpenAIModel(OpenAIModel::Gpt6Astra),
+            (Backend::OpenAIPlan, "gpt-6-luna") => Self::OpenAIModel(OpenAIModel::Gpt6Luna),
+            (Backend::OpenAIPlan, "gpt-5.6-sol") => Self::OpenAIModel(OpenAIModel::Gpt56Sol),
+            _ => Self::CustomModel(backend, id.to_owned()),
+        }
+    }
+
+    /// Provider ownership is explicit; model spelling never selects a route.
+    #[must_use]
+    pub fn backend(&self) -> Backend {
+        match self {
+            Self::DeepSeekFlash | Self::DeepSeekPro => Backend::DeepSeek,
+            Self::OpenAIModel(_) => Backend::OpenAIPlan,
+            Self::CustomModel(backend, _) => backend.clone(),
+        }
+    }
+
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
-            Self::ProviderModel(model) => model,
-            _ => self.workspace_key().expect("configured selector"),
+            Self::DeepSeekFlash => "deepseek-flash",
+            Self::DeepSeekPro => "deepseek-v4-pro",
+            Self::OpenAIModel(model) => model.value(),
+            Self::CustomModel(_, model) => model,
+        }
+    }
+}
+
+impl OpenAIModel {
+    #[must_use]
+    pub fn value(&self) -> &'static str {
+        match self {
+            Self::Gpt61Sol => "gpt-6.1-sol",
+            Self::Gpt6Sol => "gpt-6-sol",
+            Self::Gpt6Astra => "gpt-6-astra",
+            Self::Gpt6Luna => "gpt-6-luna",
+            Self::Gpt56Sol => "gpt-5.6-sol",
+        }
+    }
+}
+
+impl Reasoning {
+    pub fn for_backend(backend: Backend, effort: &str) -> Result<Self, String> {
+        match (backend, effort) {
+            (Backend::DeepSeek, "none") => {
+                Ok(Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekNone))
+            }
+            (Backend::DeepSeek, "low") => {
+                Ok(Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow))
+            }
+            (Backend::DeepSeek, "high") => {
+                Ok(Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh))
+            }
+            (Backend::DeepSeek, "max") => {
+                Ok(Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekMax))
+            }
+            (Backend::OpenAIPlan, "low") => Ok(Self::OpenAIReasoning(OpenAIReasoning::OpenAILow)),
+            (Backend::OpenAIPlan, "medium") => {
+                Ok(Self::OpenAIReasoning(OpenAIReasoning::OpenAIMedium))
+            }
+            (Backend::OpenAIPlan, "high") => Ok(Self::OpenAIReasoning(OpenAIReasoning::OpenAIHigh)),
+            _ => Err("reasoning setting is not supported by the selected backend".into()),
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &'static str {
+        match self {
+            Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekNone) => "none",
+            Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)
+            | Self::OpenAIReasoning(OpenAIReasoning::OpenAILow) => "low",
+            Self::OpenAIReasoning(OpenAIReasoning::OpenAIMedium) => "medium",
+            Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
+            | Self::OpenAIReasoning(OpenAIReasoning::OpenAIHigh) => "high",
+            Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekMax) => "max",
+        }
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> Backend {
+        match self {
+            Self::DeepSeekReasoning(_) => Backend::DeepSeek,
+            Self::OpenAIReasoning(_) => Backend::OpenAIPlan,
         }
     }
 }
@@ -323,33 +414,38 @@ mod context_constructor_tests {
     }
 
     #[test]
-    fn model_selectors_roundtrip_preserves_tiers_custom_alias_and_provider_identity() {
+    fn model_selectors_roundtrip_preserve_explicit_backend_identity() {
         let mut table = DataConTable::new();
         table
             .extend_checked([
-                row(1, "Tidepool.Effects.Core", "Luna", 0),
-                row(2, "Tidepool.Effects.Core", "Sol", 0),
-                row(3, "Tidepool.Effects.Core", "Astra", 0),
-                row(4, "Tidepool.Effects.Core", "CustomAlias", 1),
-                row(5, "Tidepool.Effects.Core", "ProviderModel", 1),
-                row(6, "Data.Text", "Text", 3),
-                row(7, "User", "Luna", 0),
+                row(1, "Tidepool.Effects.Core", "DeepSeekFlash", 0),
+                row(2, "Tidepool.Effects.Core", "DeepSeekPro", 0),
+                row(3, "Tidepool.Effects.Core", "OpenAIModel", 1),
+                row(4, "Tidepool.Effects.Core", "CustomModel", 2),
+                row(5, "Tidepool.Effects.Core", "DeepSeek", 0),
+                row(6, "Tidepool.Effects.Core", "OpenAIPlan", 0),
+                row(7, "Tidepool.Effects.Core", "Gpt61Sol", 0),
+                row(8, "Data.Text", "Text", 3),
+                row(9, "User", "DeepSeekFlash", 0),
             ])
             .unwrap();
         for model in [
-            Model::Luna,
-            Model::Sol,
-            Model::Astra,
-            Model::CustomAlias("luna".into()),
-            Model::CustomAlias("unknown-custom".into()),
-            Model::ProviderModel("luna".into()),
+            Model::DeepSeekFlash,
+            Model::DeepSeekPro,
+            Model::OpenAIModel(OpenAIModel::Gpt61Sol),
+            Model::CustomModel(Backend::DeepSeek, "custom".into()),
+            Model::CustomModel(Backend::OpenAIPlan, "custom".into()),
         ] {
             let encoded = model.to_value(&table).unwrap();
             assert_eq!(Model::from_value(&encoded, &table).unwrap(), model);
         }
-        assert!(Model::from_value(&HaskellValue::Con(DataConId(7), vec![]), &table).is_err());
+        assert!(Model::from_value(&HaskellValue::Con(DataConId(9), vec![]), &table).is_err());
+        assert_ne!(
+            Model::CustomModel(Backend::DeepSeek, "same".into()).backend(),
+            Model::CustomModel(Backend::OpenAIPlan, "same".into()).backend()
+        );
         assert!(Model::from_value(
-            &HaskellValue::Con(DataConId(1), vec![HaskellValue::Con(DataConId(2), vec![]),]),
+            &HaskellValue::Con(DataConId(1), vec![HaskellValue::Con(DataConId(2), vec![])]),
             &table
         )
         .is_err());

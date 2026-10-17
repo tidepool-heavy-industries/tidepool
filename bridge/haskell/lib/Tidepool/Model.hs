@@ -16,10 +16,14 @@ module Tidepool.Model
   , textTurn
   , typedTurn
   , withModel
-  , withEffort
+  , withReasoning
   , withLimits
   , Model (..)
-  , ModelEffort (..)
+  , Reasoning (..)
+  , DeepSeekReasoning (..)
+  , OpenAIReasoning (..)
+  , OpenAIModel (..)
+  , Backend (..)
   , ModelLimits (..)
   , defaultLimits
   , invokeModel
@@ -39,11 +43,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Model (..), ModelCall (..), ModelBoundaryError (..))
-
--- | Requested effort is constrained by the host's admitted model policy.
-data ModelEffort = LowEffort | MediumEffort | HighEffort
-  deriving (Eq, Show)
+import Tidepool.Effects.Core (Model (..), Reasoning (..), DeepSeekReasoning (..), OpenAIReasoning (..), OpenAIModel (..), Backend (..), ModelCall (..), ModelBoundaryError (..))
 
 -- | Optional narrower limits. Missing fields retain the cell's limits;
 -- negative values are refused before any provider request. Reported token
@@ -67,7 +67,7 @@ data ModelTurn tools effects a = ModelTurn
   , turnInstructions :: Text
   , turnFormat :: ResultFormat a
   , turnModel :: Maybe Model
-  , turnEffort :: Maybe ModelEffort
+  , turnReasoning :: Maybe Reasoning
   , turnLimits :: ModelLimits
   }
 
@@ -81,8 +81,8 @@ typedTurn spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)
 -- this option inherits the caller's resolved model; the host bounds all choices.
 withModel :: Model -> ModelTurn tools effects a -> ModelTurn tools effects a
 withModel model turn = turn { turnModel = Just model }
-withEffort :: ModelEffort -> ModelTurn tools effects a -> ModelTurn tools effects a
-withEffort effort turn = turn { turnEffort = Just effort }
+withReasoning :: Reasoning -> ModelTurn tools effects a -> ModelTurn tools effects a
+withReasoning reasoning turn = turn { turnReasoning = Just reasoning }
 withLimits :: ModelLimits -> ModelTurn tools effects a -> ModelTurn tools effects a
 withLimits limits turn = turn { turnLimits = limits }
 
@@ -135,7 +135,7 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
     drive compiled Nothing initial
   where
     request compiled = toJSON (ModelRequestEnvelope
-      (turnInstructions turn) input (turnModel turn) (fmap controlEffort (turnEffort turn))
+      (turnInstructions turn) input (turnModel turn) (turnReasoning turn)
       (requestLimits (turnLimits turn)) (declarationsToJson (declarations compiled))
       (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))))
     stop Nothing failure = pure (failed failure)
@@ -161,10 +161,6 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
 failed :: ModelFailure -> ModelResult a
 failed failure = ModelResult (Left failure) Nothing
 
-controlEffort :: ModelEffort -> ModelEffortEnvelope
-controlEffort LowEffort = ModelLowEffort
-controlEffort MediumEffort = ModelMediumEffort
-controlEffort HighEffort = ModelHighEffort
 requestLimits :: ModelLimits -> ModelRequestLimits
 requestLimits limits = ModelRequestLimits (requestLimit limits) (toolLimit limits)
   (reportedTokenLimit limits) (durationSeconds limits)

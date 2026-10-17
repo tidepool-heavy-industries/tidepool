@@ -75,9 +75,9 @@ pub fn agent_launch() -> Effect {
                         RustBinding::Path("Option<crate::Model>"),
                     ),
                     optional_arg(
-                        "effort",
-                        HsType::Named("ForkEffort"),
-                        RustBinding::Path("Option<crate::ForkEffort>"),
+                        "reasoning",
+                        HsType::Named("Reasoning"),
+                        RustBinding::Path("Option<crate::Reasoning>"),
                     ),
                     optional_arg("instructions", HsType::Text, RustBinding::Derived),
                     Arg {

@@ -150,8 +150,8 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
     assert_eq!(argument("label").ty, HsType::maybe(HsType::Text));
     assert_eq!(argument("model").ty, HsType::maybe(HsType::Named("Model")));
     assert_eq!(
-        argument("effort").ty,
-        HsType::maybe(HsType::Named("ForkEffort"))
+        argument("reasoning").ty,
+        HsType::maybe(HsType::Named("Reasoning"))
     );
     assert_eq!(argument("instructions").ty, HsType::maybe(HsType::Text));
     assert_eq!(
@@ -372,4 +372,65 @@ fn agent_launch_generates_shared_model_without_actor_owned_live_types() {
     ] {
         assert!(!wire.contents.contains(obsolete));
     }
+}
+
+#[test]
+fn inference_model_and_reasoning_wire_shapes_are_provider_qualified() {
+    use tidepool_protocol::schema::{TypeShape, VariantFields};
+    let effect = agent_launch();
+    let shape = |name| {
+        let definition = effect.type_defs.iter().find(|ty| ty.name == name).unwrap();
+        let TypeShape::Sum { variants } = &definition.shape else {
+            panic!("inference sum")
+        };
+        variants
+            .iter()
+            .map(|variant| {
+                let VariantFields::Positional(fields) = &variant.fields else {
+                    panic!("positional variant")
+                };
+                (variant.ctor, fields.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape("Model"),
+        vec![
+            ("DeepSeekFlash", vec![]),
+            ("DeepSeekPro", vec![]),
+            ("OpenAIModel", vec![HsType::Named("OpenAIModel")]),
+            ("CustomModel", vec![HsType::Named("Backend"), HsType::Text]),
+        ]
+    );
+    assert_eq!(
+        shape("Backend"),
+        vec![("DeepSeek", vec![]), ("OpenAIPlan", vec![])]
+    );
+    assert_eq!(
+        shape("Reasoning"),
+        vec![
+            (
+                "DeepSeekReasoning",
+                vec![HsType::Named("DeepSeekReasoning")]
+            ),
+            ("OpenAIReasoning", vec![HsType::Named("OpenAIReasoning")]),
+        ]
+    );
+    assert_eq!(
+        shape("DeepSeekReasoning"),
+        vec![
+            ("DeepSeekNone", vec![]),
+            ("DeepSeekLow", vec![]),
+            ("DeepSeekHigh", vec![]),
+            ("DeepSeekMax", vec![]),
+        ]
+    );
+    assert_eq!(
+        shape("OpenAIReasoning"),
+        vec![
+            ("OpenAILow", vec![]),
+            ("OpenAIMedium", vec![]),
+            ("OpenAIHigh", vec![]),
+        ]
+    );
 }
