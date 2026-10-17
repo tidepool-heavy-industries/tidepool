@@ -549,26 +549,11 @@ impl CompilerSourceSupport {
             .collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.projection.merge(&issued)?;
-        // Retained offers own historical code independently of current roles.
-        // Only contributions to this namespace belong in projected admission;
-        // the resulting support still retains every original offer below.
-        let contributions = self
-            .native_offers
-            .iter()
-            .map(|offer| offer.within_projection(&projection, &self.artifacts))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let artifacts = self
-            .artifacts
-            .inventory()
-            .admit_projected_with_native_offers(
-                &self.artifacts,
-                entries,
-                &projection,
-                &contributions,
-            )?;
+        let artifacts = projection.admit_interfaces_with_native_offers(
+            &self.artifacts,
+            entries,
+            &self.native_offers,
+        )?;
         Self::new(projection, artifacts, self.native_offers.iter().cloned())
     }
 
@@ -779,6 +764,44 @@ impl CompilerSourceSupport {
 }
 
 impl CompilerInputProjection {
+    /// Retained offers keep their original exact custody. Current admissions
+    /// consume only contributions derived from this issued compiler namespace.
+    fn native_offer_contributions(
+        &self,
+        parent: &ArtifactView,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+        offers
+            .iter()
+            .map(|offer| offer.within_projection(self, parent))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|offers| offers.into_iter().flatten().collect())
+    }
+
+    pub(crate) fn admit_interfaces_with_native_offers(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<ArtifactView, CompileError> {
+        let contributions = self.native_offer_contributions(parent, offers)?;
+        parent
+            .inventory()
+            .admit_projected_with_native_offers(parent, entries, self, &contributions)
+    }
+
+    pub(crate) fn admit_complete_native_products(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<ArtifactView, CompileError> {
+        let contributions = self.native_offer_contributions(parent, offers)?;
+        parent
+            .inventory()
+            .admit_private_complete_products(parent, entries, self, &contributions)
+    }
+
     /// Narrow one issued namespace to authenticated source owners and their
     /// exact required type closure. Reuse remains restricted to source owners;
     /// other dependencies keep interface roles and their existing graph only.

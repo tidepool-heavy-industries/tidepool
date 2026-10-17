@@ -1391,13 +1391,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
 
     let private = OriginalCompilerInputs::from_selection(&selected, &b).unwrap();
-    let admitted = inventory
-        .admit_projected_with_native_offers(
-            &private.artifacts,
-            vec![],
-            &private.projection,
-            &private.native_offers,
-        )
+    let admitted = private
+        .projection
+        .admit_interfaces_with_native_offers(&private.artifacts, vec![], &private.native_offers)
         .unwrap();
     let graph = admitted.capture_graph_selection();
     assert!(graph
@@ -1460,14 +1456,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .flat_map(|availability| availability.offers().iter().cloned())
         .collect::<Vec<_>>();
     let selected = request
-        .artifacts
-        .inventory()
-        .admit_projected_with_native_offers(
-            &request.artifacts,
-            vec![],
-            &request.projection,
-            &offers,
-        )
+        .projection
+        .admit_interfaces_with_native_offers(&request.artifacts, vec![], &offers)
         .unwrap();
     let graph = selected.capture_graph_selection();
     assert!(graph
@@ -1909,13 +1899,8 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     ProtectedScaffoldRequirements::default()
         .compiler_inputs(&context(b.clone(), projection.clone()), Some(&private))
         .expect("without a conflicting selected A, B retains its real A9001 dependency");
-    inventory
-        .admit_projected_with_native_offers(
-            &private.artifacts,
-            vec![],
-            &projection,
-            &private.native_offers,
-        )
+    projection
+        .admit_interfaces_with_native_offers(&private.artifacts, vec![], &private.native_offers)
         .expect("typed admission accepts the same exact dependency closure");
 
     let replacement = product("BackedgeAncestor", 99);
@@ -1945,11 +1930,10 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
         "transport must not discard B's real backedge to old A"
     );
     assert!(
-        inventory
-            .admit_projected_with_native_offers(
+        selected_projection
+            .admit_interfaces_with_native_offers(
                 &private.artifacts,
                 vec![replacement],
-                &selected_projection,
                 &private.native_offers,
             )
             .is_err(),
@@ -2660,13 +2644,10 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     .is_err());
     // An issued winner remains explicit even when other versions stay in custody.
     let projection = CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
-    let selected = ambiguous
-        .artifact_view()
-        .inventory()
-        .admit_projected_with_native_requirements(
+    let selected = projection
+        .admit_interfaces_with_native_offers(
             ambiguous.artifact_view(),
             vec![entries[0].clone()],
-            &projection,
             &[],
         )
         .expect("the inventory issuer selects the explicit original and canonical pair");
@@ -2940,13 +2921,10 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
 
         let projection =
             CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
-        let selected = context
-            .artifact_view()
-            .inventory()
-            .admit_projected_with_native_requirements(
+        let selected = projection
+            .admit_interfaces_with_native_offers(
                 context.artifact_view(),
                 vec![entries[0].clone()],
-                &projection,
                 &[],
             )
             .expect("the inventory issuer selects the explicit original and canonical pair");
