@@ -5400,10 +5400,17 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .unwrap();
             assert_eq!(retained.graph[&owner].canonical, expected);
             assert_eq!(
-                retained.artifacts.capture_graph_selection(),
+                retained
+                    .compiler_support
+                    .artifacts
+                    .capture_graph_selection(),
                 expected_view.capture_graph_selection()
             );
-            assert!(retained.artifacts.selected_native_groups().is_empty());
+            assert!(retained
+                .compiler_support
+                .artifacts
+                .selected_native_groups()
+                .is_empty());
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
             let retained_again = retained.retain_in(original.artifact_view()).unwrap();
             assert_eq!(
@@ -5411,6 +5418,37 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 before.namespace
             );
             assert_eq!(retained_again.capture_graph_selection().roots, before.roots);
+            assert!(!original.artifact_view().selected_native_groups().is_empty());
+            assert!(before.bindings.iter().all(|binding| retained_again
+                .capture_graph_selection()
+                .bindings
+                .contains(binding)));
+            assert!(original
+                .artifact_view()
+                .binding_dependencies()
+                .iter()
+                .all(|edge| retained_again.binding_dependencies().contains(edge)));
+            let empty = original.artifact_view().inventory().empty_view();
+            let custody_only = retained.retain_in(&empty).unwrap();
+            let custody_graph = custody_only.capture_graph_selection();
+            assert!(custody_graph.namespace.is_empty());
+            assert!(custody_graph.roots.is_empty());
+            let incoming = retained
+                .compiler_support
+                .artifacts
+                .capture_graph_selection();
+            assert!(incoming
+                .roots
+                .iter()
+                .chain(&incoming.custody_roots)
+                .all(|seed| custody_graph.custody_roots.contains(seed)));
+            assert_eq!(
+                retained
+                    .retain_in(&custody_only)
+                    .unwrap()
+                    .capture_graph_selection(),
+                custody_graph
+            );
             let mut malformed = original.clone();
             let mut roles = CompilerInputProjection::default();
             roles
@@ -5430,7 +5468,9 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 &["import TemplateOwner\n".into()]
             )
             .is_err());
-            retained.validate(producer, &retained.artifacts).unwrap();
+            retained
+                .validate(producer, &retained.compiler_support.artifacts)
+                .unwrap();
             let mut mismatched = retained.as_ref().clone();
             mismatched
                 .graph

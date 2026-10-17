@@ -6505,6 +6505,31 @@ impl ArtifactView {
         self.merge_validated_namespace(other, namespace)
     }
 
+    /// Retain another issued view as lifetime custody while preserving this
+    /// receiver's exact compiler namespace and execution roots.
+    pub(crate) fn retain_custody(&self, other: &Self) -> Result<Self, CompileError> {
+        self.validate_issued_merge(other)?;
+        let namespace = self.namespace();
+        let roots = self.roots().iter().copied().collect::<BTreeSet<_>>();
+        let joined = self.merge_validated_namespace(other, namespace.clone())?;
+        let custody = joined
+            .roots()
+            .iter()
+            .copied()
+            .chain(joined.custody_roots().iter().copied())
+            .filter(|node| !roots.contains(node))
+            .collect::<BTreeSet<_>>();
+        let retained = joined.inventory().retain(
+            roots.into_iter().collect(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = joined.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
+    }
+
     /// Both views and the exact namespace have already crossed their issuing
     /// owner. Historical edges remain in their immutable scopes, independently
     /// of the compiler namespace selected for this receiving view.

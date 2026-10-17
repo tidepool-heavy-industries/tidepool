@@ -170,12 +170,13 @@ impl PreparedValueSourceSupport {
             .context
             .artifact_view()
             .select_roots(vec![value.artifact_id()])?;
-        self.retain_surface(&view)
+        self.retain_surface(&view, &BTreeSet::from([owner]))
     }
 
     fn retain_surface(
         &self,
         value: &ArtifactView,
+        value_owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<RetainedValueSourceSurface, CompileError> {
         let retained = value
             .descriptors()
@@ -208,7 +209,11 @@ impl PreparedValueSourceSupport {
                 "retained source surface lacks its exact artifact owner",
             ));
         }
-        let source_owners = lexical.iter().map(|node| node.owner.clone()).collect();
+        let source_owners = lexical
+            .iter()
+            .map(|node| node.owner.clone())
+            .chain(value_owners.iter().cloned())
+            .collect();
         let support = self
             .context
             .facts
@@ -216,8 +221,11 @@ impl PreparedValueSourceSupport {
             .source_support(&source_owners)?;
         // The value already owns its exact graph; source roles retain their
         // issued namespace and group handles without choosing new body demand.
-        let compiler_artifacts = value.merge(support.artifacts())?;
-        support.projection().validate(&compiler_artifacts)?;
+        let (compiler_artifacts, projection) = value.merge_compiler_inputs(
+            &CompilerInputProjection::default(),
+            support.artifacts(),
+            support.projection(),
+        )?;
         let artifacts = self
             .context
             .artifact_view()
@@ -225,7 +233,7 @@ impl PreparedValueSourceSupport {
         Ok(RetainedValueSourceSurface {
             artifacts,
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-                support.projection().clone(),
+                projection,
                 compiler_artifacts,
                 support.native_offers().iter().cloned(),
             )?,
@@ -2805,7 +2813,7 @@ pub(crate) struct RetainedTemplateImports {
     producer: [u8; 32],
     roots: BTreeSet<ExactModuleIdentity>,
     graph: BTreeMap<ExactModuleIdentity, RetainedTemplateNode>,
-    artifacts: ArtifactView,
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
 }
 
 fn template_selects_owner(templates: &[String], owner: &ExactModuleIdentity) -> bool {
@@ -2869,8 +2877,14 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
 }
 
 impl RetainedTemplateImports {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.compiler_support
+    }
+
     pub(crate) fn retain_in(&self, artifacts: &ArtifactView) -> Result<ArtifactView, CompileError> {
-        Ok(artifacts.merge(&self.artifacts)?)
+        artifacts.retain_custody(self.compiler_support.artifacts())
     }
 
     pub(crate) fn capture(
@@ -2943,12 +2957,12 @@ impl RetainedTemplateImports {
                 },
             );
         }
-        let artifacts = interfaces.select_owners(graph.keys().cloned().collect())?;
+        let compiler_support = interfaces.support_for_owners(graph.keys().cloned().collect())?;
         let retained = Arc::new(Self {
             producer: original.facts.producer,
             roots,
             graph,
-            artifacts,
+            compiler_support,
         });
         retained.validate(original.facts.producer, original.artifact_view())?;
         Ok(Some(retained))
@@ -3019,9 +3033,9 @@ impl RetainedTemplateImports {
             producer: left.producer,
             roots: left.roots.union(&right.roots).cloned().collect(),
             graph,
-            artifacts: left.artifacts.merge(&right.artifacts)?,
+            compiler_support: left.compiler_support.merge(&right.compiler_support)?,
         });
-        merged.validate(merged.producer, &merged.artifacts)?;
+        merged.validate(merged.producer, merged.compiler_support.artifacts())?;
         Ok(merged)
     }
 }
@@ -6522,7 +6536,7 @@ impl ExactDeclarationContext {
                         .facts
                         .compiler_support
                         .artifacts
-                        .merge(&retained.artifacts)?;
+                        .retain_custody(retained.compiler_support.artifacts())?;
                     self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
                 }
                 {
@@ -6548,12 +6562,14 @@ impl ExactDeclarationContext {
         self.finish()
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_value_source_surface(
         &self,
         value: &ArtifactView,
         support: &[ExactLexicalNode],
     ) -> Result<RetainedValueSourceSurface, CompileError> {
-        PreparedValueSourceSupport::new(Arc::new(self.clone()), support)?.retain_surface(value)
+        PreparedValueSourceSupport::new(Arc::new(self.clone()), support)?
+            .retain_surface(value, &BTreeSet::new())
     }
 
     pub(crate) fn extend_program_value_interface(
@@ -14863,7 +14879,7 @@ mod tests {
                         .collect(),
                 )
                 .unwrap();
-            let surface = shared.retain_surface(&selected).unwrap();
+            let surface = shared.retain_surface(&selected, &BTreeSet::new()).unwrap();
             let expected = if roots == [owner.clone()] {
                 vec![identity("fixture", "InstanceOwner"), owner.clone()]
             } else {

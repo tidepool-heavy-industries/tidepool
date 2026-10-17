@@ -173,6 +173,32 @@ impl SelectedCompilerInterfaces<'_> {
         &self.entries
     }
 
+    pub(crate) fn support_for_owners(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        let mut projection = CompilerInputProjection::default();
+        let mut pending = owners;
+        while let Some(owner) = pending.pop() {
+            if projection.roles.contains_key(&owner) {
+                continue;
+            }
+            let entry = self
+                .entries
+                .get(&owner)
+                .ok_or_else(|| failure("selected interface dependency lacks its issued role"))?;
+            pending.extend(entry.requirements.iter().cloned());
+            projection.admit_role(
+                owner,
+                CompilerInputRole::InterfaceOnly {
+                    interface: entry.descriptor.id,
+                },
+            )?;
+        }
+        let artifacts = self.select_owners(projection.roles.keys().cloned().collect())?;
+        CompilerSourceSupport::new(projection, artifacts, [])
+    }
+
     pub(crate) fn select_owners(
         &self,
         owners: Vec<ExactModuleIdentity>,
