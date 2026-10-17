@@ -1166,7 +1166,7 @@ mod tests {
         reverse_names: bool,
         split_last: bool,
         value_offset: u32,
-    ) -> CertifiedGroup {
+    ) -> (CachedHomeOwner, ProjectedGroup, Vec<ImportOwner>) {
         use tidepool_repr::execution_schema::{
             parse_projected_group, DecodeLimits, ProgramRequirements,
         };
@@ -1246,7 +1246,7 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
         let projected = parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
-        CertifiedGroup::admit(
+        (
             CachedHomeOwner {
                 unit: "fixture".into(), module: "Fixture".into(),
                 module_version: ModuleVersion([1; 32]),
@@ -1254,7 +1254,7 @@ mod tests {
             },
             projected,
             imports,
-        ).unwrap()
+        )
     }
 
     #[test]
@@ -1263,7 +1263,8 @@ mod tests {
         use proptest::test_runner::{Config, TestRunner};
 
         let check = |helpers, exports, imports, reverse, split, offset| {
-            let group = outlined_fixture(helpers, exports, imports, reverse, split, offset);
+            let (owner, projected, owners) = outlined_fixture(helpers, exports, imports, reverse, split, offset);
+            let group = CertifiedGroup::admit(owner, projected, owners).unwrap();
             OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
             let actual = SourceGroupOutline::from_certified(&group);
             let touched = OUTLINE_ROWS.with(|rows| rows.get());
@@ -1330,6 +1331,43 @@ mod tests {
         config.source_file = Some(file!());
         config.test_name = Some(concat!(module_path!(), "::certified_outlines_match_full_definitions_and_visit_only_exports"));
         TestRunner::new(config).run(&strategy, |(h, e, i, r, s, o)| check(h, e, i, r, s, o)).unwrap();
+    }
+
+    #[test]
+    fn certified_outline_admission_preserves_owner_import_and_inventory_refusals() {
+        let (owner, projected, imports) = outlined_fixture(2, 2, 4, true, true, 1);
+        let mut bad_source = imports.clone();
+        let ImportOwner::Source { binder, .. } = &mut bad_source[0] else { unreachable!() };
+        binder.occurrence = "foreign".into();
+        let mut bad_package = imports.clone();
+        let ImportOwner::Package { unit, .. } = &mut bad_package[1] else { unreachable!() };
+        *unit = "foreign".into();
+        let mut bad_retained = imports.clone();
+        let ImportOwner::Retained { generation, .. } = &mut bad_retained[2] else { unreachable!() };
+        *generation = 10;
+        let mut bad_export = imports.clone();
+        let ImportOwner::CodeExport { generation, .. } = &mut bad_export[3] else { unreachable!() };
+        *generation = 10;
+        let mut bad_source_generation = imports.clone();
+        bad_source_generation[0] = ImportOwner::Retained {
+            id: tidepool_repr::SessionVarId::from_extract(1), generation: 9,
+        };
+        for malformed in [Vec::new(), bad_source, bad_package, bad_retained, bad_export, bad_source_generation] {
+            assert!(CertifiedGroup::admit(owner.clone(), projected.clone(), malformed).is_err());
+        }
+        for (unit, module) in [("", "Fixture"), ("foreign", "Fixture"), ("fixture", "Foreign")] {
+            let mut malformed = owner.clone();
+            malformed.unit = unit.into();
+            malformed.module = module.into();
+            assert!(CertifiedGroup::admit(malformed, projected.clone(), imports.clone()).is_err());
+        }
+        let valid = CertifiedGroup::admit(owner.clone(), projected.clone(), imports.clone()).unwrap();
+        assert!(matches!(GroupInventory::new(&[valid.clone(), valid.clone()]), Err(DemandError::DuplicateGroup { .. })));
+        let mut conflicting = owner;
+        conflicting.product_sha256 = [99; 32];
+        let other = CertifiedGroup::admit(conflicting, projected, imports).unwrap();
+        assert!(matches!(GroupInventory::new(&[valid, other]), Err(DemandError::ConflictingOwner { .. })));
+        assert!(matches!(GroupInventory::new(&[group("same", 11, &[]), group("same", 12, &[])]), Err(DemandError::DuplicateBinder(_))));
     }
 
     #[test]
