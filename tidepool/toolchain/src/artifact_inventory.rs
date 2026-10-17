@@ -580,6 +580,16 @@ impl NativeOriginalRequirement {
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let graph = self.selection.graph_selection();
         validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
+        self.qualify_checked_lease(&view.lease, &state, graph, scope)
+    }
+
+    fn qualify_checked_lease(
+        &self,
+        lease: &ViewLease,
+        state: &InventoryState,
+        graph: &ArtifactGraphSelection,
+        scope: NativeAvailabilityQualificationScope,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
         let carrier = if let Some(carrier) = graph
             .namespace
             .iter()
@@ -618,8 +628,7 @@ impl NativeOriginalRequirement {
         if matches!(
             scope,
             NativeAvailabilityQualificationScope::CurrentNamespace
-        ) && view
-            .lease
+        ) && lease
             .selection
             .namespace
             .get(&self.original)
@@ -627,7 +636,7 @@ impl NativeOriginalRequirement {
         {
             return Ok(None);
         }
-        let entry = &view.lease.payloads[&self.original];
+        let entry = &lease.payloads[&self.original];
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeRootNotOriginal {
@@ -645,7 +654,7 @@ impl NativeOriginalRequirement {
         .id;
         let canonical_binding = match scope {
             NativeAvailabilityQualificationScope::CurrentNamespace => {
-                let Some(binding) = view.lease.selection.namespace.get(&canonical).copied() else {
+                let Some(binding) = lease.selection.namespace.get(&canonical).copied() else {
                     return Ok(None);
                 };
                 binding
@@ -698,7 +707,7 @@ impl NativeOriginalRequirement {
                     .map(InventoryNodeKey::Group),
             )
             .collect::<imbl::OrdSet<_>>();
-        let index = NativeSelectionIndex::build(&state, &nodes);
+        let index = NativeSelectionIndex::build(state, &nodes);
         if entry.native_group_ordinals.is_empty()
             || !entry.native_group_ordinals.iter().all(|ordinal| {
                 matches!(
@@ -715,7 +724,7 @@ impl NativeOriginalRequirement {
             .map(|ordinal| index.resolve(carrier, *ordinal))
             .collect::<Result<Vec<_>, _>>()?;
         let (_, groups) =
-            view.native_requirements_for_exact_groups_locked(&state, &nodes, roots)?;
+            native_requirements_for_exact_groups_in_custody(state, &lease.payloads, &nodes, roots)?;
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
@@ -4214,6 +4223,22 @@ impl ArtifactInventory {
         if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) || parent.has_retained_nodes() {
             return Err(failure("bound recovery requires an empty owning view"));
         }
+        self.recover_selected_custody(parent, entries, selection, edges)
+            .map(IssuedArtifactCustody::into_view)
+    }
+
+    /// Authenticate recorded exact rows independently of any broader receiving
+    /// selection, retaining its real payload and acquisition owners.
+    fn recover_selected_custody(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        selection: &ArtifactGraphSelection,
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<IssuedArtifactCustody, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("bound recovery requires its owning inventory"));
+        }
         let entries = entries
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
@@ -4327,17 +4352,25 @@ impl ArtifactInventory {
         let snapshot =
             selection_snapshot_for_lease(&state, &namespace, &roots, &selection.custody_roots, &[]);
         drop(state);
-        Ok(ArtifactView::new(ViewDraft {
-            roots: roots,
-            selection: snapshot,
-
-            inventory: self.clone(),
-
-            parents: vec![],
-            issuing_payloads: entries,
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        }))
+        let introduced = entries.keys().copied().collect();
+        let retained_entries = entries.clone();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection: snapshot,
+                inventory: self.clone(),
+                parents: vec![Arc::clone(&parent.lease)],
+                issuing_payloads: entries,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            introduced,
+        );
+        Ok(IssuedArtifactCustody {
+            lease,
+            entries: retained_entries,
+            target_native_selection: None,
+        })
     }
 
     pub fn metrics(&self) -> ArtifactInventoryMetrics {
@@ -4357,6 +4390,74 @@ impl ArtifactInventory {
     pub fn node_count(&self) -> usize {
         self.0.lock().expect("inventory lock").live_nodes().len()
     }
+}
+
+fn native_requirements_for_exact_groups_in_custody(
+    state: &InventoryState,
+    payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    mut pending: Vec<NativeGroupBinding>,
+) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
+    let mut seen = BTreeSet::new();
+    let mut requirements = BTreeSet::new();
+    let mut packages = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if !seen.insert(key) {
+            continue;
+        }
+        state.graph_visits.fetch_add(1, Ordering::Relaxed);
+        for package in &payloads[&key.binding.artifact()].retained_packages {
+            if key.original_ordinal == package.dependent_ordinal {
+                packages.insert(NativePackageRequirement {
+                    artifact_id: key.binding.artifact(),
+                    identity: package.identity.clone(),
+                    generation: package.generation,
+                    interface_digest: package.interface_digest,
+                });
+            }
+        }
+        for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
+            match label {
+                ArtifactDependency::NativeGroup { .. } => {
+                    let InventoryNodeKey::Group(required) = target else {
+                        return Err(failure("native group edge lacks group target"));
+                    };
+                    if !owned.contains(&target) {
+                        return Err(failure("native dependency outside selected view"));
+                    }
+                    pending.push(required);
+                }
+                ArtifactDependency::NativeBinding {
+                    generation,
+                    namespace,
+                    occurrence,
+                    record_parent,
+                    ..
+                } => {
+                    let descriptor = &payloads[&target.artifact()].descriptor;
+                    requirements.insert(NativeBindingRequirement {
+                        artifact_id: descriptor.id,
+                        identity: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: descriptor.owner.unit.clone(),
+                            module: descriptor.owner.module.clone(),
+                            namespace: namespace.clone(),
+                            occurrence: occurrence.clone(),
+                            record_parent: record_parent.clone(),
+                        },
+                        generation: *generation,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((
+        NativeRequirements {
+            bindings: requirements.into_iter().collect(),
+            packages: packages.into_iter().collect(),
+        },
+        seen,
+    ))
 }
 
 struct ViewLease {
@@ -5601,68 +5702,9 @@ impl ArtifactView {
         &self,
         state: &InventoryState,
         owned: &imbl::OrdSet<InventoryNodeKey>,
-        mut pending: Vec<NativeGroupBinding>,
+        pending: Vec<NativeGroupBinding>,
     ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
-        let mut seen = BTreeSet::new();
-        let mut requirements = BTreeSet::new();
-        let mut packages = BTreeSet::new();
-        while let Some(key) = pending.pop() {
-            if !seen.insert(key) {
-                continue;
-            }
-            state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            for package in &self.lease.payloads[&key.binding.artifact()].retained_packages {
-                if key.original_ordinal == package.dependent_ordinal {
-                    packages.insert(NativePackageRequirement {
-                        artifact_id: key.binding.artifact(),
-                        identity: package.identity.clone(),
-                        generation: package.generation,
-                        interface_digest: package.interface_digest,
-                    });
-                }
-            }
-            for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
-                match label {
-                    ArtifactDependency::NativeGroup { .. } => {
-                        let InventoryNodeKey::Group(required) = target else {
-                            return Err(failure("native group edge lacks group target"));
-                        };
-                        if !owned.contains(&target) {
-                            return Err(failure("native dependency outside selected view"));
-                        }
-                        pending.push(required);
-                    }
-                    ArtifactDependency::NativeBinding {
-                        generation,
-                        namespace,
-                        occurrence,
-                        record_parent,
-                        ..
-                    } => {
-                        let descriptor = &self.lease.payloads[&target.artifact()].descriptor;
-                        requirements.insert(NativeBindingRequirement {
-                            artifact_id: descriptor.id,
-                            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                                unit: descriptor.owner.unit.clone(),
-                                module: descriptor.owner.module.clone(),
-                                namespace: namespace.clone(),
-                                occurrence: occurrence.clone(),
-                                record_parent: record_parent.clone(),
-                            },
-                            generation: *generation,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok((
-            NativeRequirements {
-                bindings: requirements.into_iter().collect(),
-                packages: packages.into_iter().collect(),
-            },
-            seen,
-        ))
+        native_requirements_for_exact_groups_in_custody(state, &self.lease.payloads, owned, pending)
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {

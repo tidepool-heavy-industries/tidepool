@@ -758,79 +758,175 @@ impl IssuedNativeOffer {
         source: &ArtifactView,
     ) -> Result<Self, CompileError> {
         use crate::exact_context::NativeOfferSnapshotBody;
-        let exact_source;
-        let source = if let NativeOfferSnapshotBody::Empty(custody) = &facts.body {
-            let graph = custody.graph_selection();
-            if !graph.roots.is_empty()
-                || !graph.namespace.is_empty()
-                || !matches!(graph.custody_roots.as_slice(), [ArtifactBindingNode::Artifact(binding)] if binding.artifact == facts.original)
-            {
-                return Err(failure(
-                    "recovered empty offer lacks exact original custody",
-                ));
-            }
-            exact_source = source.select_issued(Vec::new(), custody)?;
-            &exact_source
-        } else {
-            let selection = match &facts.body {
-                NativeOfferSnapshotBody::Partial(selection)
-                | NativeOfferSnapshotBody::Full(selection) => selection,
-                NativeOfferSnapshotBody::Empty(_) => unreachable!(),
-            };
-            exact_source = source.select_issued(Vec::new(), selection)?;
-            &exact_source
-        };
         let selection = match &facts.body {
-            NativeOfferSnapshotBody::Empty(_) => None,
-            NativeOfferSnapshotBody::Partial(selection)
-            | NativeOfferSnapshotBody::Full(selection) => Some(selection.clone()),
+            NativeOfferSnapshotBody::Empty(selection)
+            | NativeOfferSnapshotBody::Partial(selection)
+            | NativeOfferSnapshotBody::Full(selection) => selection,
         };
-        let mut offer = Self::issue(
-            facts.original,
-            source,
-            selection.map(|selection| NativeOriginalRequirement {
-                original: facts.original,
-                selection,
-            }),
-        )?;
-        if offer.0.interface != facts.interface || offer.0.owner != facts.owner {
+        let snapshot = selection.snapshot();
+        if snapshot
+            .scopes
+            .keys()
+            .any(|scope| !source.lease.selection.scopes.contains_key(scope))
+        {
+            return Err(failure(
+                "recovered native offer scope is outside acquisition custody",
+            ));
+        }
+        let nodes = snapshot
+            .retained_nodes()
+            .map_err(|_| failure("recovered native offer has malformed exact closure"))?;
+        let graph = ArtifactGraphSelection {
+            selections: snapshot
+                .scopes
+                .values()
+                .map(|proof| Arc::clone(proof.proof()))
+                .collect(),
+            bindings: nodes
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
+                    _ => None,
+                })
+                .collect(),
+            namespace: snapshot.namespace.values().copied().collect(),
+            roots: snapshot.roots.keys().copied().collect(),
+            native_groups: nodes
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group) => Some(*group),
+                    _ => None,
+                })
+                .collect(),
+            custody_roots: snapshot.custody_roots.keys().copied().collect(),
+        };
+        if matches!(&facts.body, NativeOfferSnapshotBody::Empty(_))
+            && (!graph.roots.is_empty()
+                || !graph.namespace.is_empty()
+                || !matches!(graph.custody_roots.as_slice(), [ArtifactBindingNode::Artifact(binding)] if binding.artifact == facts.original))
+        {
+            return Err(failure(
+                "recovered empty offer lacks exact original custody",
+            ));
+        }
+        let mut edges = Vec::new();
+        for node in &nodes {
+            let proof = snapshot.scopes[&node.selection()].proof();
+            let start = proof
+                .dependencies
+                .partition_point(|(source, _, _)| source < node);
+            edges.extend(
+                proof.dependencies[start..]
+                    .iter()
+                    .take_while(|(source, _, _)| source == node)
+                    .cloned(),
+            );
+        }
+        let entries = graph
+            .bindings
+            .iter()
+            .map(|binding| {
+                source
+                    .lease
+                    .payloads
+                    .get(&binding.artifact)
+                    .cloned()
+                    .ok_or_else(|| {
+                        failure("recovered native offer payload is outside acquisition custody")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // This is independent cold admission of the recorded rows and complete
+        // proof witnesses, not authority inferred from a receiving inventory.
+        let recovered = source
+            .inventory()
+            .recover_selected_custody(source, entries, &graph, &edges)?;
+        let entry = recovered
+            .entries
+            .get(&facts.original)
+            .ok_or_else(|| failure("recovered native offer lacks its original"))?;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootNotOriginal {
+                    artifact: facts.original,
+                },
+            ));
+        };
+        let interface = ArtifactEntry::canonical(
+            product
+                .module_interface()
+                .ok_or_else(|| failure("recovered native offer lacks its canonical interface"))?
+                .clone(),
+        )
+        .descriptor
+        .id;
+        if interface != facts.interface || entry.descriptor.owner != facts.owner {
             return Err(failure(
                 "recovered native offer differs from its original interface or owner",
             ));
         }
-        match &facts.body {
-            NativeOfferSnapshotBody::Full(_) => {
-                let proof = offer.proof().expect("full snapshot retains proof").clone();
-                let qualification = proof
-                    .qualify_issued_availability(source)?
-                    .ok_or_else(|| failure("recovered full native offer no longer qualifies"))?;
-                offer = Self(Arc::new(NativeOfferFacts {
-                    original: offer.0.original,
-                    interface: offer.0.interface,
-                    owner: offer.0.owner.clone(),
-                    body: NativeOfferBody::Full {
-                        proof,
-                        qualification,
-                    },
-                    custody: offer.0.custody.clone(),
-                }));
-            }
+        let state = recovered.lease.inventory.0.lock().expect("inventory lock");
+        let body = match &facts.body {
+            NativeOfferSnapshotBody::Empty(_) => NativeOfferBody::Empty,
             NativeOfferSnapshotBody::Partial(_) => {
-                let proof = offer
-                    .proof()
-                    .expect("partial snapshot retains proof")
-                    .clone();
-                offer = Self(Arc::new(NativeOfferFacts {
-                    original: offer.0.original,
-                    interface: offer.0.interface,
-                    owner: offer.0.owner.clone(),
-                    body: NativeOfferBody::Partial(proof),
-                    custody: offer.0.custody.clone(),
-                }));
+                NativeOfferBody::Partial(NativeOriginalRequirement {
+                    original: facts.original,
+                    selection: selection.clone(),
+                })
             }
-            _ => {}
+            NativeOfferSnapshotBody::Full(_) => {
+                let proof = NativeOriginalRequirement {
+                    original: facts.original,
+                    selection: selection.clone(),
+                };
+                let qualification = proof
+                    .qualify_checked_lease(
+                        &recovered.lease,
+                        &state,
+                        &graph,
+                        NativeAvailabilityQualificationScope::IssuedClosure,
+                    )?
+                    .ok_or_else(|| failure("recovered full native offer no longer qualifies"))?;
+                NativeOfferBody::Full {
+                    proof,
+                    qualification,
+                }
+            }
+        };
+        drop(state);
+        let mut custody_selection = recovered.lease.selection.as_ref().clone();
+        for root in custody_selection.roots.keys().copied().collect::<Vec<_>>() {
+            custody_selection.custody_roots.insert(root, ());
         }
-        Ok(offer)
+        custody_selection.roots.clear();
+        custody_selection.namespace.clear();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots: vec![],
+                selection: Arc::new(custody_selection),
+                inventory: source.inventory().clone(),
+                parents: vec![recovered.lease],
+                issuing_payloads: BTreeMap::new(),
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            BTreeSet::new(),
+        );
+        let custody = {
+            let state = lease.inventory.0.lock().expect("inventory lock");
+            NativeOfferCustody::from_checked_nodes(
+                &state,
+                Arc::clone(&lease),
+                nodes.into_iter().collect(),
+            )?
+        };
+        Ok(Self(Arc::new(NativeOfferFacts {
+            original: facts.original,
+            interface,
+            owner: facts.owner.clone(),
+            body,
+            custody,
+        })))
     }
 
     pub(crate) fn original(&self) -> ArtifactId {
