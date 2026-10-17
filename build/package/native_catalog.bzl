@@ -157,8 +157,6 @@ def native_runtime_bundle(name, catalog_backed):
         "qualification": ":qualification_script",
         "entrypoint": ":native_entrypoint",
         "runtime-tools": "toolchains//:exomonad_runtime_tools",
-        "offline-rustc": "toolchains//:rustc",
-        "offline-cc": "toolchains//:cc",
         "build-sources": "//build/rust:native_qualification_sources",
         "workspace-gitlink": "//build/rust:workspace_gitlink",
         "workspace-git-bundle": "//build/rust:workspace_git_bundle",
