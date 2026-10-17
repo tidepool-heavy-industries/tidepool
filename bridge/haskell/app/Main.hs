@@ -116,7 +116,7 @@ import Tidepool.Introspection
   ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
 import Tidepool.InspectionRunner
-  ( isInspectionTypeQuery, runInspectionRequests, runHostedLookupRequests, HostedMetadataEnvironment(..) )
+  ( runInspectionRequests, runHostedLookupRequests, HostedMetadataEnvironment(..) )
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview

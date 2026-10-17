@@ -16825,17 +16825,23 @@ pub(crate) mod request_tests {
             r#"{"examples":[{"module":"Tidepool.Effects.Core","name":"lookupRaw","namespace":"value","source":"checks/captured.hs","prerequisites":[],"requirements":"Lookup effect required"}]}"#).unwrap();
         let examples = crate::UsagePointerTable::discover(modules.path()).unwrap();
         let answer = crate::lookup::execute(
-            real_lookup_request(vec![
-                "LookupPlanParent.ModuleOnly".into(),
-                "LookupPlanParent.Choice".into(),
-                "LookupPlanParent.ConstructorOnly".into(),
-                "LookupApi.lookupRaw".into(),
-                "doc workbench".into(),
-                "Fs.writeCheckedIf".into(),
-                "Fs.fileHash".into(),
-                "writeCheckedIf".into(),
-                "lookupRaw".into(),
-            ]),
+            {
+                let mut request = real_lookup_request(vec![
+                    "LookupPlanParent.ModuleOnly".into(),
+                    "LookupPlanParent.Choice".into(),
+                    "LookupPlanParent.ConstructorOnly".into(),
+                    "LookupApi.lookupRaw".into(),
+                    "doc workbench".into(),
+                    "Fs.writeCheckedIf".into(),
+                    "Fs.fileHash".into(),
+                    "writeCheckedIf".into(),
+                    "lookupRaw".into(),
+                ]);
+                request.queries.push("LookupPlanParent.missing".into());
+                request.discover = true;
+                request.candidate_limit = 4;
+                request
+            },
             "view".into(),
             &prepared.imports,
             &prepared.injected,
@@ -16873,14 +16879,30 @@ pub(crate) mod request_tests {
             "successful module/name/doc batch must execute exactly one real worker request"
         );
         assert!(answer.issue.is_none(), "typed row witness must compile");
+        assert!(answer.candidates.len() <= 4);
+        assert!(
+            !answer.candidates.is_empty(),
+            "mixed native selection must retain actual candidates"
+        );
+
         let inspected = inspected.into_inner().expect("lookup inspections");
+        assert!(
+            matches!(&inspected.discovery, Some(selection) if matches!(&selection.fallback,
+            tidepool_runtime::session::inspection::HostedFallback::Attempted(scopes) if !scopes.is_empty()))
+        );
+
         let lookup = inspected
+            .answers
             .iter()
             .find_map(|result| match result {
-                tidepool_runtime::session::InspectionResult::Lookup {
-                    answer: tidepool_runtime::session::LookupAnswer::Info(entries),
+                tidepool_runtime::session::inspection::HostedLookupAnswer::Name {
+                    answer:
+                        tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches),
                     ..
-                } => entries.iter().find(|entry| entry.name == "lookupRaw"),
+                } => matches
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == "lookupRaw"),
                 _ => None,
             })
             .expect("lookupRaw inspection");
@@ -17097,6 +17119,52 @@ pub(crate) mod request_tests {
                 if entries.iter().any(|entry| entry.name == "checkedLookupValue"))
             );
         }
+        // Qualification selects an already-visible protected nominal name;
+        // it does not grant PublicModule browse authority over that owner.
+        let owner = inputs.view().reachable_values()[0].module_name();
+        let protected_batch = tidepool_runtime::session::inspection::HostedLookupBatch {
+            operations: vec![
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![0],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::Current,
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: format!("{owner}.checkedLookupValue"),
+                    },
+                },
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![1],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::PublicModule(owner.clone()),
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: "checkedLookupValue".into(),
+                    },
+                },
+            ],
+            discovery: None,
+        };
+        let protected = tidepool_testing::with_settlement(|settlement| {
+            inspect_hosted_lookup(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &protected_batch,
+                None,
+                settlement,
+            )
+        })
+        .expect("protected nominal Current address resolves through the existing checked owner");
+        assert!(matches!(&protected.answers[..], [
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches), scopes, .. },
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::ModuleNotFound(refused), scopes: refused_scopes, .. },
+        ] if matches.entries.len() == 1 && matches.entries[0].name == "checkedLookupValue"
+            && scopes == &[tidepool_runtime::session::NameScope::Current] && refused == &owner && refused_scopes.is_empty()));
         let query = tidepool_runtime::session::NameQuery {
             scope: tidepool_runtime::session::NameScope::Current,
             namespace: tidepool_runtime::session::NameNamespace::Value,
