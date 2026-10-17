@@ -7895,11 +7895,6 @@ pub(crate) fn certify_products_with_validation(
                         PACKAGE_INTERFACE_LIMIT,
                         &validation.inventory,
                     )?) != accepted.skinny_iface_sha256
-                    || hex(&sha(&read_bounded_with_operation(
-                        &bundle.package_imports_path,
-                        32 << 20,
-                        &validation.inventory,
-                    )?)) != bundle.package_imports_sha256
                 {
                     return Err(CertificationError::StaleEvidence);
                 }
@@ -7908,7 +7903,9 @@ pub(crate) fn certify_products_with_validation(
                     32 << 20,
                     &validation.inventory,
                 )?;
-                if sidecar != bundle.package_imports_bytes {
+                if hex(&sha(&sidecar)) != bundle.package_imports_sha256
+                    || sidecar != bundle.package_imports_bytes
+                {
                     return Err(CertificationError::StaleEvidence);
                 }
                 crate::recovery_artifacts::validate_package_imports_with_validation(
@@ -16247,38 +16244,38 @@ pub(crate) mod tests {
         )
         .unwrap();
         let empty = ParsedModuleProducts::decode(&empty_bytes, &empty_packages).unwrap();
-        let cached = certify_products(
-            Some(&selected),
-            &cached_receipt,
-            &empty,
-            &evidence_bytes,
-            &input,
-            input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
-            &producer,
-            &include,
-            exact.as_ref(),
-            None,
-        )
-        .unwrap();
+        let certify_cached = |receipt: &CertifiedReceipt| {
+            certify_products(
+                Some(&selected),
+                receipt,
+                &empty,
+                &evidence_bytes,
+                &input,
+                input.parent().unwrap(),
+                &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
+                source,
+                &producer,
+                &include,
+                exact.as_ref(),
+                None,
+            )
+        };
+        let cached = certify_cached(&cached_receipt).unwrap();
+        // Fresh publication validation must observe drift after candidate
+        // acquisition, independently of its retained package witness bytes.
+        std::fs::write(&bundle.package_imports_path, b"changed package witness").unwrap();
+        let stale_package = certify_cached(&cached_receipt);
+        std::fs::write(&bundle.package_imports_path, &bundle.package_imports_bytes).unwrap();
+        assert!(matches!(stale_package, Err(CertificationError::StaleEvidence)));
+        let restored_package = certify_cached(&cached_receipt).unwrap();
+        assert_eq!(restored_package.recovery_products[0].owner(), &bundle.owner);
+        assert_eq!(
+            restored_package.recovery_products[0].package_imports_bytes(),
+            bundle.package_imports_bytes
+        );
         let mut stale_cached_receipt = cached_receipt.clone();
         stale_cached_receipt.modules[0].dependency_witness_sha256 = [0; 32];
-        assert!(certify_products(
-            Some(&selected),
-            &stale_cached_receipt,
-            &empty,
-            &evidence_bytes,
-            &input,
-            input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
-            &producer,
-            &include,
-            exact.as_ref(),
-            None,
-        )
-        .is_err());
+        assert!(certify_cached(&stale_cached_receipt).is_err());
         let restored = &cached.recovery_products[0];
         assert_eq!(restored.owner(), original.recovery_products[0].owner());
         assert_eq!(
