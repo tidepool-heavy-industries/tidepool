@@ -70,6 +70,10 @@ the former eval and invocation cache layouts; neither is read or written.
 `source_root_manifest` and `source_roots_identity` still own whole-source-revision
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
+Build-action and corpus declaration membership instead walks the complete selected
+namespace without reading unused source contents. Keep alias, cycle and metadata
+failures strict; consumed bytes and negative imports still require their existing
+evidence authentication. Whole-source identity callers continue hashing contents.
 
 Host authentication and private materialization use `host_work` checkpoints in
 the owning compiler scope, including between bounded reads and owner-lock polls.
