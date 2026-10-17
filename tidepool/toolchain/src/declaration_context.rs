@@ -687,12 +687,13 @@ impl OriginalCompilerInputs {
                 .module_interface()
                 .ok_or_else(|| failure("complete native product has no canonical owner"))?
                 .producer_sha256();
-            let issued = Self::issue_complete_native_availability(
+            let issued = Self::issue_complete_native_availability_with_source(
                 &artifacts,
                 &projection,
                 producer,
                 &complete,
                 &preferred,
+                None,
             )?;
             native_offers.extend(issued.native_offers);
             issued.artifacts
