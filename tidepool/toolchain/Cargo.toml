@@ -36,6 +36,7 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 proptest.workspace = true
+tidepool-codegen.workspace = true
 tidepool-test-data.workspace = true
 serial_test.workspace = true
 

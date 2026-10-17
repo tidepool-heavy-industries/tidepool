@@ -4228,6 +4228,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-atomic-write",
+ "tidepool-codegen",
  "tidepool-extract-cmd",
  "tidepool-extract-report",
  "tidepool-repr",

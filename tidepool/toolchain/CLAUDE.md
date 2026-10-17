@@ -127,9 +127,10 @@ pinned compiler deployment/package closure and explicit source directory trees.
 The CLI binds the configured frontend directly, clears inherited compiler and
 package selection, and uses private scratch as its current directory. Admission
 checks complete source evidence against the declared trees before export.
-Fixture requests select typed portable output. The worker closes reachable home
-bindings through its existing prepared recovery and rejects residual home-unit
-imports before writing programs. Ordinary extraction retains native-original
+Fixture requests select typed portable output before native original projection.
+The worker closes reachable home and package bindings through its existing
+prepared recovery. The portable export owner refuses every remaining executable
+import before exporting programs. Ordinary extraction retains native-original
 boundaries; portable output cannot carry resident, candidate or exact inputs.
 The GHC compilation owner replaces package-database flags with the libdir's
 pinned global database before loading packages. User databases and ambient
@@ -139,7 +140,8 @@ compilation. Native oracle actions select that same global database explicitly.
 Build actions never read or publish the runtime module-candidate store,
 deployment catalog or runtime build-products directory. Production readers
 validate every requested prepared program, typed-site sidecar, metadata and
-product certificate before any portable output is exported. The directory
+self-contained portable result before export. Native product certification stays
+on the native output path. The directory
 contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for every
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
