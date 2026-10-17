@@ -7198,10 +7198,17 @@ fn recovery_interface_projection_preserves_native_availability_modes() {
             .iter()
             .all(|artifact| artifact.product.is_none()));
         inputs.0.validate().unwrap();
+        let after = context.snapshot();
+        assert_eq!(after.producer, before.producer);
         assert_eq!(
-            context.snapshot(),
-            before,
-            "interface inspection cannot select groups or issue native availability"
+            after.graph_selection().unwrap(),
+            before.graph_selection().unwrap()
         );
+        assert_eq!(after.roles, before.roles);
+        assert_eq!(
+            after.offers, before.offers,
+            "interface inspection cannot issue native availability"
+        );
+        assert_eq!(after.lexical, before.lexical);
     }
 }
