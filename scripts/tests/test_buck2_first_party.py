@@ -1409,14 +1409,21 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                            "tidepool_rust_isolated_test")
         self.assertEqual(binary["required_test_modules"], ["tidepool/extract-cmd/src/main.rs"])
 
-    def test_toolchain_declares_only_the_resident_admission_case_mode(self):
+    def test_toolchain_declares_resident_admission_and_live_input_history_modes(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
                               "tidepool_rust_isolated_test")
         self.assertEqual(generated['case_compiler_modes'], {
             'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground':
+            'owned-resident',
+            'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof': 'owned-resident'})
+        history = self.rule("tidepool/toolchain", "toolchain_source_proof_pairing_test",
+                            "tidepool_rust_test_cases")
+        self.assertEqual(history['case_compiler_modes'], {
+            'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof':
             'owned-resident'})
+        self.assertEqual(history['env']['TIDEPOOL_TEST_TRACE_PROFILE'], 'full')
 
     def test_delegated_command_resource_target_requires_four_ignored_cases(self):
         metadata = json.loads(self.metadata.read_text())

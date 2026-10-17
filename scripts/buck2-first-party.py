@@ -1630,7 +1630,7 @@ tidepool_buildscript_run(
         env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
         unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-toolchain":
-            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},'
+            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},'
         if package_name == "tidepool":
             unit_extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         if package_name == "exomonad-host":
@@ -1660,9 +1660,11 @@ tidepool_buildscript_run(
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
+            env["TIDEPOOL_TEST_TRACE_PROFILE"] = "full"
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_source_proof_pairing_test",',
+                '    case_compiler_modes = {"artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',

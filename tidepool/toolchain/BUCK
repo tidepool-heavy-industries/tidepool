@@ -989,12 +989,13 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
-    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},
+    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 
 tidepool_rust_test_cases(
     name = "toolchain_source_proof_pairing_test",
+    case_compiler_modes = {"artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},
     binary = ":tidepool_toolchain_unit_tests_binary",
     exact_tests = [
         "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
@@ -1006,6 +1007,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_TEST_TRACE_PROFILE": "full",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
