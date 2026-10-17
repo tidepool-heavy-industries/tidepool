@@ -1228,11 +1228,16 @@ fn private_native_availability(
     producer: &[u8],
     selected: Option<&module_candidates::CandidateSet>,
 ) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
-    crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
-        context,
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
-        selected.map_or(&[], |selected| selected.native_availability.as_slice()),
-    )
+    match selected {
+        Some(selected) => crate::declaration_context::OriginalCompilerInputs::from_candidates(
+            context,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+            selected,
+        ),
+        None => {
+            crate::declaration_context::OriginalCompilerInputs::reuse_selected_authored(context)
+        }
+    }
 }
 
 fn checked_candidate_reservations(
@@ -3795,10 +3800,7 @@ fn seal_turn_outputs_with_validation(
                         table.clone(),
                         sites.to_vec(),
                         &artifact_view,
-                        &certified
-                            .source_selection
-                            .compiler_projection(&artifact_view)
-                            .map_err(compiler_evidence_failure)?,
+                        &certified.source_selection,
                         artifact_view.native_sites_for_groups(
                             &target_native_selection.groups_for_target(
                                 &artifact_view,
@@ -8802,7 +8804,7 @@ mod module_product_tests {
         let second_native = native_root(&second);
         assert_eq!(first_native.descriptors(), second_native.descriptors());
         let joined = first_native
-            .merge(&second_native)
+            .merge_fixture_selections(&second_native)
             .expect("same original native owners join across unrelated context extension");
         assert_eq!(joined.descriptors(), first_native.descriptors());
 
@@ -8818,7 +8820,9 @@ mod module_product_tests {
             promoted_owner(&first).module_version,
             changed_owner.module_version
         );
-        assert!(first_native.merge(&native_root(&changed)).is_err());
+        assert!(first_native
+            .merge_fixture_selections(&native_root(&changed))
+            .is_err());
     }
 
     #[test]

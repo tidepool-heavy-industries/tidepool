@@ -621,7 +621,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
         .copied()
         .collect::<BTreeSet<_>>();
     let old = islands[0].clone();
-    let merged = islands[0].merge(&islands[1]).unwrap();
+    let merged = islands[0].merge_fixture_selections(&islands[1]).unwrap();
     assert_eq!(merged.selected_native_groups(), expected);
     assert_ne!(
         old.selected_native_groups(),
@@ -762,9 +762,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
     let b = Arc::new(
         a.as_ref()
             .clone()
-            .with_compiler_input_projection(
-                catalog.projection(a.artifact_view(), [Some(1); MODULES]),
-            )
+            .recover_fixture_projection(catalog.projection(a.artifact_view(), [Some(1); MODULES]))
             .unwrap(),
     );
     let scratch = tempfile::tempdir().unwrap();

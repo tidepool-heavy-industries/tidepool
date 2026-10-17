@@ -232,7 +232,6 @@ impl ActivationPreviewOffer {
         if !sites.is_empty() {
             return Err(failure("pure activation preview emitted suspension sites"));
         }
-        let producer = self.prototype.producer();
         Ok(Arc::new(ExactCompiledActivationPreview {
             prototype: self.prototype.clone(),
             specification: self.specification.clone(),
@@ -240,11 +239,7 @@ impl ActivationPreviewOffer {
             table: read_table(root, target)?,
             yield_sites_digest: crate::artifacts::yield_sites_metadata_digest(&sites)?,
             disposition,
-            original_interfaces: Arc::new(ExactDeclarationContext::from_authenticated_interfaces(
-                producer,
-                artifact_context.artifact_view(),
-                artifact_context.compiler_input_projection().clone(),
-            )?),
+            original_interfaces: Arc::new(artifact_context.original_interface_context()?),
             original_execution: self.original_execution.clone(),
             display_context: self.display_context.clone(),
         }))
@@ -277,28 +272,22 @@ pub(crate) fn validate_original_display_context(
     ))
 }
 
-/// Authored instance implementations are retained native originals, rather
-/// than source originals that the compiler may lower again from Core. Offer
-/// only carriers matching the original request's selected canonical interface.
-/// Their complete census adds availability, never lexical or heap authority.
+/// Reuse authored implementations from the original context without issuing
+/// additional native availability.
 pub(crate) fn original_native_declaration_inputs(
     context: &ExactDeclarationContext,
     producer: &[u8],
 ) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
-    use crate::artifact_inventory::CanonicalProducerIdentity;
-
     context.original_instance_target()?;
-    let products = context
-        .compiler_input_projection()
-        .native_declaration_availability(context.artifact_view())?;
-    if products.is_empty() {
-        return Ok(None);
+    if context.toolchain_identity_sha256()
+        != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256()
+    {
+        return Err(CompileError::ExtractFailed(
+            "activation original producer changed".into(),
+        ));
     }
-    crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
-        context,
-        CanonicalProducerIdentity::from_producer_bytes(producer),
-        &products,
-    )
+    crate::declaration_context::OriginalCompilerInputs::reuse_selected_authored(context)
 }
 
 #[derive(Debug)]

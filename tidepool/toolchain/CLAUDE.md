@@ -251,7 +251,15 @@ custody cannot supply missing groups or veto an exact proof. Ambient discovery
 belongs only to the absence of a supplied or selected proof.
 
 `CompilerSourceSupport` carries issued roles, graph custody and immutable native
-offers together through context publication and retained values. Narrowing type
+offers together through context publication and retained values. Its fields and
+constructor are private; domain operations carry selected issuer bindings rather
+than accepting independently reconstructed projections and views.
+`OriginalCompilerInputs` is a separate baseline-dependent private contribution:
+authenticate its own scoped role associations at issuance, then close its type
+dependencies against the receiving context and protected requirements at request
+construction. A missing baseline role cannot be supplied by private custody.
+Activation reuses carried offers unchanged; fresh complete issuance belongs to
+checked candidates or certified physical outputs. Narrowing type
 or execution selection does not reissue body availability. Requests consume
 carried offers; they do not census broader context custody. Context snapshot v3
 records exact offer selections and Empty/Partial/Full mode. Reopening authenticates

@@ -156,9 +156,9 @@ pub struct CompilerInputProjection {
 /// Required type interfaces do not grant lexical imports or native body demand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompilerSourceSupport {
-    pub(crate) projection: CompilerInputProjection,
-    pub(crate) artifacts: ArtifactView,
-    pub(crate) native_offers: Arc<[IssuedNativeOffer]>,
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+    native_offers: Arc<[IssuedNativeOffer]>,
 }
 
 /// Borrowed selected interface observations and the same issuing view that
@@ -217,12 +217,13 @@ impl SelectedCompilerInterfaces<'_> {
 }
 
 impl CompilerSourceSupport {
-    pub(crate) fn new(
+    fn new(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
+        projection.validate_associations(&artifacts)?;
         let mut offers = Vec::new();
         let retained = artifacts.retain_issued_offer_custody(
             native_offers.into_iter().filter_map(|offer| {
@@ -243,7 +244,7 @@ impl CompilerSourceSupport {
 
     /// Issue availability at a checked original input ingress from its exact
     /// selected graph. Custody outside that selection cannot supply bodies.
-    pub(crate) fn from_selected_issuance(
+    fn from_selected_issuance(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
     ) -> Result<Self, CompileError> {
@@ -295,7 +296,313 @@ impl CompilerSourceSupport {
         &self.native_offers
     }
 
+    pub(crate) fn close_request(
+        &self,
+        fragment: Option<&crate::declaration_context::OriginalCompilerInputs>,
+        protected: &crate::declaration_context::ProtectedScaffoldRequirements,
+    ) -> Result<Self, CompileError> {
+        let (artifacts, projection) = match fragment {
+            Some(fragment) => ArtifactView::receive_original_fragment(self, fragment)?,
+            None => (self.artifacts.clone(), self.projection.clone()),
+        };
+        let projection = projection.merge(protected.role_requirements())?;
+        let offers = self
+            .native_offers
+            .iter()
+            .chain(
+                fragment
+                    .into_iter()
+                    .flat_map(|fragment| fragment.issued_offers().iter()),
+            )
+            .cloned();
+        let offers = offers
+            .map(|offer| offer.within_projection(&projection, &artifacts))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten();
+        Self::new(projection, artifacts, offers)
+    }
+
+    pub(crate) fn from_recovered_selection(
+        selection: crate::declaration_context::RecoveredCompilerSelection,
+    ) -> Result<Self, CompileError> {
+        let (artifacts, projection, issuance) = selection.into_parts();
+        match issuance {
+            crate::declaration_context::RecoveredCompilerIssuance::CheckedInput => {
+                Self::from_selected_issuance(projection, artifacts)
+            }
+            crate::declaration_context::RecoveredCompilerIssuance::RecordedRoles => {
+                Self::new(projection, artifacts, [])
+            }
+        }
+    }
+
+    pub(crate) fn restore_snapshot_offers(
+        &self,
+        snapshot: &crate::exact_context::ExactContextSnapshot,
+    ) -> Result<Self, CompileError> {
+        if self.projection.roles() != snapshot.compiler_roles() {
+            return Err(failure(
+                "recovered availability roles differ from their context",
+            ));
+        }
+        let offers = snapshot
+            .native_offers()
+            .map(|fact| fact.restore(&self.artifacts))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(self.projection.clone(), self.artifacts.clone(), offers)
+    }
+
+    pub(crate) fn from_joined_interface(
+        interface: &crate::recovery_artifacts::CertifiedJoinedInterface,
+        inputs: &crate::declaration_join::ValidatedJoinInputs,
+    ) -> Result<Self, CompileError> {
+        let source = inputs.support();
+        let entry = Arc::new(ArtifactEntry::interface(
+            interface.clone(),
+            JoinedInterfaceRole::LexicalJoin,
+            inputs.owners().to_vec(),
+        ));
+        let issued = CompilerInputProjection::from_issued_entries(&[entry.clone()])?;
+        let namespace = source.projection.merge(&issued)?;
+        let joined = source
+            .artifacts
+            .inventory()
+            .admit_projected_with_native_requirements(
+                &source.artifacts,
+                vec![entry],
+                &namespace.interface_only(),
+                &[],
+            )?;
+        let joined = joined.merge_selected(&source.artifacts, &namespace)?;
+        Self::new(namespace, joined, source.native_offers.iter().cloned())
+    }
+
+    pub(crate) fn close_complete_output(
+        output: &crate::declaration_context::OriginalCompilerInputs,
+    ) -> Result<Self, CompileError> {
+        Self::new(
+            output.role_projection().clone(),
+            output.issued_artifacts().clone(),
+            output.issued_offers().iter().cloned(),
+        )
+    }
+
+    pub(crate) fn from_original_output(
+        request: &crate::declaration_context::ExactCompilationRequest,
+        output: &crate::declaration_context::OriginalCompilerInputs,
+    ) -> Result<Self, CompileError> {
+        let projection = request
+            .compiler_inputs()
+            .projection
+            .within_view(output.issued_artifacts())
+            .merge(output.role_projection())?;
+        Self::new(
+            projection,
+            output.issued_artifacts().clone(),
+            request
+                .context()
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .chain(output.issued_offers())
+                .cloned(),
+        )
+    }
+
+    pub(crate) fn extend_program_source(
+        &self,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        artifacts: &ArtifactView,
+        admissions: &[crate::declaration_context::ExactSourceAdmission],
+    ) -> Result<Self, CompileError> {
+        let mut owners = BTreeSet::new();
+        for admission in admissions {
+            owners.extend(admission.home_imports()?.into_keys());
+        }
+        let incoming = selection
+            .compiler_support_projection(artifacts, admissions)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+            .for_source_owners(&owners);
+        let (artifacts, projection) = self.artifacts.merge_compiler_inputs_with_demand(
+            &self.projection,
+            artifacts,
+            &incoming,
+            CompilerNativeDemand::RoleIssuer,
+            CompilerInputValidation::ReceivedFragment,
+        )?;
+        let offers = selection
+            .issued_native_availability()
+            .flat_map(|availability| availability.offers().iter().cloned());
+        Self::new(
+            projection,
+            artifacts,
+            self.native_offers.iter().cloned().chain(offers),
+        )
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self::new(
+            CompilerInputProjection::default(),
+            ArtifactInventory::default().empty_view(),
+            [],
+        )
+        .expect("empty compiler support is closed")
+    }
+
+    pub(crate) fn retain_custody(&self, incoming: &ArtifactView) -> Result<Self, CompileError> {
+        Self::new(
+            self.projection.clone(),
+            self.artifacts.retain_custody(incoming)?,
+            self.native_offers.iter().cloned(),
+        )
+    }
+
+    pub(crate) fn retain_offers(
+        &self,
+        incoming: impl IntoIterator<Item = IssuedNativeOffer>,
+    ) -> Result<Self, CompileError> {
+        Self::new(
+            self.projection.clone(),
+            self.artifacts.clone(),
+            self.native_offers.iter().cloned().chain(incoming),
+        )
+    }
+
+    pub(crate) fn bind_snapshot_baseline(
+        &self,
+        snapshot: &crate::exact_context::ExactContextSnapshot,
+    ) -> Result<Self, CompileError> {
+        let mut projection = self.projection.clone();
+        projection.bind_snapshot_roles(&snapshot.roles)?;
+        let mut artifacts = self.artifacts.clone();
+        artifacts.bind_selection_snapshot_baseline(snapshot.selection().clone())?;
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    pub(crate) fn finalize_namespace(&self) -> Result<Self, CompileError> {
+        Self::new(
+            self.projection.clone(),
+            self.artifacts.with_compiler_projection(&self.projection)?,
+            self.native_offers.iter().cloned(),
+        )
+    }
+
+    pub(crate) fn for_source_owners(
+        &self,
+        owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Self, CompileError> {
+        Self::new(
+            self.projection.for_source_owners(owners),
+            self.artifacts.clone(),
+            self.native_offers.iter().cloned(),
+        )
+    }
+
+    pub(crate) fn certify_original_closure(
+        &self,
+        originals: &crate::certified_products::SelectedOriginalClosure,
+    ) -> Result<Self, CompileError> {
+        let (artifacts, projection) = self
+            .artifacts
+            .merge_selected_original_closure(&self.projection, originals)?;
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admit_checked_products(
+        &self,
+        producer: [u8; 32],
+        products: &[CertifiedRecoveryProduct],
+    ) -> Result<Self, CompileError> {
+        if products.is_empty() {
+            return Ok(self.clone());
+        }
+        let fragment =
+            crate::declaration_context::OriginalCompilerInputs::from_checked_support_products(
+                self, producer, products,
+            )?;
+        let (artifacts, projection) = ArtifactView::receive_original_fragment(self, &fragment)?;
+        Self::new(
+            projection,
+            artifacts,
+            self.native_offers
+                .iter()
+                .chain(fragment.issued_offers())
+                .cloned(),
+        )
+    }
+
+    pub(crate) fn admit_value_interfaces(
+        &self,
+        values: &[Arc<crate::recovery_artifacts::CertifiedValueInterface>],
+    ) -> Result<Self, CompileError> {
+        let entries = values
+            .iter()
+            .map(|value| {
+                Arc::new(ArtifactEntry::interface(
+                    value.interface().clone(),
+                    JoinedInterfaceRole::ValueInterface,
+                    value.requirements().to_vec(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
+        let projection = self.projection.merge(&issued)?;
+        let artifacts = self
+            .artifacts
+            .inventory()
+            .admit_projected_with_native_offers(
+                &self.artifacts,
+                entries,
+                &projection,
+                &self.native_offers,
+            )?;
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    pub(crate) fn without_value_roots(
+        &self,
+        excluded: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
+        let projection = self.projection.within_view(&artifacts);
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    pub(crate) fn select_type_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
+        let selected = self.selected_interfaces()?;
+        let requested = roots.into_iter().collect::<BTreeSet<_>>();
+        let owners = selected
+            .entries()
+            .iter()
+            .filter(|(_, entry)| requested.contains(&entry.descriptor.id))
+            .map(|(owner, _)| owner.clone())
+            .collect::<Vec<_>>();
+        if owners.len() != requested.len() {
+            return Err(failure(
+                "interface root is outside selected compiler interfaces",
+            ));
+        }
+        selected.support_for_owners(owners)
+    }
+
     pub(crate) fn from_interface_selection(artifacts: &ArtifactView) -> Result<Self, CompileError> {
+        let namespace = artifacts.namespace();
+        for id in namespace.keys() {
+            if let ArtifactPayload::Original(product) = &artifacts.lease.payloads[id].payload {
+                let canonical = product
+                    .module_interface()
+                    .ok_or_else(|| failure("selected original lacks its canonical attachment"))?;
+                if !namespace
+                    .contains_key(&ArtifactEntry::canonical(canonical.clone()).descriptor.id)
+                {
+                    return Err(failure(
+                        "interface input lacks a selected canonical interface",
+                    ));
+                }
+            }
+        }
         let entries = artifacts
             .namespace()
             .keys()
@@ -311,6 +618,49 @@ impl CompilerSourceSupport {
                 .collect(),
         )?;
         Self::new(projection, interfaces, [])
+    }
+
+    pub(crate) fn select_publication_graph(
+        &self,
+        root: &ExactModuleIdentity,
+        roots: Vec<ArtifactId>,
+        owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Self, CompileError> {
+        let role = self
+            .projection
+            .snapshot_roles()
+            .get(root)
+            .ok_or_else(|| failure("published root lacks its issued role"))?;
+        let original = role
+            .original()
+            .ok_or_else(|| failure("published root lacks an original"))?;
+        let artifacts = match role {
+            CompilerInputRole::PublishedSourceOriginal { selection, .. } => {
+                self.artifacts.select_issued(roots, selection)?
+            }
+            _ => self.artifacts.select_publication_roots(original, roots)?,
+        };
+        let ids = artifacts
+            .artifact_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let projection = self.projection.project_roles(|owner, role| {
+            (owners.contains(owner) && ids.contains(&role.interface())).then(|| {
+                if owner == root && role.is_published_source_original() {
+                    role.clone()
+                } else if let Some(original) = role.original().filter(|id| ids.contains(id)) {
+                    CompilerInputRole::ReusableOriginal {
+                        interface: role.interface(),
+                        original,
+                    }
+                } else {
+                    CompilerInputRole::InterfaceOnly {
+                        interface: role.interface(),
+                    }
+                }
+            })
+        });
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     pub(crate) fn publish_original(
@@ -707,6 +1057,7 @@ impl CompilerInputProjection {
     /// Retained authored bodies can supplement selected type evidence privately.
     /// An original role restricts availability to its exact implementation; an
     /// interface-only role does not select executable groups or mutate its role.
+    #[cfg(test)]
     pub(crate) fn native_declaration_availability(
         &self,
         view: &ArtifactView,

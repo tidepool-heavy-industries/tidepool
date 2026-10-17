@@ -43,8 +43,8 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Vec<ArtifactId>, CompileError> {
-        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
-        let roles = self.facts.compiler_support.projection.roles();
+        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
+        let roles = self.facts.compiler_support.projection().roles();
         let issued = roles
             .iter()
             .find_map(|role| match role {
@@ -57,13 +57,13 @@ impl ExactDeclarationContext {
             })
             .unwrap_or_else(|| {
                 crate::artifact_inventory::ExactArtifactSelection::capture(
-                    &self.facts.compiler_support.artifacts,
+                    &self.facts.compiler_support.artifacts(),
                 )
             });
         let issuer = self
             .facts
             .compiler_support
-            .artifacts
+            .artifacts()
             .select_issued(vec![original], &issued)?;
         let mut roots = BTreeSet::from([original]);
         for node in self.published_lexical_closure(root)? {
@@ -140,7 +140,7 @@ impl ExactDeclarationContext {
         let closure = self
             .facts
             .compiler_support
-            .artifacts
+            .artifacts()
             .select_issued(self.published_artifact_roots(root, *original)?, selection)?;
         let metadata = closure.metadata_snapshot();
         let entry = metadata
@@ -199,7 +199,7 @@ impl ExactDeclarationContext {
         let roles = self
             .facts
             .compiler_support
-            .projection
+            .projection()
             .roles()
             .into_iter()
             .filter(CompilerInputRole::is_published_source_original)
@@ -207,7 +207,7 @@ impl ExactDeclarationContext {
         if roles.is_empty() {
             return Ok(());
         }
-        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
+        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
         for role in roles {
             if let CompilerInputRole::PublishedSourceOriginal {
                 interface,
@@ -237,7 +237,7 @@ impl ExactDeclarationContext {
         if !self
             .facts
             .compiler_support
-            .projection
+            .projection()
             .roles()
             .iter()
             .any(CompilerInputRole::is_published_source_original)
@@ -245,10 +245,10 @@ impl ExactDeclarationContext {
             return Ok(Vec::new());
         }
         self.normalize()?;
-        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
+        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
         self.facts
             .compiler_support
-            .projection
+            .projection()
             .roles()
             .into_iter()
             .filter_map(|role| {
@@ -351,71 +351,15 @@ impl ExactDeclarationContext {
         original: ArtifactId,
     ) -> Result<Self, CompileError> {
         let roots = self.published_artifact_roots(root, original)?;
-        let inventory = match self
-            .facts
-            .compiler_support
-            .projection
-            .roles()
-            .iter()
-            .find(|role| role.original() == Some(original) && role.is_published_source_original())
-        {
-            Some(CompilerInputRole::PublishedSourceOriginal { selection, .. }) => self
-                .facts
-                .compiler_support
-                .artifacts
-                .select_issued(roots, selection)?,
-            _ => self
-                .facts
-                .compiler_support
-                .artifacts
-                .select_publication_roots(original, roots)?,
-        };
-        let ids = inventory
-            .descriptors()
-            .into_iter()
-            .map(|row| row.id)
-            .collect::<BTreeSet<_>>();
-        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
         let lexical = self.published_lexical_closure(root)?;
-        let owners = lexical
-            .iter()
-            .map(|node| &node.owner)
-            .collect::<BTreeSet<_>>();
-        let roles = self
+        let owners = lexical.iter().map(|node| node.owner.clone()).collect();
+        let compiler_support = self
             .facts
             .compiler_support
-            .projection
-            .roles()
-            .into_iter()
-            .filter(|role| {
-                ids.contains(&role.interface())
-                    && owners.contains(&metadata.artifacts[&role.interface()].descriptor.owner)
-            })
-            .map(|role| {
-                let owner = &metadata.artifacts[&role.interface()].descriptor.owner;
-                if owner == root && role.is_published_source_original() {
-                    role
-                } else if let Some(original) =
-                    role.original().filter(|original| ids.contains(original))
-                {
-                    CompilerInputRole::ReusableOriginal {
-                        interface: role.interface(),
-                        original,
-                    }
-                } else {
-                    CompilerInputRole::InterfaceOnly {
-                        interface: role.interface(),
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+            .select_publication_graph(root, roots, &owners)?;
         Self::from_facts(DeclarationContextFacts {
             producer: self.facts.producer,
-            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-                CompilerInputProjection::restore(&inventory, &roles)?,
-                inventory,
-                self.facts.compiler_support.native_offers.iter().cloned(),
-            )?,
+            compiler_support,
             lexical: self
                 .facts
                 .lexical
@@ -457,7 +401,7 @@ impl ExactDeclarationContext {
         let interface = context
             .facts
             .compiler_support
-            .projection
+            .projection()
             .roles()
             .into_iter()
             .find(|role| role.original() == Some(entry.descriptor.id))
@@ -469,7 +413,7 @@ impl ExactDeclarationContext {
             source_revision: revision.into(),
             original_input_identity: input_identity.into(),
             selection: crate::artifact_inventory::ExactArtifactSelection::capture(
-                &context.facts.compiler_support.artifacts,
+                &context.facts.compiler_support.artifacts(),
             ),
             selection_sha256: [0; 32],
         };
@@ -525,7 +469,7 @@ impl ExactDeclarationContext {
         if !self
             .facts
             .compiler_support
-            .projection
+            .projection()
             .roles()
             .iter()
             .any(CompilerInputRole::is_published_source_original)
@@ -537,7 +481,7 @@ impl ExactDeclarationContext {
         Ok(Value::Array(
             self.facts
                 .compiler_support
-                .projection
+                .projection()
                 .roles()
                 .into_iter()
                 .filter_map(|role| {
@@ -572,7 +516,7 @@ impl ExactDeclarationContext {
                     let dependencies = context
                         .facts
                         .compiler_support
-                        .projection
+                        .projection()
                         .roles()
                         .into_iter()
                         .filter_map(|role| {
@@ -619,8 +563,178 @@ mod tests {
 
     #[test]
     fn published_source_composition_preserves_selected_issuer_over_historical_custody() {
+        published_composition_histories(false, false);
+    }
+
+    #[test]
+    fn sparse_partial_publication_cannot_promote_unissued_later_group() {
+        published_composition_histories(true, false);
+    }
+
+    #[test]
+    fn interface_adapter_preserves_issued_canonical_scope_and_refuses_unselected_attachment() {
+        published_composition_histories(false, true);
+    }
+
+    fn check_interface_adapter(
+        issued: &ExactDeclarationContext,
+        selected_issuer: &ArtifactView,
+        original: ArtifactId,
+        child: ArtifactId,
+    ) {
         use crate::artifact_inventory::{
-            ArtifactBindingNode, ArtifactInventoryFailure, CompilerSourceSupport, IssuedNativeOffer,
+            ArtifactBindingNode, ArtifactDependency, ExactArtifactSelection,
+        };
+        let root_owner = identity("fixture", "Root");
+        let graph = issued.artifact_view().capture_graph_selection();
+        let original_binding = *graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == original)
+            .unwrap();
+        let canonical =
+            issued.compiler_input_projection().snapshot_roles()[&root_owner].interface();
+        let canonical_binding = issued
+            .artifact_view()
+            .binding_dependencies()
+            .into_iter()
+            .find_map(|(from, to, dependency)| match (from, to, dependency) {
+                (
+                    ArtifactBindingNode::Artifact(from),
+                    ArtifactBindingNode::Artifact(to),
+                    ArtifactDependency::Interface,
+                ) if from == original_binding && to.artifact == canonical => Some(to),
+                _ => None,
+            })
+            .expect("the selected original owns its exact canonical attachment");
+        let interfaces = issued
+            .artifact_view()
+            .interface_projection(std::slice::from_ref(&root_owner))
+            .unwrap();
+        assert!(interfaces
+            .capture_graph_selection()
+            .namespace
+            .contains(&canonical_binding));
+        assert!(interfaces.selected_native_groups().is_empty());
+        let expected_edges = interfaces.binding_dependencies();
+        let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let extended = empty
+            .clone()
+            .extend_interface_artifacts(&interfaces)
+            .expect("the checked-cell interface projection preserves its issuing scope");
+        let roles = extended.compiler_input_projection().snapshot_roles();
+        assert_eq!(roles[&root_owner].interface(), canonical);
+        assert_eq!(roles[&identity("fixture", "Child")].interface(), child);
+        assert_eq!(roles.len(), 2);
+        assert!(roles.values().all(|role| role.original().is_none()));
+        assert!(extended
+            .artifact_view()
+            .capture_graph_selection()
+            .namespace
+            .contains(&canonical_binding));
+        assert_eq!(
+            extended.artifact_view().binding_dependencies(),
+            expected_edges
+        );
+        assert!(extended.artifact_view().selected_native_groups().is_empty());
+        assert!(extended.lexical_graph().is_empty());
+
+        // Recovery may transport a narrower namespace without changing any
+        // authenticated binding, edge, root or custody fact. An attachment in
+        // custody does not make it a selected interface input.
+        assert_eq!(
+            selected_issuer
+                .capture_graph_selection()
+                .bindings
+                .iter()
+                .filter(|binding| binding.artifact == canonical)
+                .count(),
+            1,
+            "the clean issuer negative cannot refuse from canonical binding ambiguity"
+        );
+        for source in [selected_issuer, issued.artifact_view()] {
+            let graph = source.capture_graph_selection();
+            let mut original_only = graph.clone();
+            original_only
+                .namespace
+                .retain(|binding| *binding == original_binding);
+            let original_only = source
+                .select_issued(
+                    vec![original],
+                    &ExactArtifactSelection::from_recovered_graph_selection(original_only),
+                )
+                .expect("the owner authenticates the unchanged issued graph");
+            let narrowed = original_only.capture_graph_selection();
+            assert_eq!(narrowed.namespace, vec![original_binding]);
+            assert_eq!(narrowed.bindings, graph.bindings);
+            assert_eq!(narrowed.roots, graph.roots);
+            assert_eq!(narrowed.custody_roots, graph.custody_roots);
+            assert_eq!(narrowed.native_groups, graph.native_groups);
+            assert_eq!(
+                original_only.binding_dependencies(),
+                source.binding_dependencies()
+            );
+            assert!(narrowed.bindings.contains(&canonical_binding));
+            assert!(
+                empty
+                    .clone()
+                    .extend_interface_artifacts(&original_only)
+                    .is_err(),
+                "an Original-only namespace must refuse its unselected canonical attachment"
+            );
+        }
+    }
+
+    fn assert_sparse_partial_transport(context: &ExactDeclarationContext, original: ArtifactId) {
+        let offers = context.compiler_source_support().native_offers();
+        let partials = offers
+            .iter()
+            .filter(|offer| offer.original() == original)
+            .filter_map(|offer| match offer.snapshot_facts().body {
+                crate::exact_context::NativeOfferSnapshotBody::Partial(selection) => {
+                    Some(selection)
+                }
+                crate::exact_context::NativeOfferSnapshotBody::Full(_) => {
+                    panic!("sparse issuance became Full")
+                }
+                crate::exact_context::NativeOfferSnapshotBody::Empty(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(partials.len(), 1);
+        assert_eq!(
+            partials[0]
+                .graph_selection()
+                .native_groups
+                .iter()
+                .filter(|group| group.binding.artifact() == original)
+                .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([7])
+        );
+        assert!(context
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups
+            .iter()
+            .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
+        let transport = NativeCompilerTransport::issue(
+            &context.compiler_metadata_snapshot().unwrap(),
+            context.artifact_view(),
+            offers,
+        )
+        .unwrap();
+        let availability = &transport.availability[&original];
+        assert!(availability.permits(7));
+        assert!(!availability.permits(11));
+        assert!(
+            matches!(&availability.mode, NativeTransportMode::IssuedGroups(groups)
+            if groups == &BTreeSet::from([7]))
+        );
+    }
+
+    fn published_composition_histories(sparse: bool, interface_adapter_only: bool) {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactInventoryFailure, IssuedNativeOffer,
         };
         let producer = [2; 32];
         let child_interface = crate::certified_products::fixture_module_interface(
@@ -639,11 +753,15 @@ mod tests {
                 BTreeMap::new(),
             ),
         ));
+        let ordinals = if sparse { [7, 11] } else { [3, 29] };
         let root = |version| {
             let product = crate::certified_products::fixture_finalized_product_with_requirements(
                 crate::certified_products::tests::original_groups_fixture_with_interface(
                     "Root",
-                    vec![(3, vec![]), (29, vec![])],
+                    ordinals
+                        .into_iter()
+                        .map(|ordinal| (ordinal, vec![]))
+                        .collect(),
                     version,
                     &BTreeMap::new(),
                     b"published root interface".to_vec(),
@@ -715,9 +833,22 @@ mod tests {
                         if reverse {
                             entries.reverse();
                         }
-                        inventory
-                            .admit_shared(&inventory.empty_view(), entries)
-                            .unwrap()
+                        if sparse {
+                            inventory
+                                .admit_recovery_selection(
+                                    &inventory.empty_view(),
+                                    entries,
+                                    &BTreeSet::from([NativeGroupKey {
+                                        artifact: native.descriptor.id,
+                                        original_ordinal: 7,
+                                    }]),
+                                )
+                                .unwrap()
+                        } else {
+                            inventory
+                                .admit_shared(&inventory.empty_view(), entries)
+                                .unwrap()
+                        }
                     })
                     .collect::<Vec<_>>();
                 let binding = |index: usize| {
@@ -756,7 +887,7 @@ mod tests {
                     let old =
                         IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
                             .unwrap();
-                    let support = CompilerSourceSupport::new(
+                    let support = crate::declaration_context::recover_fixture_compiler_support(
                         projection.clone(),
                         views[selected].clone(),
                         [old.clone(), old],
@@ -777,9 +908,25 @@ mod tests {
                     .unwrap()
                     .extend_issued_compiler_support(&support)
                     .unwrap();
+                    if interface_adapter_only {
+                        check_interface_adapter(
+                            &issued,
+                            &views[selected],
+                            native.descriptor.id,
+                            children[selected].descriptor.id,
+                        );
+                        completed += 1;
+                        continue;
+                    }
                     let publication = issued
                         .issue_published_source_original("revision", "input", &root_owner)
                         .expect("the completed target directly imported the native root");
+                    if sparse {
+                        assert_sparse_partial_transport(
+                            publication.context(),
+                            native.descriptor.id,
+                        );
+                    }
                     let publication_sha = publication.context().semantic_sha256();
                     let publication_graph = publication
                         .context()
@@ -822,6 +969,12 @@ mod tests {
                                 .with_published_source_originals(&publication)
                             {
                                 Ok(next) => {
+                                    if sparse {
+                                        assert_sparse_partial_transport(
+                                            &next,
+                                            native.descriptor.id,
+                                        );
+                                    }
                                     assert_eq!(
                                         next.compiler_input_projection().snapshot_roles()
                                             [&root_owner],
@@ -958,7 +1111,7 @@ mod tests {
             failures.is_empty(),
             "published composition rejected an issuer-preserving history"
         );
-        assert_eq!(completed, 16);
+        assert_eq!(completed, if interface_adapter_only { 8 } else { 16 });
     }
 
     #[test]
@@ -1064,7 +1217,7 @@ mod tests {
             .within_view(originals.native_closure());
         let (policy_only, _) = originals
             .native_closure()
-            .merge_compiler_inputs(
+            .merge_fixture_compiler_inputs(
                 &legacy_incoming,
                 published.artifact_view(),
                 published.compiler_input_projection(),
@@ -1179,7 +1332,7 @@ mod tests {
                     .as_ref()
                     .clone()
                     .extend_issued_compiler_support(
-                        &crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                        &crate::declaration_context::issue_fixture_compiler_support(
                             fresh_projection,
                             fresh_view,
                         )
@@ -1472,7 +1625,7 @@ mod tests {
             let continued = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &admitted,
-                published.facts.compiler_support.projection.clone(),
+                published.facts.compiler_support.projection().clone(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
@@ -1494,7 +1647,7 @@ mod tests {
             let with_ambient = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &ambient,
-                published.facts.compiler_support.projection.clone(),
+                published.facts.compiler_support.projection().clone(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],

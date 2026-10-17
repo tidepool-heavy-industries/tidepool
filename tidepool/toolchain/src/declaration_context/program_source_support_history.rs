@@ -29,10 +29,7 @@ mod program_source_support_history {
         products: &[CertifiedRecoveryProduct],
     ) -> crate::artifact_inventory::CompilerSourceSupport {
         let (artifacts, projection) = original_offer(products);
-        crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
-            projection, artifacts,
-        )
-        .unwrap()
+        crate::declaration_context::issue_fixture_compiler_support(projection, artifacts).unwrap()
     }
 
     fn source_selection(
@@ -109,7 +106,7 @@ mod program_source_support_history {
         let artifacts = support
             .compiler_support
             .artifacts()
-            .merge(&support_view(&[support_product("Consumer")]))
+            .merge_fixture_selections(&support_view(&[support_product("Consumer")]))
             .unwrap();
         let actual = ExactProductAdmission {
             request: &request,
@@ -234,7 +231,7 @@ mod program_source_support_history {
         assert_eq!(baseline[0].module_interface(), alternate.module_interface());
         assert_ne!(baseline[0].owner(), alternate.owner());
         let custody = support_view(&baseline)
-            .merge(&support_view(&[alternate.clone()]))
+            .merge_fixture_selections(&support_view(&[alternate.clone()]))
             .unwrap();
         let sparse = [
             support_product("Consumer"),
@@ -312,7 +309,10 @@ mod program_source_support_history {
             assert_eq!(generated_owner, identity("fixture", "Consumer"));
             let source = "module Consumer where\n";
             let effective = request.compiler_inputs();
-            let full_view = effective.artifacts.merge(&sparse_view).unwrap();
+            let full_view = effective
+                .artifacts
+                .merge_fixture_selections(&sparse_view)
+                .unwrap();
             let full_projection = effective.projection.merge(&sparse_projection).unwrap();
             let full_selection = source_selection(&full_projection, &full_view);
             let full_input =

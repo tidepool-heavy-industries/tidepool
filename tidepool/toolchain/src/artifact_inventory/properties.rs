@@ -722,7 +722,7 @@ fn run_history(
                                     .collect(),
                             })
                     };
-                    let actual = left_view.merge(right_view);
+                    let actual = left_view.merge_fixture_selections(right_view);
                     match (expected, actual) {
                         (Ok(expected), Ok(actual)) => {
                             coverage.merged += 1;

@@ -322,7 +322,7 @@ fn certify_promotion(
     let context = Arc::new(
         context
             .clone()
-            .with_compiler_input_projection(projection)
+            .recover_fixture_projection(projection)
             .unwrap(),
     );
     let directory = root.join(format!("promotion-{index}"));
@@ -476,7 +476,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     // The exact request exposes canonical interfaces while withholding native
     // originals from the compiler input.
     let projection = context.compiler_input_projection().interface_only();
-    context = context.with_compiler_input_projection(projection).unwrap();
+    context = context.recover_fixture_projection(projection).unwrap();
     let directory = root.path().join("promotion-0");
     std::fs::create_dir(&directory).unwrap();
     let input = directory.join("Target.hs");
@@ -1256,7 +1256,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         // newly certified native version for each owner.
         let projection = history_context.compiler_input_projection().interface_only();
         history_context = history_context
-            .with_compiler_input_projection(projection)
+            .recover_fixture_projection(projection)
             .unwrap()
             .extend_checked_original_products(
                 canonical_producer,

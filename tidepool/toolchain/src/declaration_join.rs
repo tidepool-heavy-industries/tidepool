@@ -418,7 +418,7 @@ impl CertifiedAuthoredDeclaration {
             .collect();
         let implementations = self
             .compiler_support
-            .artifacts
+            .artifacts()
             .source_implementation_roles();
         let mut inherited_by_owner = std::collections::BTreeMap::new();
         for node in inherited.iter().chain(&self.source_lexical_imports) {
@@ -447,11 +447,11 @@ impl CertifiedAuthoredDeclaration {
     pub(crate) fn compiler_input_projection(
         &self,
     ) -> &crate::artifact_inventory::CompilerInputProjection {
-        &self.compiler_support.projection
+        &self.compiler_support.projection()
     }
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.compiler_support
-            .artifacts
+            .artifacts()
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -463,7 +463,7 @@ impl CertifiedAuthoredDeclaration {
             .collect()
     }
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
-        &self.compiler_support.artifacts
+        &self.compiler_support.artifacts()
     }
     pub fn lexical_exports(&self) -> &[DeclarationExport] {
         &self.lexical_exports
@@ -888,6 +888,20 @@ pub struct AcceptedJoin {
     context: ExactDeclarationContext,
 }
 
+pub(crate) struct ValidatedJoinInputs {
+    support: crate::artifact_inventory::CompilerSourceSupport,
+    owners: Vec<ExactModuleIdentity>,
+}
+
+impl ValidatedJoinInputs {
+    pub(crate) fn support(&self) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.support
+    }
+    pub(crate) fn owners(&self) -> &[ExactModuleIdentity] {
+        &self.owners
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RejectedJoin {
     input: DeclarationJoinInput,
@@ -1144,10 +1158,9 @@ pub fn certify_declaration_join(
                 )
                 .map_err(|error| contract(format!("joined package witness rejected: {error}")))?;
             context.validate_artifacts(&input.artifacts)?;
-            let entry = Arc::new(crate::artifact_inventory::ArtifactEntry::interface(
-                interface.clone(),
-                crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin,
-                input
+            let validated_inputs = ValidatedJoinInputs {
+                support: context.compiler_source_support().clone(),
+                owners: input
                     .artifacts
                     .iter()
                     .map(|artifact| ExactModuleIdentity {
@@ -1155,31 +1168,12 @@ pub fn certify_declaration_join(
                         module: artifact.interface.module.clone(),
                     })
                     .collect(),
-            ));
-            let source = context.artifact_view();
-            let issued =
-                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
-                    entry.clone()
-                ])?;
-            let namespace = context.compiler_input_projection().merge(&issued)?;
-            let joined = source
-                .inventory()
-                .admit_projected_with_native_requirements(
-                    source,
-                    vec![entry],
-                    &namespace.interface_only(),
-                    &[],
+            };
+            let compiler_support =
+                crate::artifact_inventory::CompilerSourceSupport::from_joined_interface(
+                    &interface,
+                    &validated_inputs,
                 )?;
-            let joined = joined.merge_selected(source, &namespace)?;
-            let compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
-                namespace,
-                joined,
-                context
-                    .compiler_source_support()
-                    .native_offers()
-                    .iter()
-                    .cloned(),
-            )?;
             Ok(CertifiedDeclarationJoin::Accepted(AcceptedJoin {
                 compiler_support,
                 input,
@@ -2564,7 +2558,6 @@ mod authored_tests {
     fn accepted_join_preserves_selected_dependencies_with_historical_interface_custody() {
         use crate::artifact_inventory::{
             ArtifactDependency, ArtifactEntry, ArtifactInventory, CompilerInputProjection,
-            CompilerSourceSupport,
         };
         use crate::exact_context::{hydrate_context, Materializer};
         use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -2619,8 +2612,12 @@ mod authored_tests {
             .unwrap();
         let context = context
             .extend_issued_compiler_support(
-                &CompilerSourceSupport::new(CompilerInputProjection::default(), custody, [])
-                    .unwrap(),
+                &crate::declaration_context::recover_fixture_compiler_support(
+                    CompilerInputProjection::default(),
+                    custody,
+                    [],
+                )
+                .unwrap(),
             )
             .unwrap();
         let original_graph = context.artifact_view().capture_graph_selection();

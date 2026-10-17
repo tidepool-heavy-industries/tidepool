@@ -1219,7 +1219,7 @@ fn run_history_observed(
                     let result = actual[*left]
                         .as_ref()
                         .unwrap()
-                        .merge(actual[*right].as_ref().unwrap());
+                        .merge_fixture_selections(actual[*right].as_ref().unwrap());
                     prop_assert!(result.is_ok(), "step {}: {:?}: {:?}", step, op, result);
                     let inventory = if right_view.physical.is_empty() {
                         left_view.inventory
@@ -1745,7 +1745,7 @@ fn cold_native_history(
     let right = parent
         .select_roots(vec![catalog.originals[1].descriptor.id])
         .unwrap();
-    let merged = left.merge(&right).unwrap();
+    let merged = left.merge_fixture_selections(&right).unwrap();
     let parent_reads = Arc::downgrade(&parent.reads);
     let left_reads = Arc::downgrade(&left.reads);
     let right_reads = Arc::downgrade(&right.reads);
@@ -2363,7 +2363,7 @@ fn exact_original_versions_do_not_substitute_across_views_or_reuse_indices() {
             .is_err());
     }
     let before = inventory.node_count();
-    let merged = old_view.merge(&new_view).unwrap();
+    let merged = old_view.merge_fixture_selections(&new_view).unwrap();
     assert_eq!(inventory.node_count(), before);
     let mut both = old.selection(&old_groups);
     both.extend(new.selection(&new_groups));

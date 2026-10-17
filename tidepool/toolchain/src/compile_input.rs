@@ -737,7 +737,7 @@ pub(crate) fn seal(
     table: DataConTable,
     sites: Vec<YieldSite>,
     artifacts: &crate::artifact_inventory::ArtifactView,
-    compiler_projection: &crate::artifact_inventory::CompilerInputProjection,
+    source_selection: &crate::certified_products::CertifiedSourceSelection,
     native_sites: crate::checked_cell::SelectedNativeSites,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
     // Original completed source output can retain compile-time execution.
@@ -798,28 +798,22 @@ pub(crate) fn seal(
             module: module.module.clone(),
         })
         .collect::<Vec<_>>();
+    let original_execution = Arc::new(
+        crate::declaration_context::ExactDeclarationContext::from_source_selection(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256(),
+            source_selection,
+            artifacts,
+            lexical,
+            original_target.clone(),
+            &required_instance_owners,
+        )?,
+    );
     Ok(Some(SealedOriginalCompileInput {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         source: source.into(),
-        original_interfaces: Arc::new(
-            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                    .sha256(),
-                artifacts,
-                compiler_projection.clone(),
-            )?,
-        ),
-        original_execution: Arc::new(
-            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                    .sha256(),
-                artifacts,
-                compiler_projection.clone(),
-                lexical,
-                original_target.clone(),
-                &required_instance_owners,
-            )?,
-        ),
+        original_interfaces: Arc::new(original_execution.original_interface_context()?),
+        original_execution,
         target: prepared.clone(),
         groups: groups.clone(),
         target_owners: target_owners.to_vec().into(),
@@ -905,7 +899,14 @@ mod tests {
             DataConTable::new(),
             vec![],
             &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
-            &crate::artifact_inventory::CompilerInputProjection::default(),
+            &crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &crate::artifact_inventory::CompilerInputProjection::default(),
+                &crate::artifact_inventory::ArtifactInventory::default()
+                    .empty_view()
+                    .metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap(),
             Default::default(),
         )
         .unwrap()

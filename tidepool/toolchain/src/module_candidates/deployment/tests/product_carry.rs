@@ -747,7 +747,9 @@ fn selected_merge_preserves_acquired_catalog_origins_in_exact_scope() {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_interface_view(&incoming).unwrap();
-            let merged = first.merge_selected(&incoming, &projection).unwrap();
+            let merged = first
+                .merge_fixture_selected(&incoming, &projection)
+                .unwrap();
             let descriptor = &merged.descriptors()[0];
             assert!(!merged.original_input_origins(descriptor.id).is_empty());
             let context = Arc::new(
@@ -1099,16 +1101,16 @@ fn independent_catalog_views_preserve_cold_and_warm_issuing_custody() {
             .union(&expected_b)
             .cloned()
             .collect::<BTreeSet<_>>();
-        let ab = a.merge(&b).unwrap();
-        let ba = b.merge(&a).unwrap();
+        let ab = a.merge_fixture_selections(&b).unwrap();
+        let ba = b.merge_fixture_selections(&a).unwrap();
         assert_eq!(origin_paths(&ab, id), expected_join);
         assert_eq!(origin_paths(&ba, id), expected_join);
         let other_inventory = ArtifactInventory::default();
         let other_b = other_inventory
             .admit_shared(&other_inventory.empty_view(), b.entries())
             .unwrap();
-        let cross_ab = a.merge(&other_b).unwrap();
-        let cross_ba = other_b.merge(&a).unwrap();
+        let cross_ab = a.merge_fixture_selections(&other_b).unwrap();
+        let cross_ba = other_b.merge_fixture_selections(&a).unwrap();
         assert_eq!(origin_paths(&cross_ab, id), expected_join);
         assert_eq!(origin_paths(&cross_ba, id), expected_join);
         assert_eq!(origin_paths(&other_b, id), expected_b);
@@ -1363,9 +1365,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
                     assert_ne!(source_of(&independent), expected);
                     // The same-inventory join must mask a right-side fresh proof,
                     // including when the left product explicitly has no proof.
-                    let shallow_join = parent.merge(&independent).unwrap();
+                    let shallow_join = parent.merge_fixture_selections(&independent).unwrap();
                     let deep_parent = inventory.admit_shared(&parent, parent.entries()).unwrap();
-                    let deep_join = deep_parent.merge(&independent).unwrap();
+                    let deep_join = deep_parent.merge_fixture_selections(&independent).unwrap();
                     assert_eq!(source_of(&shallow_join), expected);
                     assert_eq!(source_of(&deep_join), expected);
                     let detached = deep_join.select_roots(vec![id]).unwrap();

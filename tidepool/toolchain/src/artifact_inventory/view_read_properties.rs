@@ -238,7 +238,7 @@ fn construction_history(
         .select_roots(vec![catalog.entries[OWNERS - 2].descriptor.id])
         .unwrap();
     check_empty_observation(&branch, false)?;
-    let merged = peer.merge(&branch).unwrap();
+    let merged = peer.merge_fixture_selections(&branch).unwrap();
     check_empty_observation(&merged, false)?;
     let merged_roots = roots.union(&branch_roots).copied().collect::<BTreeSet<_>>();
     if read_schedule[3] {
@@ -632,16 +632,16 @@ proptest! {
                 projected.selected_native_groups().is_empty(),
                 "interface projection carries no native groups"
             );
-            selected = selected.merge(&projected).unwrap();
+            selected = selected.merge_fixture_selections(&projected).unwrap();
             check_read_projection(&selected)?;
         }
 
         // Exercise parent-linked same-inventory merging and cross-inventory
         // admission of identical content IDs from an independent graph.
-        let same_merged = peer.merge(&extended).unwrap();
+        let same_merged = peer.merge_fixture_selections(&extended).unwrap();
         check_read_projection(&same_merged)?;
         let other = right.admit(&right.empty_view(), other_catalog.entries[..OWNERS].to_vec()).unwrap();
-        let cross_merged = all.merge(&other).unwrap();
+        let cross_merged = all.merge_fixture_selections(&other).unwrap();
         check_read_projection(&cross_merged)?;
 
         // Release the full roots while a selected peer remains. Its read cache
@@ -859,8 +859,8 @@ fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
     check_empty_observation(&inherited, false).unwrap();
     check_empty_observation(&empty, true).unwrap();
     for merged in [
-        empty.merge(&inherited).unwrap(),
-        inherited.merge(&empty).unwrap(),
+        empty.merge_fixture_selections(&inherited).unwrap(),
+        inherited.merge_fixture_selections(&empty).unwrap(),
     ] {
         assert!(Arc::ptr_eq(&merged.lease, &inherited.lease));
         check_empty_observation(&merged, false).unwrap();
@@ -1005,7 +1005,9 @@ fn same_inventory_merge_keeps_custody_after_peer_read_caches_drop() {
     let right_reads = Arc::downgrade(&right.reads);
     let left_lease = Arc::downgrade(&left.lease);
     let right_lease = Arc::downgrade(&right.lease);
-    let merged = left.merge(&right).expect("same-inventory merge succeeds");
+    let merged = left
+        .merge_fixture_selections(&right)
+        .expect("same-inventory merge succeeds");
     check_read_projection(&merged).unwrap();
     assert!(!Arc::ptr_eq(&merged.reads, &left.reads));
     assert!(!Arc::ptr_eq(&merged.reads, &right.reads));

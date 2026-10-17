@@ -178,7 +178,7 @@ fn continued_context(
     ExactDeclarationContext::from_authenticated_execution(
         context.facts.producer,
         view,
-        context.facts.compiler_support.projection.clone(),
+        context.facts.compiler_support.projection().clone(),
         context.facts.lexical.to_vec(),
         root.descriptor.owner.clone(),
         &[root.descriptor.owner.clone()],
@@ -288,7 +288,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         },
                     };
                     let view = context
-                        .facts.compiler_support.artifacts
+                        .facts.compiler_support.artifacts()
                         .inventory()
                         .admit_shared_with_demand(
                             context.artifact_view(),

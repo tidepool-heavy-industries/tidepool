@@ -2164,7 +2164,6 @@ struct SelectedOwners {
 #[derive(Clone, Copy, Debug)]
 enum NativeClosureStage {
     Admission,
-    AcceptedMerge,
     #[cfg(test)]
     ColdValidation,
 }
@@ -6312,7 +6311,26 @@ impl ArtifactView {
 
     /// Join compiler inputs using each surviving role's issuing view. Other
     /// exact roots retain custody without becoming competing source choices.
-    pub(crate) fn merge_compiler_inputs(
+    #[cfg(test)]
+    pub(crate) fn merge_fixture_compiler_inputs(
+        &self,
+        projection: &CompilerInputProjection,
+        other: &Self,
+        incoming: &CompilerInputProjection,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        self.merge_compiler_inputs(projection, other, incoming)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_fixture_selected(
+        &self,
+        other: &Self,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        self.merge_selected(other, projection)
+    }
+
+    fn merge_compiler_inputs(
         &self,
         projection: &CompilerInputProjection,
         other: &Self,
@@ -6372,7 +6390,7 @@ impl ArtifactView {
         )
     }
 
-    pub(crate) fn receive_original_fragment(
+    fn receive_original_fragment(
         baseline: &compiler_projection::CompilerSourceSupport,
         fragment: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
@@ -6546,7 +6564,7 @@ impl ArtifactView {
         Ok(())
     }
 
-    pub(crate) fn merge_selected(
+    fn merge_selected(
         &self,
         other: &Self,
         projection: &CompilerInputProjection,
@@ -6764,117 +6782,12 @@ impl ArtifactView {
         Ok(retained)
     }
 
-    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        if Arc::ptr_eq(&self.lease, &other.lease) || !other.has_retained_nodes() {
-            return Ok(self.clone());
-        }
-        if !self.has_retained_nodes() {
-            return Ok(other.clone());
-        }
+    #[cfg(test)]
+    pub(crate) fn merge_fixture_selections(&self, other: &Self) -> Result<Self, CompileError> {
         self.validate_issued_merge(other)?;
-        {
-            let state = self.lease.inventory.0.lock().expect("inventory lock");
-            let parent_nodes = &self.read_projection(&state).nodes;
-            let parent_ids = artifact_ids(parent_nodes);
-            let mut nodes = parent_nodes.clone();
-            nodes.extend(other.read_projection(&state).nodes.iter().copied());
-            let ids = artifact_ids(&nodes);
-            let mut entries = self
-                .read_projection(&state)
-                .entries
-                .iter()
-                .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
-                .collect::<BTreeMap<_, _>>();
-            let mut issuing_payloads = BTreeMap::new();
-            for entry in &other.read_projection(&state).entries {
-                let id = entry.descriptor.id;
-                let merged = match entries.get(&id) {
-                    Some(previous) => {
-                        let merged = ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
-                        if !merged.same_issuing_authority(previous)
-                            || !merged.same_issuing_authority(entry)
-                        {
-                            issuing_payloads.insert(id, Arc::clone(&merged));
-                        }
-                        merged
-                    }
-                    None => Arc::clone(entry),
-                };
-                entries.insert(id, merged);
-            }
-            state
-                .entry_handle_copies
-                .fetch_add(ids.len() as u64, Ordering::Relaxed);
-            SelectedOwners::new(&state, &entries, &parent_ids)?.planned_edges(
-                &state,
-                &entries,
-                &native_groups(&nodes),
-                NativeClosureStage::AcceptedMerge,
-            ).map_err(|error| {
-                if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG) {
-                    if let CompileError::ArtifactInventory(error) = &error {
-                        if let ArtifactInventoryFailure::MissingDependency {
-                            artifact, required,
-                            dependency: ArtifactDependency::NativeGroup { dependent_ordinal, required_ordinal },
-                            ..
-                        } = &error.failure {
-                            for (input, view) in [("left", self), ("right", other)] {
-                                let projection = view.read_projection(&state);
-                                let matching = || projection.nodes.iter().filter_map(|node| match node {
-                                    InventoryNodeKey::Group(group)
-                                        if group.binding.artifact() == *artifact
-                                            && group.original_ordinal == *dependent_ordinal => Some(*group),
-                                    _ => None,
-                                });
-                                let group_count = matching().count();
-                                let groups = matching().take(16).map(|group| {
-                                    let node = InventoryNodeKey::Group(group);
-                                    let edge_count = state.outgoing(node).count();
-                                    let edges = state.outgoing(node).take(16).map(|(target, label)| {
-                                        let native = projection.entries.iter().find_map(|entry| match &entry.payload {
-                                            ArtifactPayload::Original(product) if entry.descriptor.id == target.artifact() =>
-                                                Some(NativeOwnerKey::from_owner(product.owner())),
-                                            _ => None,
-                                        });
-                                        (target, label.clone(), native)
-                                    }).collect::<Vec<_>>();
-                                    (group, edge_count, edges)
-                                }).collect::<Vec<_>>();
-                                let native_count = projection.entries.iter().filter(|entry|
-                                    entry.descriptor.owner == *required && matches!(entry.payload, ArtifactPayload::Original(_))
-                                ).count();
-                                let natives = projection.entries.iter().filter_map(|entry| match &entry.payload {
-                                    ArtifactPayload::Original(product) if entry.descriptor.owner == *required =>
-                                        Some((entry.descriptor.id, NativeOwnerKey::from_owner(product.owner()))),
-                                    _ => None,
-                                }).take(16).collect::<Vec<_>>();
-                                tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
-                                    input, ?artifact, ?dependent_ordinal, ?required, ?required_ordinal,
-                                    group_count, ?groups, native_count, ?natives,
-                                    "accepted merge retained native bindings before owner reconstruction");
-                            }
-                        }
-                    }
-                }
-                error
-            })?;
-            let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
-            let mut namespace = self.namespace();
-            namespace.extend(other.namespace());
-            let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
-            drop(state);
-            Ok(ArtifactView::new(ViewDraft {
-                roots: vec![],
-                selection,
-
-                inventory: self.lease.inventory.clone(),
-
-                parents,
-                issuing_payloads,
-                materialization_parents: Vec::new(),
-                materialization: Mutex::new(BTreeMap::new()),
-            }))
-        }
+        let mut namespace = self.namespace();
+        namespace.extend(other.namespace());
+        self.merge_validated_namespace(other, namespace)
     }
     /// Reuse only this view's exact completed native carrier. Demand and graph
     /// closure remain the admission owner's responsibility for each consumer.
@@ -7519,7 +7432,7 @@ mod tests {
         }
         let mut prefix = issued[order[0]].clone();
         for index in order.into_iter().skip(1) {
-            prefix = prefix.merge(&issued[index]).unwrap();
+            prefix = prefix.merge_fixture_selections(&issued[index]).unwrap();
         }
         let mut selection = bound_selection_for_entries(&prefix, &[native.clone(), child.clone()]);
         let requirement = NativeOriginalRequirement::from_selected_view(id, selected)
@@ -7724,25 +7637,25 @@ mod tests {
             assert_eq!(
                 retained
                     .compiler_support
-                    .artifacts
+                    .artifacts()
                     .capture_graph_selection()
                     .native_groups,
                 prefix.capture_graph_selection().native_groups
             );
             assert_eq!(inventory.metrics().issued_scope_nodes, before_retention);
             assert_eq!(
-                retained.compiler_support.artifacts.namespace()[&id],
+                retained.compiler_support.artifacts().namespace()[&id],
                 prefix.namespace()[&id]
             );
             assert_eq!(
-                retained.compiler_support.artifacts.namespace()[&child.descriptor.id],
+                retained.compiler_support.artifacts().namespace()[&child.descriptor.id],
                 prefix.namespace()[&child.descriptor.id]
             );
             let hidden = Arc::new(entry("UnselectedCompilerRole", &[]));
             let hidden_view = inventory
                 .admit_shared(&inventory.empty_view(), vec![hidden.clone()])
                 .unwrap();
-            let expanded = prefix.merge(&hidden_view).unwrap();
+            let expanded = prefix.merge_fixture_selections(&hidden_view).unwrap();
             let projection =
                 CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
                     .unwrap();
@@ -7757,7 +7670,7 @@ mod tests {
                 )
                 .unwrap();
             let value_with_hidden = value
-                .merge(
+                .merge_fixture_selections(
                     &hidden_view
                         .interface_projection(&[hidden.descriptor.owner.clone()])
                         .unwrap(),
@@ -7813,7 +7726,7 @@ mod tests {
                 left.capture_graph_selection().native_groups,
                 right.capture_graph_selection().native_groups
             );
-            let chosen = left.merge(&right).unwrap();
+            let chosen = left.merge_fixture_selections(&right).unwrap();
             let mut selection = bound_selection_for_entries(&chosen, &[native.clone()]);
             if explicit {
                 let requirement = NativeOriginalRequirement::from_selected_view(id, &left)
@@ -8025,7 +7938,7 @@ mod tests {
         assert_eq!(left.namespace()[&canonical_id], canonical_binding);
         assert_eq!(right.namespace()[&canonical_id], canonical_binding);
         assert_ne!(left.namespace()[&id], right.namespace()[&id]);
-        let joined = left.merge(&right).unwrap();
+        let joined = left.merge_fixture_selections(&right).unwrap();
         let ambiguous = inventory
             .empty_view()
             .merge_compiler_inputs(
@@ -8073,7 +7986,7 @@ mod tests {
         );
         let other_half = make("OtherPartialCarrier", &[7]);
         assert_eq!(other_half.namespace()[&canonical_id], canonical_binding);
-        let split = partial.merge(&other_half).unwrap();
+        let split = partial.merge_fixture_selections(&other_half).unwrap();
         let split = inventory
             .empty_view()
             .merge_compiler_inputs(
@@ -9987,7 +9900,10 @@ mod tests {
             scoped_group_child(&first, first_group),
             scoped_group_child(&second, second_group),
         );
-        for joined in [first.merge(&second).unwrap(), second.merge(&first).unwrap()] {
+        for joined in [
+            first.merge_fixture_selections(&second).unwrap(),
+            second.merge_fixture_selections(&first).unwrap(),
+        ] {
             assert!(matches!(
                 joined.select_roots(vec![native.descriptor.id]),
                 Err(CompileError::ArtifactInventory(error))
@@ -10194,7 +10110,10 @@ mod tests {
                 vec![group]
             );
             let published_projection = published.compiler_input_projection();
-            for joined in [first.merge(&second).unwrap(), second.merge(&first).unwrap()] {
+            for joined in [
+                first.merge_fixture_selections(&second).unwrap(),
+                second.merge_fixture_selections(&first).unwrap(),
+            ] {
                 let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
                 let admitted = inventory
                     .admit_projected_with_native_requirements(
@@ -10381,8 +10300,8 @@ mod tests {
                 .iter()
                 .any(|group| group.binding.artifact() == unrelated.descriptor.id));
             for (joined, use_certified) in [
-                original.merge(&sibling).unwrap(),
-                sibling.merge(&original).unwrap(),
+                original.merge_fixture_selections(&sibling).unwrap(),
+                sibling.merge_fixture_selections(&original).unwrap(),
             ]
             .into_iter()
             .flat_map(|joined| [(joined.clone(), false), (joined, true)])
@@ -10532,7 +10451,7 @@ mod tests {
                 )
                 .unwrap();
             if !child_reusable {
-                let broader = issuer.merge(&sibling).unwrap();
+                let broader = issuer.merge_fixture_selections(&sibling).unwrap();
                 assert!(matches!(inventory.admit_certified_with_demand(
                     &broader, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &receipt,
                 ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -10543,8 +10462,8 @@ mod tests {
                 .with_new_product_dependencies(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
             for (joined, projected) in [
-                issuer.merge(&sibling).unwrap(),
-                sibling.merge(&issuer).unwrap(),
+                issuer.merge_fixture_selections(&sibling).unwrap(),
+                sibling.merge_fixture_selections(&issuer).unwrap(),
             ]
             .into_iter()
             .flat_map(|joined| [(joined.clone(), false), (joined, true)])
@@ -10629,7 +10548,7 @@ mod tests {
         facts.extend(
             NativeOriginalRequirement::for_projection(&projection, &alternate, &[]).unwrap(),
         );
-        let joined = issuer.merge(&alternate).unwrap();
+        let joined = issuer.merge_fixture_selections(&alternate).unwrap();
         let preserved =
             NativeOriginalRequirement::for_projection(&projection, &joined, &facts).unwrap();
         assert_eq!(preserved.len(), 2);
@@ -10879,8 +10798,8 @@ mod tests {
                 .with_new_product_dependencies(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
             for (joined, projected) in [
-                issuer.merge(&sibling).unwrap(),
-                sibling.merge(&issuer).unwrap(),
+                issuer.merge_fixture_selections(&sibling).unwrap(),
+                sibling.merge_fixture_selections(&issuer).unwrap(),
             ]
             .into_iter()
             .flat_map(|view| [(view.clone(), false), (view, true)])
@@ -11005,8 +10924,8 @@ mod tests {
         let expected = published.artifact_view().capture_graph_selection();
         let group = expected.native_groups[0];
         for joined in [
-            original.merge(&sibling).unwrap(),
-            sibling.merge(&original).unwrap(),
+            original.merge_fixture_selections(&sibling).unwrap(),
+            sibling.merge_fixture_selections(&original).unwrap(),
         ] {
             let narrowed = joined
                 .with_compiler_projection(&CompilerInputProjection::default())
@@ -11773,7 +11692,11 @@ mod tests {
                 .unwrap()
             });
             assert_ne!(requirements[0], requirements[1]);
-            let ambiguous = view.merge(&first).unwrap().merge(&second).unwrap();
+            let ambiguous = view
+                .merge_fixture_selections(&first)
+                .unwrap()
+                .merge_fixture_selections(&second)
+                .unwrap();
             let projection = self
                 .interfaces
                 .merge(
@@ -12964,7 +12887,7 @@ mod tests {
                 let source = other
                     .admit(&other.empty_view(), vec![entry("B", &[])])
                     .unwrap();
-                first.merge(&source).unwrap()
+                first.merge_fixture_selections(&source).unwrap()
             } else {
                 inventory.admit(&first, vec![entry("B", &[])]).unwrap()
             };
@@ -13170,7 +13093,7 @@ mod tests {
         assert!(current.artifact_ids().contains(&old_id));
         assert!(current.artifact_ids().contains(&native_id));
         assert!(
-            current.merge(&old).is_err(),
+            current.merge_fixture_selections(&old).is_err(),
             "ordinary incompatible namespace must still refuse"
         );
         let old_body = current.select_roots(vec![native_id]).unwrap();
@@ -13416,7 +13339,7 @@ mod tests {
                     .artifacts;
             }
             let selected = available
-                .merge(&cursor)
+                .merge_fixture_selections(&cursor)
                 .unwrap()
                 .interface_projection(&[inspection.descriptor.owner.clone()])
                 .unwrap();
@@ -13449,7 +13372,7 @@ mod tests {
             let unrelated = inventory
                 .admit(&inventory.empty_view(), vec![entry("Unrelated", &[])])
                 .unwrap();
-            let merged = selected.merge(&unrelated).unwrap();
+            let merged = selected.merge_fixture_selections(&unrelated).unwrap();
             if let Some(exact_edge) = &exact_edge {
                 assert!(merged.binding_dependencies().contains(exact_edge));
             }
@@ -13554,7 +13477,7 @@ mod tests {
         let expected = sources[0].capture_graph_selection().native_groups;
         let historical = sources[1].capture_graph_selection().native_groups;
         assert_ne!(expected, historical);
-        let unselected = sources[0].merge(&sources[1]).unwrap();
+        let unselected = sources[0].merge_fixture_selections(&sources[1]).unwrap();
         assert!(
             matches!(unselected.merge_compiler_inputs(&projections[0], &inventory.empty_view(), &CompilerInputProjection::default()),
             Err(CompileError::ArtifactInventory(error))
@@ -13824,7 +13747,7 @@ mod tests {
             matches!(ambiguous.select_roots(vec![root.descriptor.id]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
         );
         assert!(
-            original.merge(&new).is_err(),
+            original.merge_fixture_selections(&new).is_err(),
             "two incompatible selected child versions must refuse"
         );
         drop(original);
@@ -14137,7 +14060,7 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(old_product, existing_product);
-            let joined = unrelated.merge(&old).unwrap();
+            let joined = unrelated.merge_fixture_selections(&old).unwrap();
             let selected = joined.select_roots(vec![incoming.descriptor.id]).unwrap();
             drop(joined);
             drop(unrelated);
@@ -14158,7 +14081,10 @@ mod tests {
             let fresh_again = inventory
                 .admit(&inventory.empty_view(), vec![fresh.clone()])
                 .unwrap();
-            assert_eq!(source_of(&selected.merge(&fresh_again).unwrap()), expected);
+            assert_eq!(
+                source_of(&selected.merge_fixture_selections(&fresh_again).unwrap()),
+                expected
+            );
         }
         assert!(
             observations
@@ -14217,7 +14143,7 @@ mod tests {
                         let other_inventory = if operation == 2 { inventory.clone() } else { ArtifactInventory::default() };
                         let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![issue(choice)]).unwrap();
                         proptest::prop_assert_eq!(witness(&incoming), incoming_expected);
-                        current = current.merge(&incoming).unwrap();
+                        current = current.merge_fixture_selections(&incoming).unwrap();
                     }
                     _ => { current = current.select_roots(vec![id]).unwrap(); }
                 }
@@ -14266,7 +14192,7 @@ mod tests {
             (&cold_view, &fresh_view, None),
             (&fresh_view, &cold_view, Some([1; 32])),
         ] {
-            let merged = retained.merge(incoming).unwrap();
+            let merged = retained.merge_fixture_selections(incoming).unwrap();
             let selected = merged
                 .entries()
                 .into_iter()
@@ -14588,7 +14514,7 @@ mod tests {
                 let existing = destination
                     .admit(&destination.empty_view(), vec![entry("Unrelated", &[])])
                     .unwrap();
-                existing.merge(&selected).unwrap()
+                existing.merge_fixture_selections(&selected).unwrap()
             } else {
                 selected.clone()
             };
@@ -15068,7 +14994,7 @@ mod tests {
         assert_eq!(new_view.descriptors(), vec![new.descriptor.clone()]);
         assert_eq!(inventory.node_count(), 2);
         let before = inventory.node_count();
-        assert!(old_view.merge(&new_view).is_err());
+        assert!(old_view.merge_fixture_selections(&new_view).is_err());
         assert_eq!(inventory.node_count(), before);
         let duplicate = inventory.admit(&empty, vec![old]).unwrap();
         drop(old_view);
@@ -15103,7 +15029,7 @@ mod tests {
             .unwrap();
         let old_ids = old.artifact_ids();
         let new_ids = new.artifact_ids();
-        assert!(old.merge(&new).is_err());
+        assert!(old.merge_fixture_selections(&new).is_err());
         assert_eq!(first.node_count(), 1);
         assert_eq!(second.node_count(), 2);
         assert_eq!(old.artifact_ids(), old_ids);
@@ -15299,7 +15225,7 @@ mod tests {
             )
             .unwrap();
         let selected = history.select_roots(vec![support_id]).unwrap();
-        let merged = existing.merge(&selected).unwrap();
+        let merged = existing.merge_fixture_selections(&selected).unwrap();
         let mut roots = merged
             .root_entries()
             .iter()
@@ -15349,7 +15275,7 @@ mod tests {
         let before = inventory.metrics();
         let unchanged = inventory.admit(&view, Vec::new()).unwrap();
         assert!(Arc::ptr_eq(&view.lease, &unchanged.lease));
-        let merged = view.merge(&unchanged).unwrap();
+        let merged = view.merge_fixture_selections(&unchanged).unwrap();
         drop(merged);
         drop(unchanged);
         let after = inventory.metrics();
@@ -15750,7 +15676,7 @@ mod tests {
             (&empty, &custody, &empty),
             (&custody, &empty, &empty),
         ] {
-            let merged = left.merge(right).unwrap();
+            let merged = left.merge_fixture_selections(right).unwrap();
             let graph = merged.capture_graph_selection();
             assert_eq!(graph.roots, selected.capture_graph_selection().roots);
             assert_eq!(
@@ -15775,7 +15701,7 @@ mod tests {
         let second_proof = second.capture_graph_selection();
         let second_custody = inventory.retain(vec![], second_proof.roots.clone(), vec![], vec![]);
         for (left, right) in [(&custody, &second_custody), (&second_custody, &custody)] {
-            let merged = left.merge(right).unwrap();
+            let merged = left.merge_fixture_selections(right).unwrap();
             let graph = merged.capture_graph_selection();
             assert!(graph.roots.is_empty());
             assert!(graph.namespace.is_empty());

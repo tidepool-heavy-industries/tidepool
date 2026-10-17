@@ -24,17 +24,12 @@ fn captured_materialization_context(
     source: &Arc<ExactDeclarationContext>,
     roots: Vec<ArtifactId>,
 ) -> Arc<ExactDeclarationContext> {
+    let support = source
+        .compiler_source_support()
+        .select_support_roots(roots)
+        .unwrap();
     let mut selected = source.as_ref().clone();
-    {
-        let updated = source.facts.compiler_support.artifacts.select_roots(roots).unwrap();
-        selected = selected.rebuild(|facts| facts.compiler_support.artifacts = updated);
-    }
-    {
-        let updated = source
-            .facts.compiler_support.projection
-            .within_view(&selected.facts.compiler_support.artifacts);
-        selected = selected.rebuild(|facts| facts.compiler_support.projection = updated);
-    }
+    selected = selected.rebuild(|facts| facts.compiler_support = support);
     {
         let updated = crate::exact_context::ExactLexicalSnapshot::default();
         selected = selected.rebuild(|facts| facts.lexical = updated);
@@ -280,7 +275,9 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let materialize = |context: &Arc<ExactDeclarationContext>| {
         let metadata = context.compiler_metadata_snapshot().unwrap();
         context
-            .facts.compiler_support.artifacts
+            .facts
+            .compiler_support
+            .artifacts()
             .retain_materialization(&metadata, |parents| {
                 context.materialize_retained_artifacts(
                     &metadata,
@@ -446,7 +443,9 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     let materialize = |context: &Arc<ExactDeclarationContext>,
                        metadata: &CompilerArtifactMetadata| {
         context
-            .facts.compiler_support.artifacts
+            .facts
+            .compiler_support
+            .artifacts()
             .retain_materialization(metadata, |parents| {
                 context.materialize_retained_artifacts(
                     metadata,
@@ -460,9 +459,11 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         // AllGroups is the existing issuer of exact native roots, not an
         // inference from available code or a test certificate constructor.
         let artifacts = context
-            .facts.compiler_support.artifacts
+            .facts
+            .compiler_support
+            .artifacts()
             .inventory()
-            .admit_shared(&context.facts.compiler_support.artifacts, entries.clone())
+            .admit_shared(context.facts.compiler_support.artifacts(), entries.clone())
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
@@ -482,9 +483,13 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             artifacts,
             native_offers,
         };
-        ProtectedScaffoldRequirements::default()
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
+                .unwrap();
+        let inputs = ProtectedScaffoldRequirements::default()
             .compiler_inputs(context, Some(&private))
-            .unwrap()
+            .unwrap();
+        (inputs, support)
     };
     let descendant = extend(&ancestor, "BeforePrivate");
     let completed = materialize(
@@ -494,7 +499,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     assert!(completed.groups.is_empty());
     assert!(completed.graph_paths.is_empty());
     let completed_directory = completed.directory().path().to_path_buf();
-    let late_inputs = private_inputs(&ancestor);
+    let (late_inputs, late_support) = private_inputs(&ancestor);
     assert_eq!(
         late_inputs.metadata.retained.selected_native_groups.len(),
         2
@@ -502,7 +507,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     let late = materialize(&ancestor, &late_inputs.metadata);
     let late_directory = late.directory().path().to_path_buf();
     let next = extend(&descendant, "AfterPrivate");
-    let inputs = private_inputs(&next);
+    let (inputs, support) = private_inputs(&next);
     assert_ne!(
         inputs.metadata.materialization_key(),
         descendant
@@ -546,21 +551,38 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         assert_eq!(std::fs::read(&paths[digest]).unwrap(), *bytes);
     }
     let mut captured = next.as_ref().clone();
-    let inventory = inputs.artifacts.select_roots(roots).unwrap();
-    let projection = inputs.projection.within_view(&inventory);
+    let selected = support
+        .retain_custody(&inputs.artifacts)
+        .unwrap()
+        .select_support_roots(roots)
+        .unwrap();
     captured = captured.rebuild(|facts| {
-        facts.compiler_support.artifacts = inventory;
-        facts.compiler_support.projection = projection;
+        facts.compiler_support = selected;
         facts.lexical = crate::exact_context::ExactLexicalSnapshot::default();
     });
     captured.normalize().unwrap();
     let captured = Arc::new(captured);
-    let payload = Arc::downgrade(&captured.facts.compiler_support.artifacts.metadata_snapshot().artifacts[&root_id]);
-    let proof = Arc::clone(captured.facts.compiler_support.artifacts.selection_snapshot());
+    let payload = Arc::downgrade(
+        &captured
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot()
+            .artifacts[&root_id],
+    );
+    let proof = Arc::clone(
+        captured
+            .facts
+            .compiler_support
+            .artifacts()
+            .selection_snapshot(),
+    );
     let weak_current = Arc::downgrade(&current);
     let weak_late = Arc::downgrade(&late);
     drop(inputs);
+    drop(support);
     drop(late_inputs);
+    drop(late_support);
     drop(current);
     drop(late);
     drop(completed);

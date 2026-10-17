@@ -1712,9 +1712,10 @@ impl HostBindingInterfaceOffer {
         let context = (*self.prototype.context)
             .clone()
             .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
-        let artifact_view = context
-            .artifact_view()
-            .select_roots(vec![certificate.artifact_id()])?;
+        let compiler_support = context
+            .compiler_source_support()
+            .select_type_roots(vec![certificate.artifact_id()])?;
+        let artifact_view = compiler_support.artifacts().clone();
         let interface = Arc::new(CheckedValueArtifact {
             interface: ValueInterfaceBytes {
                 owner,
@@ -1725,14 +1726,7 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate,
-            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-                context
-                    .compiler_input_projection()
-                    .interface_only()
-                    .within_view(&artifact_view),
-                artifact_view.clone(),
-                [],
-            )?,
+            compiler_support,
             artifact_view,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -2190,7 +2184,7 @@ impl CheckedValueArtifact {
     pub(crate) fn compiler_input_projection(
         &self,
     ) -> &crate::artifact_inventory::CompilerInputProjection {
-        &self.compiler_support.projection
+        &self.compiler_support.projection()
     }
     pub fn owner(&self) -> tidepool_repr::SessionModule {
         self.interface.owner
@@ -2205,7 +2199,7 @@ impl CheckedValueArtifact {
         &self.artifact_view
     }
     pub(crate) fn compiler_artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
-        &self.compiler_support.artifacts
+        &self.compiler_support.artifacts()
     }
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
         &self.source_lexical
@@ -3912,13 +3906,7 @@ impl CheckedItemOffer {
             None
         };
         Ok(Arc::new(ExactCompiledItem {
-            original_interfaces: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                    self.item.cell.producer,
-                    original_execution.artifact_view(),
-                    original_execution.compiler_input_projection().clone(),
-                )?,
-            ),
+            original_interfaces: Arc::new(original_execution.original_interface_context()?),
             original_execution,
             item: self.item.clone(),
             target,
@@ -5542,8 +5530,8 @@ mod tests {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
-            CompilerInputProjection, CompilerSourceSupport, IssuedNativeOffer,
-            NativeBindingRequirement, NativeOriginalRequirement,
+            CompilerInputProjection, IssuedNativeOffer, NativeBindingRequirement,
+            NativeOriginalRequirement,
         };
         use crate::certified_products::PendingImportOwner;
         use crate::declaration_join::ExactModuleIdentity;
@@ -5673,7 +5661,7 @@ mod tests {
         entries.extend(helper.iter().cloned());
         let inventory = ArtifactInventory::default();
         let full = inventory
-            .admit_shared(&inventory.empty_view(), entries)
+            .admit_shared(&inventory.empty_view(), entries.clone())
             .unwrap();
         let proof =
             NativeOriginalRequirement::from_issued_group_custody(authored_id, canonical, &full)
@@ -5692,6 +5680,27 @@ mod tests {
             partial_offer.snapshot_facts().body,
             crate::exact_context::NativeOfferSnapshotBody::Partial(_)
         ));
+
+        let sparse = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                entries,
+                &BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
+                    artifact: authored_id,
+                    original_ordinal: 7,
+                }]),
+            )
+            .unwrap();
+        let sparse_proof = NativeOriginalRequirement::from_selected_view(authored_id, &sparse)
+            .unwrap()
+            .expect("the owner issued the actual sparse initial group");
+        let sparse_offer =
+            IssuedNativeOffer::issue(authored_id, &sparse, Some(sparse_proof)).unwrap();
+        assert!(matches!(
+            sparse_offer.snapshot_facts().body,
+            crate::exact_context::NativeOfferSnapshotBody::Partial(_)
+        ));
+        assert!(!sparse_offer.is_full());
 
         let expected = vec![NativeBindingRequirement {
             artifact_id: value_id,
@@ -5756,11 +5765,13 @@ mod tests {
             .into_iter()
             .chain(cyclic.then_some((binding_source, 7)))
             .collect::<BTreeSet<_>>();
-        for (offer, nonempty) in [
-            (empty_offer, false),
-            (partial_offer, true),
-            (full_offer, true),
+        for (offer, expected_groups, captures_value) in [
+            (empty_offer, BTreeSet::new(), false),
+            (sparse_offer, BTreeSet::from([(authored_id, 7)]), false),
+            (partial_offer, expected_groups.clone(), true),
+            (full_offer, expected_groups, true),
         ] {
+            let issuance = offer.snapshot_facts().identity().unwrap();
             let offered_groups = offer
                 .custody()
                 .capture_graph_selection()
@@ -5768,16 +5779,9 @@ mod tests {
                 .iter()
                 .map(|group| (group.binding.artifact(), group.original_ordinal))
                 .collect::<BTreeSet<_>>();
-            assert_eq!(
-                offered_groups,
-                if nonempty {
-                    expected_groups.clone()
-                } else {
-                    BTreeSet::new()
-                }
-            );
+            assert_eq!(offered_groups, expected_groups);
             let offered_edges = offer.custody().binding_dependencies();
-            let support = CompilerSourceSupport::new(
+            let support = crate::declaration_context::recover_fixture_compiler_support(
                 CompilerInputProjection::default(),
                 context.artifact_view().clone(),
                 [offer],
@@ -5796,7 +5800,25 @@ mod tests {
                 before.roots,
                 context.artifact_view().capture_graph_selection().roots
             );
-            if nonempty {
+            assert!(
+                retained
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .any(|offer| offer.snapshot_facts().identity().unwrap() == issuance),
+                "custody composition preserves the exact offered availability mode and proof"
+            );
+            assert_eq!(
+                before
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact() == authored_id
+                        || group.binding.artifact() == binding_source)
+                    .map(|group| (group.binding.artifact(), group.original_ordinal))
+                    .collect::<BTreeSet<_>>(),
+                expected_groups
+            );
+            if !expected_groups.is_empty() {
                 for edge in offered_edges
                     .iter()
                     .filter(|(from, _, _)| matches!(from, ArtifactBindingNode::Group(_)))
@@ -5824,7 +5846,11 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             assert_eq!(
                 requirements,
-                if nonempty { expected.clone() } else { vec![] }
+                if captures_value {
+                    expected.clone()
+                } else {
+                    vec![]
+                }
             );
             assert_eq!(retained.artifact_view().capture_graph_selection(), before);
             assert_eq!(
@@ -5844,8 +5870,8 @@ mod tests {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
-            ArtifactInventoryFailure, CompilerInputProjection, CompilerSourceSupport,
-            IssuedNativeOffer, NativeOriginalRequirement,
+            ArtifactInventoryFailure, CompilerInputProjection, IssuedNativeOffer,
+            NativeOriginalRequirement,
         };
         use crate::declaration_context::{ExactDeclarationContext, PreparedValueSourceSupport};
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -6006,7 +6032,7 @@ mod tests {
                 let old =
                     IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
                         .unwrap();
-                let support = CompilerSourceSupport::new(
+                let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),
                     [old.clone(), old],
@@ -6054,9 +6080,12 @@ mod tests {
                         [1 - selected]
                         .clone()])
                     .unwrap();
-                    let competing =
-                        CompilerSourceSupport::new(competing, views[1 - selected].clone(), [])
-                            .unwrap();
+                    let competing = crate::declaration_context::recover_fixture_compiler_support(
+                        competing,
+                        views[1 - selected].clone(),
+                        [],
+                    )
+                    .unwrap();
                     assert!(
                         matches!((*original).clone().extend_issued_compiler_support(&competing), Err(CompileError::ArtifactInventory(error))
                         if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. })),
@@ -6448,7 +6477,7 @@ mod tests {
             }
             let ambiguous = captured[first]
                 .compiler_artifact_view()
-                .merge(captured[1 - first].compiler_artifact_view())
+                .merge_fixture_selections(captured[1 - first].compiler_artifact_view())
                 .unwrap();
             let requirements =
                 NativeOriginalRequirement::for_projection(projection, &ambiguous, &[]).unwrap();
@@ -6529,7 +6558,7 @@ mod tests {
             crate::artifact_inventory::ExactArtifactSelection::capture(&old_body);
         let old_body_graph = old_body.capture_graph_selection();
         let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(value)]).unwrap();
-        let grown = old.merge_selected(&new, &projection).unwrap();
+        let grown = old.merge_fixture_selected(&new, &projection).unwrap();
         assert!(
             matches!(grown.select_roots(vec![native_id]), Err(CompileError::ArtifactInventory(error))
             if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity { .. }))

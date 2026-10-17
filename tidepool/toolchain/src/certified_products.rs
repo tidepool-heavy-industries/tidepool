@@ -9895,7 +9895,12 @@ pub(crate) mod tests {
             table.clone(),
             vec![],
             &artifacts,
-            &projection,
+            &CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap(),
             Default::default(),
         )
         .unwrap()
@@ -16420,7 +16425,7 @@ pub(crate) mod tests {
         let mut current_child = None;
         for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
             let projection = context.compiler_input_projection().interface_only();
-            context = context.with_compiler_input_projection(projection).unwrap();
+            context = context.recover_fixture_projection(projection).unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
@@ -16738,7 +16743,7 @@ pub(crate) mod tests {
             .compiler_input_projection()
             .interface_only()
             .merge(&historical_projection)
-            .and_then(|projection| context.clone().with_compiler_input_projection(projection))
+            .and_then(|projection| context.clone().recover_fixture_projection(projection))
             .and_then(|context| {
                 context.extend_lexical_joins(
                     &[],
@@ -16781,7 +16786,7 @@ pub(crate) mod tests {
             .compiler_input_projection()
             .interface_only()
             .merge(&current_projection)
-            .and_then(|projection| planned_context.with_compiler_input_projection(projection))
+            .and_then(|projection| planned_context.recover_fixture_projection(projection))
             .and_then(|context| {
                 context.extend_lexical_joins(
                     &[],
@@ -17187,7 +17192,7 @@ pub(crate) mod tests {
             .unwrap();
         for index in 0..2 {
             let projection = context.compiler_input_projection().interface_only();
-            context = context.with_compiler_input_projection(projection).unwrap();
+            context = context.recover_fixture_projection(projection).unwrap();
             assert_eq!(context.recovery_products().len(), prior.len());
             let directory = root.path().join(format!("request-{index}"));
             std::fs::create_dir(&directory).unwrap();
@@ -17637,7 +17642,7 @@ pub(crate) mod tests {
             }
             let projection = context.compiler_input_projection().interface_only();
             context = context
-                .with_compiler_input_projection(projection)
+                .recover_fixture_projection(projection)
                 .unwrap()
                 .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
                 .unwrap();

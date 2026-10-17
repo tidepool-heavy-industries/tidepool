@@ -920,8 +920,7 @@ mod tests {
     #[test]
     fn authored_certification_preserves_historical_canonical_custody() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
-            IssuedNativeOffer,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, IssuedNativeOffer,
         };
         use crate::certified_products::{
             fixture_finalized_product,
@@ -959,7 +958,12 @@ mod tests {
         let baseline = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(
-                &CompilerSourceSupport::new(projection.clone(), current_view, [offer]).unwrap(),
+                &crate::declaration_context::recover_fixture_compiler_support(
+                    projection.clone(),
+                    current_view,
+                    [offer],
+                )
+                .unwrap(),
             )
             .unwrap();
         let compiled = crate::declaration_context::certified_product_artifact_view(
@@ -1522,7 +1526,7 @@ mod tests {
         };
         let first_offer = offer([1; 32]);
         let second_offer = offer([2; 32]);
-        assert!(first_offer.merge(&second_offer).is_err());
+        assert!(first_offer.merge_fixture_selections(&second_offer).is_err());
         let first = authored_interface_context(
             None,
             &first_offer,
