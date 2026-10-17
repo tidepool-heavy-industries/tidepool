@@ -9719,6 +9719,109 @@ mod tests {
     }
 
     #[test]
+    fn recovery_payload_acquisition_preserves_batch_original_owner_uniqueness() {
+        use crate::certified_products::tests::original_groups_fixture;
+        let raw = original_groups_fixture("RepeatedOwner", vec![(3, vec![])], 1, &BTreeMap::new());
+        let products = [1, 2].map(|generation| {
+            crate::certified_products::fixture_native_declaration_product(
+                raw.clone(),
+                [2; 32],
+                generation,
+            )
+        });
+        assert_eq!(products[0].owner(), products[1].owner());
+        assert_ne!(
+            products[0].certification_bytes(),
+            products[1].certification_bytes()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let references = products.each_ref().map(|product| {
+            recovery_artifacts::materialize_certified_products(
+                directory.path(),
+                [2; 32],
+                std::slice::from_ref(product),
+            )
+            .unwrap()
+            .remove(0)
+        });
+        let views = products
+            .into_iter()
+            .map(|product| {
+                let inventory = ArtifactInventory::default();
+                inventory
+                    .admit(
+                        &inventory.empty_view(),
+                        vec![ArtifactEntry::original([2; 32], product).unwrap()],
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let selections = views
+            .iter()
+            .map(ArtifactView::capture_graph_selection)
+            .collect::<Vec<_>>();
+        let descriptors = views
+            .iter()
+            .flat_map(ArtifactView::descriptors)
+            .map(|descriptor| (descriptor.id, descriptor))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect::<Vec<_>>();
+        let bindings = selections
+            .iter()
+            .flat_map(|selection| selection.bindings.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let edges = views
+            .iter()
+            .flat_map(ArtifactView::binding_dependencies)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let interfaces = references
+            .iter()
+            .map(|reference| reference.module_interface.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert!(RecoveredArtifactInventory::capture_bound(
+            directory.path(),
+            &references,
+            &interfaces,
+            &[],
+            &[],
+            &descriptors,
+            &bindings,
+            &edges
+        )
+        .is_err());
+        let mut acquisition = RecoveredArtifactAcquisition::new(directory.path());
+        acquisition
+            .capture_bound(
+                std::slice::from_ref(&references[0]),
+                std::slice::from_ref(&interfaces[0]),
+                &[],
+                &[],
+                &views[0].descriptors(),
+                &selections[0].bindings,
+                &views[0].binding_dependencies(),
+            )
+            .unwrap();
+        let before = acquisition.payloads.len();
+        assert!(acquisition
+            .capture_bound(
+                &references,
+                &interfaces,
+                &[],
+                &[],
+                &descriptors,
+                &bindings,
+                &edges
+            )
+            .is_err());
+        assert_eq!(acquisition.payloads.len(), before);
+    }
+
+    #[test]
     fn bound_recovery_preserves_same_root_payload_with_distinct_child_certificates() {
         let pair = bound_recovery_pair_fixture();
         let BoundRecoveryPair {
