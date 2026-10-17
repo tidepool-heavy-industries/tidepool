@@ -864,6 +864,7 @@ pub(crate) struct ExomonadSourceReload {
     /// The actor's generation owner fences publication separately.
     gate: Mutex<()>,
     prompt_composers: RwLock<HashMap<PrincipalId, prompt_files::PromptComposer>>,
+    // Full-revision decode calls and input rows for its unconditional wire path.
     #[cfg(test)]
     revision_projection_work: [std::sync::atomic::AtomicUsize; 2],
 }
@@ -3540,7 +3541,7 @@ mod tests {
 
     fn assert_locator_identity_observations() {
         use exomonad_actor::{ActorSourceLayers, SourceInspection};
-        for (selected, unrelated) in [(1, 1), (20, 64)] {
+        for (selected, unrelated) in [(1, 1), (1, 64), (20, 1), (20, 64)] {
             let (project, owner) = generation_owner();
             let a = owner.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
             let a_revision = owner.revision_issued(&a).unwrap();
@@ -3598,6 +3599,9 @@ mod tests {
                 before,
                 "identity-only observations must not decode/project the full revision"
             );
+            let observed = owner.revision_projection_work();
+            eprintln!("source locator removed-path work selected={selected} unrelated={unrelated} revision_decode_calls={} wire_input_rows={}",
+                observed.0 - before.0, observed.1 - before.1);
             assert_eq!(b.generation_evidence().unwrap().reference, reference);
             assert_eq!(
                 b.generation_evidence().unwrap().configuration_digest,
