@@ -162,6 +162,35 @@ pub(crate) fn validate_consumed_native_namespace(
     Ok(())
 }
 
+/// Exact lifetime custody, without a derived artifact-view projection.
+/// Only the inventory's checked issuance or an already authenticated view can
+/// construct this owner; immutable proof bytes alone are insufficient.
+#[derive(Clone)]
+struct NativeOfferCustody {
+    lease: Arc<ViewLease>,
+    #[cfg(test)]
+    observed: Arc<OnceLock<ArtifactView>>,
+}
+
+impl NativeOfferCustody {
+    fn from_lease(lease: Arc<ViewLease>) -> Self {
+        Self {
+            lease,
+            #[cfg(test)]
+            observed: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeOfferCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeOfferCustody")
+            .field("roots", &self.lease.selection.roots)
+            .field("custody", &self.lease.selection.custody_roots)
+            .finish()
+    }
+}
+
 /// One availability issuance and exactly the graph custody supporting it.
 /// Propagation can retain or narrow this owner, never rediscover another proof.
 #[derive(Clone, Debug)]
@@ -174,13 +203,13 @@ impl PartialEq for IssuedNativeOffer {
 }
 impl Eq for IssuedNativeOffer {}
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct NativeOfferFacts {
     original: ArtifactId,
     interface: ArtifactId,
     owner: ExactModuleIdentity,
     body: NativeOfferBody,
-    custody: ArtifactView,
+    custody: NativeOfferCustody,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -335,7 +364,7 @@ impl IssuedNativeOffer {
             interface,
             owner: entry.descriptor.owner.clone(),
             body,
-            custody,
+            custody: NativeOfferCustody::from_lease(custody.lease),
         })))
     }
 
@@ -347,7 +376,9 @@ impl IssuedNativeOffer {
             owner: self.0.owner.clone(),
             body: match &self.0.body {
                 NativeOfferBody::Empty => {
-                    NativeOfferSnapshotBody::Empty(ExactArtifactSelection::capture(&self.0.custody))
+                    NativeOfferSnapshotBody::Empty(ExactArtifactSelection::from_snapshot(
+                        Arc::clone(&self.0.custody.lease.selection),
+                    ))
                 }
                 NativeOfferBody::Partial(proof) => {
                     NativeOfferSnapshotBody::Partial(proof.selection.clone())
@@ -456,17 +487,62 @@ impl IssuedNativeOffer {
         matches!(self.0.body, NativeOfferBody::Full { .. })
     }
 
+    #[cfg(test)]
     pub(crate) fn custody(&self) -> &ArtifactView {
-        &self.0.custody
+        self.0
+            .custody
+            .observed
+            .get_or_init(|| ArtifactView::from_custody(Arc::clone(&self.0.custody.lease)))
+    }
+
+    pub(super) fn custody_lease(&self) -> &Arc<ViewLease> {
+        &self.0.custody.lease
     }
 
     pub(crate) fn issued_group_carriers(
         &self,
     ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {
-        self.proof()
-            .map(|proof| proof.issued_group_carriers(&self.0.custody))
-            .transpose()
-            .map(Option::unwrap_or_default)
+        let Some(proof) = self.proof() else {
+            return Ok(BTreeMap::new());
+        };
+        let state = self
+            .0
+            .custody
+            .lease
+            .inventory
+            .0
+            .lock()
+            .expect("inventory lock");
+        proof
+            .selection
+            .graph_selection()
+            .native_groups
+            .iter()
+            .map(|group| {
+                let mut carriers = state
+                    .outgoing(ArtifactBindingNode::Group(*group))
+                    .filter_map(|(target, edge)| match target {
+                        ArtifactBindingNode::Artifact(carrier)
+                            if carrier.artifact == group.binding.artifact()
+                                && *edge == ArtifactDependency::Interface =>
+                        {
+                            Some(carrier)
+                        }
+                        _ => None,
+                    });
+                let carrier = carriers
+                    .next()
+                    .ok_or_else(|| failure("issued native group has no carrier"))?;
+                if carriers.next().is_some() {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: carrier.artifact,
+                        },
+                    ));
+                }
+                Ok((*group, carrier))
+            })
+            .collect()
     }
 
     /// A receipt can carry this proof for one of its dependencies. Consume that

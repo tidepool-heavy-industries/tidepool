@@ -395,6 +395,21 @@ pub(crate) struct ArtifactAdmission {
     target_native_selection: Option<IssuedTargetNativeSelection>,
 }
 
+/// Ownership issued by the admission solver, before deriving a selected view.
+struct IssuedArtifactCustody {
+    lease: Arc<ViewLease>,
+    target_native_selection: Option<IssuedTargetNativeSelection>,
+}
+
+impl IssuedArtifactCustody {
+    fn into_view(self) -> ArtifactAdmission {
+        ArtifactAdmission {
+            artifacts: ArtifactView::from_custody(self.lease),
+            target_native_selection: self.target_native_selection,
+        }
+    }
+}
+
 impl ArtifactAdmission {
     pub(crate) fn into_target(self) -> Result<AdmittedTargetArtifacts, CompileError> {
         Ok(AdmittedTargetArtifacts {
@@ -2011,7 +2026,7 @@ impl NativeOwnerKey {
 #[derive(Default)]
 struct InventoryState {
     payload_intern: BTreeMap<ArtifactId, Vec<Weak<ArtifactEntry>>>,
-    views: Vec<(Weak<ViewReadCache>, Arc<ExactSelectionSnapshot>)>,
+    views: Vec<(Weak<ViewLease>, Arc<ExactSelectionSnapshot>)>,
     /// Immutable proof evidence lasts for this inventory's lifetime. Releasing
     /// native payload custody does not release proof-only ancestor facts.
     selection_plans: BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>,
@@ -3500,6 +3515,19 @@ impl ArtifactInventory {
         root_intent: ArtifactRootIntent<'_>,
         target_groups: Option<BTreeSet<NativeGroupKey>>,
     ) -> Result<ArtifactAdmission, CompileError> {
+        self.issue_selected_custody(parent, entries, groups, exact, root_intent, target_groups)
+            .map(IssuedArtifactCustody::into_view)
+    }
+
+    fn issue_selected_custody(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        groups: BTreeSet<NativeGroupKey>,
+        exact: bool,
+        root_intent: ArtifactRootIntent<'_>,
+        target_groups: Option<BTreeSet<NativeGroupKey>>,
+    ) -> Result<IssuedArtifactCustody, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
             return Err(failure("view belongs to another inventory"));
         }
@@ -3508,8 +3536,8 @@ impl ArtifactInventory {
             && target_groups.is_none()
             && matches!(root_intent, ArtifactRootIntent::SuppliedArtifacts)
         {
-            return Ok(ArtifactAdmission {
-                artifacts: parent.clone(),
+            return Ok(IssuedArtifactCustody {
+                lease: Arc::clone(&parent.lease),
                 target_native_selection: None,
             });
         }
@@ -4115,19 +4143,29 @@ impl ArtifactInventory {
         let snapshot =
             selection_snapshot_for_lease(&state, &namespace, &roots, &custody_roots, &parents);
         drop(state);
-        let view = ArtifactView::new(ViewDraft {
-            roots,
-            selection: snapshot,
+        let introduced = bound
+            .keys()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Artifact(binding) => Some(binding.artifact),
+                ArtifactBindingNode::Group(_) => None,
+            })
+            .collect();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection: snapshot,
 
-            inventory: self.clone(),
+                inventory: self.clone(),
 
-            parents,
-            issuing_payloads,
-            materialization_parents,
-            materialization: Mutex::new(BTreeMap::new()),
-        });
-        Ok(ArtifactAdmission {
-            artifacts: view,
+                parents,
+                issuing_payloads,
+                materialization_parents,
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            introduced,
+        );
+        Ok(IssuedArtifactCustody {
+            lease,
             target_native_selection,
         })
     }
@@ -4515,6 +4553,99 @@ impl ViewReadProjection {
 }
 
 impl ViewLease {
+    /// Retain payload and acquisition owners after the admission solver has
+    /// authenticated these exact bindings. No derived view closure is needed.
+    fn from_issued_draft(lease: ViewDraft, introduced: BTreeSet<ArtifactId>) -> Arc<Self> {
+        let mut payloads = lease
+            .parents
+            .first()
+            .map(|parent| parent.payloads.clone())
+            .unwrap_or_default();
+        for parent in lease.parents.iter().skip(1) {
+            for (id, entry) in &parent.payloads {
+                if !payloads.contains_key(id) {
+                    payloads.insert(*id, Arc::clone(entry));
+                }
+            }
+        }
+        for (id, entry) in &lease.issuing_payloads {
+            if (payloads.contains_key(id) || introduced.contains(id))
+                && payloads
+                    .get(id)
+                    .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
+            {
+                payloads.insert(*id, Arc::clone(entry));
+            }
+        }
+        let mut state = lease.inventory.0.lock().expect("inventory lock");
+        if lease
+            .parents
+            .iter()
+            .any(|parent| !Arc::ptr_eq(&parent.inventory.0, &lease.inventory.0))
+        {
+            let proofs = scope_proof::prepare_install(
+                &state,
+                lease
+                    .selection
+                    .scopes
+                    .iter()
+                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
+                    .map(|(_, proof)| Arc::clone(proof.proof())),
+            )
+            .expect("issued immutable scope owners");
+            scope_proof::install(&mut state, proofs);
+        }
+        for id in &introduced {
+            if !payloads.contains_key(id) {
+                payloads.insert(*id, state.interned(id).expect("issued payload custody"));
+            }
+        }
+        // Shared cache owners retain paths independently of artifact views and
+        // are observed lazily through the existing interruptible lock boundary.
+        let mut materialization_sources = lease
+            .parents
+            .first()
+            .map(|parent| parent.materialization_sources.clone())
+            .unwrap_or_default();
+        for (index, parent) in lease.parents.iter().enumerate() {
+            if index != 0 {
+                for (id, source) in &parent.materialization_sources {
+                    if !materialization_sources.contains_key(id) {
+                        materialization_sources.insert(*id, source.clone());
+                    }
+                }
+            }
+            materialization_sources
+                .insert(parent.materialization.id(), parent.materialization.clone());
+        }
+        let lease = Arc::new(ViewLease {
+            admission_roots: lease.roots.into_iter().collect(),
+            selection: lease.selection,
+            payloads,
+            inventory: lease.inventory.clone(),
+            materialization_sources,
+            materialization: MaterializationSource {
+                cache: Arc::new(lease.materialization),
+                parents: lease
+                    .parents
+                    .iter()
+                    .map(|parent| parent.materialization.id())
+                    .collect::<Vec<_>>()
+                    .into(),
+                fixed: lease.materialization_parents.into(),
+            },
+        });
+        for (id, entry) in &lease.payloads {
+            state.intern(*id, entry);
+        }
+        state.views.retain(|(view, _)| view.strong_count() > 0);
+        state
+            .views
+            .push((Arc::downgrade(&lease), Arc::clone(&lease.selection)));
+        drop(state);
+        lease
+    }
+
     fn lock_materialization(
         &self,
     ) -> std::io::Result<
@@ -4946,95 +5077,14 @@ impl ArtifactView {
                     .map(|parent| parent.selection.as_ref()),
             )
             .expect("issued selection");
-        let mut payloads = lease
-            .parents
-            .first()
-            .map(|parent| parent.payloads.clone())
-            .unwrap_or_default();
-        for parent in lease.parents.iter().skip(1) {
-            for (id, entry) in &parent.payloads {
-                if !payloads.contains_key(id) {
-                    payloads.insert(*id, Arc::clone(entry));
-                }
-            }
+        Self::from_custody(ViewLease::from_issued_draft(lease, introduced))
+    }
+
+    fn from_custody(lease: Arc<ViewLease>) -> Self {
+        Self {
+            lease,
+            reads: Arc::new(ViewReadCache::default()),
         }
-        for (id, entry) in &lease.issuing_payloads {
-            if (payloads.contains_key(id) || introduced.contains(id))
-                && payloads
-                    .get(id)
-                    .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
-            {
-                payloads.insert(*id, Arc::clone(entry));
-            }
-        }
-        let mut state = lease.inventory.0.lock().expect("inventory lock");
-        if lease
-            .parents
-            .iter()
-            .any(|parent| !Arc::ptr_eq(&parent.inventory.0, &lease.inventory.0))
-        {
-            let proofs = scope_proof::prepare_install(
-                &state,
-                lease
-                    .selection
-                    .scopes
-                    .iter()
-                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
-                    .map(|(_, proof)| Arc::clone(proof.proof())),
-            )
-            .expect("issued immutable scope owners");
-            scope_proof::install(&mut state, proofs);
-        }
-        for id in &introduced {
-            if !payloads.contains_key(id) {
-                payloads.insert(*id, state.interned(id).expect("issued payload custody"));
-            }
-        }
-        // Shared cache owners retain paths independently of artifact views and
-        // are observed lazily through the existing interruptible lock boundary.
-        let mut materialization_sources = lease
-            .parents
-            .first()
-            .map(|parent| parent.materialization_sources.clone())
-            .unwrap_or_default();
-        for (index, parent) in lease.parents.iter().enumerate() {
-            if index != 0 {
-                for (id, source) in &parent.materialization_sources {
-                    if !materialization_sources.contains_key(id) {
-                        materialization_sources.insert(*id, source.clone());
-                    }
-                }
-            }
-            materialization_sources
-                .insert(parent.materialization.id(), parent.materialization.clone());
-        }
-        let lease = Arc::new(ViewLease {
-            admission_roots: lease.roots.into_iter().collect(),
-            selection: lease.selection,
-            payloads,
-            inventory: lease.inventory.clone(),
-            materialization_sources,
-            materialization: MaterializationSource {
-                cache: Arc::new(lease.materialization),
-                parents: lease
-                    .parents
-                    .iter()
-                    .map(|parent| parent.materialization.id())
-                    .collect::<Vec<_>>()
-                    .into(),
-                fixed: lease.materialization_parents.into(),
-            },
-        });
-        for (id, entry) in &lease.payloads {
-            state.intern(*id, entry);
-        }
-        state.views.retain(|(view, _)| view.strong_count() > 0);
-        let reads = Arc::new(ViewReadCache::default());
-        state
-            .views
-            .push((Arc::downgrade(&reads), Arc::clone(&lease.selection)));
-        drop(state);
-        Self { lease, reads }
     }
 
     // Closure and dependency initializers receive an already locked inventory. Nothing
@@ -6766,108 +6816,59 @@ impl ArtifactView {
         &self,
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
-        let mut current = self.clone();
-        let mut deferred = Vec::new();
-        let mut validated = false;
-        let mut ordinary_merges = 0usize;
-        let mut covered_offers = 0usize;
-        for offer in offers {
-            let incoming = offer.custody();
-            if Arc::ptr_eq(&current.lease, &incoming.lease) || !incoming.has_retained_nodes() {
-                continue;
-            }
-            if !current.has_retained_nodes() {
-                current = incoming.clone();
-                validated = false;
-                continue;
-            }
-            if validated && current.covers_issued_custody(incoming) {
-                // Foreign issuers still cross the same authentication boundary.
-                current.validate_issued_merge(incoming)?;
-                deferred.push(Arc::clone(&incoming.lease));
-                covered_offers += 1;
-                continue;
-            }
-            current = current.finish_deferred_custody(std::mem::take(&mut deferred))?;
-            current.validate_issued_merge(incoming)?;
-            current = current.merge_validated_namespace(incoming, current.namespace())?;
-            validated = true;
-            ordinary_merges += 1;
-        }
-        let retained = current.finish_deferred_custody(deferred)?;
-        tracing::debug!(target: "exomonad_harness::timing", ordinary_merges, covered_offers, "issued offer custody retention");
-        Ok(retained)
-    }
-
-    fn covers_issued_custody(&self, incoming: &Self) -> bool {
-        if !incoming.lease.selection.namespace.is_empty()
-            || !incoming.lease.selection.roots.is_empty()
-            || incoming
-                .lease
-                .selection
-                .scopes
-                .iter()
-                .any(|(scope, proof)| self.lease.selection.scopes.get(scope) != Some(proof))
-            || incoming.lease.payloads.iter().any(|(id, entry)| {
-                self.lease
-                    .payloads
-                    .get(id)
-                    .is_none_or(|retained| !Arc::ptr_eq(retained, entry))
-            })
-        {
-            return false;
-        }
+        let mut parents = vec![Arc::clone(&self.lease)];
+        let mut payloads = BTreeMap::new();
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
-        incoming
-            .lease
-            .selection
-            .custody_roots
-            .keys()
-            .all(|root| owned.contains(root))
-    }
-
-    fn finish_deferred_custody(&self, deferred: Vec<Arc<ViewLease>>) -> Result<Self, CompileError> {
-        if deferred.is_empty() {
+        for offer in offers {
+            let incoming = offer.custody_lease();
+            if parents.iter().any(|parent| Arc::ptr_eq(parent, incoming)) {
+                continue;
+            }
+            if !Arc::ptr_eq(&self.lease.inventory.0, &incoming.inventory.0) {
+                scope_proof::prepare_install(
+                    &state,
+                    incoming
+                        .selection
+                        .scopes
+                        .values()
+                        .map(|proof| Arc::clone(proof.proof())),
+                )?;
+                for entry in incoming.payloads.values() {
+                    state.canonicalize(Arc::clone(entry))?;
+                }
+            }
+            for (id, incoming) in &incoming.payloads {
+                let previous = payloads.get(id).or_else(|| self.lease.payloads.get(id));
+                let retained = match previous {
+                    Some(previous) => {
+                        ArtifactEntry::merge_catalog_input_custody(previous, incoming)?
+                    }
+                    None => Arc::clone(incoming),
+                };
+                payloads.insert(*id, retained);
+            }
+            parents.push(Arc::clone(incoming));
+        }
+        if parents.len() == 1 {
             return Ok(self.clone());
         }
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let projection = self.read_projection(&state);
-        let namespace = self.namespace();
-        let entries = namespace
-            .keys()
-            .map(|id| (*id, Arc::clone(&self.lease.payloads[id])))
-            .collect();
-        SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
-        let reads = ViewReadProjection {
-            nodes: projection.nodes.clone(),
-            entries: projection.entries.clone(),
-            dependencies: OnceLock::new(),
-            native_selection: OnceLock::new(),
-            metadata: OnceLock::new(),
-        };
-        let mut parents = Vec::with_capacity(deferred.len() + 1);
-        parents.push(Arc::clone(&self.lease));
-        parents.extend(deferred);
-        let namespace = self.namespace();
-        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        let selection = selection_snapshot_for_lease(&state, &self.namespace(), &[], &[], &parents);
         drop(state);
-        let retained = Self::new(ViewDraft {
-            roots: vec![],
-            selection,
-            inventory: self.lease.inventory.clone(),
-            parents,
-            issuing_payloads: BTreeMap::new(),
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        });
-        retained
-            .reads
-            .read_projection
-            .set(reads)
-            .ok()
-            .expect("fresh custody projection");
-        Ok(retained)
+        // Incoming availability snapshots have no executable roots or namespace.
+        // Their exact custody seeds and ordered materialization owners survive.
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots: vec![],
+                selection,
+                inventory: self.lease.inventory.clone(),
+                parents,
+                issuing_payloads: payloads,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            BTreeSet::new(),
+        );
+        Ok(Self::from_custody(lease))
     }
 
     #[cfg(test)]
