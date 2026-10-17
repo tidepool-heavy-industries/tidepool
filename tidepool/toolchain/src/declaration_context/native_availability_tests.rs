@@ -999,9 +999,13 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     for id in [native_entry.descriptor.id, canonical.descriptor.id] {
         assert_ne!(binding(&left, id), binding(&other, id));
     }
-    let other_interface = other
-        .interface_projection(std::slice::from_ref(&canonical.descriptor.owner))
+    let other_support = recover_fixture_compiler_support(baseline.clone(), other.clone(), [])
+        .unwrap()
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![canonical.descriptor.owner.clone()])
         .unwrap();
+    let other_interface = other_support.artifacts().clone();
     for selected in [&other, &other_interface] {
         let mismatch = left
             .merge_fixture_selections(selected)
@@ -2326,13 +2330,23 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .iter()
         .map(|entry| entry.descriptor.owner.clone())
         .collect::<Vec<_>>();
-    let narrowed = full.interface_projection(&owners).unwrap();
-    let projection = CompilerInputProjection::from_interface_view(&narrowed).unwrap();
+    let issued = recover_fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+        full.clone(),
+        [],
+    )
+    .unwrap();
+    let narrowed = issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(owners)
+        .unwrap()
+        .retain_offers([offer])
+        .unwrap();
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),
-            compiler_support: recover_fixture_compiler_support(projection, narrowed, [offer])
-                .unwrap(),
+            compiler_support: narrowed,
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -4596,20 +4610,27 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             artifacts: custody.clone(),
             native_offers: vec![offer],
         };
-        let interfaces = full
-            .interface_projection(&[
+        let issued = recover_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[entry.clone(), unrelated_entry.clone()])
+                .unwrap(),
+            full.clone(),
+            [],
+        )
+        .unwrap();
+        let interfaces = issued
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(vec![
                 entry.descriptor.owner.clone(),
                 unrelated_entry.descriptor.owner.clone(),
             ])
             .unwrap()
             .retain_custody(&custody)
             .unwrap();
-        let interface_roles = CompilerInputProjection::from_interface_view(&interfaces).unwrap();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
                 producer: producer.sha256(),
-                compiler_support: recover_fixture_compiler_support(interface_roles, interfaces, [])
-                    .unwrap(),
+                compiler_support: interfaces,
                 lexical: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -4811,11 +4832,14 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         .restore(&canonical_support.artifacts())
         .unwrap();
     assert_eq!(empty_restored.snapshot_facts(), empty.snapshot_facts());
-    let artifacts = artifacts
-        .interface_projection(&[entry.descriptor.owner.clone()])
+    let support = recover_fixture_compiler_support(projection.clone(), artifacts.clone(), [])
         .unwrap()
-        .with_compiler_projection(&projection)
+        .select_support_roots(vec![canonical])
+        .unwrap()
+        .finalize_namespace()
         .unwrap();
+    assert_eq!(support.projection(), &projection);
+    let artifacts = support.artifacts().clone();
     assert!(artifacts.selected_native_groups().is_empty());
     assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
     let root = tempfile::tempdir().unwrap();
@@ -5096,12 +5120,19 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     assert!(issued.facts.compiler_support.native_offers()[0].is_full());
     assert_eq!(issued.artifact_view().selected_native_groups().len(), 2);
     let projection = issued.facts.compiler_support.projection().clone();
-    let artifacts = issued
-        .artifact_view()
-        .interface_projection(&[entry.descriptor.owner.clone()])
+    let canonical = projection
+        .snapshot_roles()
+        .get(&entry.descriptor.owner)
         .unwrap()
-        .with_compiler_projection(&projection)
+        .interface();
+    let support = issued
+        .compiler_source_support()
+        .select_support_roots(vec![canonical])
+        .unwrap()
+        .finalize_namespace()
         .unwrap();
+    assert_eq!(support.projection(), &projection);
+    let artifacts = support.artifacts().clone();
     assert!(artifacts.selected_native_groups().is_empty());
     let full = issued.facts.compiler_support.native_offers()[0].clone();
     let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
@@ -5243,11 +5274,20 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             1 => partial,
                             _ => full,
                         };
-                        let selected = sources[1]
-                            .interface_projection(&[entries[1].descriptor.owner.clone()])
+                        let issued = recover_fixture_compiler_support(
+                            CompilerInputProjection::from_issued_entries(&[entries[1].clone()])
+                                .unwrap(),
+                            sources[1].clone(),
+                            [],
+                        )
+                        .unwrap();
+                        let selected_support = issued
+                            .selected_interfaces()
+                            .unwrap()
+                            .support_for_owners(vec![entries[1].descriptor.owner.clone()])
                             .unwrap();
-                        let projection =
-                            CompilerInputProjection::from_interface_view(&selected).unwrap();
+                        let selected = selected_support.artifacts().clone();
+                        let projection = selected_support.projection().clone();
                         if changed_canonical {
                             let incompatible_projection = old_projection.interface_only();
                             assert!(
@@ -5545,12 +5585,22 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
         .unwrap();
     let offer = IssuedNativeOffer::issue(old_entry.descriptor.id, &old_source, None).unwrap();
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
-    let current = inventory
+    let current_source = inventory
         .admit_shared(&inventory.empty_view(), vec![entry.clone()])
-        .unwrap()
-        .interface_projection(&[entry.descriptor.owner.clone()])
         .unwrap();
-    let projection = CompilerInputProjection::from_interface_view(&current).unwrap();
+    let issued = recover_fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+        current_source,
+        [],
+    )
+    .unwrap();
+    let current_support = issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![entry.descriptor.owner.clone()])
+        .unwrap();
+    let current = current_support.artifacts().clone();
+    let projection = current_support.projection().clone();
     let context = |offers: Vec<IssuedNativeOffer>| {
         Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
@@ -5568,7 +5618,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
         ))
     };
     let other_inventory = ArtifactInventory::default();
-    let other_current = other_inventory
+    let other_source = other_inventory
         .admit_shared(
             &other_inventory.empty_view(),
             vec![
@@ -5579,9 +5629,15 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
                 ),
             ],
         )
-        .unwrap()
-        .interface_projection(&[entry.descriptor.owner.clone()])
         .unwrap();
+    let other_issued =
+        recover_fixture_compiler_support(projection.clone(), other_source, []).unwrap();
+    let other_support = other_issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![entry.descriptor.owner.clone()])
+        .unwrap();
+    let other_current = other_support.artifacts().clone();
     assert_ne!(
         current.capture_graph_selection().namespace,
         other_current.capture_graph_selection().namespace

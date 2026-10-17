@@ -8357,12 +8357,24 @@ mod module_product_tests {
             |_, _, _| {},
         )
         .expect("ordinary compiler producer issues the exact context's interface");
+        let context_support = crate::declaration_context::recover_fixture_compiler_support(
+            context_products
+                .source_selection
+                .as_ref()
+                .unwrap()
+                .compiler_projection(&context_products.artifact_view)
+                .unwrap(),
+            context_products.artifact_view.clone(),
+            [],
+        )
+        .unwrap();
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_interface_artifacts(
-                &context_products
-                    .artifact_view
-                    .interface_projection(&[context_owner])
+            .extend_issued_compiler_support(
+                &context_support
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(vec![context_owner])
                     .unwrap(),
             )
             .unwrap();
@@ -8585,12 +8597,25 @@ mod module_product_tests {
                         compiled.producer_identity.as_ref().unwrap(),
                     )
                     .sha256();
+                let compiled_support =
+                    crate::declaration_context::recover_fixture_compiler_support(
+                        compiled
+                            .source_selection
+                            .as_ref()
+                            .unwrap()
+                            .compiler_projection(&compiled.artifact_view)
+                            .unwrap(),
+                        compiled.artifact_view.clone(),
+                        [],
+                    )
+                    .unwrap();
                 let context = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_interface_artifacts(
-                        &compiled
-                            .artifact_view
-                            .interface_projection(&owners)
+                    .extend_issued_compiler_support(
+                        &compiled_support
+                            .selected_interfaces()
+                            .unwrap()
+                            .support_for_owners(owners)
                             .unwrap(),
                     )
                     .unwrap()
@@ -8720,22 +8745,35 @@ mod module_product_tests {
                     group.owner().unit == selected.unit && group.owner().module == selected.module
                 })
             }));
-            let interfaces = original
-                .artifact_view
-                .interface_projection(&[owner.clone(), support.clone()])
+            let original_support = crate::declaration_context::recover_fixture_compiler_support(
+                original
+                    .source_selection
+                    .as_ref()
+                    .unwrap()
+                    .compiler_projection(&original.artifact_view)
+                    .unwrap(),
+                original.artifact_view.clone(),
+                [],
+            )
+            .unwrap();
+            let interfaces = original_support
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(vec![owner.clone(), support.clone()])
                 .unwrap();
             let context = ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_interface_artifacts(&interfaces)
+                .extend_issued_compiler_support(&interfaces)
                 .unwrap()
                 .extend(&[], &[], lexical[..2].to_vec())
                 .unwrap();
             let extended = context
                 .clone()
-                .extend_interface_artifacts(
-                    &original
-                        .artifact_view
-                        .interface_projection(&[unrelated.clone()])
+                .extend_issued_compiler_support(
+                    &original_support
+                        .selected_interfaces()
+                        .unwrap()
+                        .support_for_owners(vec![unrelated.clone()])
                         .unwrap(),
                 )
                 .unwrap()

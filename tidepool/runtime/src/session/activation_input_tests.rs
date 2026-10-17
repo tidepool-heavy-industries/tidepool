@@ -1594,43 +1594,20 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     assert!(result_witness.signature().names().iter().any(|name| {
         name.module() == "Tidepool.Agent.Reply.Internal" && name.occurrence() == "ResponseResult"
     }));
-    let original_descriptors = compiler_context.artifact_view().descriptors();
-    let home_roots = |witness: &tidepool_toolchain::checked_cell::CanonicalInputTypeWitness| {
-        witness
-            .interface_seals()
-            .filter_map(|(unit, module, seal)| {
-                original_descriptors
-                    .iter()
-                    .find(|descriptor| {
-                        descriptor.owner.unit == unit && descriptor.owner.module == module
-                    })
-                    .map(|descriptor| {
-                        let original_seal = descriptor
-                            .interface_sha256
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>();
-                        assert_eq!(
-                            seal, original_seal,
-                            "original interface seal for {unit}:{module}"
-                        );
-                        descriptor.id
-                    })
-            })
-            .collect::<Vec<_>>()
-    };
+    let package_types = compiler_context
+        .select_original_type_interfaces(&[input_witness], &[])
+        .unwrap();
     assert!(
-        home_roots(input_witness).is_empty(),
+        package_types.compiler_input_roles().is_empty(),
         "Int -> Int requires only package interfaces"
     );
-    let result_roots = home_roots(result_witness);
+    let expected_types = compiler_context
+        .select_original_type_interfaces(&[result_witness], &[])
+        .unwrap();
     assert!(
-        !result_roots.is_empty(),
+        !expected_types.compiler_input_roles().is_empty(),
         "ResponseResult () retains its original home interface"
     );
-    let expected_types = compiler_context
-        .select_interface_roots(result_roots)
-        .unwrap();
     let expected_descriptors = expected_types.artifact_view().descriptors();
     assert_eq!(
         retained_context.artifact_view().descriptors(),
@@ -3104,12 +3081,6 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
     assert_eq!(retained_witness, &witness);
     assert_eq!(retained_witness.original_bytes(), before_bytes);
     assert_eq!(retained_witness.metadata_digest(), before_digest);
-    // An actually owned native ID is still an invalid interface root. The
-    // positive path must change its query domain, not relax this refusal.
-    assert!(matches!(
-        context.select_interface_roots(vec![owned_originals[0].id]),
-        Err(crate::CompileError::ExtractFailed(_))
-    ));
 }
 
 #[test]

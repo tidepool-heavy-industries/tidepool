@@ -268,7 +268,18 @@ impl Catalog {
             .collect::<Vec<_>>();
         CompilerInputProjection::from_issued_entries(&entries)
             .unwrap()
-            .merge(&CompilerInputProjection::from_interface_view(view).unwrap())
+            .merge(
+                &CompilerInputProjection::from_issued_entries(
+                    &self
+                        .interfaces
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(self.capture.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap()
+                .within_view(view),
+            )
             .unwrap()
     }
 
@@ -550,14 +561,22 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
         interface: catalog.interfaces[0].descriptor.id,
     };
     assert!(CompilerInputProjection::restore(&view, &[missing_type_dependency]).is_err());
-    let type_view = view
-        .interface_projection(
-            &(0..MODULES)
+    let type_projection = selected.interface_only();
+    let issued = view.with_compiler_projection(&type_projection).unwrap();
+    let support =
+        crate::declaration_context::recover_fixture_compiler_support(type_projection, issued, [])
+            .unwrap();
+    let types = support
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(
+            (0..MODULES)
                 .map(owner)
                 .chain(std::iter::once(catalog.capture.descriptor.owner.clone()))
-                .collect::<Vec<_>>(),
+                .collect(),
         )
         .unwrap();
+    let type_view = types.artifacts().clone();
     assert!(
         CompilerInputProjection::restore(&type_view, &selected.roles()).is_err(),
         "canonical custody cannot supply missing body proof"
@@ -1230,7 +1249,18 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         catalog.original(module, version),
                     )])
                     .unwrap()
-                    .merge(&CompilerInputProjection::from_interface_view(available).unwrap())
+                    .merge(
+                        &CompilerInputProjection::from_issued_entries(
+                            &catalog
+                                .interfaces
+                                .iter()
+                                .cloned()
+                                .chain(std::iter::once(catalog.capture.clone()))
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap()
+                        .within_view(available),
+                    )
                     .unwrap();
                     let mut selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection, &available.metadata_snapshot(),

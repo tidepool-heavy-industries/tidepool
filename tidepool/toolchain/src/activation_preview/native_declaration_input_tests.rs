@@ -539,14 +539,16 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
     ]
     .map(|core| {
         let inventory = ArtifactInventory::default();
+        let entries = vec![
+            Arc::new(ArtifactEntry::canonical(target.clone())),
+            Arc::new(ArtifactEntry::canonical(fixture_module_core(
+                &child,
+                core.to_vec(),
+            ))),
+        ];
+        let roles = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let view = inventory
-            .admit(
-                &inventory.empty_view(),
-                vec![
-                    ArtifactEntry::canonical(target.clone()),
-                    ArtifactEntry::canonical(fixture_module_core(&child, core.to_vec())),
-                ],
-            )
+            .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
         let target = ExactModuleIdentity {
             unit: "main".into(),
@@ -560,7 +562,7 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
             ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &view,
-                CompilerInputProjection::from_interface_view(&view).unwrap(),
+                roles,
                 vec![
                     ExactLexicalNode {
                         owner: target.clone(),
@@ -730,12 +732,12 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
     assert!(available[0].same_durable_artifact(&selected[0]));
     assert!(expanded.selected_native_groups().is_empty());
 
-    let owners = expanded
-        .interface_owners()
-        .into_iter()
-        .map(|entry| entry.owner)
-        .collect::<Vec<_>>();
-    let types = expanded.interface_projection(&owners).unwrap();
+    let types = original
+        .compiler_source_support()
+        .selected_interfaces()
+        .unwrap()
+        .select_owners(projection.snapshot_roles().keys().cloned().collect())
+        .unwrap();
     assert!(
         projection.native_declaration_availability(&types).is_err(),
         "a selected original role cannot silently lose native custody"
@@ -791,8 +793,25 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
             vec![fixture.canonical.clone(), fixture.original.clone()],
         )
         .unwrap();
+    let issued = CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
+    let support =
+        crate::declaration_context::recover_fixture_compiler_support(issued, full.clone(), [])
+            .unwrap();
+    let projected = support
+        .selected_interfaces()
+        .unwrap()
+        .select_owners(vec![fixture.original.descriptor.owner.clone()])
+        .unwrap();
     let view = full
-        .interface_projection(&[fixture.original.descriptor.owner.clone()])
+        .select_issued(
+            projected
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect(),
+            &crate::artifact_inventory::ExactArtifactSelection::capture(&projected),
+        )
         .unwrap();
     let projection = CompilerInputProjection::restore(
         &view,

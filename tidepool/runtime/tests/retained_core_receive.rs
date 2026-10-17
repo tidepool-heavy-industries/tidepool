@@ -1,14 +1,13 @@
 //! Genuine source-only originals gain native groups through exact consumption.
+use std::collections::BTreeMap;
 use std::sync::Arc;
-
-use super::compiler_test_support::selected_lexical_closure;
 
 use tidepool_repr::execution_schema::Group;
 use tidepool_toolchain::artifact_inventory::ArtifactKind;
 use tidepool_toolchain::artifacts::{
-    compile_invocation, compile_invocation_in_context, CompileInvocation,
+    compile_invocation_in_context, prepare_frozen_production_entry, CompileInvocation,
+    FrozenEntrySources,
 };
-use tidepool_toolchain::cache::ProductAvailability;
 use tidepool_toolchain::certified_products::ProductOrigin;
 use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
 use tidepool_toolchain::CompileError;
@@ -48,35 +47,52 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         unit: "main".into(),
         module: "RetainedReceiveSupport".into(),
     };
+    let probe_source = work.path().join("RetainedReceiveProbe.hs");
+    std::fs::write(
+        &probe_source,
+        format!(
+            "{}\n__prepared :: Int\n__prepared = result\n",
+            include_str!("fixtures/RetainedReceiveProbe.hs")
+        ),
+    )
+    .unwrap();
+    let frozen = FrozenEntrySources::capture(&include, &probe_source).unwrap();
+    let retained = tempfile::tempdir().unwrap();
     let original = tidepool_testing::with_settlement(|settlement| {
-        compile_invocation(
-            &CompileInvocation {
-                source: include_str!("fixtures/RetainedReceiveProbe.hs"),
-                targets: &["result"],
-                include: &include,
-                fallback_module_name: "RetainedReceiveProbe",
-            },
-            |_, _, _| {},
+        prepare_frozen_production_entry(
+            &frozen,
+            retained.path(),
+            &retained.path().join("entry"),
             settlement,
         )
     })
-    .expect("production issuer finalizes import-only originals");
-    let inventory = original
-        .module_inventory
+    .expect("production entry issuer finalizes import-only originals");
+    let products = original.products();
+    let (interfaces, execution) = products
+        .original_compile_input
         .as_ref()
-        .expect("original compiler graph");
+        .expect("original entry retains its consumed input proof")
+        .original_contexts(
+            &original.target_owned(),
+            &products.certified_groups,
+            &products.pending_imports,
+            &products.package_interfaces,
+            original.table(),
+            original.yield_sites(),
+        )
+        .unwrap();
+    let original_seals = interfaces.artifact_view().descriptors();
     for expected in [&owner, &support] {
-        let module = inventory
+        let interface = original_seals
             .iter()
-            .find(|module| {
-                !module.boot && module.unit == expected.unit && module.module == expected.module
-            })
-            .expect("source-only original in the consumed graph");
-        assert_eq!(module.product, ProductAvailability::InterfaceOnly);
-        assert!(!original.recovery_products.iter().any(|product| {
+            .find(|descriptor| descriptor.owner == *expected)
+            .expect("source-only original has its issued canonical interface");
+        assert_eq!(interface.kind, ArtifactKind::CanonicalModuleInterface);
+        assert!(interface.product_sha256.is_none());
+        assert!(!products.recovery_products.iter().any(|product| {
             product.owner().unit == expected.unit && product.owner().module == expected.module
         }));
-        assert!(!original.certified_groups.iter().any(|group| {
+        assert!(!products.certified_groups.iter().any(|group| {
             group.owner().unit == expected.unit && group.owner().module == expected.module
         }));
     }
@@ -84,46 +100,67 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     // Retain the original consumed home-import graph. A lexical selection is
     // separate from native demand, and its complete interface closure is
     // admitted by the production inventory owner.
-    let lexical = selected_lexical_closure(&original, vec![owner.clone()]);
+    let mut pending = vec![owner.clone()];
+    let mut lexical = BTreeMap::new();
+    while let Some(selected) = pending.pop() {
+        if lexical.contains_key(&selected) {
+            continue;
+        }
+        let node = execution
+            .lexical_graph()
+            .iter()
+            .find(|node| node.owner == selected)
+            .expect("selected source owner has its original compiler import graph");
+        pending.extend(node.imports.iter().cloned());
+        lexical.insert(selected, node.clone());
+    }
     assert!(lexical[&owner].imports.contains(&support));
-    let roots = lexical.keys().cloned().collect::<Vec<_>>();
-    let interfaces = original
-        .artifact_view
-        .interface_projection(&roots)
-        .expect("genuine canonical original interface closure");
-    assert!(interfaces.descriptors().iter().all(|descriptor| {
+    assert!(original_seals.iter().all(|descriptor| {
         descriptor.kind == ArtifactKind::CanonicalModuleInterface
             && descriptor.product_sha256.is_none()
     }));
-    let original_seals = interfaces.descriptors();
     let context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
-        .extend_interface_artifacts(&interfaces)
+        .extend_interface_context(&interfaces)
         .unwrap()
         .extend(&[], &[], lexical.values().cloned().collect())
         .unwrap();
     assert!(context.recovery_products().is_empty());
 
-    // Omit the owner through a real interface projection. The production
-    // context cannot admit its lexical graph without its canonical proof.
-    let missing = original
-        .artifact_view
-        .interface_projection(
-            &roots
-                .iter()
-                .filter(|selected| **selected != owner)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
+    // Recover the real support interfaces while omitting the requested owner.
+    // Its lexical graph still requires that owner's own canonical proof.
+    let durable = tempfile::tempdir().unwrap();
+    let support_interfaces = interfaces
+        .materialize_module_interfaces(durable.path())
+        .unwrap()
+        .into_iter()
+        .filter(|reference| {
+            let selected = ExactModuleIdentity {
+                unit: reference.interface.unit.clone(),
+                module: reference.interface.module.clone(),
+            };
+            selected != owner && lexical.contains_key(&selected)
+        })
+        .collect::<Vec<_>>();
+    let missing = ExactDeclarationContext::capture_recovery(
+        durable.path(),
+        &[],
+        &support_interfaces,
+        &[],
+        vec![],
+    )
+    .unwrap();
     assert!(missing
+        .artifact_view()
         .descriptors()
         .iter()
         .all(|descriptor| descriptor.owner != owner));
-    let refusal = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .extend_interface_artifacts(&missing)
-        .unwrap()
+    assert!(missing
+        .artifact_view()
+        .descriptors()
+        .iter()
+        .any(|descriptor| descriptor.owner == support));
+    let refusal = missing
         .extend(&[], &[], lexical.values().cloned().collect())
         .unwrap_err();
     assert!(matches!(&refusal, CompileError::ExtractFailed(_)));

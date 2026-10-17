@@ -607,10 +607,13 @@ mod tests {
                 _ => None,
             })
             .expect("the selected original owns its exact canonical attachment");
-        let interfaces = issued
-            .artifact_view()
-            .interface_projection(std::slice::from_ref(&root_owner))
+        let types = issued
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(vec![root_owner.clone()])
             .unwrap();
+        let interfaces = types.artifacts();
         assert!(interfaces
             .capture_graph_selection()
             .namespace
@@ -620,7 +623,7 @@ mod tests {
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let extended = empty
             .clone()
-            .extend_interface_artifacts(&interfaces)
+            .extend_issued_compiler_support(&types)
             .expect("the checked-cell interface projection preserves its issuing scope");
         let roles = extended.compiler_input_projection().snapshot_roles();
         assert_eq!(roles[&root_owner].interface(), canonical);
@@ -676,11 +679,11 @@ mod tests {
             );
             assert!(narrowed.bindings.contains(&canonical_binding));
             assert!(
-                empty
-                    .clone()
-                    .extend_interface_artifacts(&original_only)
-                    .is_err(),
-                "an Original-only namespace must refuse its unselected canonical attachment"
+                matches!(crate::declaration_context::recover_fixture_compiler_support(
+                    types.projection().clone(), original_only, [],
+                ), Err(CompileError::ExtractFailed(detail))
+                    if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
+                "recorded type roles must refuse a namespace that omits their selected canonical attachment"
             );
         }
     }

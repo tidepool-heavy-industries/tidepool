@@ -985,7 +985,7 @@ mod tests {
             ]),
             "a consumed generated owner without its original interface is missing evidence",
         );
-        let projected = execution.select_interface_roots(Vec::new()).unwrap();
+        let projected = execution.select_original_type_interfaces(&[], &[]).unwrap();
         assert_eq!(
             projected.original_instance_environment(),
             &crate::declaration_context::OriginalInstanceEnvironment::Unknown
@@ -1041,7 +1041,7 @@ mod tests {
     fn sealed_package_context_preserves_original_producer_after_empty_projection() {
         let proof = package_context_proof(b"original compiler producer");
         let original = original_context(&proof);
-        let selected = original.select_interface_roots(Vec::new()).unwrap();
+        let selected = original.select_original_type_interfaces(&[], &[]).unwrap();
         assert!(selected.artifact_view().descriptors().is_empty());
         assert_eq!(selected, *original);
         let expected = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -1065,10 +1065,10 @@ mod tests {
         let first_proof = package_context_proof(b"first compiler producer");
         let second_proof = package_context_proof(b"second compiler producer");
         let first = original_context(&first_proof)
-            .select_interface_roots(Vec::new())
+            .select_original_type_interfaces(&[], &[])
             .unwrap();
         let second = original_context(&second_proof)
-            .select_interface_roots(Vec::new())
+            .select_original_type_interfaces(&[], &[])
             .unwrap();
         assert_ne!(first, second);
         assert_ne!(first.semantic_sha256(), second.semantic_sha256());

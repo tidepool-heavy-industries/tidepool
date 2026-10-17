@@ -669,9 +669,38 @@ fn run_history(
                         .map(|id| (model.records[expected.inventory][&id].spec.key, id))
                         .collect();
                     let valid = owners.iter().all(|key| available.contains_key(key));
-                    let projected = actual.interface_projection(
-                        &owners.iter().map(|key| owner(*key)).collect::<Vec<_>>(),
-                    );
+                    let issued_entries = model
+                        .contents(expected)
+                        .iter()
+                        .map(|id| Arc::new(model.records[expected.inventory][id].spec.entry()))
+                        .collect::<Vec<_>>();
+                    let projection =
+                        CompilerInputProjection::from_issued_entries(&issued_entries).unwrap();
+                    let issued = actual.with_compiler_projection(&projection).unwrap();
+                    let support = crate::declaration_context::recover_fixture_compiler_support(
+                        projection,
+                        issued,
+                        [],
+                    )
+                    .unwrap();
+                    // Authenticate the role selection through recovery, then retain
+                    // its exact scoped graph in the original inventory. The model
+                    // still measures that inventory's admission and reclamation.
+                    let projected = support
+                        .selected_interfaces()
+                        .and_then(|interfaces| {
+                            interfaces.select_owners(owners.iter().map(|key| owner(*key)).collect())
+                        })
+                        .and_then(|selected| {
+                            actual.select_issued(
+                                selected
+                                    .root_entries()
+                                    .iter()
+                                    .map(|entry| entry.descriptor.id)
+                                    .collect(),
+                                &ExactArtifactSelection::capture(&selected),
+                            )
+                        });
                     prop_assert_eq!(projected.is_ok(), valid, "step {} {:?}", step, op);
                     if valid {
                         coverage.selected += 1;

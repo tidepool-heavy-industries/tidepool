@@ -3572,7 +3572,6 @@ impl ExactProductAdmission<'_> {
             .compiler_inputs()
             .projection
             .within_view(artifacts)
-            .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?
             .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
         if let Some(support) = &self.request.program_support {
             projection =
@@ -5655,20 +5654,6 @@ impl ExactDeclarationContext {
             .projection()
             .project_metadata(self.facts.compiler_support.artifacts().metadata_snapshot())
     }
-    /// Merge retained interface custody without granting authored imports.
-    pub fn extend_interface_artifacts(
-        mut self,
-        artifacts: &ArtifactView,
-    ) -> Result<Self, CompileError> {
-        for descriptor in artifacts.descriptors() {
-            self = self.admit_producer(descriptor.producer_sha256)?;
-        }
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::from_interface_selection(artifacts)?;
-        self.facts.compiler_support = self.facts.compiler_support.merge(&support)?;
-        self.finish()
-    }
-
     /// Carry a compiler issuer's exact role selection without deriving roles
     /// from the broader artifact custody retained by its view.
     pub(crate) fn extend_issued_compiler_support(
@@ -5870,16 +5855,112 @@ impl ExactDeclarationContext {
         }
     }
 
-    /// Select interface custody without losing the original producer when the
-    /// selected type closure contains only package Names.
-    #[track_caller]
-    pub fn select_interface_roots(
+    /// Select original type evidence through the issuing compiler roles. Names
+    /// outside known home units remain obligations of the pinned compiler
+    /// transaction; this projection grants no package or native authority.
+    pub fn select_original_type_interfaces(
         &self,
-        roots: Vec<crate::artifact_inventory::ArtifactId>,
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
     ) -> Result<Self, CompileError> {
+        Self::type_interfaces_from_support(
+            &self.facts.compiler_support,
+            self.facts.producer,
+            witnesses,
+            signatures,
+        )
+    }
+
+    pub(crate) fn checked_value_type_interfaces(
+        value: &crate::checked_cell::CheckedValueArtifact,
+        signature: &crate::checked_cell::ExactCheckedSignature,
+    ) -> Result<Self, CompileError> {
+        Self::type_interfaces_from_support(
+            value.compiler_source_support(),
+            value
+                .certified_interface()
+                .interface()
+                .toolchain_identity_sha256(),
+            &[],
+            &[signature],
+        )
+    }
+
+    fn type_interfaces_from_support(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        producer: [u8; 32],
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
+    ) -> Result<Self, CompileError> {
+        if producer == [0; 32] {
+            return Err(failure("original type context lacks its compiler producer"));
+        }
+        let selected = support.selected_interfaces()?;
+        let entries = selected.entries();
+        let home_units = entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Canonical(interface) => Some(interface.home_units()),
+                _ => None,
+            })
+            .flatten()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut owners = BTreeSet::new();
+        for witness in witnesses {
+            for (unit, module, seal) in witness.interface_seals() {
+                let owner = ExactModuleIdentity {
+                    unit: unit.to_owned(),
+                    module: module.to_owned(),
+                };
+                match entries.get(&owner) {
+                    Some(entry) => {
+                        if entry.descriptor.producer_sha256 != producer
+                            || hex(&entry.descriptor.interface_sha256) != seal
+                        {
+                            return Err(failure(
+                                "original input differs from its certified interface seal",
+                            ));
+                        }
+                        owners.insert(owner);
+                    }
+                    None if unit == "main" || home_units.contains(unit) => {
+                        return Err(failure("original input lacks its certified home interface"));
+                    }
+                    None => {}
+                }
+            }
+        }
+        for name in witnesses
+            .iter()
+            .map(|witness| witness.signature())
+            .chain(signatures.iter().copied())
+            .flat_map(|signature| signature.names())
+        {
+            let owner = ExactModuleIdentity {
+                unit: name.unit().to_owned(),
+                module: name.module().to_owned(),
+            };
+            match entries.get(&owner) {
+                Some(entry) => {
+                    if entry.descriptor.producer_sha256 != producer {
+                        return Err(failure(
+                            "original type interface differs from its compiler producer",
+                        ));
+                    }
+                    owners.insert(owner);
+                }
+                None if name.unit() == "main" || home_units.contains(name.unit()) => {
+                    return Err(failure(
+                        "original native signature lacks its certified Name owner",
+                    ));
+                }
+                None => {}
+            }
+        }
         Ok(Self::from_facts(DeclarationContextFacts {
-            compiler_support: self.facts.compiler_support.select_type_roots(roots)?,
-            producer: self.facts.producer,
+            compiler_support: selected.support_for_owners(owners.into_iter().collect())?,
+            producer,
             lexical: Default::default(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
@@ -9740,8 +9821,14 @@ mod tests {
                 .is_err(),
             "continuation must retain every issued non-generated original role"
         );
-        let types = support
-            .interface_projection(&[identity("fixture", "Hidden")])
+        let hidden_issuance = support_offer(std::slice::from_ref(&hidden));
+        let hidden_support =
+            recover_fixture_compiler_support(hidden_issuance.projection, support.clone(), [])
+                .unwrap();
+        let types = hidden_support
+            .selected_interfaces()
+            .unwrap()
+            .select_owners(vec![identity("fixture", "Hidden")])
             .unwrap();
         assert!(
             private
@@ -12594,13 +12681,18 @@ mod tests {
             .any(|descriptor| descriptor.kind
                 == crate::artifact_inventory::ArtifactKind::OriginalModule
                 && descriptor.owner.module == "HiddenNative"));
-        let interfaces = retained
-            .interface_projection(
-                &retained
-                    .interface_owners()
-                    .into_iter()
-                    .map(|owner| owner.owner)
-                    .collect::<Vec<_>>(),
+        let interfaces = context
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .select_owners(
+                context
+                    .compiler_input_projection()
+                    .snapshot_roles()
+                    .keys()
+                    .filter(|owner| owner.module != "Joined")
+                    .cloned()
+                    .collect(),
             )
             .unwrap();
         assert!(interfaces
@@ -12880,21 +12972,27 @@ mod tests {
             .map(|interface| interface.owner)
             .collect::<Vec<_>>();
         let interfaces = context
-            .artifact_view()
-            .interface_projection(&owners)
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .select_owners(owners)
             .unwrap();
         assert!(matches!(recover_fixture_compiler_support(
             context.compiler_input_projection().clone(), interfaces, [],
         ), Err(CompileError::ExtractFailed(detail))
             if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"));
-        let roots = context
-            .compiler_input_roles()
-            .iter()
-            .map(CompilerInputRole::interface)
-            .collect();
         let support = context
             .compiler_source_support()
-            .select_type_roots(roots)
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(
+                context
+                    .compiler_input_projection()
+                    .snapshot_roles()
+                    .keys()
+                    .cloned()
+                    .collect(),
+            )
             .unwrap();
         let mut type_only = context.as_ref().clone();
         type_only = type_only.rebuild(|facts| facts.compiler_support = support);
@@ -14402,7 +14500,14 @@ mod tests {
         let hidden = Arc::new(
             (*empty)
                 .clone()
-                .extend_interface_artifacts(&support.artifacts)
+                .extend_issued_compiler_support(
+                    &recover_fixture_compiler_support(
+                        support.projection.clone(),
+                        support.artifacts.clone(),
+                        [],
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), hidden.clone());
@@ -15420,7 +15525,19 @@ mod tests {
         let canonical_context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_interface_artifacts(&canonical)
+                .extend_issued_compiler_support(
+                    &recover_fixture_compiler_support(
+                        CompilerInputProjection::from_issued_entries(&[Arc::new(
+                            ArtifactEntry::canonical(
+                                unchanged[0].module_interface().unwrap().clone(),
+                            ),
+                        )])
+                        .unwrap(),
+                        canonical,
+                        [],
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
         );
         let mut canonical_request = program_request(directory.path(), canonical_context.clone());
@@ -15766,7 +15883,15 @@ mod tests {
             ExactDeclarationContext::from_authenticated_interfaces(
                 [2; 32],
                 &interfaces,
-                CompilerInputProjection::from_interface_view(&interfaces).unwrap(),
+                CompilerInputProjection::from_issued_entries(&[
+                    Arc::new(ArtifactEntry::canonical(
+                        product.module_interface().unwrap().clone(),
+                    )),
+                    Arc::new(ArtifactEntry::canonical(
+                        unchanged.module_interface().unwrap().clone(),
+                    )),
+                ])
+                .unwrap(),
             )
             .unwrap(),
         );
@@ -16741,8 +16866,10 @@ mod tests {
             ])
         );
         let changed_interfaces = changed
-            .artifact_view()
-            .interface_projection(&[owner])
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .select_owners(vec![owner])
             .unwrap();
         local.program_support = Some(ProgramSourceSupport {
             compiler_support: changed
@@ -17185,7 +17312,7 @@ mod tests {
             ));
         let inventory = initial.facts.compiler_support.artifacts().inventory();
         let retained = inventory
-            .admit(initial.artifact_view(), vec![canonical_target])
+            .admit(initial.artifact_view(), vec![canonical_target.clone()])
             .unwrap();
         let mut lexical = initial.lexical_graph().to_vec();
         lexical.push(ExactLexicalNode {
@@ -17195,7 +17322,14 @@ mod tests {
         let original = ExactDeclarationContext::from_authenticated_execution(
             initial.facts.producer,
             &retained,
-            CompilerInputProjection::from_interface_view(&retained).unwrap(),
+            initial
+                .compiler_input_projection()
+                .interface_only()
+                .merge(
+                    &CompilerInputProjection::from_issued_entries(&[Arc::new(canonical_target)])
+                        .unwrap(),
+                )
+                .unwrap(),
             lexical,
             identity("main", "OriginalTarget"),
             &[identity("main", "CapturedInterface")],

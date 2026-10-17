@@ -736,17 +736,16 @@ fn selected_merge_preserves_acquired_catalog_origins_in_exact_scope() {
                     })],
                 )
                 .unwrap();
+            let incoming_entry = Arc::new(ArtifactEntry::canonical(if acquired_first {
+                bare
+            } else {
+                acquired
+            }));
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[incoming_entry.clone()]).unwrap();
             let incoming = other_inventory
-                .admit(
-                    &other_inventory.empty_view(),
-                    vec![ArtifactEntry::canonical(if acquired_first {
-                        bare
-                    } else {
-                        acquired
-                    })],
-                )
+                .admit_shared(&other_inventory.empty_view(), vec![incoming_entry])
                 .unwrap();
-            let projection = CompilerInputProjection::from_interface_view(&incoming).unwrap();
             let merged = first
                 .merge_fixture_selected(&incoming, &projection)
                 .unwrap();
@@ -818,6 +817,10 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
         } else {
             canonical.clone()
         });
+        let projection = crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+            &[Arc::new(second.clone())],
+        )
+        .unwrap();
         let retained = inventory.admit(&view, vec![second]).unwrap();
         drop(canonical);
         assert!(
@@ -828,8 +831,7 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
             crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                 retained.descriptors()[0].producer_sha256,
                 &retained,
-                crate::artifact_inventory::CompilerInputProjection::from_interface_view(&retained)
-                    .unwrap(),
+                projection,
             )
             .unwrap(),
         );
@@ -871,7 +873,14 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
         let current = Arc::new(
             (*context)
                 .clone()
-                .extend_interface_artifacts(&both)
+                .extend_issued_compiler_support(
+                    &crate::declaration_context::recover_fixture_compiler_support(
+                        context.compiler_input_projection().clone(),
+                        both.clone(),
+                        [],
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
         );
         let current_request = current

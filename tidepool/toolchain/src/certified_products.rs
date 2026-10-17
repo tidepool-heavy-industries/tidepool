@@ -11934,11 +11934,32 @@ pub(crate) mod tests {
                 let complete = inventory
                     .admit_shared(&inventory.empty_view(), vec![entry.clone()])
                     .unwrap();
-                let interfaces = complete
-                    .interface_projection(&[entry.descriptor.owner.clone()])
-                    .unwrap();
                 let roles = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-                let available = interfaces.with_compiler_projection(&roles).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    roles.clone(),
+                    complete.clone(),
+                    [],
+                )
+                .unwrap();
+                let narrowed = support
+                    .select_support_roots(vec![roles.roles()[0].interface()])
+                    .unwrap()
+                    .finalize_namespace()
+                    .unwrap();
+                let available = complete
+                    .select_issued(
+                        roles
+                            .roles()
+                            .iter()
+                            .flat_map(|role| {
+                                std::iter::once(role.interface()).chain(role.original())
+                            })
+                            .collect(),
+                        &crate::artifact_inventory::ExactArtifactSelection::capture(
+                            narrowed.artifacts(),
+                        ),
+                    )
+                    .unwrap();
                 assert!(available.selected_native_groups().is_empty());
                 available
             } else {
@@ -12153,10 +12174,30 @@ pub(crate) mod tests {
                 let complete = inventory
                     .admit_shared(&inventory.empty_view(), vec![entry.clone()])
                     .unwrap();
-                complete
-                    .interface_projection(&[entry.descriptor.owner.clone()])
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection.clone(),
+                    complete.clone(),
+                    [],
+                )
+                .unwrap();
+                let narrowed = support
+                    .select_support_roots(vec![projection.roles()[0].interface()])
                     .unwrap()
-                    .with_compiler_projection(&projection)
+                    .finalize_namespace()
+                    .unwrap();
+                complete
+                    .select_issued(
+                        projection
+                            .roles()
+                            .iter()
+                            .flat_map(|role| {
+                                std::iter::once(role.interface()).chain(role.original())
+                            })
+                            .collect(),
+                        &crate::artifact_inventory::ExactArtifactSelection::capture(
+                            narrowed.artifacts(),
+                        ),
+                    )
                     .unwrap()
             } else {
                 let selected = if mode == "partial" {
@@ -17264,7 +17305,21 @@ pub(crate) mod tests {
             let public_context = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_interface_artifacts(marker_context.artifact_view())
+                    .extend_issued_compiler_support(
+                        &marker_context
+                            .compiler_source_support()
+                            .selected_interfaces()
+                            .unwrap()
+                            .support_for_owners(
+                                marker_context
+                                    .compiler_input_projection()
+                                    .snapshot_roles()
+                                    .keys()
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .unwrap(),
+                    )
                     .unwrap(),
             );
             assert!(public_context.recovery_products().is_empty());

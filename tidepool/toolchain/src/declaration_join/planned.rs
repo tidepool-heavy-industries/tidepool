@@ -951,10 +951,21 @@ mod tests {
         let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
         let current_view = inventory
             .admit_shared(&inventory.empty_view(), vec![current_entry.clone()])
-            .unwrap()
-            .interface_projection(&[current_entry.descriptor.owner.clone()])
             .unwrap();
-        let projection = CompilerInputProjection::from_interface_view(&current_view).unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[current_entry.clone()])
+            .unwrap()
+            .interface_only();
+        let current_support = crate::declaration_context::recover_fixture_compiler_support(
+            projection.clone(),
+            current_view,
+            [],
+        )
+        .unwrap();
+        let current_view = current_support
+            .selected_interfaces()
+            .unwrap()
+            .select_owners(vec![current_entry.descriptor.owner.clone()])
+            .unwrap();
         let baseline = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(
@@ -1010,18 +1021,27 @@ mod tests {
                 IssuedNativeOffer::issue(original, &compiled, Some(proof)).unwrap()
             })
             .collect::<Vec<_>>();
-        let scoped = compiled
-            .interface_projection(
-                &products
-                    .iter()
-                    .map(|product| ExactModuleIdentity {
-                        unit: product.owner().unit.clone(),
-                        module: product.owner().module.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-            )
+        let support = crate::declaration_context::recover_fixture_compiler_support(
+            issued.clone(),
+            compiled.clone(),
+            [],
+        )
+        .unwrap();
+        let narrowed = support
+            .select_support_roots(issued.roles().iter().map(|role| role.interface()).collect())
             .unwrap()
-            .with_compiler_projection(&issued)
+            .finalize_namespace()
+            .unwrap();
+        let scoped = compiled
+            .select_issued(
+                narrowed
+                    .projection()
+                    .roles()
+                    .iter()
+                    .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                    .collect(),
+                &crate::artifact_inventory::ExactArtifactSelection::capture(narrowed.artifacts()),
+            )
             .unwrap();
         assert!(scoped.selected_native_groups().is_empty());
         let baseline = authored_interface_context(
@@ -1201,13 +1221,26 @@ mod tests {
                 ordered.reverse();
             }
             let (full, issued) = issued_view(&ordered);
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                issued.clone(),
+                full.clone(),
+                [],
+            )
+            .unwrap();
+            let projected = support
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(issued.snapshot_roles().keys().cloned().collect())
+                .unwrap();
             let interfaces = full
-                .interface_projection(
-                    &full
-                        .interface_owners()
-                        .into_iter()
-                        .map(|row| row.owner)
-                        .collect::<Vec<_>>(),
+                .select_issued(
+                    projected
+                        .capture_graph_selection()
+                        .namespace
+                        .iter()
+                        .map(|binding| binding.artifact)
+                        .collect(),
+                    &crate::artifact_inventory::ExactArtifactSelection::capture(&projected),
                 )
                 .unwrap();
             let view = full.retain_original_custody(&interfaces).unwrap();
@@ -1314,10 +1347,28 @@ mod tests {
                         ]),
                     )
                     .unwrap();
+                let first = first.retain_original_custody(&first).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    issued.clone(),
+                    first.clone(),
+                    [],
+                )
+                .unwrap()
+                .finalize_namespace()
+                .unwrap();
                 let first = first
-                    .retain_original_custody(&first)
-                    .unwrap()
-                    .with_compiler_projection(&issued)
+                    .select_issued(
+                        issued
+                            .roles()
+                            .iter()
+                            .flat_map(|role| {
+                                std::iter::once(role.interface()).chain(role.original())
+                            })
+                            .collect(),
+                        &crate::artifact_inventory::ExactArtifactSelection::capture(
+                            support.artifacts(),
+                        ),
+                    )
                     .unwrap();
                 let before = first.selected_native_groups();
                 assert_eq!(before.len(), 1);
@@ -1374,15 +1425,20 @@ mod tests {
         let compiled = crate::declaration_context::certified_product_artifact_view(
             [1; 32],
             &[],
-            &[source, dependency],
+            &[source.clone(), dependency.clone()],
             None,
         )
         .unwrap();
         let context = authored_interface_context(
             None,
             &compiled,
-            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&compiled)
-                .unwrap(),
+            &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(source)),
+                Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+                    dependency,
+                )),
+            ])
+            .unwrap(),
             [root.clone()],
             &admitted,
         )
@@ -1497,41 +1553,54 @@ mod tests {
             (consumer.clone(), vec![original.clone()]),
         ]);
         let offer = |source_sha256| {
-            crate::declaration_context::certified_product_artifact_view(
+            let interfaces = [
+                fixture_module_interface([1; 32], "main", "Original", BTreeMap::new()),
+                fixture_module_interface([1; 32], "main", "TypeOnlySource", BTreeMap::new()),
+                fixture_source_module_interface(
+                    [1; 32],
+                    "main",
+                    &probe.module,
+                    source_sha256,
+                    BTreeMap::new(),
+                    None,
+                ),
+                fixture_source_module_interface(
+                    [1; 32],
+                    "main",
+                    &consumer.module,
+                    source_sha256,
+                    BTreeMap::new(),
+                    None,
+                ),
+            ];
+            let entries = interfaces
+                .iter()
+                .cloned()
+                .map(|interface| {
+                    Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+                        interface,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let roles =
+                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)
+                    .unwrap();
+            let view = crate::declaration_context::certified_product_artifact_view(
                 [1; 32],
                 &[],
-                &[
-                    fixture_module_interface([1; 32], "main", "Original", BTreeMap::new()),
-                    fixture_module_interface([1; 32], "main", "TypeOnlySource", BTreeMap::new()),
-                    fixture_source_module_interface(
-                        [1; 32],
-                        "main",
-                        &probe.module,
-                        source_sha256,
-                        BTreeMap::new(),
-                        None,
-                    ),
-                    fixture_source_module_interface(
-                        [1; 32],
-                        "main",
-                        &consumer.module,
-                        source_sha256,
-                        BTreeMap::new(),
-                        None,
-                    ),
-                ],
+                &interfaces,
                 None,
             )
-            .unwrap()
+            .unwrap();
+            (view, roles)
         };
-        let first_offer = offer([1; 32]);
-        let second_offer = offer([2; 32]);
+        let (first_offer, first_roles) = offer([1; 32]);
+        let (second_offer, second_roles) = offer([2; 32]);
         assert!(first_offer.merge_fixture_selections(&second_offer).is_err());
         let first = authored_interface_context(
             None,
             &first_offer,
-            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&first_offer)
-                .unwrap(),
+            &first_roles,
             [original.clone()],
             &admitted,
         )
@@ -1539,8 +1608,7 @@ mod tests {
         let second = authored_interface_context(
             Some(&first),
             &second_offer,
-            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&second_offer)
-                .unwrap(),
+            &second_roles,
             [original.clone()],
             &admitted,
         )

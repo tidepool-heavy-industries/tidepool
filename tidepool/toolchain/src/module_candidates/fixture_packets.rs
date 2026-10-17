@@ -140,9 +140,24 @@ fn admit_fixture_scope(
         None,
     )
     .unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(
+        certified
+            .source_selection
+            .compiler_projection(&view)
+            .unwrap(),
+        view.clone(),
+        [],
+    )
+    .unwrap();
     if !exact_owners.is_empty() {
         context = context
-            .extend_interface_artifacts(&view.interface_projection(exact_owners).unwrap())
+            .extend_issued_compiler_support(
+                &support
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(exact_owners.to_vec())
+                    .unwrap(),
+            )
             .unwrap();
     }
     if !lexical_roots.is_empty() {
@@ -186,13 +201,25 @@ fn admit_fixture_scope(
             .map(|node| node.owner.clone())
             .collect::<Vec<_>>();
         context = context
-            .extend_interface_artifacts(&view.interface_projection(&lexical_owners).unwrap())
+            .extend_issued_compiler_support(
+                &support
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(lexical_owners)
+                    .unwrap(),
+            )
             .unwrap();
         context = context.extend(&[], &[], surface.lexical).unwrap();
     }
     if !native_owners.is_empty() {
         context = context
-            .extend_interface_artifacts(&view.interface_projection(native_owners).unwrap())
+            .extend_issued_compiler_support(
+                &support
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(native_owners.to_vec())
+                    .unwrap(),
+            )
             .unwrap();
         let native = certified
             .recovery_products
@@ -556,12 +583,14 @@ fn source_boot_authored_declaration_packet_producer() {
         module: module.module_name(),
     };
     let projected = context
-        .artifact_view()
-        .interface_projection(&[owner.clone()])
+        .compiler_source_support()
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![owner.clone()])
         .unwrap();
     let type_context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
-        .extend_interface_artifacts(&projected)
+        .extend_issued_compiler_support(&projected)
         .unwrap();
     assert!(type_context.recovery_products().is_empty());
     assert!(type_context

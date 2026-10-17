@@ -6273,7 +6273,7 @@ impl ArtifactView {
 
     /// Narrow the compiler namespace using already-issued roles while retaining
     /// every exact historical binding and its physical custody independently.
-    pub(crate) fn with_compiler_projection(
+    fn with_compiler_projection(
         &self,
         projection: &CompilerInputProjection,
     ) -> Result<Self, CompileError> {
@@ -6980,53 +6980,6 @@ impl ArtifactView {
         Ok(entries)
     }
 
-    pub fn interface_projection(
-        &self,
-        owners: &[ExactModuleIdentity],
-    ) -> Result<Self, CompileError> {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let projection = self.read_projection(&state);
-        let selected = projection
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                (!entry.is_native())
-                    .then_some((entry.descriptor.owner.clone(), entry.descriptor.id))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let roots = owners
-            .iter()
-            .map(|owner| {
-                selected
-                    .get(owner)
-                    .copied()
-                    .ok_or_else(|| failure("type owner outside retained view"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let interface_nodes = admitted_closure(
-            &state,
-            roots
-                .iter()
-                .map(|id| {
-                    self.resolve_binding(*id, &projection.nodes)
-                        .map(InventoryNodeKey::Artifact)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter(),
-        );
-        let namespace = artifact_ids(&interface_nodes)
-            .into_iter()
-            .map(|id| {
-                self.resolve_binding(id, &interface_nodes)
-                    .map(|binding| (id, binding))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        drop(state);
-        let mut retained = self.select_roots(roots)?;
-        retained.replace_namespace(&namespace);
-        Ok(retained)
-    }
-
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
@@ -7064,108 +7017,118 @@ mod tests {
     use super::*;
 
     proptest::proptest! {
-        #[test]
-        fn demotion_retains_undemanded_exact_native_dependency_custody(
-            late in 1u32..8, repeats in 1usize..9,
-        ) {
-            let inventory = ArtifactInventory::default();
-            let dependency = Arc::new(issued_native_groups("DeferredDependency",
-                vec![(5, Vec::new())], &[], &BTreeMap::new()));
-            let original = Arc::new(issued_native_groups("DeferredConsumer",
-                vec![(0, Vec::new()), (late, vec![issued_source(&dependency, 5)])],
-                &[&dependency], &BTreeMap::new()));
-            let owner = original.descriptor.owner.clone();
-            let available = inventory.admit_shared_with_demand(
-                &inventory.empty_view(), vec![original.clone(), dependency.clone()],
-                NativeArtifactDemand::ScopeInterfaces,
-            ).unwrap();
-            let mut view = inventory.admit_shared_with_demand(
-                &available, vec![original.clone()],
-                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, 0)]),
-            ).unwrap();
-            proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id));
-            for _ in 0..repeats {
-                view = view.interface_projection(&[owner.clone()]).unwrap();
-                proptest::prop_assert!(view.artifact_ids().contains(&original.descriptor.id));
-                proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id),
-                    "projection dropped exact dependency {:?}; retained {:?}",
-                    dependency.descriptor.id, view.artifact_ids());
-                proptest::prop_assert!(!view.namespace().contains_key(&dependency.descriptor.id));
-                proptest::prop_assert!(view.selected_native_groups().is_empty());
+            #[test]
+            fn demotion_retains_undemanded_exact_native_dependency_custody(
+                late in 1u32..8, repeats in 1usize..9,
+            ) {
+                let inventory = ArtifactInventory::default();
+                let dependency = Arc::new(issued_native_groups("DeferredDependency",
+                    vec![(5, Vec::new())], &[], &BTreeMap::new()));
+                let original = Arc::new(issued_native_groups("DeferredConsumer",
+                    vec![(0, Vec::new()), (late, vec![issued_source(&dependency, 5)])],
+                    &[&dependency], &BTreeMap::new()));
+                let owner = original.descriptor.owner.clone();
+                let available = inventory.admit_shared_with_demand(
+                    &inventory.empty_view(), vec![original.clone(), dependency.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                ).unwrap();
+                let mut view = inventory.admit_shared_with_demand(
+                    &available, vec![original.clone()],
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, 0)]),
+                ).unwrap();
+                proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id));
+                for _ in 0..repeats {
+                    view = {
+    let projection = CompilerInputProjection::from_issued_entries(&[original.clone(), dependency.clone()]).unwrap().interface_only();
+    let issued = view.with_compiler_projection(&projection).unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(projection, issued, []).unwrap();
+    let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
+    view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
+    };
+                    proptest::prop_assert!(view.artifact_ids().contains(&original.descriptor.id));
+                    proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id),
+                        "projection dropped exact dependency {:?}; retained {:?}",
+                        dependency.descriptor.id, view.artifact_ids());
+                    proptest::prop_assert!(!view.namespace().contains_key(&dependency.descriptor.id));
+                    proptest::prop_assert!(view.selected_native_groups().is_empty());
+                }
+                let demanded = inventory.admit_shared_with_demand(
+                    &view, vec![original.clone()],
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, late)]),
+                ).unwrap();
+                let expected = (
+                    original.descriptor.id, dependency.descriptor.id,
+                    ArtifactDependency::NativeGroup { dependent_ordinal: late, required_ordinal: 5 },
+                );
+                proptest::prop_assert!(demanded.dependencies().contains(&expected));
             }
-            let demanded = inventory.admit_shared_with_demand(
-                &view, vec![original.clone()],
-                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, late)]),
-            ).unwrap();
-            let expected = (
-                original.descriptor.id, dependency.descriptor.id,
-                ArtifactDependency::NativeGroup { dependent_ordinal: late, required_ordinal: 5 },
-            );
-            proptest::prop_assert!(demanded.dependencies().contains(&expected));
-        }
 
-        #[test]
-        fn complete_native_group_custody_survives_demotion_histories(
-            count in 1u32..7, repeats in 1usize..12,
-        ) {
-            let inventory = ArtifactInventory::default();
-            let original = Arc::new(issued_native_groups("CustodiedAvailable",
-                (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
-            let id = original.descriptor.id;
-            let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
-            let owner = ExactModuleIdentity { unit: product.owner().unit.clone(), module: product.owner().module.clone() };
-            let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
-            let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
-            for _ in 0..repeats {
-                view = inventory.empty_view().merge_compiler_inputs(
-                    &CompilerInputProjection::default(), &view, &roles,
-                ).unwrap().0;
-                view = view.interface_projection(&[owner.clone()]).unwrap();
-                proptest::prop_assert!(view.roots().iter().all(|root|
-                    matches!(root, InventoryNodeKey::Artifact(binding) if binding.artifact == canonical)));
-                let before = ExactArtifactSelection::capture(&view);
-                let proof = NativeOriginalRequirement::from_issued_group_custody(id, canonical, &view)
-                    .unwrap().expect("one complete issued carrier remains available");
-                proptest::prop_assert!(view.selected_native_groups().is_empty());
-                proptest::prop_assert!(proof.selection.graph_selection().roots.iter()
-                    .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
-                proptest::prop_assert_eq!(proof.selection.graph_selection().native_groups.iter()
-                    .filter(|group| group.binding.artifact() == id).count(), count as usize);
-                proptest::prop_assert_eq!(ExactArtifactSelection::capture(&view), before);
+            #[test]
+            fn complete_native_group_custody_survives_demotion_histories(
+                count in 1u32..7, repeats in 1usize..12,
+            ) {
+                let inventory = ArtifactInventory::default();
+                let original = Arc::new(issued_native_groups("CustodiedAvailable",
+                    (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
+                let id = original.descriptor.id;
+                let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
+                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let owner = ExactModuleIdentity { unit: product.owner().unit.clone(), module: product.owner().module.clone() };
+                let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
+                let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
+                for _ in 0..repeats {
+                    view = inventory.empty_view().merge_compiler_inputs(
+                        &CompilerInputProjection::default(), &view, &roles,
+                    ).unwrap().0;
+                    view = {
+    let support = crate::declaration_context::recover_fixture_compiler_support(roles.clone(), view.with_compiler_projection(&roles).unwrap(), []).unwrap();
+    let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
+    view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
+    };
+                    proptest::prop_assert!(view.roots().iter().all(|root|
+                        matches!(root, InventoryNodeKey::Artifact(binding) if binding.artifact == canonical)));
+                    let before = ExactArtifactSelection::capture(&view);
+                    let proof = NativeOriginalRequirement::from_issued_group_custody(id, canonical, &view)
+                        .unwrap().expect("one complete issued carrier remains available");
+                    proptest::prop_assert!(view.selected_native_groups().is_empty());
+                    proptest::prop_assert!(proof.selection.graph_selection().roots.iter()
+                        .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
+                    proptest::prop_assert_eq!(proof.selection.graph_selection().native_groups.iter()
+                        .filter(|group| group.binding.artifact() == id).count(), count as usize);
+                    proptest::prop_assert_eq!(ExactArtifactSelection::capture(&view), before);
+                }
+            }
+
+            #[test]
+            fn incomplete_native_carriers_cannot_union_their_available_census(
+                count in 2u32..7, pivot in 1u32..6,
+            ) {
+                let pivot = 1 + (pivot % (count - 1));
+                let inventory = ArtifactInventory::default();
+                let original = Arc::new(issued_native_groups("SplitAvailable",
+                    (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
+                let id = original.descriptor.id;
+                let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
+                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
+                let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().unwrap().clone()));
+                let base = inventory.admit_shared(&inventory.empty_view(), vec![canonical_entry]).unwrap();
+                let canonical_binding = base.namespace()[&canonical];
+                let capture = |range: std::ops::Range<u32>, name: &str| inventory.admit_recovery_selection(
+                    &base, vec![original.clone(), Arc::new(entry(name, &[]))],
+                    &range.map(|original_ordinal| NativeGroupKey { artifact: id, original_ordinal }).collect(),
+                ).unwrap();
+                let left = capture(0..pivot, "LeftPartition");
+                let right = capture(pivot..count, "RightPartition");
+                proptest::prop_assert_eq!(left.namespace()[&canonical], canonical_binding);
+                proptest::prop_assert_eq!(right.namespace()[&canonical], canonical_binding);
+                proptest::prop_assert_ne!(left.namespace()[&id], right.namespace()[&id]);
+                let combined = left.merge_compiler_inputs(&roles, &right, &roles).unwrap().0;
+                proptest::prop_assert!(combined.selected_native_groups().is_empty());
+                proptest::prop_assert!(NativeOriginalRequirement::from_issued_group_custody(id, canonical, &combined)
+                    .unwrap().is_none());
             }
         }
-
-        #[test]
-        fn incomplete_native_carriers_cannot_union_their_available_census(
-            count in 2u32..7, pivot in 1u32..6,
-        ) {
-            let pivot = 1 + (pivot % (count - 1));
-            let inventory = ArtifactInventory::default();
-            let original = Arc::new(issued_native_groups("SplitAvailable",
-                (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
-            let id = original.descriptor.id;
-            let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
-            let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
-            let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().unwrap().clone()));
-            let base = inventory.admit_shared(&inventory.empty_view(), vec![canonical_entry]).unwrap();
-            let canonical_binding = base.namespace()[&canonical];
-            let capture = |range: std::ops::Range<u32>, name: &str| inventory.admit_recovery_selection(
-                &base, vec![original.clone(), Arc::new(entry(name, &[]))],
-                &range.map(|original_ordinal| NativeGroupKey { artifact: id, original_ordinal }).collect(),
-            ).unwrap();
-            let left = capture(0..pivot, "LeftPartition");
-            let right = capture(pivot..count, "RightPartition");
-            proptest::prop_assert_eq!(left.namespace()[&canonical], canonical_binding);
-            proptest::prop_assert_eq!(right.namespace()[&canonical], canonical_binding);
-            proptest::prop_assert_ne!(left.namespace()[&id], right.namespace()[&id]);
-            let combined = left.merge_compiler_inputs(&roles, &right, &roles).unwrap().0;
-            proptest::prop_assert!(combined.selected_native_groups().is_empty());
-            proptest::prop_assert!(NativeOriginalRequirement::from_issued_group_custody(id, canonical, &combined)
-                .unwrap().is_none());
-        }
-    }
 
     #[test]
     fn bound_segment_hidden_original_uses_its_unique_issued_group_carrier() {
@@ -7627,9 +7590,24 @@ mod tests {
                 );
             }
             let before_retention = inventory.metrics().issued_scope_nodes;
-            let value = prefix
-                .interface_projection(&[native.descriptor.owner.clone()])
-                .unwrap();
+            let value = {
+                let support = context.compiler_source_support().clone();
+                let selected = support
+                    .selected_interfaces()
+                    .unwrap()
+                    .select_owners(vec![native.descriptor.owner.clone()])
+                    .unwrap();
+                prefix
+                    .select_issued(
+                        selected
+                            .root_entries()
+                            .iter()
+                            .map(|entry| entry.descriptor.id)
+                            .collect(),
+                        &ExactArtifactSelection::capture(&selected),
+                    )
+                    .unwrap()
+            };
             let retained = context
                 .retain_value_source_surface(&value, &lexical)
                 .unwrap();
@@ -7670,11 +7648,34 @@ mod tests {
                 )
                 .unwrap();
             let value_with_hidden = value
-                .merge_fixture_selections(
-                    &hidden_view
-                        .interface_projection(&[hidden.descriptor.owner.clone()])
-                        .unwrap(),
-                )
+                .merge_fixture_selections(&{
+                    let projection =
+                        CompilerInputProjection::from_issued_entries(&[hidden.clone()])
+                            .unwrap()
+                            .interface_only();
+                    let issued = hidden_view.with_compiler_projection(&projection).unwrap();
+                    let support = crate::declaration_context::recover_fixture_compiler_support(
+                        projection,
+                        issued,
+                        [],
+                    )
+                    .unwrap();
+                    let selected = support
+                        .selected_interfaces()
+                        .unwrap()
+                        .select_owners(vec![hidden.descriptor.owner.clone()])
+                        .unwrap();
+                    hidden_view
+                        .select_issued(
+                            selected
+                                .root_entries()
+                                .iter()
+                                .map(|entry| entry.descriptor.id)
+                                .collect(),
+                            &ExactArtifactSelection::capture(&selected),
+                        )
+                        .unwrap()
+                })
                 .unwrap();
             let mut unsupported = lexical;
             unsupported.push(crate::declaration_join::ExactLexicalNode {
@@ -7875,9 +7876,32 @@ mod tests {
                     && to.artifact() == child_id
                     && *dependency == ArtifactDependency::Interface
             ));
-        let projected = view
-            .interface_projection(&[child.descriptor.owner.clone()])
+        let projected = {
+            let projection = CompilerInputProjection::from_issued_entries(&[child.clone()])
+                .unwrap()
+                .interface_only();
+            let issued = view.with_compiler_projection(&projection).unwrap();
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                issued,
+                [],
+            )
             .unwrap();
+            let selected = support
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(vec![child.descriptor.owner.clone()])
+                .unwrap();
+            view.select_issued(
+                selected
+                    .root_entries()
+                    .iter()
+                    .map(|entry| entry.descriptor.id)
+                    .collect(),
+                &ExactArtifactSelection::capture(&selected),
+            )
+            .unwrap()
+        };
         assert!(projected.selected_native_groups().is_empty());
         assert!(!projected.artifact_ids().contains(&native_id));
         assert!(projected.capture_graph_selection().native_groups.is_empty());
@@ -8021,7 +8045,24 @@ mod tests {
         );
         let owner = native.descriptor.owner.clone();
         for view in [&ambiguous, &split, &mismatch] {
-            match view.interface_projection(&[owner.clone()]) {
+            match (|| {
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    interface_roles.clone(),
+                    view.with_compiler_projection(&interface_roles)?,
+                    [],
+                )?;
+                let selected = support
+                    .selected_interfaces()?
+                    .select_owners(vec![owner.clone()])?;
+                view.select_issued(
+                    selected
+                        .root_entries()
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect(),
+                    &ExactArtifactSelection::capture(&selected),
+                )
+            })() {
                 Ok(projected) => {
                     assert!(projected.selected_native_groups().is_empty());
                     if !projected.artifact_ids().contains(&id) {
@@ -13230,9 +13271,33 @@ mod tests {
                 .roots
                 .iter()
                 .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
-            let projected = view
-                .interface_projection(&[native.descriptor.owner.clone()])
+            let projected = {
+                let projection =
+                    CompilerInputProjection::from_issued_entries(&[Arc::new(native.clone())])
+                        .unwrap()
+                        .interface_only();
+                let issued = view.with_compiler_projection(&projection).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection,
+                    issued,
+                    [],
+                )
                 .unwrap();
+                let selected = support
+                    .selected_interfaces()
+                    .unwrap()
+                    .select_owners(vec![native.descriptor.owner.clone()])
+                    .unwrap();
+                view.select_issued(
+                    selected
+                        .root_entries()
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect(),
+                    &ExactArtifactSelection::capture(&selected),
+                )
+                .unwrap()
+            };
             assert!(projected.selected_native_groups().is_empty());
             let private = NativeOriginalRequirement::from_issued_group_custody(
                 native_id,
@@ -13338,11 +13403,37 @@ mod tests {
                     .unwrap()
                     .artifacts;
             }
-            let selected = available
-                .merge_fixture_selections(&cursor)
+            let joined = available.merge_fixture_selections(&cursor).unwrap();
+            let selected = {
+                let projection = CompilerInputProjection::from_issued_entries(&[
+                    inspection.clone(),
+                    wire.clone(),
+                ])
                 .unwrap()
-                .interface_projection(&[inspection.descriptor.owner.clone()])
+                .interface_only();
+                let issued = joined.with_compiler_projection(&projection).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection,
+                    issued,
+                    [],
+                )
                 .unwrap();
+                let selected = support
+                    .selected_interfaces()
+                    .unwrap()
+                    .select_owners(vec![inspection.descriptor.owner.clone()])
+                    .unwrap();
+                joined
+                    .select_issued(
+                        selected
+                            .root_entries()
+                            .iter()
+                            .map(|entry| entry.descriptor.id)
+                            .collect(),
+                        &ExactArtifactSelection::capture(&selected),
+                    )
+                    .unwrap()
+            };
             assert!(available.artifact_ids().contains(&wire.descriptor.id));
             assert!(selected.artifact_ids().contains(&inspection.descriptor.id));
             let before = selected.binding_dependencies();
@@ -14369,7 +14460,33 @@ mod tests {
                 .id,
             first.descriptor.id
         );
-        let types = view.interface_projection(&[original_owner]).unwrap();
+        let types = {
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[Arc::new(first.clone())])
+                    .unwrap()
+                    .interface_only();
+            let issued = view.with_compiler_projection(&projection).unwrap();
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                issued,
+                [],
+            )
+            .unwrap();
+            let selected = support
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(vec![original_owner])
+                .unwrap();
+            view.select_issued(
+                selected
+                    .root_entries()
+                    .iter()
+                    .map(|entry| entry.descriptor.id)
+                    .collect(),
+                &ExactArtifactSelection::capture(&selected),
+            )
+            .unwrap()
+        };
         assert_eq!(types.artifact_ids(), vec![carrier]);
         drop(view);
         assert_eq!(inventory.node_count(), 3);
@@ -14494,9 +14611,37 @@ mod tests {
             );
             assert!(selected.artifact_ids().contains(&old.descriptor.id));
             assert!(selected.artifact_ids().contains(&leaf.descriptor.id));
-            let types = selected
-                .interface_projection(&[root.descriptor.owner.clone()])
+            let types = {
+                let projection = CompilerInputProjection::from_issued_entries(&[
+                    Arc::new(root.clone()),
+                    Arc::new(old.clone()),
+                    Arc::new(leaf.clone()),
+                ])
+                .unwrap()
+                .interface_only();
+                let issued = selected.with_compiler_projection(&projection).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection,
+                    issued,
+                    [],
+                )
                 .unwrap();
+                let selected = support
+                    .selected_interfaces()
+                    .unwrap()
+                    .select_owners(vec![root.descriptor.owner.clone()])
+                    .unwrap();
+                selected
+                    .select_issued(
+                        selected
+                            .root_entries()
+                            .iter()
+                            .map(|entry| entry.descriptor.id)
+                            .collect(),
+                        &ExactArtifactSelection::capture(&selected),
+                    )
+                    .unwrap()
+            };
             assert!(types.root_entries().iter().all(|entry| !entry.is_native()));
             assert!(types
                 .namespace()
@@ -14613,6 +14758,8 @@ mod tests {
         let inventory = ArtifactInventory::default();
         let canonical = entry("Owner", &[]);
         let canonical_id = canonical.descriptor.id;
+        let type_projection =
+            CompilerInputProjection::from_issued_entries(&[Arc::new(canonical.clone())]).unwrap();
         let type_cap = inventory
             .admit(&inventory.empty_view(), vec![canonical])
             .unwrap();
@@ -14632,9 +14779,29 @@ mod tests {
             canonical_id,
             ArtifactDependency::Interface
         )));
-        let projected = execution_cap
-            .interface_projection(&[module("Owner")])
+        let projected = {
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                type_projection,
+                type_cap.clone(),
+                [],
+            )
             .unwrap();
+            let selected = support
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(vec![module("Owner")])
+                .unwrap();
+            execution_cap
+                .select_issued(
+                    selected
+                        .root_entries()
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect(),
+                    &ExactArtifactSelection::capture(&selected),
+                )
+                .unwrap()
+        };
         assert_eq!(projected.artifact_ids(), vec![canonical_id]);
         assert!(projected.source_implementation_roles().is_empty());
         drop(execution_cap);

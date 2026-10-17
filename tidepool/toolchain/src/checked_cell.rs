@@ -1373,31 +1373,17 @@ impl ExactHostBindingPrototype {
         let interface = execution
             .value_interface_certificate()
             .ok_or_else(|| failure("host prototype lacks its original value interface"))?;
-        let names = signature
-            .names()
-            .iter()
-            .map(|name| crate::declaration_join::ExactModuleIdentity {
-                unit: name.unit.clone(),
-                module: name.module.clone(),
-            })
-            .collect::<BTreeSet<_>>();
-        let owners = interface
-            .artifact_view()
-            .interface_owners()
-            .into_iter()
-            .map(|owner| owner.owner)
-            .filter(|owner| names.contains(owner))
-            .collect::<Vec<_>>();
-        let selected = interface.artifact_view().interface_projection(&owners)?;
         let context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
-                .extend_interface_artifacts(&selected)?,
+            crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
+                interface, signature,
+            )?,
         );
-        let producer = execution.item.cell.producer;
-        // A package-only type still belongs to this original compiler producer.
-        let mut context = (*context).clone();
-        context = context.admit_producer(producer)?;
-        let context = Arc::new(context);
+        let producer = context.toolchain_identity_sha256();
+        if producer != execution.item.cell.producer {
+            return Err(failure(
+                "host prototype value interface differs from its checked producer",
+            ));
+        }
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&encode_signature(signature), &mut encoded)
             .expect("signature encodes to memory");
@@ -1429,52 +1415,7 @@ impl ExactHostBindingPrototype {
                 "original input context lacks its compiler producer",
             ));
         }
-        let descriptors = original_context.artifact_view().descriptors();
-        let mut interface_roots = BTreeSet::new();
-        for (unit, module, seal) in witness.interface_seals() {
-            let originals = descriptors
-                .iter()
-                .filter(|descriptor| {
-                    descriptor.owner.unit == unit && descriptor.owner.module == module
-                })
-                .collect::<Vec<_>>();
-            if originals.is_empty() {
-                // Package seals are checked against the original producer's
-                // pinned package closure by the native compiler transaction.
-                if unit == "main" {
-                    return Err(failure("original input lacks its certified home interface"));
-                }
-            } else if originals.iter().any(|descriptor| {
-                descriptor.producer_sha256 != producer || hex(&descriptor.interface_sha256) != seal
-            }) {
-                return Err(failure(
-                    "original input differs from its certified interface seal",
-                ));
-            }
-            interface_roots.extend(originals.iter().map(|descriptor| descriptor.id));
-        }
-        let owners = original_context
-            .interface_owners()
-            .into_iter()
-            .map(|owner| owner.owner)
-            .collect::<BTreeSet<_>>();
-        if witness.signature.names().iter().any(|name| {
-            name.unit == "main"
-                && !owners.contains(&crate::declaration_join::ExactModuleIdentity {
-                    unit: name.unit.clone(),
-                    module: name.module.clone(),
-                })
-        }) {
-            return Err(failure(
-                "original input native signature lacks its certified Name owner",
-            ));
-        }
-        // Select this input's sealed roots and their issued dependency edges;
-        // the joint request context can also retain reply and progress types.
-        // Empty package-only projections still preserve the original producer.
-        let context = Arc::new(
-            original_context.select_interface_roots(interface_roots.into_iter().collect())?,
-        );
+        let context = Arc::new(original_context.select_original_type_interfaces(&[&witness], &[])?);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&encode_signature(witness.signature()), &mut encoded)
             .expect("signature encodes to memory");
@@ -1714,7 +1655,7 @@ impl HostBindingInterfaceOffer {
             .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
         let compiler_support = context
             .compiler_source_support()
-            .select_type_roots(vec![certificate.artifact_id()])?;
+            .select_value_interface(&certificate)?;
         let artifact_view = compiler_support.artifacts().clone();
         let interface = Arc::new(CheckedValueArtifact {
             interface: ValueInterfaceBytes {

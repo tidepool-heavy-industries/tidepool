@@ -212,7 +212,35 @@ impl SelectedCompilerInterfaces<'_> {
                     .ok_or_else(|| failure("selected interface owner lacks its issued role"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.artifacts.select_roots(ids)
+        let state = self
+            .artifacts
+            .lease
+            .inventory
+            .0
+            .lock()
+            .expect("inventory lock");
+        let owned = &self.artifacts.read_projection(&state).nodes;
+        let roots = ids
+            .iter()
+            .map(|id| {
+                self.artifacts
+                    .resolve_binding(*id, owned)
+                    .map(InventoryNodeKey::Artifact)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let interfaces = admitted_closure(&state, roots.into_iter());
+        let namespace = artifact_ids(&interfaces)
+            .into_iter()
+            .map(|id| {
+                self.artifacts
+                    .resolve_binding(id, &interfaces)
+                    .map(|binding| (id, binding))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        drop(state);
+        let mut selected = self.artifacts.select_roots(ids)?;
+        selected.replace_namespace(&namespace);
+        Ok(selected)
     }
 }
 
@@ -581,85 +609,20 @@ impl CompilerSourceSupport {
         Self::new(projection, artifacts, self.native_offers.iter().cloned())
     }
 
-    #[track_caller]
-    pub(crate) fn select_type_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
+    /// The freshly checked value certificate selects its exact canonical role;
+    /// retained artifact IDs are not an input to this boundary.
+    pub(crate) fn select_value_interface(
+        &self,
+        certificate: &crate::recovery_artifacts::CertifiedValueInterface,
+    ) -> Result<Self, CompileError> {
         let selected = self.selected_interfaces()?;
-        let requested = roots.into_iter().collect::<BTreeSet<_>>();
-        let owners = selected
+        let owner = selected
             .entries()
             .iter()
-            .filter(|(_, entry)| requested.contains(&entry.descriptor.id))
+            .find(|(_, entry)| entry.descriptor.id == certificate.artifact_id())
             .map(|(owner, _)| owner.clone())
-            .collect::<Vec<_>>();
-        if owners.len() != requested.len() {
-            if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
-            {
-                let observations = requested
-                    .iter()
-                    .filter(|id| {
-                        !selected
-                            .entries()
-                            .values()
-                            .any(|entry| entry.descriptor.id == **id)
-                    })
-                    .take(32)
-                    .map(|id| {
-                        let entry = self.artifacts.lease.payloads.get(id);
-                        let role = entry
-                            .and_then(|entry| self.projection.roles.get(&entry.descriptor.owner));
-                        (
-                            id,
-                            entry.map(|entry| &entry.descriptor.owner),
-                            entry.map(|entry| entry.is_native()),
-                            role.map(CompilerInputRole::interface),
-                            role.and_then(CompilerInputRole::original),
-                            role.map(CompilerInputRole::is_published_source_original),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
-                    requested_count = requested.len(), selected_count = selected.entries().len(),
-                    ?observations, caller = %std::panic::Location::caller(),
-                    "type interface root differs from selected compiler role");
-            }
-            return Err(failure(
-                "interface root is outside selected compiler interfaces",
-            ));
-        }
-        selected.support_for_owners(owners)
-    }
-
-    pub(crate) fn from_interface_selection(artifacts: &ArtifactView) -> Result<Self, CompileError> {
-        let namespace = artifacts.namespace();
-        for id in namespace.keys() {
-            if let ArtifactPayload::Original(product) = &artifacts.lease.payloads[id].payload {
-                let canonical = product
-                    .module_interface()
-                    .ok_or_else(|| failure("selected original lacks its canonical attachment"))?;
-                if !namespace
-                    .contains_key(&ArtifactEntry::canonical(canonical.clone()).descriptor.id)
-                {
-                    return Err(failure(
-                        "interface input lacks a selected canonical interface",
-                    ));
-                }
-            }
-        }
-        let entries = artifacts
-            .namespace()
-            .keys()
-            .map(|id| Arc::clone(&artifacts.lease.payloads[id]))
-            .filter(|entry| !entry.is_native())
-            .collect::<Vec<_>>();
-        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let interfaces = artifacts.select_roots(
-            projection
-                .roles()
-                .iter()
-                .map(CompilerInputRole::interface)
-                .collect(),
-        )?;
-        Self::new(projection, interfaces, [])
+            .ok_or_else(|| failure("value certificate is outside selected compiler interfaces"))?;
+        selected.support_for_owners(vec![owner])
     }
 
     pub(crate) fn select_publication_graph(
@@ -928,17 +891,6 @@ impl CompilerInputProjection {
             projection.admit_role(entry.descriptor.owner.clone(), role)?;
         }
         Ok(projection)
-    }
-
-    /// Issue only type roles from an authenticated interface closure. Native
-    /// carriers in the view never become reuse offers through this operation.
-    pub(crate) fn from_interface_view(view: &ArtifactView) -> Result<Self, CompileError> {
-        let entries = view
-            .entries()
-            .into_iter()
-            .filter(|entry| !entry.is_native())
-            .collect::<Vec<_>>();
-        Self::from_issued_entries(&entries)
     }
 
     /// Restrict already issued roles to a proved retained surface. An original

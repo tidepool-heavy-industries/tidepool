@@ -194,74 +194,25 @@ impl CompiledProvenancePlan {
                         .map(|site| site.site),
                 );
             }
-            let descriptors = original_interfaces.artifact_view().descriptors();
-            let home_units = descriptors
-                .iter()
-                .map(|descriptor| descriptor.owner.unit.as_str())
-                .collect::<std::collections::BTreeSet<_>>();
-            let owners = descriptors
-                .iter()
-                .map(|descriptor| (&descriptor.owner, descriptor.id))
-                .collect::<BTreeMap<_, _>>();
             for site in provenance.sites.values().filter(|site| {
                 selected_sites.contains(&site.site)
                     && site.input_type_witnesses.len() == site.inputs.len()
                     && site.input_type_witnesses.iter().any(Option::is_some)
             }) {
-                let mut roots = std::collections::BTreeSet::new();
-                for name in site
+                let witnesses = site
+                    .input_type_witnesses
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                let signatures = site
                     .request_type_signatures
                     .iter()
                     .flat_map(|signatures| {
                         std::iter::once(signatures.reply()).chain(signatures.progress())
                     })
-                    .flat_map(|signature| signature.names())
-                {
-                    if home_units.contains(name.unit()) {
-                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                            unit: name.unit().to_owned(),
-                            module: name.module().to_owned(),
-                        };
-                        let id = owners.get(&owner).ok_or_else(|| SessionError::Compile(crate::CompileError::ExtractFailed(
-                            format!("request native type owner {}:{} is outside its sealed interface closure", name.unit(), name.module()),
-                        )))?;
-                        roots.insert(*id);
-                    }
-                }
-                for witness in site.input_type_witnesses.iter().flatten() {
-                    for (unit, module, seal) in witness.interface_seals() {
-                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                            unit: unit.to_owned(),
-                            module: module.to_owned(),
-                        };
-                        if let Some(id) = owners.get(&owner) {
-                            let descriptor = descriptors
-                                .iter()
-                                .find(|descriptor| descriptor.id == *id)
-                                .expect("selected owner descriptor");
-                            let actual = descriptor
-                                .interface_sha256
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>();
-                            if actual != seal {
-                                return Err(SessionError::Compile(
-                                    crate::CompileError::ExtractFailed(format!(
-                                        "request input interface seal differs for {unit}:{module}"
-                                    )),
-                                )
-                                .into());
-                            }
-                            roots.insert(*id);
-                        } else if home_units.contains(unit) {
-                            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
-                                format!("request input owner {unit}:{module} is outside its sealed interface closure"),
-                            )).into());
-                        }
-                    }
-                }
+                    .collect::<Vec<_>>();
                 let interfaces = original_interfaces
-                    .select_interface_roots(roots.into_iter().collect())
+                    .select_original_type_interfaces(&witnesses, &signatures)
                     .map_err(SessionError::Compile)?;
                 let identity = interfaces.semantic_sha256();
                 provenance

@@ -250,13 +250,22 @@ mod program_source_support_history {
             } else {
                 alternate.clone()
             };
-            let (_, projection) = original_offer(&selected);
+            let (selected_view, projection) = original_offer(&selected);
             let selection = source_selection(&projection, &custody);
             let input = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
+            let issued =
+                recover_fixture_compiler_support(projection.clone(), selected_view, []).unwrap();
+            let types = issued
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(projection.snapshot_roles().keys().cloned().collect())
+                .unwrap()
+                .retain_custody(&custody)
+                .unwrap();
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_interface_artifacts(&custody)
+                    .extend_issued_compiler_support(&types)
                     .unwrap(),
             );
             let before = public.semantic_sha256();

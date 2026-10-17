@@ -7,7 +7,9 @@ use super::compiler_test_support::OwnedEnvironment;
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::turn::{compile_cell_program_admitted, TemplateSelector};
+use tidepool_runtime::session::turn::{
+    compile_cell_program_admitted, consume_cell_program_item, TemplateSelector, TurnResult,
+};
 use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, ModuleEnv, PersistentSession,
     SessionLib, SourceImports,
@@ -99,7 +101,21 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             assert!(item.native().is_some());
             assert!(item.native_products().is_some());
         }
-        let sealed = program.items()[0].native_products().unwrap();
+        let first = &program.items()[0];
+        let sealed = first.native_products().unwrap();
+        let reservation = session
+            .begin_cell_program(admission, program.clone())
+            .unwrap()
+            .expect("checked program starts with its first expression");
+        let TurnResult::Expr { compiled, .. } = consume_cell_program_item(reservation).unwrap()
+        else {
+            panic!("checked program starts with its first expression");
+        };
+        let original_interfaces = first
+            .native()
+            .unwrap()
+            .original_interface_context(compiled.prepared(), compiled.table(), compiled.sites())
+            .unwrap();
         let products = &sealed.recovery_products;
         let original = products
             .iter()
@@ -112,16 +128,9 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             products,
         )
         .unwrap();
-        let module_interfaces = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
-            &[],
-            &[],
-            Vec::new(),
-        )
-        .unwrap()
-        .extend_interface_artifacts(&sealed.artifact_view)
-        .unwrap()
-        .materialize_module_interfaces(durable.path())
-        .unwrap();
+        let module_interfaces = original_interfaces
+            .materialize_module_interfaces(durable.path())
+            .unwrap();
         let reference = references
             .iter()
             .find(|reference| reference.module == "Tidepool.QQ.Bash")
@@ -166,10 +175,6 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             std::fs::read(durable.path().join(graph)).unwrap()
                 == std::fs::read(recovered_durable.path().join(graph)).unwrap()
         );
-        assert!(session
-            .begin_cell_program(admission, program.clone())
-            .unwrap()
-            .is_some());
         eprintln!(
             "checked quoter {phase}: {} ms",
             started.elapsed().as_millis()

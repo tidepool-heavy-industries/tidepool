@@ -626,7 +626,24 @@ proptest! {
         let mut selected = all.select_roots(selected_ids.iter().copied().collect()).unwrap();
         check_read_projection(&selected)?;
         if let Some(index) = choices.first() {
-            let projected = selected.interface_projection(&[catalog.owner(*index)]).unwrap();
+            let projected = {
+                let entries = catalog.entries[..OWNERS].iter().cloned().map(Arc::new).collect::<Vec<_>>();
+                let projection = CompilerInputProjection::from_issued_entries(&entries)
+                    .unwrap()
+                    .within_view(&selected);
+                let issued_namespace = selected.with_compiler_projection(&projection).unwrap();
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection,
+                    issued_namespace,
+                    [],
+                ).unwrap();
+                let issued = support.selected_interfaces().unwrap()
+                    .select_owners(vec![catalog.owner(*index)]).unwrap();
+                selected.select_issued(
+                    issued.root_entries().iter().map(|entry| entry.descriptor.id).collect(),
+                    &ExactArtifactSelection::capture(&issued),
+                ).unwrap()
+            };
             check_read_projection(&projected)?;
             prop_assert!(
                 projected.selected_native_groups().is_empty(),
@@ -663,9 +680,25 @@ proptest! {
             .iter()
             .any(|entry| !entry.is_native() && entry.descriptor.owner == interface_owner);
         prop_assert!(has_interface_owner, "extended view retains its interface");
-        let interface = extended
-            .interface_projection(&[interface_owner.clone()])
-            .unwrap();
+        let interface = {
+            let entries = catalog.entries[..=OWNERS].iter().cloned().map(Arc::new).collect::<Vec<_>>();
+            let projection = CompilerInputProjection::from_issued_entries(&entries)
+                .unwrap()
+                .interface_only();
+            let issued_namespace = extended.with_compiler_projection(&projection).unwrap();
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                issued_namespace,
+                [],
+            ).unwrap();
+            let types = support.selected_interfaces().unwrap()
+                .support_for_owners(vec![interface_owner.clone()]).unwrap();
+            let issued = types.artifacts();
+            extended.select_issued(
+                issued.root_entries().iter().map(|entry| entry.descriptor.id).collect(),
+                &ExactArtifactSelection::capture(issued),
+            ).unwrap()
+        };
         prop_assert!(
             interface.selected_native_groups().is_empty(),
             "projected view has no selected native groups"
@@ -928,9 +961,39 @@ fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
     assert!(selected_empty.is_empty());
     check_read_projection(&selected_empty).unwrap();
 
-    let native_interface = extended
-        .interface_projection(&[catalog.owner(OWNERS)])
+    let native_interface = {
+        let entries = catalog.entries[..=OWNERS]
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&entries)
+            .unwrap()
+            .interface_only();
+        let issued_namespace = extended.with_compiler_projection(&projection).unwrap();
+        let support = crate::declaration_context::recover_fixture_compiler_support(
+            projection,
+            issued_namespace,
+            [],
+        )
         .unwrap();
+        let types = support
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(vec![catalog.owner(OWNERS)])
+            .unwrap();
+        let issued = types.artifacts();
+        extended
+            .select_issued(
+                issued
+                    .root_entries()
+                    .iter()
+                    .map(|entry| entry.descriptor.id)
+                    .collect(),
+                &ExactArtifactSelection::capture(issued),
+            )
+            .unwrap()
+    };
     assert!(native_interface.selected_native_groups().is_empty());
     assert!(native_interface
         .root_entries()
