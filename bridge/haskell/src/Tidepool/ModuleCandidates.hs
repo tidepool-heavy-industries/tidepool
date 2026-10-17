@@ -6,8 +6,7 @@ module Tidepool.ModuleCandidates
   , CandidateModuleInterface, candidateCertificatePath, candidateCertificateSha256
   , candidateCoreDescriptor
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
-  , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
-  , CandidateContextIdentity, candidateContextIdentity
+  , CapturedCandidateManifest, captureCandidateManifest
   , readCapturedModuleCandidatesWithGraphs
   , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
@@ -20,14 +19,12 @@ import Control.Monad (forM_, replicateM, unless, when)
 import Data.Char (isHexDigit)
 import Data.List (stripPrefix)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as T
-import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, artifactDigestBytes, checkArtifactSeal)
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, captureRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.BoundedRead (readFileAtMost)
@@ -120,34 +117,9 @@ maxCandidates = 128
 readModuleCandidates :: FilePath -> IO (Either String [ModuleCandidate])
 readModuleCandidates = readModuleCandidatesWithGraphs []
 
--- The envelope is captured once. Its fingerprint and later candidate admission
--- consume these same bounded bytes, including when the source file changes.
+-- Candidate admission consumes these same bounded captured bytes, including
+-- when the source file changes.
 data CapturedCandidateManifest = CapturedCandidateManifest FilePath ArtifactBytes
-
-candidateManifestSha256 :: CapturedCandidateManifest -> BS.ByteString
-candidateManifestSha256 (CapturedCandidateManifest _ bytes) = artifactDigestBytes bytes
-
--- This is a selection key, never candidate admission. Current source,
--- products and canonical evidence still pass the normal admission path.
-newtype CandidateContextIdentity = CandidateContextIdentity BS.ByteString
-  deriving (Eq)
-
-candidateContextIdentity :: CapturedCandidateManifest -> Either String CandidateContextIdentity
-candidateContextIdentity (CapturedCandidateManifest _ body) =
-  case deserialiseFromBytes decodeManifest (BL.fromStrict (artifactBytes body)) of
-    Left failure -> Left (show failure)
-    Right (remaining,(candidates,_,_,producer,_))
-      | BL.null remaining -> Right (CandidateContextIdentity (SHA256.hash (BS8.pack
-          (show (producer,map identity candidates)))))
-      | otherwise -> Left "candidate manifest has trailing bytes"
-  where
-    identity candidate =
-      (candidateUnit candidate,candidateModule candidate,candidateSourceSha256 candidate,
-       candidateInterfaceSha256 candidate,candidateModuleVersion candidate,
-       candidateProductSha256 candidate,candidateProducerSha256 candidate,
-       candidateInterfaceRequirements candidate,
-       candidateCertificateSha256 (candidateModuleInterface candidate),
-       snd (candidateCoreDescriptor (candidateModuleInterface candidate)))
 
 captureCandidateManifest :: FilePath -> IO (Either String CapturedCandidateManifest)
 captureCandidateManifest path = do

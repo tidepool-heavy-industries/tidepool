@@ -286,7 +286,7 @@ import Tidepool.PackageWitness
   , validatePackageImportRoot, encodePackageImports )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
-  , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
+  , CapturedCandidateManifest, captureCandidateManifest
   , readCapturedModuleCandidatesWithGraphs, readModuleCandidatesWithGraphs
   , candidateExecutionSources, candidateOriginalIdentity )
 import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
