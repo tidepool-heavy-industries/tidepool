@@ -11132,8 +11132,18 @@ mod authored_publication_tests {
                 panic!("expected the real compiler's expression target");
             };
             let group_count = compiled.certification.as_ref().unwrap().groups.len();
+            let lib = SessionLib::open(
+                SessionId(if startup { 993 } else { 994 }),
+                root.path(),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap();
             let mut session =
-                TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, None);
+                TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
+            assert!(session
+                .state
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .is_some());
             let before = session.state.certified_resolution_work();
             // No CompiledTurn or borrowed code survives this transfer. The
             // admission and installed custody must retain its original inputs.
