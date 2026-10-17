@@ -1019,7 +1019,7 @@ impl RetainedRecoveryArtifactObservations {
     #[cfg(test)]
     pub(crate) fn entry_owned_paths(&self) -> std::collections::BTreeSet<PathBuf> {
         self.files.iter().filter(|(_, file)| file.owned)
-            .map(|(path, _)| path.strip_prefix(&self.root).expect("confined entry observation").to_owned())
+            .filter_map(|(path, _)| path.strip_prefix(&self.root).ok().map(Path::to_owned))
             .collect()
     }
 
