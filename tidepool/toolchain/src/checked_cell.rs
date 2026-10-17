@@ -5752,11 +5752,31 @@ mod tests {
                 )));
             }
         }
+        let expected_groups = [(authored_id, 7), (authored_id, 11), (authored_id, 13)]
+            .into_iter()
+            .chain(cyclic.then_some((binding_source, 7)))
+            .collect::<BTreeSet<_>>();
         for (offer, nonempty) in [
             (empty_offer, false),
             (partial_offer, true),
             (full_offer, true),
         ] {
+            let offered_groups = offer
+                .custody()
+                .capture_graph_selection()
+                .native_groups
+                .iter()
+                .map(|group| (group.binding.artifact(), group.original_ordinal))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                offered_groups,
+                if nonempty {
+                    expected_groups.clone()
+                } else {
+                    BTreeSet::new()
+                }
+            );
+            let offered_edges = offer.custody().binding_dependencies();
             let support = CompilerSourceSupport::new(
                 CompilerInputProjection::default(),
                 context.artifact_view().clone(),
@@ -5777,11 +5797,10 @@ mod tests {
                 context.artifact_view().capture_graph_selection().roots
             );
             if nonempty {
-                for edge in issued_edges.iter().filter(|(from, _, _)| {
-                    matches!(from, ArtifactBindingNode::Group(group)
-                            if group.binding.artifact() == authored_id
-                                || group.binding.artifact() == binding_source)
-                }) {
+                for edge in offered_edges
+                    .iter()
+                    .filter(|(from, _, _)| matches!(from, ArtifactBindingNode::Group(_)))
+                {
                     assert!(retained
                         .artifact_view()
                         .binding_dependencies()
