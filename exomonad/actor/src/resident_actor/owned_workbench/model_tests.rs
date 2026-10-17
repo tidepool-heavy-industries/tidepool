@@ -61,11 +61,15 @@ impl crate::CellModelBinding for ModelOwner {
     }
 }
 
-fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp::CapturedOutput> {
-    execution_with_id(model, [17; 16])
+fn execution(
+    source: crate::BoundActorWorkbenchSource,
+    model: Arc<ModelOwner>,
+) -> OwnedExecution<frunk::HNil, tidepool_mcp::CapturedOutput> {
+    execution_with_id(source, model, [17; 16])
 }
 
 fn execution_with_id(
+    source: crate::BoundActorWorkbenchSource,
     model: Arc<ModelOwner>,
     digest: [u8; 16],
 ) -> OwnedExecution<frunk::HNil, tidepool_mcp::CapturedOutput> {
@@ -82,7 +86,7 @@ fn execution_with_id(
     let resources = ExecutionResourceOwners::for_inspection(public);
     let workbench = crate::ResidentActorWorkbench::new(
         Arc::new(crate::ActorMachineRegistry::new()),
-        crate::ActorWorkbenchSource::new("", Vec::new()),
+        source,
         None,
     );
     let request = WorkbenchRequest::from_cell_input("pure ()")
@@ -142,11 +146,32 @@ fn execution_with_id(
 
 #[tokio::test]
 async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     use crate::resident_workbench::CompilerCloseOwner;
     use crate::termination::CompilerWorkClose;
 
     for unwind in [false, true] {
-        let owned = execution(Arc::new(ModelOwner::default()));
+        let owned = execution(source.clone(), Arc::new(ModelOwner::default()));
         let original_work = owned.state.effects.invocation_work.clone();
         let original_control = owned.state.effects.control.clone().unwrap();
         let unrelated = crate::WorkbenchExecutionControl::untracked();
@@ -197,9 +222,27 @@ async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind()
 
 #[tokio::test]
 async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
+        .scope_with_client(blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal_with_preparation)
+        )).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     use crate::termination::CompilerWorkClose;
 
-    let owned = execution(Arc::new(ModelOwner::default()));
+    let owned = execution(source.clone(), Arc::new(ModelOwner::default()));
     let control = owned.state.effects.control.clone().unwrap();
     let (entered, observed) = tokio::sync::oneshot::channel();
     let (release, proceed) = std::sync::mpsc::channel();
@@ -251,7 +294,28 @@ async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposa
 
 #[tokio::test]
 async fn blocking_source_check_refuses_closed_execution_before_native_admission() {
-    let owned = execution(Arc::new(ModelOwner::default()));
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            blocking_source_check_refuses_closed_execution_before_native_admission_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn blocking_source_check_refuses_closed_execution_before_native_admission_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+    let owned = execution(source.clone(), Arc::new(ModelOwner::default()));
     let control = owned.state.effects.control.clone().unwrap();
     assert!(control.request_cancellation());
     owned.state.effects.invocation_work.close();
@@ -279,6 +343,27 @@ async fn blocking_source_check_refuses_closed_execution_before_native_admission(
 /// miss a dropped preparation ancestor.
 #[tokio::test(flavor = "current_thread")]
 async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     use crate::resident_actor::tests::CapturedWriter;
 
     let trace = CapturedWriter::default();
@@ -290,8 +375,8 @@ async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking()
         .with_writer(trace.clone())
         .finish();
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    let first = execution_with_id(Arc::new(ModelOwner::default()), [17; 16]);
-    let second = execution_with_id(Arc::new(ModelOwner::default()), [18; 16]);
+    let first = execution_with_id(source.clone(), Arc::new(ModelOwner::default()), [17; 16]);
+    let second = execution_with_id(source.clone(), Arc::new(ModelOwner::default()), [18; 16]);
     let expected = [
         first.state.request.execution_id().unwrap().to_string(),
         second.state.request.execution_id().unwrap().to_string(),
@@ -362,8 +447,29 @@ async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking()
 
 #[tokio::test]
 async fn execution_disposal_cancels_model_with_parked_binding_references() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            execution_disposal_cancels_model_with_parked_binding_references_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn execution_disposal_cancels_model_with_parked_binding_references_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let model = Arc::new(ModelOwner::default());
-    let execution = execution(model.clone());
+    let execution = execution(source.clone(), model.clone());
     let parked = execution.state.effects.model.clone().unwrap();
     assert_eq!(model.cancelled.load(Ordering::SeqCst), 0);
     drop(execution);
@@ -377,9 +483,27 @@ async fn execution_disposal_cancels_model_with_parked_binding_references() {
 
 #[tokio::test]
 async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
+        .scope_with_client(terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement_with_preparation)
+        )).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     for native_cancelled in [false, true] {
         let model = Arc::new(ModelOwner::default());
-        let mut owned = execution(model.clone());
+        let mut owned = execution(source.clone(), model.clone());
         let retained = owned.state.effects.model.clone().unwrap();
         let control = owned.state.effects.control.clone().unwrap();
         if native_cancelled {
@@ -407,9 +531,30 @@ async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowle
 
 #[tokio::test]
 async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            native_cleanup_failure_still_awaits_model_and_retains_both_failures_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let model = Arc::new(ModelOwner::default());
     // The fixture has no mounted machine, so native cleanup really refuses.
-    let mut owned = execution(model.clone());
+    let mut owned = execution(source.clone(), model.clone());
     let control = owned.state.effects.control.clone().unwrap();
     assert!(control.request_cancellation());
     let (release, settlement) = tokio::sync::oneshot::channel();
@@ -434,8 +579,26 @@ async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures() {
 
 #[tokio::test]
 async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
+        .scope_with_client(model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged_with_preparation)
+        )).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let model = Arc::new(ModelOwner::default());
-    let mut owned = execution(model.clone());
+    let mut owned = execution(source.clone(), model.clone());
     let control = owned.state.effects.control.clone().unwrap();
     assert!(control.request_cancellation());
     control.acknowledge_cancellation();
@@ -463,9 +626,27 @@ async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_ack
 
 #[tokio::test]
 async fn terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
+        .scope_with_client(terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure_with_preparation)
+        )).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let fixture = crate::resident_actor::invocation_work::tests::Fixture::start().await;
     let model = Arc::new(ModelOwner::default());
-    let mut owned = execution(model.clone());
+    let mut owned = execution(source.clone(), model.clone());
     let context = owned.state.effects.context.clone();
     let reservation_owner = owned.state.effects.reservation_owner.clone();
     let invocation = owned.state.effects.invocation_work.clone();
@@ -533,8 +714,29 @@ async fn terminal_finalization_releases_invocation_reservations_after_model_clea
 
 #[tokio::test]
 async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            items_callbacks_and_after_tool_prepare_on_the_original_model_binding_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let model = Arc::new(ModelOwner::default());
-    let mut execution = execution(model.clone());
+    let mut execution = execution(source.clone(), model.clone());
     let principal = tidepool_repr::PrincipalId::from(execution.state.effects.context.actor);
     let value = || tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(73), Vec::new());
     let requests = [
@@ -598,9 +800,30 @@ async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding() 
 
 #[tokio::test]
 async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            cancellation_closes_model_while_non_model_callback_wait_remains_parked_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     for retiring in [false, true] {
         let model = Arc::new(ModelOwner::default());
-        let execution = execution(model.clone());
+        let execution = execution(source.clone(), model.clone());
         let control = execution.state.effects.control.clone().unwrap();
         let retirement = execution.retirement.clone();
         let binding = execution.state.effects.model.clone().unwrap();
@@ -694,8 +917,29 @@ impl crate::HostedContextBinding for ContextOwner {
 
 #[tokio::test]
 async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_preparation,
+        ),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let source = crate::ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
     let binding = Arc::new(ContextOwner::default());
-    let mut execution = execution(Arc::new(ModelOwner::default()));
+    let mut execution = execution(source.clone(), Arc::new(ModelOwner::default()));
     execution.state.effects.context_binding = Some(binding.clone());
     let boundary = || ResidentActorBoundary::Context {
         continuation: ResidentHole::plain("context-owned"),

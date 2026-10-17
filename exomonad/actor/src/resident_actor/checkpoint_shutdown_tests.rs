@@ -26,8 +26,10 @@ async fn nonempty_checkpoint_shutdown_retains_uncertainty_and_retry_authority() 
     let actor_scope = session.mint_isolated_scope();
     let machines = Arc::new(ActorMachineRegistry::new());
     machines.insert_idle(id, Box::new(session));
-    owner.environment.runner =
-        ResidentActorRunner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+    owner.environment.runner = ResidentActorRunner::new(
+        machines.clone(),
+        owner.environment.runner.preparation_source(),
+    );
     let descriptor = ActorDescriptor::new(
         "checkpoint-shutdown",
         ActorPlacement {

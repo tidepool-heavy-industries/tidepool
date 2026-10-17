@@ -3236,7 +3236,8 @@ mod tests {
             .is_none());
         let runner = Arc::new(crate::ResidentActorRunner::new(
             machines,
-            crate::ActorWorkbenchSource::new("", vec![]),
+            crate::ActorWorkbenchSource::new("", vec![])
+                .bind_preparation(control.preparation_client()),
         ));
         let lifecycle = reservation.lifecycle().clone();
         lifecycle

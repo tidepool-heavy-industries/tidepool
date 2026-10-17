@@ -59,7 +59,10 @@ impl Fixture {
         }
     }
 
-    fn machines(&self) -> (Runner, Vec<tempfile::TempDir>) {
+    fn machines(
+        &self,
+        source: crate::BoundActorWorkbenchSource,
+    ) -> (Runner, Vec<tempfile::TempDir>) {
         let machines = Arc::new(ActorMachineRegistry::new());
         let images = Arc::new(tidepool_runtime::session::ImageRegistry::new());
         let mut roots = Vec::new();
@@ -90,10 +93,6 @@ impl Fixture {
             machines.insert_idle(id, Box::new(session));
             roots.push(root);
         }
-        let source = ActorWorkbenchSource::new(
-            self.surface.preamble(),
-            self.surface.include_paths().to_vec(),
-        );
         (ResidentActorRunner::new(machines, source), roots)
     }
 }
@@ -157,97 +156,111 @@ async fn verify_checkpoint(runner: &Runner, predecessor: SessionId, value: Arc<R
 
 #[tokio::test]
 async fn replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements() {
-    with_test_compiler_owner(async {
-        let fixture = Fixture::compile();
-        let c = SessionId(0xE101);
-        let p = SessionId(0xE102);
-        let s = SessionId(0xE103);
-        for (caller, predecessor, successor) in
-            [(c, p, s), (c, p, p), (c, p, c), (p, p, s), (p, p, p)]
-        {
-            let (runner, _roots) = fixture.machines();
-            let entry =
-                crate::MailboxValue::new(caller, retain(&runner, caller, "replacementEntry").await);
-            let checkpoint = Arc::new(retain(&runner, predecessor, "replacementCheckpoint").await);
-            let context = context(successor);
-            let realm = context.placement.resource_scope;
-            let (entry, imported) = runner
-                .prepare_replacement_inputs(
-                    context.clone(),
-                    entry,
-                    predecessor,
-                    Arc::clone(&checkpoint),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                Arc::ptr_eq(&checkpoint, &imported),
-                predecessor == successor
-            );
-            let outcome = runner
-                .run_rooted_application(context, entry, imported, realm)
-                .await
-                .unwrap();
-            let ResidentOutcome::Completed { result, .. } = outcome else {
-                panic!("transferred entry must complete: {outcome:?}");
-            };
-            assert_eq!(
-                result.to_json(),
-                serde_json::json!(42),
-                "{caller:?}/{predecessor:?}/{successor:?}"
-            );
-            verify_checkpoint(&runner, predecessor, Arc::clone(&checkpoint)).await;
-            assert_eq!(
-                counts(&runner).await.iter().sum::<usize>(),
-                1,
-                "only predecessor checkpoint remains"
-            );
-            drop(checkpoint);
-            assert_eq!(counts(&runner).await, [0, 0, 0]);
-        }
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
+        .scope_with_client(replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements_with_preparation)
+        )).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
 
-        // A failure after the entry crossed must release its provisional root
-        // while preserving the predecessor's independent checkpoint.
-        let (runner, _roots) = fixture.machines();
-        let entry = crate::MailboxValue::new(c, retain(&runner, c, "replacementEntry").await);
-        let checkpoint = Arc::new(retain(&runner, p, "replacementCheckpoint").await);
-        let error = runner
-            .prepare_replacement_inputs(context(s), entry, c, Arc::clone(&checkpoint))
+async fn replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let fixture = Fixture::compile();
+    let source = ActorWorkbenchSource::new(
+        fixture.surface.preamble(),
+        fixture.surface.include_paths().to_vec(),
+    )
+    .bind_preparation(preparation);
+    let c = SessionId(0xE101);
+    let p = SessionId(0xE102);
+    let s = SessionId(0xE103);
+    for (caller, predecessor, successor) in [(c, p, s), (c, p, p), (c, p, c), (p, p, s), (p, p, p)]
+    {
+        let (runner, _roots) = fixture.machines(source.clone());
+        let entry =
+            crate::MailboxValue::new(caller, retain(&runner, caller, "replacementEntry").await);
+        let checkpoint = Arc::new(retain(&runner, predecessor, "replacementCheckpoint").await);
+        let context = context(successor);
+        let realm = context.placement.resource_scope;
+        let (entry, imported) = runner
+            .prepare_replacement_inputs(
+                context.clone(),
+                entry,
+                predecessor,
+                Arc::clone(&checkpoint),
+            )
             .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ResidentActorWorkbenchError::Resident(ResidentError::ForeignCustody)
-        ));
-        verify_checkpoint(&runner, p, Arc::clone(&checkpoint)).await;
-        assert_eq!(counts(&runner).await, [0, 1, 0]);
+            .unwrap();
+        assert_eq!(
+            Arc::ptr_eq(&checkpoint, &imported),
+            predecessor == successor
+        );
+        let outcome = runner
+            .run_rooted_application(context, entry, imported, realm)
+            .await
+            .unwrap();
+        let ResidentOutcome::Completed { result, .. } = outcome else {
+            panic!("transferred entry must complete: {outcome:?}");
+        };
+        assert_eq!(
+            result.to_json(),
+            serde_json::json!(42),
+            "{caller:?}/{predecessor:?}/{successor:?}"
+        );
+        verify_checkpoint(&runner, predecessor, Arc::clone(&checkpoint)).await;
+        assert_eq!(
+            counts(&runner).await.iter().sum::<usize>(),
+            1,
+            "only predecessor checkpoint remains"
+        );
         drop(checkpoint);
         assert_eq!(counts(&runner).await, [0, 0, 0]);
+    }
 
-        // Cancelling while the caller's machine is checked out drops only the
-        // affine entry. No successor root has been admitted yet.
-        use std::future::Future;
-        use std::task::Poll;
-        let (runner, _roots) = fixture.machines();
-        let entry = crate::MailboxValue::new(c, retain(&runner, c, "replacementEntry").await);
-        let checkpoint = Arc::new(retain(&runner, p, "replacementCheckpoint").await);
-        let caller_checkout = runner.access.machines.checkout_run(c).unwrap();
-        let mut transfer = Box::pin(runner.prepare_replacement_inputs(
-            context(s),
-            entry,
-            p,
-            Arc::clone(&checkpoint),
-        ));
-        assert!(matches!(
-            std::future::poll_fn(|cx| Poll::Ready(transfer.as_mut().poll(cx))).await,
-            Poll::Pending
-        ));
-        drop(transfer);
-        drop(caller_checkout);
-        verify_checkpoint(&runner, p, Arc::clone(&checkpoint)).await;
-        assert_eq!(counts(&runner).await, [0, 1, 0]);
-        drop(checkpoint);
-        assert_eq!(counts(&runner).await, [0, 0, 0]);
-    })
-    .await;
+    // A failure after the entry crossed must release its provisional root
+    // while preserving the predecessor's independent checkpoint.
+    let (runner, _roots) = fixture.machines(source.clone());
+    let entry = crate::MailboxValue::new(c, retain(&runner, c, "replacementEntry").await);
+    let checkpoint = Arc::new(retain(&runner, p, "replacementCheckpoint").await);
+    let error = runner
+        .prepare_replacement_inputs(context(s), entry, c, Arc::clone(&checkpoint))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ResidentActorWorkbenchError::Resident(ResidentError::ForeignCustody)
+    ));
+    verify_checkpoint(&runner, p, Arc::clone(&checkpoint)).await;
+    assert_eq!(counts(&runner).await, [0, 1, 0]);
+    drop(checkpoint);
+    assert_eq!(counts(&runner).await, [0, 0, 0]);
+
+    // Cancelling while the caller's machine is checked out drops only the
+    // affine entry. No successor root has been admitted yet.
+    use std::future::Future;
+    use std::task::Poll;
+    let (runner, _roots) = fixture.machines(source.clone());
+    let entry = crate::MailboxValue::new(c, retain(&runner, c, "replacementEntry").await);
+    let checkpoint = Arc::new(retain(&runner, p, "replacementCheckpoint").await);
+    let caller_checkout = runner.access.machines.checkout_run(c).unwrap();
+    let mut transfer =
+        Box::pin(runner.prepare_replacement_inputs(context(s), entry, p, Arc::clone(&checkpoint)));
+    assert!(matches!(
+        std::future::poll_fn(|cx| Poll::Ready(transfer.as_mut().poll(cx))).await,
+        Poll::Pending
+    ));
+    drop(transfer);
+    drop(caller_checkout);
+    verify_checkpoint(&runner, p, Arc::clone(&checkpoint)).await;
+    assert_eq!(counts(&runner).await, [0, 1, 0]);
+    drop(checkpoint);
+    assert_eq!(counts(&runner).await, [0, 0, 0]);
 }

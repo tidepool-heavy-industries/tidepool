@@ -120,10 +120,16 @@ impl Fixture {
         machines.insert_idle(id, Box::new(self.machine(id, true)));
         owner.environment.runner = ResidentActorRunner::new(
             machines,
-            ActorWorkbenchSource::new(
-                self.surface.preamble(),
-                self.surface.include_paths().to_vec(),
-            ),
+            owner
+                .environment
+                .runner
+                .preparation_source()
+                .with_config(|_| {
+                    ActorWorkbenchSource::new(
+                        self.surface.preamble(),
+                        self.surface.include_paths().to_vec(),
+                    )
+                }),
         );
         let descriptor = ActorDescriptor::new(
             "replacement-refusal-predecessor",

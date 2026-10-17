@@ -76,7 +76,14 @@ async fn interrupt_during_preview(
         context.placement.lexical_scope = resident.mint_scope(ScopeId::ROOT).unwrap();
     }
     let machines = Arc::new(ActorMachineRegistry::new());
-    fixture.environment.runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+    fixture.environment.runner = ResidentActorRunner::new(
+        Arc::clone(&machines),
+        fixture
+            .environment
+            .runner
+            .preparation_source()
+            .with_config(|_| source),
+    );
     let owner_actor = ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
     let request_id = fixture
         .environment
@@ -644,7 +651,14 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         .unwrap();
     let machines = Arc::new(ActorMachineRegistry::new());
     machines.insert_idle(context.placement.session, Box::new(resident));
-    fixture.environment.runner = ResidentActorRunner::new(machines.clone(), source);
+    fixture.environment.runner = ResidentActorRunner::new(
+        machines.clone(),
+        fixture
+            .environment
+            .runner
+            .preparation_source()
+            .with_config(|_| source),
+    );
     fixture
         .kernel
         .lifecycle()

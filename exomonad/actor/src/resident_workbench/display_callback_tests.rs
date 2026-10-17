@@ -42,14 +42,30 @@ impl DispatchEffect<CapturedOutput> for ImmediatePrintProbe {
 
 #[tokio::test]
 async fn expansion_fences_immediate_handler_before_callback_input() {
-    with_test_compiler_owner(expansion_fences_immediate_handler_with_compiler_owner()).await;
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(|preparation| async move {
+            expansion_fences_immediate_handler_with_compiler_owner(preparation).await;
+        }),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
-async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixture {
+async fn prepare_callback_fixture(
+    source: crate::BoundActorWorkbenchSource,
+    cell: String,
+    private: bool,
+) -> CallbackFixture {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
-    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)");
     let root = tempfile::tempdir().unwrap();
     let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_247);
     let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
@@ -94,8 +110,8 @@ async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixtur
             context.live_payload,
         )
         .unwrap();
-    let view = actor_compile_view(&session, &context, &source).unwrap();
-    let prepared = source.prepare(&view);
+    let view = actor_compile_view(&session, &context, source.config()).unwrap();
+    let prepared = source.config().prepare(&view);
     let templates =
         resident_workbench_templates(&prepared.preamble, surface.row(), &prepared.imports);
     let include = prepared
@@ -197,8 +213,15 @@ struct CallbackFixture {
     execution: crate::request::sources::CallbackExecution,
 }
 
-async fn expansion_fences_immediate_handler_with_compiler_owner() {
+async fn expansion_fences_immediate_handler_with_compiler_owner(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
+    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+
     let fixture = prepare_callback_fixture(
+        source.clone(),
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
         ),
@@ -253,124 +276,229 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
 
 #[tokio::test]
 async fn retained_display_runs_after_private_admission_settles_and_current_scope_changes() {
-    with_test_compiler_owner(async {
-        let mut fixture = prepare_callback_fixture(tidepool_testing::fixture_source("exomonad/actor/src/resident_workbench/display_callback_retained.hs"), true).await;
-        let scope_a = fixture.execution.context.placement.lexical_scope;
-        drop(fixture.admission.take());
-        let scope_b = fixture.runner.access.with_machine(fixture.public_context.clone(), move |session, _, _| {
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner.scope_with_client(retained_display_runs_after_private_admission_settles_and_current_scope_changes_with_preparation))).await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn retained_display_runs_after_private_admission_settles_and_current_scope_changes_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
+    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+
+    let mut fixture = prepare_callback_fixture(
+        source.clone(),
+        tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_callback_retained.hs",
+        ),
+        true,
+    )
+    .await;
+    let scope_a = fixture.execution.context.placement.lexical_scope;
+    drop(fixture.admission.take());
+    let scope_b = fixture
+        .runner
+        .access
+        .with_machine(fixture.public_context.clone(), move |session, _, _| {
             let scope_b = session.mint_isolated_scope();
             // A later checkout drains completed admission leases. The callback's
             // owner-derived lease must preserve its exact original scope.
-            let _ = session.begin_ephemeral_private_execution(scope_b).map_err(ResidentError::Session)?;
+            let _ = session
+                .begin_ephemeral_private_execution(scope_b)
+                .map_err(ResidentError::Session)?;
             Ok(scope_b)
-        }).await.unwrap();
-        assert_ne!(scope_a, scope_b);
-        let (page, _) = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap();
-        assert_eq!(page.text, "detail A");
-        assert_eq!(page.identity, (1, 1, 1));
-        assert!(page.expansions.is_empty());
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-        fixture.execution.scope.take();
-        fixture.runner.access.with_machine(fixture.public_context.clone(), |session, context, _| {
-            let _ = session.begin_ephemeral_private_execution(context.placement.lexical_scope).map_err(ResidentError::Session)?;
+        })
+        .await
+        .unwrap();
+    assert_ne!(scope_a, scope_b);
+    let (page, _) = fixture
+        .runner
+        .expand_display(
+            fixture.execution.context.clone(),
+            fixture.callback.clone(),
+            (1, 1, 1),
+            1,
+            8192,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.text, "detail A");
+    assert_eq!(page.identity, (1, 1, 1));
+    assert!(page.expansions.is_empty());
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    fixture.execution.scope.take();
+    fixture
+        .runner
+        .access
+        .with_machine(fixture.public_context.clone(), |session, context, _| {
+            let _ = session
+                .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                .map_err(ResidentError::Session)?;
             Ok(())
-        }).await.unwrap();
-        let error = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap_err();
-        assert!(matches!(error, ResidentActorWorkbenchError::Resident(ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope))) if scope == scope_a), "{error}");
-    }).await;
+        })
+        .await
+        .unwrap();
+    let error = fixture
+        .runner
+        .expand_display(
+            fixture.execution.context.clone(),
+            fixture.callback.clone(),
+            (1, 1, 1),
+            1,
+            8192,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentActorWorkbenchError::Resident(ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope))) if scope == scope_a),
+        "{error}"
+    );
 }
 
 #[tokio::test]
 async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
-    with_test_compiler_owner(async {
-        let fixture = prepare_callback_fixture(
-            tidepool_testing::fixture_source(
-                "exomonad/actor/src/resident_workbench/display_lookup_errors.hs",
-            ),
-            false,
-        )
-        .await;
-        assert!(
-            fixture.initial.text.contains("retained-query"),
-            "{}",
-            fixture.initial.text
-        );
-        assert!(fixture
-            .initial
-            .expansions
-            .iter()
-            .any(|(_, label)| label == "index" || label == "hits"));
-        assert!(!fixture.initial.unavailable);
-        assert!(!fixture.initial.expansions.is_empty());
-        let mut pending = fixture.initial.expansions.clone();
-        let mut rendered = fixture.initial.text.clone();
-        let mut callback = fixture.callback.clone();
-        for _ in 0..64 {
-            let Some((key, _)) = pending.first().cloned() else {
-                break;
-            };
-            let (page, retained) = fixture
-                .runner
-                .expand_display(
-                    fixture.execution.context.clone(),
-                    callback,
-                    (1, 1, 1),
-                    key,
-                    8192,
-                )
-                .await
-                .unwrap();
-            assert!(!page.unavailable);
-            rendered.push_str(&page.text);
-            pending = page.expansions;
-            callback = Arc::new(retained);
-        }
-        assert!(pending.is_empty(), "expansion did not settle");
-        for name in [
-            "retained-query",
-            "end-of-retained-query",
-            "second-query",
-            "missing-api",
-            "retained contract hash token",
-        ] {
-            assert!(rendered.contains(name), "missing {name}: {rendered}");
-        }
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-        let errors = prepare_callback_fixture(
-            tidepool_testing::fixture_source(
-                "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
-            ),
-            false,
-        )
-        .await;
-        assert!(!errors.initial.unavailable);
-        for name in [
-            "FsNotFound",
-            "FsNotUtf8",
-            "FsSandbox",
-            "FsBadRegex",
-            "FsIo",
-            "FsDurabilityUnknown",
-            "FsNonUtf8Path",
-        ] {
-            assert!(
-                errors.initial.text.contains(name),
-                "missing {name}: {}",
-                errors.initial.text
-            );
-        }
-        assert!(errors.initial.text.contains("Right (Left"));
-    })
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(
+            filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation,
+        ),
+    ))
     .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
+    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+
+    let fixture = prepare_callback_fixture(
+        source.clone(),
+        tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_lookup_errors.hs",
+        ),
+        false,
+    )
+    .await;
+    assert!(
+        fixture.initial.text.contains("retained-query"),
+        "{}",
+        fixture.initial.text
+    );
+    assert!(fixture
+        .initial
+        .expansions
+        .iter()
+        .any(|(_, label)| label == "index" || label == "hits"));
+    assert!(!fixture.initial.unavailable);
+    assert!(!fixture.initial.expansions.is_empty());
+    let mut pending = fixture.initial.expansions.clone();
+    let mut rendered = fixture.initial.text.clone();
+    let mut callback = fixture.callback.clone();
+    for _ in 0..64 {
+        let Some((key, _)) = pending.first().cloned() else {
+            break;
+        };
+        let (page, retained) = fixture
+            .runner
+            .expand_display(
+                fixture.execution.context.clone(),
+                callback,
+                (1, 1, 1),
+                key,
+                8192,
+            )
+            .await
+            .unwrap();
+        assert!(!page.unavailable);
+        rendered.push_str(&page.text);
+        pending = page.expansions;
+        callback = Arc::new(retained);
+    }
+    assert!(pending.is_empty(), "expansion did not settle");
+    for name in [
+        "retained-query",
+        "end-of-retained-query",
+        "second-query",
+        "missing-api",
+        "retained contract hash token",
+    ] {
+        assert!(rendered.contains(name), "missing {name}: {rendered}");
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    let errors = prepare_callback_fixture(
+        source.clone(),
+        tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
+        ),
+        false,
+    )
+    .await;
+    assert!(!errors.initial.unavailable);
+    for name in [
+        "FsNotFound",
+        "FsNotUtf8",
+        "FsSandbox",
+        "FsBadRegex",
+        "FsIo",
+        "FsDurabilityUnknown",
+        "FsNonUtf8Path",
+    ] {
+        assert!(
+            errors.initial.text.contains(name),
+            "missing {name}: {}",
+            errors.initial.text
+        );
+    }
+    assert!(errors.initial.text.contains("Right (Left"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn retained_lookup_selection_revisits_and_expands_without_lookup_or_effects() {
-    with_test_compiler_owner(retained_lookup_selection_with_compiler_owner()).await;
+    let mut preparation_owner = crate::CompilerPreparationOwner::new();
+    let cleanup = preparation_owner.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        preparation_owner.scope_with_client(|preparation| async move {
+            retained_lookup_selection_with_compiler_owner(preparation).await;
+        }),
+    ))
+    .await;
+    let cleanup = cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
-async fn retained_lookup_selection_with_compiler_owner() {
+async fn retained_lookup_selection_with_compiler_owner(
+    preparation: crate::CompilerPreparationClient,
+) {
+    let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
+    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+
     let fixture = prepare_callback_fixture(
+        source.clone(),
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_lookup_navigation.hs",
         ),
