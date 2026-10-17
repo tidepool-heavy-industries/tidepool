@@ -6558,3 +6558,125 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         );
     }
 }
+
+#[test]
+fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let authored = |generation, version| {
+        let module =
+            tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation)).module_name();
+        let native = crate::certified_products::fixture_native_declaration_product(
+            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                "main",
+                &module,
+                vec![(7, vec![]), (9001, vec![])],
+                version,
+                &BTreeMap::new(),
+                b"same authored canonical interface".to_vec(),
+                &BTreeMap::new(),
+                &[],
+            ),
+            producer.sha256(),
+            generation,
+        );
+        recovered_witness_fixtures(&[native]).remove(0).product
+    };
+    let current = authored(1, 151);
+    let historical = authored(1, 152);
+    let fallback = authored(2, 153);
+    assert_eq!(current.module_interface(), historical.module_interface());
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), current.clone()).unwrap());
+    let old = Arc::new(ArtifactEntry::original(producer.sha256(), historical.clone()).unwrap());
+    assert_ne!(entry.descriptor.id, old.descriptor.id);
+    let target = Arc::new(ArtifactEntry::canonical(
+        fallback.module_interface().unwrap().clone(),
+    ));
+    let inventory = ArtifactInventory::default();
+    let view = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone(), target.clone()])
+        .unwrap();
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()]).unwrap();
+    let source = ExactDeclarationContext::from_authenticated_execution(
+        producer.sha256(),
+        &view,
+        projection,
+        vec![
+            ExactLexicalNode {
+                owner: target.descriptor.owner.clone(),
+                imports: vec![entry.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: entry.descriptor.owner.clone(),
+                imports: vec![],
+            },
+        ],
+        target.descriptor.owner.clone(),
+        &[
+            target.descriptor.owner.clone(),
+            entry.descriptor.owner.clone(),
+        ],
+    )
+    .unwrap();
+    let old_input = OriginalCompilerInputs::from_native_availability(
+        &type_context(std::slice::from_ref(&historical)),
+        producer,
+        std::slice::from_ref(&historical),
+    )
+    .unwrap();
+    assert!(old_input
+        .native_offers()
+        .iter()
+        .any(|offer| offer.is_full()));
+    let publication = source
+        .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+        .unwrap();
+    for published in [false, true] {
+        let baseline = if published {
+            publication.context().as_ref()
+        } else {
+            &source
+        };
+        let before = baseline.artifact_view().capture_graph_selection();
+        let mixed = baseline
+            .clone()
+            .retain_issued_native_offers(old_input.native_offers().iter().cloned())
+            .unwrap();
+        assert_eq!(
+            mixed.artifact_view().capture_graph_selection().roots,
+            before.roots
+        );
+        assert_eq!(
+            mixed.artifact_view().capture_graph_selection().namespace,
+            before.namespace
+        );
+        let roles = mixed.compiler_input_projection().snapshot_roles();
+        assert_eq!(
+            roles[&entry.descriptor.owner].original(),
+            Some(entry.descriptor.id)
+        );
+        assert!(roles[&target.descriptor.owner].original().is_none());
+        assert!(mixed
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == old.descriptor.id));
+        let reused = OriginalCompilerInputs::reuse_selected_authored(&mixed)
+            .expect(
+                "unrelated InterfaceOnly fallback cannot requalify selected B against historical A",
+            )
+            .unwrap();
+        assert_eq!(
+            reused.issued_artifacts().capture_graph_selection().roots,
+            before.roots
+        );
+        assert_eq!(
+            reused.projection.snapshot_roles()[&entry.descriptor.owner].original(),
+            Some(entry.descriptor.id)
+        );
+        assert!(reused
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == old.descriptor.id));
+    }
+}
