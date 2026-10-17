@@ -3151,15 +3151,30 @@ mod authored_tests {
             .unwrap()
             .path
             .clone();
+        crate::artifacts::test_support::with_settlement(|settlement| {
+            inspection.inspect(&[], settlement)
+        })
+        .unwrap();
+        let mut clean_closes = 0;
         let mutation = crate::artifacts::test_support::with_settlement(|settlement| {
             inspection.inspect(&[], &mut |close| {
+                if matches!(close, tidepool_extract_cmd::CompilerTransactionClose::Clean) {
+                    clean_closes += 1;
+                    std::fs::write(&path, b"changed during real compiler inspection").unwrap();
+                }
                 settlement(close);
-                std::fs::write(&path, b"changed during real compiler inspection").unwrap();
             })
         });
+        assert_eq!(
+            clean_closes, 1,
+            "mutation requires the real inventory transaction's clean close"
+        );
         assert!(
-            mutation.is_err(),
-            "inspection must refuse an interface changed during its compiler transaction"
+            matches!(mutation,
+                Err(CompileError::ExtractFailed(ref diagnostic))
+                    if diagnostic == "exact declaration context: recovery inspection interface differs from its issuing context"
+            ),
+            "inspection must reach its owning interface-diff refusal: {mutation:?}"
         );
 
         assert_eq!(recovered_join.authored_generation(), None);
