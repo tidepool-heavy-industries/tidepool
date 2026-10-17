@@ -16,6 +16,7 @@ module Tidepool.ExecutionProjection
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
+  , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , preparedModuleProductOutcomes, preparedModuleProductEncodings, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
@@ -117,7 +118,8 @@ import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
-import Tidepool.Timing (readTimingEnabled, timeModuleDetailPhase, emitModuleCounts)
+import Tidepool.Timing (readTimingEnabled, timeModuleDetailPhase, emitModuleCounts
+  , ProjectionObservation, newProjectionObservation, ReuseContext, OriginalGroupWork(..), emitOriginalGroupWork)
 import Tidepool.ExecutionEncode
   (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingInput, projectedGroupEncodingBytes, encodeTypeIdentity)
 import Tidepool.ExecutionSchema
@@ -346,11 +348,38 @@ projectOriginalHomeModuleProductDemand env interfaces context externalBinders mo
 
 -- Independent lowering retains each group's original ordinal and failure.
 -- Missing owners remain demands until the compiler worklist has settled.
-data RawModuleProducts = RawModuleProducts
-  { rawOriginalProductOwner :: Module
-  , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
-  , rawExecutableProduct :: Either ProjectionError [ProjectedGroupEvidence]
-  }
+-- The optional observation belongs to this exact result only. It is outside
+-- the semantic record, never compared by cache admission and never serialized.
+data RawModuleProducts = RawModuleProducts RawModuleSemantics (Maybe ProjectionObservation)
+
+data RawModuleSemantics = RawModuleSemantics
+  Module (Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)])
+  (Either ProjectionError [ProjectedGroupEvidence])
+
+rawOriginalProductOwner :: RawModuleProducts -> Module
+rawOriginalProductOwner (RawModuleProducts (RawModuleSemantics owner _ _) _) = owner
+
+rawOriginalProductGroups :: RawModuleProducts
+  -> Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
+rawOriginalProductGroups (RawModuleProducts (RawModuleSemantics _ groups _) _) = groups
+
+rawExecutableProduct :: RawModuleProducts -> Either ProjectionError [ProjectedGroupEvidence]
+rawExecutableProduct (RawModuleProducts (RawModuleSemantics _ _ executable) _) = executable
+
+rawProjectionObservation :: RawModuleProducts -> Maybe ProjectionObservation
+rawProjectionObservation (RawModuleProducts _ observation) = observation
+
+observeRawOriginalGroupWork :: Bool -> Maybe ReuseContext -> OriginalGroupWork
+  -> RawModuleProducts -> IO ()
+observeRawOriginalGroupWork False _ _ _ = pure ()
+observeRawOriginalGroupWork True context stage raw = case rawOriginalProductGroups raw of
+  Nothing -> pure ()
+  Just groups -> emitOriginalGroupWork True context stage
+    (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
+    (rawProjectionObservation raw) [ordinal | (ordinal,_,Right _) <- groups]
+    [ordinal | (ordinal,_,Left _) <- groups] Nothing Nothing
+  where owner = rawOriginalProductOwner raw
+
 
 -- Raw facts retain exact prepared compiler objects and projection authority.
 -- Home-unit classification and interface ownership also affect projection;
@@ -433,7 +462,10 @@ projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) 
         symbols = Set.fromList (Map.elems identities ++ map (idSymbol "value") identifiers)
         tops = Set.fromList (Map.elems identities)
         normalized = normalizeOriginalProjectionContext names symbols tops context
-    raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts env interfaces context prepared)
+    enabled <- readTimingEnabled
+    observation <- newProjectionObservation enabled
+    let RawModuleProducts semantics _ = projectRawOriginalHomeModuleProducts env interfaces context prepared
+    raw <- forceRawModuleProducts (RawModuleProducts semantics observation)
     modifyMVar_ entries (pure . Map.insertWith (++) owner
       [OriginalProjectionEntry identity names symbols tops normalized homes hasInterface raw])
     pure (False,raw)
@@ -441,7 +473,7 @@ projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
 projectRawOriginalHomeModuleProducts env interfaces context prepared =
-  RawModuleProducts owner original executable
+  RawModuleProducts (RawModuleSemantics owner original executable) Nothing
   where
     owner = pmModule prepared
     isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
@@ -536,6 +568,8 @@ forceRawModuleProducts raw = do
     _ <- evaluate (sum (map snd counts))
     emitModuleCounts True "raw_projection_output" owner counts
   else pure ()
+  observeRawOriginalGroupWork enabled Nothing RawProjectionCompleted raw
+  observeRawOriginalGroupWork enabled Nothing RawEncodingDemanded raw
   pure raw
  where
   siteTypeSize siteType = Text.length (Effect.stType siteType)

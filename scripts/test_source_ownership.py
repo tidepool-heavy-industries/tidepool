@@ -43,6 +43,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     })),
     ('exomonad-host', frozenset({
         'exomonad/host/src/actor_host/deepseek_offline_acceptance.rs',
+        'exomonad/host/src/actor_host/ordinary_demand_history_tests.rs',
         'exomonad/host/src/actor_host/startup_context_acceptance_tests.rs',
         'exomonad/host/src/actor_host/startup_persona_acceptance_tests.rs',
         'exomonad/host/src/actor_host/coherent_reload_acceptance_tests.rs',
@@ -145,6 +146,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     })),
     ('exomonad-host', frozenset({
+        'exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_spawn.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs',
