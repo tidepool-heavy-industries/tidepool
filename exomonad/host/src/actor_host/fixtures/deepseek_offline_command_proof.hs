@@ -1,6 +1,7 @@
 import qualified Data.Text as T
 import qualified Tidepool.Command as Cmd
 
+let offlineRustJob = __OFFLINE_RETAINED_JOB__
 offlineRustTerminal <- Cmd.await offlineRustJob
 let offlineTestsRan = case Cmd.stdout offlineRustTerminal of
       Right output -> all (`T.isInfixOf` output)

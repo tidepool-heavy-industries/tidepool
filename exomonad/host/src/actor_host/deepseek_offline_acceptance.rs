@@ -664,7 +664,8 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
             .expect("the actual rustc and test process succeed before the next inference");
         let command_binding = command_success(host, &compile, &root);
         let proof = issued_call(&root, "offline-command-proof");
-        root.cell("offline-command-proof", &format!("let offlineRustJob = {command_binding}\n{COMMAND_PROOF}"));
+        assert_eq!(COMMAND_PROOF.matches("__OFFLINE_RETAINED_JOB__").count(), 1);
+        root.cell("offline-command-proof", &COMMAND_PROOF.replace("__OFFLINE_RETAINED_JOB__", &command_binding));
         let root = driver.next(host, root_actor).await;
         display_true(host, &proof, &root);
         let cleanup = issued_call(&root, "offline-workers-stop");
