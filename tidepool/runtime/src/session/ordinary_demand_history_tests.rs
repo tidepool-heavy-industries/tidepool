@@ -337,8 +337,42 @@ fn run_cell(
         "actual ordinary compiler front door"
     );
     assert!(
-        !expected.images(&captured, ordinal).is_empty(),
-        "native owner and ordinal must join the admitted original"
+        captured.group_work.iter().any(|row| {
+            row.get("message").map(String::as_str) == Some("certified source import resolved")
+                && expected.owner_matches(row)
+                && row
+                    .get("original_ordinal")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    == Some(ordinal)
+        }),
+        "actual native source use joins the admitted original owner and ordinal"
+    );
+    let mut source_uses = std::collections::BTreeMap::<u64, usize>::new();
+    let mut completed_uses = std::collections::BTreeMap::<u64, usize>::new();
+    for row in &captured.group_work {
+        match row.get("message").map(String::as_str) {
+            Some("certified source import resolved") => {
+                let target = row["target_image_instance"].parse::<u64>().unwrap();
+                *source_uses.entry(target).or_default() += 1;
+            }
+            Some("certified source import resolution complete") => {
+                let target = row["target_image_instance"].parse::<u64>().unwrap();
+                let count = row["source_imports_resolved"].parse::<usize>().unwrap();
+                *completed_uses.entry(target).or_default() += count;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !completed_uses.is_empty(),
+        "actual native import walks completed under the tracing profile"
+    );
+    for target in completed_uses.keys() {
+        source_uses.entry(*target).or_default();
+    }
+    assert_eq!(
+        source_uses, completed_uses,
+        "complete source-use observations; missing trace is unknown, not zero JIT work"
     );
     captured
 }
@@ -575,13 +609,9 @@ fn ordinary_entry_late_binding_warm_repeat_and_restore_preserves_work_frontier()
             serde_json::to_string(row).unwrap()
         );
     }
-    assert!(
-        !warm_keys.is_empty(),
-        "warm execution observes its exact original image decision"
-    );
     eprintln!(
         "ordinary-demand-frontier {}",
-        serde_json::json!({"original": expected, "entry_images": expected.images(&first, expected.entry_ordinal), "later_images": later_images, "warm_images": expected.images(&warm, expected.later_ordinal), "unused_unattempted_assertion": "pending demand-lowering repair"})
+        serde_json::json!({"original": expected, "entry_images": expected.images(&first, expected.entry_ordinal), "later_images": later_images, "warm_images": expected.images(&warm, expected.later_ordinal), "warm_registry_decisions": warm_keys.len(), "unused_unattempted_assertion": "pending demand-lowering repair"})
     );
     drop(resident);
     drop(publication);

@@ -458,7 +458,12 @@ where
             event.record(&mut fields);
             if matches!(
                 fields.0.get("message").map(String::as_str),
-                Some("native group image association" | "certified group staged")
+                Some(
+                    "native group image association"
+                        | "certified group staged"
+                        | "certified source import resolved"
+                        | "certified source import resolution complete"
+                )
             ) {
                 if let Some(active) = self.0.lock().active.as_mut() {
                     assert!(
