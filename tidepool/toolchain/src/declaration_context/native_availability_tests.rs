@@ -6812,6 +6812,10 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         full.snapshot_facts()
     );
     let before = context.artifact_view().capture_graph_selection();
+    let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
+        .unwrap()
+        .descriptor
+        .id;
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-native-issuance-only"),
         by_owner: BTreeMap::new(),
@@ -6830,5 +6834,100 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     assert!(inputs
         .native_offers()
         .iter()
-        .any(|offer| offer.is_full() && offer.original() != entry.descriptor.id));
+        .any(|offer| offer.is_full() && offer.original() == fresh_id));
+
+    for (ordinals, expected) in [(vec![3], true), (vec![7], false), (vec![], false)] {
+        let selected = ordinals
+            .iter()
+            .map(|ordinal| crate::artifact_inventory::NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            })
+            .collect::<BTreeSet<_>>();
+        let bounded = inventory
+            .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
+            .unwrap();
+        let proof =
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &bounded).unwrap();
+        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &bounded, proof).unwrap();
+        assert!(!offer.is_full());
+        assert_eq!(
+            offer
+                .custody()
+                .capture_graph_selection()
+                .native_groups
+                .iter()
+                .filter(|group| group.binding.artifact() == entry.descriptor.id)
+                .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>(),
+            ordinals.iter().copied().collect()
+        );
+        let mut graph = bounded.capture_graph_selection();
+        let roots = graph
+            .roots
+            .iter()
+            .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+            .copied()
+            .collect::<Vec<_>>();
+        graph
+            .roots
+            .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
+        graph.custody_roots.extend(roots);
+        graph.custody_roots.sort();
+        graph.custody_roots.dedup();
+        let namespace = graph
+            .namespace
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect();
+        let withdrawn = bounded
+            .select_issued(
+                namespace,
+                &ExactArtifactSelection::from_recovered_graph_selection(graph),
+            )
+            .unwrap();
+        let support = recover_fixture_compiler_support(
+            context.compiler_input_projection().clone(),
+            withdrawn,
+            [offer.clone()],
+        )
+        .unwrap();
+        let bounded_context = context
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support);
+        assert!(bounded_context
+            .artifact_view()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            bounded_context.compiler_source_support().native_offers()[0].snapshot_facts(),
+            offer.snapshot_facts()
+        );
+        assert_eq!(
+            entry
+                .native_group_ordinals
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([3, 7]),
+            "physical body census stays complete even when issued availability is bounded"
+        );
+        let result =
+            OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "only an exact issued group3 can support this dependency"
+        );
+        if let Ok(Some(inputs)) = result {
+            assert!(inputs
+                .issued_artifacts()
+                .selected_native_groups()
+                .is_empty());
+            assert!(inputs
+                .native_offers()
+                .iter()
+                .any(|offer| offer.is_full() && offer.original() == fresh_id));
+        }
+    }
 }
