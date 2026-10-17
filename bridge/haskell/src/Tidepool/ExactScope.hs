@@ -1302,9 +1302,11 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
            sha = digest bytes
            scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
              purpose types Set.empty (Set.fromList (map fst published)) (Set.fromList (concatMap snd published))
-       forM_ (scopeValueInterfaces scope) $ \iface -> do
-         _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
-         pure ()
+       case acquisition of
+         FreshFiles -> forM_ (scopeValueInterfaces scope) $ \iface -> do
+           _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
+           pure ()
+         ContinueOwnedOriginals _ -> pure ()
        validateInputClosure producer inputs selectedProducts
        forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
@@ -1315,7 +1317,10 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
          _ <- evaluate (length sha)
          emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
        pure scope
-      let complete = retainCapturedInputsUsing originals decoder scope
+      admittedInputs <- case acquisition of
+        FreshFiles -> pure originals
+        ContinueOwnedOriginals _ -> either fail pure (bindCapturedPurposeValues scope originals)
+      let complete = retainCapturedInputsUsing admittedInputs decoder scope
       additions <- forM images $ \(OriginalInputImage _ _ key parts) -> do
         content <- either fail pure (selectedOriginalContent (map snd parts) originals)
         pure (key,content)
@@ -1352,6 +1357,21 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
     pure $ case captured of
       Left failure -> (previous,Left (show failure))
       Right (scope,settled) -> (settled,Right scope)
+
+-- Protected value paths and materialized transport paths can differ. Their
+-- typed owner and seal select already captured bytes, never a filesystem read.
+bindCapturedPurposeValues :: ExactScope -> RequestOriginalInputs -> Either String RequestOriginalInputs
+bindCapturedPurposeValues scope inputs = do
+  aliases <- forM (scopeValueInterfaces scope) $ \value -> do
+    let owner = (exactUnit value,exactModule value)
+        candidates = [iface | (iface,_,_) <- scopeInterfaces scope
+          , (exactUnit iface,exactModule iface) == owner]
+    case (Map.lookup owner (scopeInterfaceEvidence scope),candidates) of
+      (Just CheckedValueEvidence,[iface])
+        | exactSha256 iface == exactSha256 value ->
+            Right (exactPath value,exactPath iface,exactSha256 value)
+      _ -> Left "checked purpose value differs from its captured value interface owner"
+  aliasRequestInputs aliases inputs
 
 validatePreviewOriginalTarget :: ExactScope -> Map.Map (String,String) ExactInterfaceEvidence -> IO ()
 validatePreviewOriginalTarget scope evidence = forM_ (scopeActivationPreview scope) $ \admission -> do
