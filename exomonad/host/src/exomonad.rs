@@ -2826,6 +2826,9 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::{run_map_status_fixture, run_map_trace_fixture};
+
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::disallowed_methods,
@@ -3951,6 +3954,45 @@ mod tests {
             .iter()
             .map(|span| span["name"].as_str().unwrap_or_default().to_owned())
             .collect()
+    }
+
+    pub(crate) fn run_map_status_fixture(workspace: &Path) -> RunStatus {
+        RunStatus::new(
+            "projection",
+            workspace,
+            "session",
+            test_agent_defaults(),
+            RunPhase::Ready {
+                root_actor: ActorRef::first(exomonad_actor::ActorId(3)),
+                root_thread: "thread-3".into(),
+            },
+        )
+    }
+
+    // The real production formatter and scoped dispatcher supply run-map tests;
+    // input acquisition/formatting happens outside their decoder allocation window.
+    pub(crate) fn run_map_trace_fixture(source: &str) -> String {
+        let detailed = CapturedWriter::default();
+        let pane = CapturedWriter::default();
+        let trace = CapturedWriter::default();
+        let subscriber = host_tracing_subscriber(
+            detailed,
+            pane,
+            trace.clone(),
+            detailed_filter_without_content(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let actor = tracing::info_span!("actor", actor = "3@1");
+            let _actor = actor.enter();
+            let cell = tracing::info_span!("cell", execution = "projection-execution");
+            let _cell = cell.enter();
+            tracing::info!(target: CONTENT_TARGET, source, "cell input unit source");
+            tracing::info!(target: CONTENT_TARGET, status = "Committed", output = "42", "input unit receipt");
+            tracing::info!(target: "exomonad_actor::resident_actor",
+                actor = "3@1", target = "4@1", from_slot = true,
+                reason = "λ notification", "actor notification sent");
+        });
+        trace.text()
     }
 
     #[test]
