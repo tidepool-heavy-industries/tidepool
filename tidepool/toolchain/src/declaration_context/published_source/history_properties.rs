@@ -614,3 +614,67 @@ fn unrelated_later_native_offer_does_not_change_reopened_publication() {
         original_graph
     );
 }
+
+#[test]
+fn composing_same_publication_preserves_later_executable_demand() {
+    let (root, helper, publication) = fixture(0);
+    let published = publication.context();
+    let ArtifactPayload::Original(product) = &root.payload else {
+        unreachable!()
+    };
+    let import = PendingImportOwner::Source {
+        owner: product.owner().clone(),
+        original_ordinal: 11,
+        binder: SymbolIdentity {
+            unit: "fixture".into(),
+            module: "HistoryRoot".into(),
+            namespace: "value".into(),
+            occurrence: "entry_11".into(),
+            record_parent: None,
+        },
+    };
+    let view = published
+        .artifact_view()
+        .inventory()
+        .admit_shared_with_demand(
+            published.artifact_view(),
+            vec![root.clone()],
+            NativeArtifactDemand::CertifiedTargetImports(&[import]),
+        )
+        .unwrap();
+    let continued = continued_context(published, &view, &root).unwrap();
+    let expected = BTreeSet::from([
+        NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 3,
+        },
+        NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 11,
+        },
+        NativeGroupKey {
+            artifact: helper.descriptor.id,
+            original_ordinal: 7,
+        },
+    ]);
+    assert_eq!(continued.artifact_view().selected_native_groups(), expected);
+    let composed = continued
+        .with_published_source_originals(&publication)
+        .unwrap();
+    assert_eq!(
+        composed.compiler_input_roles(),
+        published.compiler_input_roles(),
+        "the publication policy remains the original issued policy"
+    );
+    let reopened = composed.published_source_original_selections().unwrap();
+    assert_eq!(
+        reopened[0].context().semantic_sha256(),
+        published.semantic_sha256(),
+        "reopening retains the frozen publication independently of current demand"
+    );
+    assert_eq!(
+        composed.artifact_view().selected_native_groups(),
+        expected,
+        "composing the same source publication does not erase the caller's later executable demand"
+    );
+}
