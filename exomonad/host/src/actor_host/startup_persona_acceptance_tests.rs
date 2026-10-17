@@ -1,7 +1,9 @@
 //! The delivered persona carries full authored memory to the first provider
 //! request and refreshes that exact issued block only on explicit activation.
 
-use super::hosted_test_context::HostedTestRuntime;
+use super::hosted_test_context::{
+    panic_message, HostedTestRuntime, ScenarioOutcome, ScenarioPhase,
+};
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     retained_committed_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
@@ -232,8 +234,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     let run = files.path().join("persona-run");
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
-    let (entered, judgments) = mpsc::unbounded_channel();
-    let judgments = Arc::new(parking_lot::Mutex::new(judgments));
+    let (entered, mut judgments) = mpsc::unbounded_channel();
     let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
         retained_location(config, &workspace, &run);
         configure_persona(config, "AgentSpec.agentSpec", |_, _| {});
@@ -242,12 +243,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     .await
     .unwrap();
     let forest = Arc::downgrade(&host.context.forest);
-    let scenario_workspace = workspace.clone();
-    let scenario_judgments = judgments.clone();
-    let scenario = std::panic::AssertUnwindSafe(host.run_scenario(|host| {
-        Box::pin(async move {
-        let workspace = scenario_workspace;
-        let judgments = scenario_judgments;
+    let scenario = std::panic::AssertUnwindSafe(async {
     {
         let retained = host
             .context
@@ -274,7 +270,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         assert_eq!(result.sections[0].source.as_deref(), Some("Persona.Orientation.startup; .exomonad/state/memory/{persona,human,curiosities}.md"));
         assert!(!workspace.join(".exomonad/state/notes").exists());
         assert!(matches!(
-            judgments.lock().try_recv(),
+            judgments.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
         host.input("What do you already remember about me?")
@@ -401,7 +397,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         .await;
         assert_eq!(refused.request.instructions, instructions);
         assert!(matches!(
-            judgments.lock().try_recv(),
+            judgments.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
         refused.finish();
@@ -442,13 +438,20 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         host.context.actor.terminal().get().unwrap().kind,
         exomonad_actor::ActorExitKind::Cancelled
     );
-        })
-    })).catch_unwind().await;
-    if let Err(payload) = scenario {
+    }).catch_unwind().await;
+    let scenario_outcome = ScenarioOutcome::from_result(&scenario);
+    let stopped = host.stop_with_scenario(&scenario_outcome).await;
+    if scenario.is_err() || stopped.is_err() {
         files.disable_cleanup(true);
         repository.disable_cleanup(true);
+    }
+    if let Err(payload) = scenario {
+        if let Err(cleanup) = stopped {
+            eprintln!("persona cleanup failed after scenario assertion: {cleanup}");
+        }
         std::panic::resume_unwind(payload);
     }
+    stopped.unwrap();
     assert_eq!(forest.strong_count(), 0);
     let records =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
@@ -470,7 +473,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         .unwrap()
         .is_none());
     assert!(matches!(
-        judgments.lock().try_recv(),
+        judgments.try_recv(),
         Err(mpsc::error::TryRecvError::Disconnected)
     ));
 }
