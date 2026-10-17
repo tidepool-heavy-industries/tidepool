@@ -542,8 +542,10 @@ def parse_args(argv, *, require_binary=True):
                 parser.error('compiler job allowances require --compiler-mode owned-resident')
     if options.retain_artifacts and options.output_dir is None:
         parser.error('--retain-artifacts requires --output-dir')
-    if options.trace_profile is not None and (options.output_dir is None or not options.retain_artifacts):
-        parser.error('--trace-profile requires --output-dir and --retain-artifacts')
+    if options.trace_profile is not None and options.output_dir is None:
+        parser.error('--trace-profile requires --output-dir')
+    if options.trace_profile == 'full' and not options.retain_artifacts:
+        parser.error('--trace-profile full requires --retain-artifacts')
     if (len(options.resource_env) != len(set(options.resource_env))
             or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name)
                    for name in options.resource_env)):

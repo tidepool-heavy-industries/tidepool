@@ -2105,7 +2105,7 @@ def _run_cohort(args) -> int:
     for name, value in allowances.items():
         if value is not None:
             command.extend(["--" + name.replace("_", "-"), str(value)])
-    if trace_profile is not None or cohort.get("retain_artifacts", False):
+    if trace_profile == "full" or cohort.get("retain_artifacts", False):
         command.append("--retain-artifacts")
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])

@@ -825,6 +825,14 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertEqual(observed['TIDEPOOL_TIMING_SUMMARY'], '1')
                 self.assertEqual(json.loads((root / 'case.json').read_text())['trace_profile'], expected)
 
+    def test_summary_capture_keeps_existing_artifact_retention_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            options = runner.parse_args([str(self.binary), '--trace-profile', 'minimal',
+                                         '--output-dir', directory])
+            self.assertFalse(options.retain_artifacts)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.parse_args([str(self.binary), '--trace-profile', 'full', '--output-dir', directory])
+
     def test_trace_profile_parser_requires_retained_case_artifacts(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             runner.parse_args([str(self.binary), '--trace-profile', 'minimal'])
