@@ -1385,6 +1385,11 @@ fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custod
     let old = inventory
         .admit(&inventory.empty_view(), vec![first_a, first_b])
         .unwrap();
+    assert_eq!(
+        read_catalog_view_interface(&old, id_a),
+        original_a,
+        "original captured owner must read its live sealed range before release"
+    );
     let moved = fixture._root.path().join("moved-products");
     fs::rename(&fixture.output, &moved).unwrap();
     let new_package = Arc::new(
