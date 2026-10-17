@@ -3199,6 +3199,18 @@ impl CompilerSidecar {
         }
     }
 
+    fn read_observed(
+        self,
+        root: &Path,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<u8>, CompileError> {
+        let path = root.join(self.filename());
+        let bytes = self.read(root, &validation.inventory)?;
+        validation.record_captured_bytes(&path, &bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        Ok(bytes)
+    }
+
     fn read(
         self,
         root: &Path,
@@ -3300,13 +3312,13 @@ fn seal_turn_outputs_with_validation(
         })
         .transpose()?;
     let receipt_bytes =
-        CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
+        CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
     let ordinary_inputs = if source_segment.is_none() {
         let product_bytes =
-            CompilerSidecar::ModuleProducts.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
         let packages =
-            CompilerSidecar::ModulePackageImports.read(output_dir, &validation.inventory)?;
-        let evidence = CompilerSidecar::Dependencies.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModulePackageImports.read_observed(output_dir, validation)?;
+        let evidence = CompilerSidecar::Dependencies.read_observed(output_dir, validation)?;
         timing::record_inventory_work("products.decode.before", output_dir, &validation.inventory);
         let start = Instant::now();
         let products = certified_products::ParsedModuleProducts::decode_with_operation(
@@ -3420,6 +3432,12 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    if let Some(receipt) = &ordinary_receipt {
+        if let certified_products::WorkerExecutionSource::ExactAvailable { bytes, .. } = &receipt.source_recipe {
+            validation.record_captured_bytes(&output_dir.join("execution-source.cbor"), bytes)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        }
+    }
     let valid =
         evidence.filter(|evidence| source_segment.is_some() || evidence.revalidate(source).is_ok());
     let Some(valid) = valid else {
@@ -3687,10 +3705,12 @@ fn seal_turn_outputs_with_validation(
     let certified_groups: Arc<[_]> = certified.groups.into();
     let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
-            let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
-                &output_dir.join("compiler-inputs.cbor"),
-                &evidence_bytes,
-                valid,
+            let input_path = output_dir.join("compiler-inputs.cbor");
+            let input_bytes = crate::compile_input::ValidatedInputPackages::read_bytes(&input_path)?;
+            validation.record_captured_bytes(&input_path, &input_bytes)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            let input_packages = crate::compile_input::ValidatedInputPackages::decode_supported(
+                &input_bytes, &evidence_bytes, valid,
             )?;
             input_packages
                 .map(|input_packages| {

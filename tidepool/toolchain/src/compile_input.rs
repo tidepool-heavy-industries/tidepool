@@ -281,7 +281,15 @@ impl ValidatedInputPackages {
         evidence_bytes: &[u8],
         evidence: &DependencyEvidence,
     ) -> Result<Option<Self>, CompileInputError> {
-        match Self::read(path, evidence_bytes, evidence) {
+        Self::decode_supported(&Self::read_bytes(path)?, evidence_bytes, evidence)
+    }
+
+    pub(crate) fn decode_supported(
+        bytes: &[u8],
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+    ) -> Result<Option<Self>, CompileInputError> {
+        match Self::decode(bytes, evidence_bytes, evidence) {
             Ok(proof) => Ok(Some(proof)),
             Err(
                 failure @ (CompileInputError::UnsupportedBoot { .. }
@@ -313,7 +321,7 @@ impl ValidatedInputPackages {
         Self::decode(&Self::read_bytes(path)?, evidence_bytes, evidence)
     }
 
-    fn read_bytes(path: &Path) -> Result<Vec<u8>, CompileInputError> {
+    pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, CompileInputError> {
         use std::io::Read;
         let file = std::fs::File::open(path)
             .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;

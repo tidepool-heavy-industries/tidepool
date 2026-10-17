@@ -1016,6 +1016,25 @@ pub fn capture_recovery_artifact_observations<T, E>(
 }
 
 impl RetainedRecoveryArtifactObservations {
+    pub(crate) fn verify_entry_inventory(
+        &self,
+        root: &Path,
+        inventory: &BTreeMap<PathBuf, String>,
+    ) -> Result<(), RecoveryArtifactError> {
+        if fs::canonicalize(root)? != self.root {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        for (path, observed) in self.files.iter().filter(|(_, file)| file.owned) {
+            let relative = path.strip_prefix(&self.root)
+                .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+            resolve_owned(root, relative)?;
+            if inventory.get(relative) != Some(&hex(&observed.sha256)) {
+                return Err(RecoveryArtifactError::DigestMismatch(path.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Recheck owned path confinement and every file, including external
     /// package interfaces, without decoding their unchanged certificates.
     pub fn observe(
@@ -1144,6 +1163,34 @@ struct CapturedPackageInterface {
 }
 
 impl PackageInterfaceValidation {
+    /// The entry admission owns one complete verification scope. Physical
+    /// observations leave it only with successfully admitted semantic facts.
+    pub(crate) fn capture_entry<T, E>(
+        root: &Path,
+        inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<(T, RetainedRecoveryArtifactObservations), E> {
+        let mut validation = Self::with_inventory(inventory);
+        validation.observed = Some(BTreeMap::new());
+        let value = operation(&mut validation)?;
+        Ok((value, RetainedRecoveryArtifactObservations {
+            root: root.to_path_buf(),
+            files: Arc::new(validation.observed.take().expect("entry observation scope")),
+        }))
+    }
+
+    pub(crate) fn record_captured_bytes(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), RecoveryArtifactError> {
+        if self.observed.is_some() {
+            let digest = self.digest(bytes);
+            self.record_observed(path, digest, bytes.len() as u64, true)?;
+        }
+        Ok(())
+    }
+
     fn record_observed(
         &mut self,
         path: &Path,
@@ -1759,7 +1806,7 @@ fn classify_certification_path_error(error: RecoveryArtifactError) -> RecoveryAr
 fn read_admission_bytes(
     path: &Path,
     limit: u64,
-    validation: &PackageInterfaceValidation,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     crate::host_work::checkpoint()?;
     let file = File::open(path).map_err(|error| {
@@ -1789,6 +1836,7 @@ fn read_admission_bytes(
             path.to_path_buf(),
         ));
     }
+    validation.record_captured_bytes(path, &bytes)?;
     Ok(bytes)
 }
 
@@ -2918,6 +2966,51 @@ mod tests {
     use super::*;
     use ciborium::value::Value;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[test]
+    fn entry_observations_bind_consumed_bytes_before_manifest_and_refuse_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        for name in ["meta.cbor", "__prepared.cbor", "asks.json", "module-products.cbor",
+            "module-package-imports.cbor", "dependencies.json", "certified-products.cbor",
+            "compiler-inputs.cbor", "execution-source.cbor"] {
+            let path = root.join(name);
+            fs::write(&path, b"admitted").unwrap();
+            let (bytes, observations) = PackageInterfaceValidation::capture_entry(
+                &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+                |validation| read_admission_bytes(&path, 64, validation),
+            ).unwrap();
+            assert_eq!(bytes, b"admitted");
+            let mut inventory = BTreeMap::from([(PathBuf::from(name), hex(&Sha256::digest(&bytes).into()))]);
+            observations.verify_entry_inventory(&root, &inventory).unwrap();
+            observations.observe(&root, &mut Default::default()).unwrap();
+            fs::write(&path, b"mutated-after-admission").unwrap();
+            inventory.insert(PathBuf::from(name), hex(&Sha256::digest(b"mutated-after-admission").into()));
+            assert!(matches!(observations.verify_entry_inventory(&root, &inventory),
+                Err(RecoveryArtifactError::DigestMismatch(_))));
+            assert!(matches!(observations.observe(&root, &mut Default::default()),
+                Err(RecoveryArtifactError::DigestMismatch(_))));
+        }
+        let external = tempfile::NamedTempFile::new().unwrap();
+        fs::write(external.path(), b"not-owned-by-entry").unwrap();
+        let (_, escaped) = PackageInterfaceValidation::capture_entry(
+            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            |validation| read_admission_bytes(external.path(), 64, validation),
+        ).unwrap();
+        assert!(matches!(escaped.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::InvalidReference)));
+        let path = root.join("conflicting-read");
+        fs::write(&path, b"first").unwrap();
+        let conflict = PackageInterfaceValidation::capture_entry(
+            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            |validation| {
+                read_admission_bytes(&path, 64, validation)?;
+                fs::write(&path, b"second")?;
+                read_admission_bytes(&path, 64, validation)
+            },
+        );
+        assert!(matches!(conflict, Err(RecoveryArtifactError::DigestMismatch(_))));
+    }
 
     #[cfg(unix)]
     proptest::proptest! {
