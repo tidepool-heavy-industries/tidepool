@@ -160,6 +160,7 @@ def normalize_events(events):
         matching = observations.get(request, [])
         observation = matching[0] if len(matching) == 1 else {}
         direct.append({'usage': usage, 'observation': observation,
+                       'raw_transport_observations': matching,
                        'request_id': request,
                        'association': 'unique_request_owner' if len(matching) == 1 else
                                       'missing_or_ambiguous_transport_observation'})
@@ -204,6 +205,7 @@ def report(events, config):
         observation = event.get('observation') or {}
         rows.append({'usage_observation': usage, 'request_observation': observation,
                      'raw_transport_observation': event.get('raw_transport_observation'),
+                     'raw_transport_observations': event.get('raw_transport_observations'),
                      'request_id': event.get('request_id'), 'association': event.get('association'),
                      'cost': estimate(usage, observation, config)})
     return {'schema': 1, 'kind': 'provider_usage_estimates', 'pricing_version': config['version'],

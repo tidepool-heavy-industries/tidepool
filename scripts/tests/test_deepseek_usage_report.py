@@ -112,6 +112,8 @@ class DeepSeekUsageTests(unittest.TestCase):
                            'payload': json.dumps(self.observation)})
             ambiguous = report.report(report.normalize_events(events), self.config)['responses'][0]
             self.assertEqual(ambiguous['cost']['kind'], 'unknown')
+            self.assertEqual(ambiguous['raw_transport_observations'],
+                             [self.observation, self.observation])
         with self.assertRaisesRegex(ValueError, 'no supported'):
             report.normalize_events([{'kind': 'unrecognized'}])
         with self.assertRaisesRegex(ValueError, 'request identity'):
@@ -137,6 +139,22 @@ class DeepSeekUsageTests(unittest.TestCase):
              'payload': observation}]), self.config)['responses'][0]
         self.assertIsNone(row['usage_observation'])
         self.assertEqual(row['cost']['kind'], 'unknown')
+
+    def test_ambiguous_transport_attempts_keep_all_raw_evidence_without_double_pricing(self):
+        usage = {'version': 3, 'input_tokens': 0, 'output_tokens': 0}
+        observations = [dict(self.observation, terminal=terminal, total_ms=elapsed,
+                             usage=dict(usage, raw={'state': 'observed', 'value': raw}))
+                        for terminal, elapsed, raw in [('failed', 1, None),
+                                                       ('completed', 2, {'future': 0})]]
+        events = [{'request_id': 'same', 'kind': 'responses_usage', 'payload': usage}]
+        events.extend({'request_id': 'same', 'kind': 'responses_transport', 'payload': value}
+                      for value in observations)
+        rows = report.report(report.normalize_events(events), self.config)['responses']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['usage_observation'], usage)
+        self.assertEqual(rows[0]['raw_transport_observations'], observations)
+        self.assertEqual(rows[0]['cost']['kind'], 'unknown')
+        self.assertNotIn('minimum_usd', rows[0]['cost'])
 
 
 if __name__ == '__main__':
