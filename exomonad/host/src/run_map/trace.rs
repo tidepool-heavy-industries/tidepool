@@ -1,7 +1,7 @@
-//! Bounded projection of host trace metadata. Never retain tool input, output or errors.
+//! Bounded projection of host trace metadata and the review owner's selected prefixes.
+use super::trace_projection::{Atom, Fields, Record};
 use super::{Evidence, Limits, TimeWindow};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -264,18 +264,19 @@ pub(super) fn text_prefix(text: &str) -> String {
 }
 
 /// Tracing renders integers wider than 64 bits as strings.
-fn lenient_u64(value: &Value) -> Option<u64> {
+fn lenient_u64(value: &Atom<'_>) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 /// The innermost span field named `name`, falling back to the current span.
-fn span_field<'a>(record: &'a Value, name: &str) -> Option<&'a str> {
-    record["spans"]
-        .as_array()
+fn span_field<'a>(record: &'a Record<'_>, name: &str) -> Option<&'a str> {
+    record
+        .spans
+        .as_deref()
         .and_then(|spans| spans.iter().rev().find_map(|span| span[name].as_str()))
-        .or_else(|| record["span"][name].as_str())
+        .or_else(|| record.span[name].as_str())
 }
 
 /// The Rust variant name that leads a `Debug` rendering such as `Abstained("..")`.
@@ -287,8 +288,8 @@ fn variant_name(debug: &str) -> Option<String> {
 }
 
 impl TraceEvents {
-    fn observe(&mut self, at: u64, record: &Value) {
-        let fields = &record["fields"];
+    fn observe(&mut self, at: u64, record: &Record<'_>) {
+        let fields = &record.fields;
         let actor_field = || fields["actor"].as_str().and_then(actor_key);
         match fields["message"].as_str().unwrap_or("") {
             "resident actor standing transition" => {
@@ -435,9 +436,9 @@ impl TraceEvents {
 fn timeline_label(
     target: &str,
     message: &str,
-    record: &Value,
+    record: &Record<'_>,
 ) -> Option<(&'static str, &'static str)> {
-    let span_name = record["span"]["name"].as_str().unwrap_or("");
+    let span_name = record.span["name"].as_str().unwrap_or("");
     Some(match (target, message, span_name) {
         ("tidepool::host_dynamic_tools", "close", "tool_call") => ("hosted tool call", "host_tool"),
         ("tidepool_extract_cmd::endpoint", "close", "compile_request") => {
@@ -588,7 +589,7 @@ fn duration_ms(text: &str) -> Option<u64> {
     (ms.is_finite() && ms >= 0.0 && ms <= u64::MAX as f64).then(|| ms.round() as u64)
 }
 
-fn elapsed_ms(fields: &Value) -> Option<u64> {
+fn elapsed_ms(fields: &Fields<'_>) -> Option<u64> {
     let busy = duration_ms(fields["time.busy"].as_str()?)?;
     let idle = duration_ms(fields["time.idle"].as_str()?)?;
     busy.checked_add(idle)
@@ -738,7 +739,7 @@ pub(super) fn read_trace(
             ));
             return (summary, events);
         }
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+        let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
             diagnostics.push(format!(
                 "{}:{}: invalid trace JSON",
                 path.display(),
@@ -746,7 +747,7 @@ pub(super) fn read_trace(
             ));
             continue;
         };
-        let Some(time) = record["timestamp"].as_str().and_then(timestamp_ms) else {
+        let Some(time) = record.timestamp.as_str().and_then(timestamp_ms) else {
             continue;
         };
         events.observe(time, &record);
@@ -756,11 +757,11 @@ pub(super) fn read_trace(
             continue;
         }
         let source = format!("{}:{}", path.display(), index + 1);
-        let fields = &record["fields"];
+        let fields = &record.fields;
         let message = fields["message"].as_str().unwrap_or("");
-        let target = record["target"].as_str().unwrap_or("");
-        let span = &record["span"];
-        let spans = record["spans"].as_array();
+        let target = record.target.as_str().unwrap_or("");
+        let span = &record.span;
+        let spans = record.spans.as_deref();
         if !message.is_empty() {
             let label = timeline_label(target, message, &record);
             if label.is_none() {
@@ -928,7 +929,7 @@ pub(super) fn read_trace(
                 if let Some(actor) = fields["actor"].as_str().and_then(actor_key) {
                     let lifecycle = summary.actor_lifecycle.entry(actor).or_default();
                     let observation = Evidence::Observed {
-                        value: record["timestamp"].as_str().unwrap_or_default().to_owned(),
+                        value: record.timestamp.as_str().unwrap_or_default().to_owned(),
                         source,
                     };
                     if message.ends_with("launched") {
@@ -951,7 +952,41 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn structured_trace_counts_without_reading_output_or_error_prose() {
+    fn projected_spans_and_rejection_prefix_keep_existing_semantics() {
+        let bytes =
+            br#"{"span":{"execution":"current"},"spans":[{"execution":"outer"},{"execution":7}]}"#;
+        let record: Record<'_> = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(span_field(&record, "execution"), Some("outer"));
+        let record: Record<'_> =
+            serde_json::from_slice(br#"{"span":{"execution":"current"},"spans":[{}]}"#).unwrap();
+        assert_eq!(span_field(&record, "execution"), Some("current"));
+        let mut events = TraceEvents::default();
+        for (index, length) in [(1, 64), (2, 65)] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "fields":{"message":"input unit receipt","status":"Rejected","index":index,
+                    "output":format!("reply rejected: {}(private suffix λ)","A".repeat(length))},
+                "span":{"execution":"rejected-execution"}
+            }))
+            .unwrap();
+            let record: Record<'_> = serde_json::from_slice(&bytes).unwrap();
+            events.observe(0, &record);
+        }
+        assert_eq!(
+            events.rejected_units.get(&("rejected-execution".into(), 1)),
+            Some(&Some("A".repeat(64)))
+        );
+        assert_eq!(
+            events.rejected_units.get(&("rejected-execution".into(), 2)),
+            Some(&None)
+        );
+        let record: Record<'_> = serde_json::from_slice(br#"{"fields":{"total_ms":"19","preparation_wait_ms":null,"actor":3,"incarnation":"1"}}"#).unwrap();
+        assert_eq!(lenient_u64(&record.fields["total_ms"]), Some(19));
+        assert_eq!(lenient_u64(&record.fields["preparation_wait_ms"]), None);
+        assert_eq!(lenient_u64(&record.fields["incarnation"]), Some(1));
+    }
+
+    #[test]
+    fn structured_trace_counts_without_classifying_output_or_error_prose() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trace.jsonl");
         let records = [
