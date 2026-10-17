@@ -17,5 +17,3 @@ mod prepared_residency;
 mod prepared_resident_composite;
 #[path = "../prepared_unit_codegen_cost.rs"]
 mod prepared_unit_codegen_cost;
-#[path = "../retained_core_receive.rs"]
-mod retained_core_receive;

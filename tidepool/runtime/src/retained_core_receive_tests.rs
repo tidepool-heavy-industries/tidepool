@@ -24,12 +24,12 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let support_source = work.path().join("RetainedReceiveSupport.hs");
     std::fs::write(
         &owner_source,
-        include_str!("fixtures/RetainedReceiveOwner.hs"),
+        include_str!("../tests/fixtures/RetainedReceiveOwner.hs"),
     )
     .unwrap();
     std::fs::write(
         &support_source,
-        include_str!("fixtures/RetainedReceiveSupport.hs"),
+        include_str!("../tests/fixtures/RetainedReceiveSupport.hs"),
     )
     .unwrap();
     let mut include = vec![work.path().to_path_buf()];
@@ -52,7 +52,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         &probe_source,
         format!(
             "{}\n__prepared :: Int\n__prepared = result\n",
-            include_str!("fixtures/RetainedReceiveProbe.hs")
+            include_str!("../tests/fixtures/RetainedReceiveProbe.hs")
         ),
     )
     .unwrap();
@@ -232,10 +232,10 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     std::fs::remove_file(&owner_source).unwrap();
     std::fs::remove_file(&support_source).unwrap();
     assert!(!owner_source.exists() && !support_source.exists());
-    let mut compiled = tidepool_testing::with_settlement(|settlement| {
+    let compiled = tidepool_testing::with_settlement(|settlement| {
         compile_invocation_in_context(
             &CompileInvocation {
-                source: include_str!("fixtures/RetainedReceiveConsumer.hs"),
+                source: include_str!("../tests/fixtures/RetainedReceiveConsumer.hs"),
                 targets: &["__prepared"],
                 include: &include,
                 fallback_module_name: "RetainedReceiveConsumer",
@@ -296,15 +296,43 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
                 binding.identity.occurrence == "routeEven"
             }))
         }));
-    let prepared = compiled
-        .targets
-        .remove("__prepared")
-        .unwrap()
-        .prepared
-        .into_prepared();
-    assert!(prepared
+    let declared_site = compiled.targets["__prepared"]
+        .asks
         .sites()
+        .into_iter()
+        .find(|site| site.origin == "RetainedReceiveOwner.result")
+        .expect("the complete compiler output retains the original receive site");
+    let receive = compiled
+        .certified_groups
         .iter()
-        .any(|site| site.origin == "RetainedReceiveOwner.result"));
-    super::prepared_execution::assert_typed_receive_json(prepared, compiled.table);
+        .filter(|group| group.owner().unit == owner.unit && group.owner().module == owner.module)
+        .filter(|group| {
+            group.group().binders().iter().any(|binder| {
+                binder.unit == owner.unit
+                    && binder.module == owner.module
+                    && binder.occurrence == "result"
+            })
+        })
+        .find(|group| {
+            group
+                .group()
+                .definitions()
+                .sites()
+                .iter()
+                .any(|site| site.site == declared_site.site)
+        })
+        .expect("the certified retained owner carries its original receive site");
+    assert_eq!(receive.origin(), ProductOrigin::RetainedCore);
+    let receive_definitions = receive.group().definitions();
+    let mut state = crate::session::PersistentSession::new(None, 4096);
+    let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
+        .expect("install the target and its complete certified native closure");
+    let table = state.session_table().clone();
+    crate::typed_receive_test_support::assert_typed_receive_json(
+        state.prepared_mut().unwrap(),
+        program,
+        table,
+        receive_definitions,
+    );
+    assert!(state.prepared_mut().unwrap().unpin(program));
 }

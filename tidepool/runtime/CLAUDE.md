@@ -8,6 +8,13 @@ Toolchain discovery, validation, fingerprinting, diagnostics, timing, and the
 compiled-artifact cache belong to `tidepool-toolchain`. The corresponding
 modules re-exported here are compatibility surfaces, not policy boundaries.
 
+Compiled targets, their certified native closure and constructor metadata form one
+installation input; compiler integration tests install that complete result through
+the production installer. Engine fixtures may bootstrap a self-contained
+`PreparedProgram`, but extracted targets from multi-module output require their
+issued closure. Site evidence belongs to the defining group or installed engine,
+not necessarily the entry program.
+
 Session state has one mutable owner at a time. `SessionRegistry` controls
 checkout admission; `PersistentSession` owns the resident execution contract;
 frontends choose whether admission waits or fails immediately. JIT resource
