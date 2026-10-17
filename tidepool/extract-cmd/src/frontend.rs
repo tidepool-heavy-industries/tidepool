@@ -816,10 +816,14 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let (cwd, argv) = daemon::read_request(&mut request)?;
     let worker_argv = daemon::normalize_worker_argv(argv)?;
     let mut worker = daemon::Worker::spawn(&prepared)?;
+    let mut received_before_failed_end = None;
     let result: Result<_, FrontendError> = (|| {
         worker.begin_transaction()?;
         let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
-        worker.end_transaction()?;
+        if let Err(error) = worker.end_transaction() {
+            received_before_failed_end = Some((code, stdout, stderr));
+            return Err(error);
+        }
         Ok((code, stdout, stderr))
     })();
     if result.is_ok() {
@@ -833,6 +837,17 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     // immediately terminate this frontend. Reap and retire scratch ownership
     // before publishing that final response.
     drop(worker);
+    if let (Err(error), Some((code, stdout, stderr))) = (&result, received_before_failed_end) {
+        if let Err(delivery_error) = daemon::write_unconfirmed_response(
+            io::stdout().lock(),
+            code,
+            &stdout,
+            &stderr,
+            &error.to_string(),
+        ) {
+            tracing::warn!(%delivery_error, "could not deliver report with failed END evidence");
+        }
+    }
     let (code, stdout, stderr) = result?;
     daemon::write_response(io::stdout().lock(), code, &stdout, &stderr)?;
     Ok(0)

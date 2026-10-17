@@ -347,6 +347,55 @@ pub struct SpawnError {
     settlement: Settlement,
 }
 
+/// A received compiler report whose transaction cleanup was not acknowledged.
+/// These bytes are diagnostic evidence; they are not a completed `ExtractRun`.
+pub struct ReceivedCompilerDiagnostic {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl ReceivedCompilerDiagnostic {
+    pub fn exit_code(&self) -> i32 {
+        self.code
+    }
+
+    pub fn stdout(&self) -> &[u8] {
+        &self.stdout
+    }
+
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+}
+
+impl std::fmt::Debug for ReceivedCompilerDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedCompilerDiagnostic")
+            .field("code", &self.code)
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .finish()
+    }
+}
+
+/// Failed END and the report received before it are independent observations.
+#[derive(Debug)]
+pub struct CompilerCompletionFailure {
+    diagnostic: ReceivedCompilerDiagnostic,
+    end_cause: String,
+}
+
+impl CompilerCompletionFailure {
+    pub fn diagnostic(&self) -> &ReceivedCompilerDiagnostic {
+        &self.diagnostic
+    }
+
+    pub fn end_cause(&self) -> &str {
+        &self.end_cause
+    }
+}
+
 #[derive(Debug)]
 enum Settlement {
     NotSubmitted,
@@ -356,6 +405,14 @@ enum Settlement {
 }
 
 impl SpawnError {
+    /// Inspect a received report without confirming completion or permitting replay.
+    pub fn completion_failure(&self) -> Option<&CompilerCompletionFailure> {
+        self.source
+            .get_ref()?
+            .downcast_ref::<daemon::DaemonError>()?
+            .completion_failure()
+    }
+
     /// The binary genuinely wasn't there.
     pub fn is_not_found(&self) -> bool {
         self.source.kind() == std::io::ErrorKind::NotFound

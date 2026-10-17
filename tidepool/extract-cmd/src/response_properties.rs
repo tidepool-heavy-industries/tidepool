@@ -13,9 +13,15 @@ struct Reply {
     stderr: Vec<u8>,
 }
 
+fn response_codes() -> impl Strategy<Value = i32> {
+    any::<i32>().prop_filter("reserved response control word", |code| {
+        code.to_le_bytes() != UNCONFIRMED_RESPONSE[..4]
+    })
+}
+
 fn replies() -> impl Strategy<Value = Reply> {
     (
-        any::<i32>(),
+        response_codes(),
         proptest::collection::vec(any::<u8>(), 0..65),
         proptest::collection::vec(any::<u8>(), 0..65),
     )
@@ -39,6 +45,14 @@ fn reply_bytes(reply: &Reply) -> Vec<u8> {
     bytes.extend_from_slice(&reply.stdout);
     bytes.extend_from_slice(&(reply.stderr.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&reply.stderr);
+    bytes
+}
+
+fn unconfirmed_bytes(reply: &Reply, cause: &str) -> Vec<u8> {
+    let mut bytes = b"TPCU0001".to_vec();
+    bytes.extend(reply_bytes(reply));
+    bytes.extend_from_slice(&(cause.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(cause.as_bytes());
     bytes
 }
 
@@ -116,6 +130,36 @@ fn property_config() -> proptest::test_runner::Config {
 
 proptest! {
     #![proptest_config(property_config())]
+
+    #[test]
+    fn unconfirmed_reports_preserve_evidence_across_partitions_without_issuing_output(
+        reply in replies(), cause in "[a-zA-Z 0-9:.]{0,96}",
+        widths in read_widths(), interrupted_byte in any::<usize>(),
+    ) {
+        let wire = unconfirmed_bytes(&reply, &cause);
+        let mut encoded = Vec::new();
+        write_unconfirmed_response(&mut encoded, reply.code, &reply.stdout, &reply.stderr, &cause)
+            .unwrap();
+        prop_assert_eq!(&encoded, &wire);
+        for fault in [None, Some((interrupted_byte % wire.len(), ReadFault::InterruptedOnce))] {
+            let mut input = PartitionedRead::new(&wire, &widths, fault);
+            let error = decode_output(&mut input).unwrap_err();
+            let evidence = error.completion_failure().unwrap();
+            prop_assert_eq!(evidence.diagnostic().exit_code(), reply.code);
+            prop_assert_eq!(evidence.diagnostic().stdout(), reply.stdout.as_slice());
+            prop_assert_eq!(evidence.diagnostic().stderr(), reply.stderr.as_slice());
+            prop_assert_eq!(evidence.end_cause(), cause.as_str());
+            prop_assert!(!error.permits_rebind());
+            prop_assert_eq!(input.position, wire.len());
+            prop_assert_eq!(input.fault_observed, fault.is_some());
+        }
+        for cut in 0..wire.len() {
+            let mut input = PartitionedRead::new(&wire[..cut], &widths, None);
+            let error = decode_output(&mut input).unwrap_err();
+            prop_assert!(matches!(error, DaemonError::IncompleteResponse));
+            prop_assert_eq!(input.position, cut);
+        }
+    }
 
     #[test]
     fn response_sequences_preserve_frames_across_read_partitions(
@@ -200,7 +244,7 @@ proptest! {
 
     #[test]
     fn oversized_second_frame_refuses_before_reading_body(
-        code in any::<i32>(), stdout in proptest::collection::vec(any::<u8>(), 0..65),
+        code in response_codes(), stdout in proptest::collection::vec(any::<u8>(), 0..65),
         overflow in 1u32..65, widths in read_widths(),
     ) {
         let remaining = MAX_RESPONSE_PAYLOAD_BYTES - stdout.len() as u32;
