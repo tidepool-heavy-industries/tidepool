@@ -6584,6 +6584,18 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
     let current = product("PublishedFallbackOwner", 151);
     let historical = product("PublishedFallbackOwner", 152);
     let fallback = authored(2, 153);
+    assert!(matches!(
+        current.module_interface().unwrap().origin(),
+        crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
+    ));
+    assert!(matches!(
+        historical.module_interface().unwrap().origin(),
+        crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
+    ));
+    assert!(matches!(
+        fallback.module_interface().unwrap().origin(),
+        crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+    ));
     assert_eq!(current.module_interface(), historical.module_interface());
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), current.clone()).unwrap());
     let old = Arc::new(ArtifactEntry::original(producer.sha256(), historical.clone()).unwrap());
