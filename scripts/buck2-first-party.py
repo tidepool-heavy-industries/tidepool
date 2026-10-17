@@ -687,7 +687,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     elif package_name == "tidepool-runtime":
         if unit or target_name in {"session", "prepared_execution"}:
             fixture_names = ["M3", "Resume", "Retention"]
-        if unit or target_name in {"session", "prepared_execution"}:
+        if not unit and target_name in {"session", "prepared_execution"}:
             fixture_names.append("TypedReceive")
         elif target_name == "prepared_resident_composite":
             fixture_names = ["Resume"]

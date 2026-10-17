@@ -1,13 +1,32 @@
 //! Typed receive assertions over an already installed complete program closure.
 use super::runtime;
 use tidepool_codegen::prepared_program::ProgramId;
-use tidepool_repr::execution_schema::{parse_program, DecodeLimits, JsonLayout};
+use tidepool_repr::execution_schema::{DefinitionsView, JsonLayout};
+
+pub(super) fn json_layout(program: DefinitionsView<'_>) -> JsonLayout<tidepool_repr::DataConId> {
+    program
+        .json_layout()
+        .expect("compiler-issued Value layout")
+        .try_map(|id| {
+            program
+                .constructors()
+                .get(id.0 as usize)
+                .map(|constructor| constructor.host_id)
+                .ok_or(())
+        })
+        .expect("declared canonical JSON constructors")
+}
 
 pub(super) fn assert_typed_receive_json(
     engine: &mut runtime::prepared_execution::PreparedEngine,
     program: ProgramId,
     table: tidepool_repr::DataConTable,
     expected_site: u64,
+    payload: (
+        &mut runtime::prepared_execution::PreparedEngine,
+        ProgramId,
+        JsonLayout<tidepool_repr::DataConId>,
+    ),
     assert_schema: impl Fn(
         &runtime::prepared_execution::PreparedEngine,
         &runtime::prepared_execution::PreparedParked,
@@ -15,38 +34,11 @@ pub(super) fn assert_typed_receive_json(
     ),
 ) {
     use runtime::prepared_execution::{
-        ParkPolicy, PreparedEngine, PreparedRuntimeError, PreparedSettlement, RealmId,
+        ParkPolicy, PreparedRuntimeError, PreparedSettlement, RealmId,
     };
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-    let payload_artifact = tidepool_test_data::prepared_resources::read_target(
-        "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
-        "__payload",
-    );
-    let payload_prepared = parse_program(
-        &payload_artifact,
-        &tidepool_toolchain::prepared_artifact::production_requirements()
-            .expect("production compiler requirements"),
-        DecodeLimits::default(),
-    )
-    .expect("genuine compiler-produced typed payloads");
-    let json_layout = |program: tidepool_repr::execution_schema::DefinitionsView<'_>| {
-        program
-            .json_layout()
-            .expect("compiler-issued Value layout")
-            .try_map(|id| {
-                program
-                    .constructors()
-                    .get(id.0 as usize)
-                    .map(|constructor| constructor.host_id)
-                    .ok_or(())
-            })
-            .expect("declared canonical JSON constructors")
-    };
-    let layout = json_layout(payload_prepared.definitions());
+    let (producer, payload_program, layout) = payload;
     let table = table.with_json_layout(Some(layout));
-    let (mut producer, payload_program) =
-        PreparedEngine::bootstrap_with_nursery_bytes(payload_prepared, 4096)
-            .expect("bootstrap Haskell payload producer");
     let PreparedSettlement::Done { value: pair } = producer
         .run_settled(payload_program, RealmId::ROOT)
         .expect("execute Haskell typed payload producer")

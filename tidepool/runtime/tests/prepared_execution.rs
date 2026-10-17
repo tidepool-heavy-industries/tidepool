@@ -157,17 +157,7 @@ fn assert_typed_receive_json(prepared: PreparedProgram, table: tidepool_repr::Da
     assert!(receive
         .constructor_replies()
         .contains(&(ConstructorId(receiver as u32), ConstructorReply::AtSite)));
-    let layout = receive
-        .json_layout()
-        .expect("compiler-issued receiver Value layout")
-        .try_map(|id| {
-            receive
-                .constructors()
-                .get(id.0 as usize)
-                .map(|constructor| constructor.host_id)
-                .ok_or(())
-        })
-        .expect("declared canonical JSON constructors");
+    let layout = typed_receive_test_support::json_layout(receive);
     let mut live_sites = receive
         .sites()
         .iter()
@@ -180,11 +170,29 @@ fn assert_typed_receive_json(prepared: PreparedProgram, table: tidepool_repr::Da
         live_sites.next().is_none(),
         "the standalone JsonReply fixture has one live receive site"
     );
+    let payload_artifact = tidepool_test_data::prepared_resources::read_target(
+        "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
+        "__payload",
+    );
+    let payload = parse_program(
+        &payload_artifact,
+        &tidepool_toolchain::prepared_artifact::production_requirements()
+            .expect("production compiler requirements"),
+        DecodeLimits::default(),
+    )
+    .expect("genuine self-contained compiler-produced typed payloads");
+    let payload_layout = typed_receive_test_support::json_layout(payload.definitions());
+    let (mut producer, payload_program) =
+        tidepool_runtime::prepared_execution::PreparedEngine::bootstrap_with_nursery_bytes(
+            payload, 4096,
+        )
+        .expect("bootstrap self-contained Haskell payload producer");
     typed_receive_test_support::assert_typed_receive_json(
         &mut engine,
         program,
         table,
         site,
+        (&mut producer, payload_program, payload_layout),
         |_, _, payload_layout| assert_eq!(&layout, payload_layout),
     );
 }

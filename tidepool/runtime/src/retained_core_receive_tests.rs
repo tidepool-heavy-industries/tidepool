@@ -236,7 +236,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         compile_invocation_in_context(
             &CompileInvocation {
                 source: include_str!("../tests/fixtures/RetainedReceiveConsumer.hs"),
-                targets: &["__prepared"],
+                targets: &["__prepared", "__payload"],
                 include: &include,
                 fallback_module_name: "RetainedReceiveConsumer",
             },
@@ -328,12 +328,27 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
         .expect("install the target and its complete certified native closure");
     let table = state.session_table().clone();
+    let payload_layout = crate::typed_receive_test_support::json_layout(
+        compiled.targets["__payload"]
+            .prepared
+            .prepared()
+            .definitions(),
+    );
+    let mut producer = crate::session::PersistentSession::new(None, 4096);
+    let payload_program = crate::install_compiled_target(&mut producer, &compiled, "__payload")
+        .expect("install the payload target and its complete certified native closure");
     crate::typed_receive_test_support::assert_typed_receive_json(
         state.prepared_mut().unwrap(),
         program,
         table,
         declared_site.site,
+        (
+            producer.prepared_mut().unwrap(),
+            payload_program,
+            payload_layout,
+        ),
         crate::session::prepared::assert_parked_receive_schema,
     );
     assert!(state.prepared_mut().unwrap().unpin(program));
+    assert!(producer.prepared_mut().unwrap().unpin(payload_program));
 }
