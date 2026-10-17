@@ -85,6 +85,9 @@ def estimate(usage, observation, config):
     result = {'kind': 'unknown', 'currency': 'USD', 'pricing_version': config['version'],
               'usage': facts, 'reasons': [], 'not_an_invoice': True, 'estimate_basis': 'snapshot_repricing',
               'pricing_verified_at': config['verified_at']}
+    if type(observation.get('version')) is not int or observation.get('version') != 3:
+        result['reasons'] = ['request_observation_version_unavailable_or_unsupported']
+        return result
     if observation.get('backend') != 'deep_seek':
         result['reasons'] = ['backend_unavailable_or_not_deepseek']
         return result
@@ -146,6 +149,8 @@ def normalize_events(events):
         if kind == 'responses_transport':
             if not isinstance(payload, dict) or not isinstance(request, str) or not request:
                 raise ValueError('transport observation lacks its retained request identity')
+            if type(payload.get('version')) is not int or payload.get('version') != 3:
+                raise ValueError('unsupported transport observation version')
             observations.setdefault(request, []).append(payload)
         elif kind == 'responses_usage':
             if not isinstance(payload, dict) or not isinstance(request, str) or not request:

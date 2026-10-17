@@ -13,7 +13,7 @@ SPEC.loader.exec_module(report)
 class DeepSeekUsageTests(unittest.TestCase):
     def setUp(self):
         self.config = json.loads((ROOT / 'build/pricing/deepseek-2026-10-17.json').read_text())
-        self.observation = {'backend': 'deep_seek', 'requested_model': 'deepseek-flash',
+        self.observation = {'version': 3, 'backend': 'deep_seek', 'requested_model': 'deepseek-flash',
                             'returned_model': 'deepseek-flash', 'started_at_unix_ms': 1792198800000,
                             'completed_at_unix_ms': 1792198805000}
 
@@ -121,7 +121,9 @@ class DeepSeekUsageTests(unittest.TestCase):
 
     def test_failed_or_incomplete_transport_usage_is_not_erased_by_missing_completion(self):
         for terminal in ('failed', 'incomplete'):
-            observation = dict(self.observation, terminal=terminal,
+            observation = dict(self.observation,
+                               terminal=({'kind': 'response_failed'} if terminal == 'failed' else
+                                         {'kind': 'incomplete', 'response_id': 'r', 'reason': None}),
                                usage={'version': 3, 'input_tokens': 0, 'output_tokens': 2,
                                       'raw': {'state': 'observed', 'value': None}},
                                queue_ms=0, first_text_ms=None, total_ms=5)
@@ -142,9 +144,9 @@ class DeepSeekUsageTests(unittest.TestCase):
 
     def test_ambiguous_transport_attempts_keep_all_raw_evidence_without_double_pricing(self):
         usage = {'version': 3, 'input_tokens': 0, 'output_tokens': 0}
-        observations = [dict(self.observation, terminal=terminal, total_ms=elapsed,
+        observations = [dict(self.observation, terminal={'kind': terminal}, total_ms=elapsed,
                              usage=dict(usage, raw={'state': 'observed', 'value': raw}))
-                        for terminal, elapsed, raw in [('failed', 1, None),
+                        for terminal, elapsed, raw in [('response_failed', 1, None),
                                                        ('completed', 2, {'future': 0})]]
         events = [{'request_id': 'same', 'kind': 'responses_usage', 'payload': usage}]
         events.extend({'request_id': 'same', 'kind': 'responses_transport', 'payload': value}
@@ -155,6 +157,23 @@ class DeepSeekUsageTests(unittest.TestCase):
         self.assertEqual(rows[0]['raw_transport_observations'], observations)
         self.assertEqual(rows[0]['cost']['kind'], 'unknown')
         self.assertNotIn('minimum_usd', rows[0]['cost'])
+
+    def test_observation_migration_never_reconstructs_old_request_context(self):
+        usage = {'version': 3, 'input_tokens': 0, 'output_tokens': 0}
+        for version in (None, True, 2, 4):
+            old = dict(self.observation, version=version)
+            with self.assertRaisesRegex(ValueError, 'unsupported transport observation version'):
+                report.normalize_events([{'request_id': 'r', 'kind': 'responses_transport',
+                                          'payload': old}])
+            self.assertEqual(report.estimate(usage, old, self.config)['kind'], 'unknown')
+        absent = {'version': 3, 'usage': usage, 'terminal': None, 'end': 'abandoned'}
+        row = report.report(report.normalize_events([
+            {'request_id': 'r', 'kind': 'responses_transport', 'payload': absent}]), self.config)['responses'][0]
+        self.assertEqual(row['request_observation'], absent)
+        self.assertEqual(row['cost']['kind'], 'unknown')
+        with self.assertRaisesRegex(ValueError, 'no supported'):
+            report.normalize_events([{'request_id': 'old', 'kind': 'responses_transport_failure',
+                                      'payload': {'version': 2}}])
 
 
 if __name__ == '__main__':
