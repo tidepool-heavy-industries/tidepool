@@ -1020,6 +1020,15 @@ portableOutputRequestValidation = do
   (decoded, accepted) <- admit valid
   assertEqual "portable intent survives typed transport" True (requestPortableOutput decoded)
   assertEqual "portable source operation" (Right SourceOperation) accepted
+  let hosted = HostedLookup (HostedLookupBatch
+        [HostedLookupPrimary 7 "value" (HostedLookupName
+          (LookupNameInspection "value" Nothing LookupNameOnly))] Nothing)
+  (_, hostedAccepted) <- admit [Input "Fixture.hs", hosted]
+  assertEqual "hosted positive uses the inspection operation"
+    (Right InspectionOperation) hostedAccepted
+  (_, mixedAccepted) <- admit (valid ++ [hosted])
+  assertEqual "hosted inspection cannot acquire portable output intent"
+    (Left InvalidPortableOutputShape) mixedAccepted
   forM_ [Turn, Cell, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
     , SessionArtifacts "scope", CertifyHomeProducts, TargetModuleOnly, InjectVal "Binding"
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
