@@ -1079,6 +1079,96 @@ mod tests {
     }
 
     #[test]
+    fn installed_haskell_text_fields_reach_function_only_surface_without_name_inference() {
+        struct UnusedDispatcher;
+        #[async_trait::async_trait]
+        impl harness::provider::Provider for UnusedDispatcher {
+            async fn call(
+                &self,
+                _: &str,
+                _: Value,
+            ) -> Result<Value, harness::provider::ProviderError> {
+                panic!("schema observation must not dispatch a tool")
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        use exomonad_tool::{ToolImplementation, ToolScheduling};
+        let custom = |name: &str, implementation, schedule| {
+            HostedTool::Custom(CustomToolDeclaration {
+                name: name.into(),
+                description: "Raw endpoint".into(),
+                implementation,
+                schedule,
+                effect_keys: vec![],
+            })
+        };
+        let snapshot = EmbeddedPolicyInstallation::new(
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
+            policy_with_tools(
+                "field-owner",
+                vec![
+                    custom(
+                        "unusual-notebook",
+                        ToolImplementation::HaskellCell,
+                        ToolScheduling::BeforeNextInference,
+                    ),
+                    custom(
+                        "async-notebook",
+                        ToolImplementation::HaskellCell,
+                        ToolScheduling::Async,
+                    ),
+                    custom(
+                        "haskell_sync",
+                        ToolImplementation::ResidentHandler,
+                        ToolScheduling::BeforeNextInference,
+                    ),
+                ],
+            ),
+        )
+        .request_snapshot()
+        .unwrap();
+        let native = harness::embedding::ToolSurface::from_manifest(
+            "field-owner".into(),
+            snapshot.manifest(),
+            Arc::new(UnusedDispatcher),
+        )
+        .unwrap();
+        assert_eq!(native.tools(), snapshot.tools());
+        let original = native
+            .with_encoding(harness::transport::ToolEncodingProfile::Native)
+            .unwrap();
+        assert_eq!(original.tools(), snapshot.tools());
+        assert!(original
+            .tools()
+            .iter()
+            .all(|tool| tool["type"] == "custom" && tool["format"] == json!({"type":"text"})));
+        let encoded = native
+            .with_encoding(harness::transport::ToolEncodingProfile::FunctionOnlyExplicitDelivery)
+            .unwrap();
+        let tool = |name: &str| {
+            encoded
+                .tools()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()
+        };
+        assert_eq!(
+            tool("unusual-notebook")["parameters"],
+            json!({"type":"object","properties":{"source":{"type":"string"}},"required":["source"],"additionalProperties":false})
+        );
+        assert_eq!(
+            tool("async-notebook")["parameters"],
+            json!({"type":"object","properties":{"source":{"type":"string"},"delivery":{"type":"string","enum":["wait","background"]}},"required":["source","delivery"],"additionalProperties":false})
+        );
+        assert_eq!(
+            tool("haskell_sync")["parameters"],
+            json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false})
+        );
+    }
+
+    #[test]
     fn installed_policy_projects_raw_and_strict_function_tools() {
         let snapshot = EmbeddedPolicyInstallation::new(
             exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
