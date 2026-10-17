@@ -624,7 +624,37 @@ async fn persona_web_selection_retains_native_judgment_and_empty_control() {
             let judgment = host
                 .while_operation_succeeds(
                     &operation,
-                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                judgment = judgments.recv() => break judgment,
+                                round = next_hosted_script_round(&mut requests, &mut pending, &root) => {
+                                    let returned = round.request.input.iter().filter(|item|
+                                        item.0["type"] == "custom_tool_call_output"
+                                            && item.0["call_id"] == operation.call.0
+                                    ).collect::<Vec<_>>();
+                                    if !returned.is_empty() {
+                                        let recorded = host.runtime.store()
+                                            .replay_tool_output_operation(&operation).unwrap()
+                                            .expect("the exact pending operation must own its returned output");
+                                        let projected = super::embedded_policy::project_retained_result(&recorded, &operation)
+                                            .expect("returned native output must authenticate its original operation")
+                                            .expect("the exact native output must have a model presentation");
+                                        let expected = harness::item::Item::tool_output(
+                                            &operation.call, harness::item::ToolKind::Custom,
+                                            &harness::turn::JobOutput::Completed(Ok(projected)),
+                                        );
+                                        assert_eq!(returned, vec![&expected],
+                                            "the observed call output must be the exact pending operation's presentation");
+                                        panic!("persona web selection settled before its judgment: {operation:?}: {:?}: {}",
+                                            recorded.terminal, round.settled_output(&operation.call.0));
+                                    }
+                                    round.finish();
+                                }
+                            }
+                        }
+                    }),
                 )
                 .await
                 .unwrap()
