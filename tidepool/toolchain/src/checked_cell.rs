@@ -903,7 +903,6 @@ pub struct CellProgramItem {
 #[derive(Debug)]
 pub(crate) struct CellProgramObservations {
     pub(crate) turn: Arc<[u8]>,
-    pub(crate) metadata: Arc<[u8]>,
     pub(crate) products: Arc<crate::artifacts::SealedTurnProducts>,
 }
 
@@ -969,9 +968,8 @@ impl CellProgramItem {
             .map(|value| value.turn.as_ref())
     }
     pub fn native_metadata_bytes(&self) -> Option<&[u8]> {
-        self.native_observations
-            .as_ref()
-            .map(|value| value.metadata.as_ref())
+        self.native_observations.as_ref()?;
+        self.native.as_ref().map(|value| value.metadata_bytes())
     }
     pub fn native_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
         self.native_observations
@@ -2537,6 +2535,8 @@ pub struct ExactCompiledItem {
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
+    metadata: Arc<[u8]>,
+    warnings: tidepool_repr::serial::MetaWarnings,
     yield_sites_digest: [u8; 32],
     value_interface: Option<Arc<CheckedValueArtifact>>,
     generation: u64,
@@ -2860,6 +2860,17 @@ impl CheckedTypedEntry {
 }
 
 impl ExactCompiledItem {
+    /// The same captured metadata observation admitted with this exact target.
+    pub fn metadata_bytes(&self) -> &[u8] {
+        &self.metadata
+    }
+    pub fn table(&self) -> &tidepool_repr::DataConTable {
+        &self.table
+    }
+    pub fn warnings(&self) -> &tidepool_repr::serial::MetaWarnings {
+        &self.warnings
+    }
+
     pub fn typed_entry(&self) -> Option<&CheckedTypedEntry> {
         self.typed_entry.as_ref().map(|issued| &issued.entry)
     }
@@ -3564,6 +3575,8 @@ impl CheckedItemOffer {
             original_execution,
             target,
             table,
+            metadata,
+            warnings,
             bound_binders,
             authenticated_sites,
             typed_entry,
@@ -3589,6 +3602,8 @@ impl CheckedItemOffer {
             item: self.item.clone(),
             target,
             table,
+            metadata,
+            warnings,
             yield_sites_digest: authenticated_sites,
             value_interface,
             generation: self.generation,
@@ -3617,6 +3632,8 @@ pub(crate) struct PreparedCheckedItemOutput {
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
+    metadata: Arc<[u8]>,
+    warnings: tidepool_repr::serial::MetaWarnings,
     bound_binders: Vec<Value>,
     authenticated_sites: [u8; 32],
     typed_entry: Option<SealedTypedEntry>,
@@ -3631,15 +3648,16 @@ impl PreparedCheckedItemOutput {
         generation: u64,
         observation_name: Option<&str>,
         is_program: bool,
-        root: &Path,
+        output: &crate::artifacts::ProgramNativeOutput,
         request: &str,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
         program_entry: Option<&CheckedTypedEntry>,
         target_imports: &[crate::certified_products::PendingImportOwner],
         target_native_selection: &crate::artifact_inventory::IssuedTargetNativeSelection,
     ) -> Result<Self, CompileError> {
+        let root = output.directory();
+        let source = output.source();
+        let target = output.target();
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if is_program { 9 } else { 8 })?;
         validate_item_receipt(
@@ -3751,13 +3769,16 @@ impl PreparedCheckedItemOutput {
                 })
             })
             .transpose()?;
+        let (metadata, table, warnings) = output.decode_metadata()?;
         Ok(Self {
             item: item.clone(),
             generation,
             observation_name: observation_name.map(str::to_owned),
             is_program,
             target: target.clone(),
-            table: read_table(root, target)?,
+            table,
+            metadata,
+            warnings,
             original_execution,
             bound_binders,
             authenticated_sites,
