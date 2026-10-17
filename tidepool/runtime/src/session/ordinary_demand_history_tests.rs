@@ -315,7 +315,7 @@ fn run_cell(
     };
     let (result, captured) =
         with_cell_request_capture(observer, "ordinary-demand-history", label, &source, || {
-            try_execute_cell_with_template_preamble_observed(
+            try_execute_cell_with_template_imports_expectation_observed(
                 resident,
                 public,
                 effects,
@@ -328,7 +328,6 @@ fn run_cell(
                 AuthorityChecks::OrdinaryGroupWork(expected, ordinal),
                 &SourceImports::default(),
                 None,
-                "",
                 |_| {},
             )
         });
