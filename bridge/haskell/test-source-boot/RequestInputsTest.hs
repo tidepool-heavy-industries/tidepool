@@ -216,7 +216,7 @@ ownedFixtureScope handles path = do
             | core <- maybe [] pure (canonicalCoreArtifact proof)]) (scopeModuleInterfaceProofs scope)
   nativeParts <- case scopeCodecField ScopeCodecNativeProducts fixture of
     TList rows -> Map.fromListWith (++) <$> forM rows (\row -> case row of
-      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha]] -> do
+      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha],_] -> do
         let key = (T.unpack unit,T.unpack name)
         product' <- maybe (fail "issued native census lacks its admitted product") pure
           (Map.lookup key (Map.fromList [((originalUnit value,originalModule value),value)
