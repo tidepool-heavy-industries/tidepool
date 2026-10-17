@@ -366,9 +366,11 @@ mod tests {
             record.spans.as_ref().unwrap()[0]["execution"].as_str(),
             Some("outer")
         );
-        assert!(record.spans.as_ref().unwrap()[1]["execution"]
-            .as_str()
-            .is_none());
+        assert!(
+            record.spans.as_ref().unwrap()[1]["execution"]
+                .as_str()
+                .is_none()
+        );
         for bytes in [
             br#"{"fields":{"actor":"old"},"fields":null}"#.as_slice(),
             br#"{"spans":[{"actor":"old"}],"spans":{}}"#,
@@ -603,11 +605,13 @@ mod tests {
         let trace = workspace.join(".exomonad/logs/projection.jsonl");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::create_dir_all(trace.parent().unwrap()).unwrap();
-        std::fs::write(run.join("status.json"), serde_json::to_vec(&serde_json::json!({
-            "version":4,"run_id":"projection","workspace":workspace,"session":"session",
-            "agent":{"model":"test","effort":"low"},
-            "phase":{"state":"ready","root_actor":{"id":3,"incarnation":1},"root_thread":"thread-3"}
-        })).unwrap()).unwrap();
+        let status = crate::exomonad::run_map_status_fixture(&workspace);
+        let status_bytes = serde_json::to_vec(&status).unwrap();
+        assert_eq!(
+            crate::exomonad::decode_run_status(&status_bytes).unwrap(),
+            status,
+        );
+        std::fs::write(run.join("status.json"), status_bytes).unwrap();
         for bytes in [&small, &large] {
             std::fs::write(&trace, bytes).unwrap();
             let report = super::super::read_observed_run_filtered(
@@ -633,6 +637,10 @@ mod tests {
                 "discarded source cannot enter reports"
             );
         }
-        eprintln!("run-map projection allocation bytes: small={small_allocated} large={large_allocated}; Value small={old_small} large={old_large}; input bytes={}/{} excluded", small.len(),large.len());
+        eprintln!(
+            "run-map projection allocation bytes: small={small_allocated} large={large_allocated}; Value small={old_small} large={old_large}; input bytes={}/{} excluded",
+            small.len(),
+            large.len()
+        );
     }
 }
