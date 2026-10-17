@@ -649,14 +649,10 @@ namesInScope rdrEnv query = case exactNameScope query of
       && namespaceMatches (exactNameNamespace query) name
 
 matchesNameQuery :: String -> Name -> Bool
-matchesNameQuery query name =
-  occNameString (nameOccName name) == occurrence
-    && maybe True (\wanted -> definingModule == Just wanted) qualifier
+matchesNameQuery query name = query == occurrence
+  || maybe False (\owner -> query == owner ++ "." ++ occurrence) definingModule
   where
-    (qualifier, occurrence) = case break (== '.') (reverse query) of
-      (reversedOccurrence, []) -> (Nothing, reverse reversedOccurrence)
-      (reversedOccurrence, _ : reversedQualifier) ->
-        (Just (reverse reversedQualifier), reverse reversedOccurrence)
+    occurrence = occNameString (nameOccName name)
     definingModule = moduleNameString . moduleName <$> nameModule_maybe name
 
 namespaceMatches :: StructuredNameNamespace -> Name -> Bool
