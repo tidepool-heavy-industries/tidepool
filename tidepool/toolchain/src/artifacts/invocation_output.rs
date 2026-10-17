@@ -1,4 +1,4 @@
-//! Complete named compiler output, shared by physical acquisition and memo IO.
+//! Complete named physical output for native and portable compiler consumers.
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -111,7 +111,7 @@ impl<P> InvocationOutputLayout<P> {
         })
     }
 
-    pub(crate) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.artifacts.len()
     }
 
