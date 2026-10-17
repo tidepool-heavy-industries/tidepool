@@ -3535,10 +3535,10 @@ mod tests {
             read(&retained, &foreign_issued),
             Err(exomonad_actor::SourceInspectionError::Unavailable(_))
         ));
+        assert_locator_identity_observations();
     }
 
-    #[test]
-    fn issued_source_locators_retain_identity_without_full_revision_projection() {
+    fn assert_locator_identity_observations() {
         use exomonad_actor::{ActorSourceLayers, SourceInspection};
         for (selected, unrelated) in [(1, 1), (20, 64)] {
             let (project, owner) = generation_owner();
