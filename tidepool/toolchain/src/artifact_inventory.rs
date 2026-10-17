@@ -2538,9 +2538,14 @@ pub(crate) struct BoundArtifactSelection {
     owners: SelectedOwners,
     captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
-    groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
+    groups: BTreeMap<NativeGroupKey, BoundNativeGroup>,
     native_source: crate::certified_products::CertifiedSourceSelection,
-    issued_group_keys: BTreeSet<NativeGroupKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BoundNativeGroup {
+    Retained(BTreeSet<NativeGroupBinding>),
+    Issued(NativeGroupBinding),
 }
 
 impl BoundArtifactSelection {
@@ -2771,9 +2776,11 @@ impl ArtifactInventory {
             owners,
             captured_facts,
             materializations,
-            groups,
+            groups: groups
+                .into_iter()
+                .map(|(key, groups)| (key, BoundNativeGroup::Retained(groups)))
+                .collect(),
             native_source: selection.clone(),
-            issued_group_keys: BTreeSet::new(),
         })
     }
 
@@ -2897,25 +2904,23 @@ impl ArtifactInventory {
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let recorded = if fixed.issued_group_keys.contains(&group) {
-                BTreeSet::new()
-            } else {
-                fixed.native_source.native_group_candidates(group)
+            let candidates = match fixed.groups.get(&group) {
+                Some(BoundNativeGroup::Issued(group)) => BTreeSet::from([*group]),
+                retained => {
+                    let recorded = fixed.native_source.native_group_candidates(group);
+                    if !recorded.is_empty() {
+                        recorded
+                    } else if let Some(BoundNativeGroup::Retained(groups)) = retained {
+                        groups.clone()
+                    } else {
+                        BTreeSet::new()
+                    }
+                }
             };
-            let issued_nodes = if recorded.is_empty() {
-                fixed
-                    .groups
-                    .get(&group)
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .collect()
-            } else {
-                recorded
-            }
-            .into_iter()
-            .map(InventoryNodeKey::Group)
-            .collect::<imbl::OrdSet<_>>();
+            let issued_nodes = candidates
+                .into_iter()
+                .map(InventoryNodeKey::Group)
+                .collect::<imbl::OrdSet<_>>();
             let issued = NativeSelectionIndex::build(&state, &issued_nodes);
             let carrier = if fixed
                 .view
@@ -3268,8 +3273,7 @@ impl ArtifactInventory {
                     artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 };
-                fixed.groups.insert(key, BTreeSet::from([*group]));
-                fixed.issued_group_keys.insert(key);
+                fixed.groups.insert(key, BoundNativeGroup::Issued(*group));
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
