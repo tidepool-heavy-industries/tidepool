@@ -8554,28 +8554,88 @@ mod module_product_tests {
     #[ignore = "requires matched Haskell worker and frontend"]
     #[serial_test::serial]
     fn real_worker_reuses_dependency_after_consumer_changes() {
+        fn compile_observed(
+            request: &str,
+            source: &str,
+            root: &Path,
+        ) -> (CompiledArtifacts, usize) {
+            use crate::module_candidates::publication_observer::{self, Stage};
+            use sha2::{Digest, Sha256};
+            let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observed = events.clone();
+            let compiled = publication_observer::with_observer(
+                move |event| observed.borrow_mut().push(event),
+                || {
+                    crate::artifacts::test_support::compile_targets(
+                        source,
+                        &["consume"],
+                        &[root.to_owned()],
+                        |_, _, _| {},
+                    )
+                },
+            )
+            .unwrap();
+            // Count actual successful serialization calls and completed writes,
+            // associated by the issuer's exact proof reference in this request.
+            let mut work = std::collections::BTreeMap::<String, (u64, u64, u64, u64)>::new();
+            let mut publications = 0;
+            for event in events.borrow().iter() {
+                match event {
+                    Stage::ProofEncoded { sha256, bytes } => {
+                        let row = work.entry(sha256.clone()).or_default();
+                        row.0 += 1;
+                        row.1 += bytes;
+                    }
+                    Stage::ProofPublished {
+                        sha256,
+                        bytes,
+                        path,
+                    } => {
+                        let written = std::fs::read(path).expect("observed proof write exists");
+                        assert_eq!(written.len() as u64, *bytes);
+                        assert_eq!(format!("{:x}", Sha256::digest(&written)), sha256.as_str());
+                        if let Some(artifacts) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+                            let directory = PathBuf::from(artifacts)
+                                .join("publication-proofs")
+                                .join(request);
+                            std::fs::create_dir_all(&directory).unwrap();
+                            std::fs::write(directory.join(format!("{sha256}.cbor")), written)
+                                .unwrap();
+                        }
+                        let row = work.entry(sha256.clone()).or_default();
+                        row.2 += 1;
+                        row.3 += bytes;
+                        publications += 1;
+                    }
+                    _ => {}
+                }
+            }
+            for (sha256, (encodes, encoded_bytes, writes, written_bytes)) in &work {
+                if *writes != 0 {
+                    assert!(
+                        *encodes != 0,
+                        "published proof encoding must be observed on this request"
+                    );
+                }
+                eprintln!("publication-proof-work request={request} sha256={sha256} successful_encodes={encodes} encoded_bytes={encoded_bytes} completed_writes={writes} written_bytes={written_bytes}");
+            }
+            (compiled, publications)
+        }
         let cache = tempfile::tempdir().unwrap();
         let old_cache = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR");
         unsafe {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
         }
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
         let work = tempfile::tempdir().unwrap();
         let root = work.path().to_path_buf();
-        std::fs::copy(
-            fixtures.join("ModuleProductA.hs"),
+        std::fs::write(
             root.join("ModuleProductA.hs"),
+            include_str!("../../../bridge/haskell/test-prepared-stg/ModuleProductA.hs"),
         )
         .unwrap();
-        let first = std::fs::read_to_string(fixtures.join("ModuleProductB.hs")).unwrap();
-        let first_artifacts = crate::artifacts::test_support::compile_targets(
-            &first,
-            &["consume"],
-            &[root.clone()],
-            |_, _, _| {},
-        )
-        .unwrap();
+        let first = include_str!("../../../bridge/haskell/test-prepared-stg/ModuleProductB.hs");
+        let (first_artifacts, first_artifacts_publications) =
+            compile_observed("first", &first, &root);
         assert!(!first_artifacts.certified_groups.is_empty());
         assert_eq!(
             first_artifacts.targets["consume"].pending_imports.len(),
@@ -8587,13 +8647,7 @@ mod module_product_tests {
         );
         let changed = first.replace("produce + 1", "produce + 2");
         assert_ne!(changed, first);
-        let second = crate::artifacts::test_support::compile_targets(
-            &changed,
-            &["consume"],
-            &[root.clone()],
-            |_, _, _| {},
-        )
-        .unwrap();
+        let (second, second_publications) = compile_observed("consumer-changed", &changed, &root);
         assert!(second
             .module_products
             .iter()
@@ -8618,13 +8672,8 @@ mod module_product_tests {
             .write_all(b"\n-- changed original dependency\n")
             .unwrap();
         let changed_again = first.replace("produce + 1", "produce + 3");
-        let third = crate::artifacts::test_support::compile_targets(
-            &changed_again,
-            &["consume"],
-            &[root],
-            |_, _, _| {},
-        )
-        .unwrap();
+        let (third, third_publications) =
+            compile_observed("dependency-changed", &changed_again, &root);
         assert!(third
             .certified_groups
             .iter()
@@ -8635,6 +8684,10 @@ mod module_product_tests {
             .iter()
             .any(|group| group.origin() == ProductOrigin::Cached
                 && group.owner().module == "ModuleProductA"));
+        assert!(
+            first_artifacts_publications + second_publications + third_publications > 0,
+            "real candidate control must observe a completed ordinary proof publication"
+        );
         match old_cache {
             Some(path) => unsafe { std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", path) },
             None => unsafe { std::env::remove_var("TIDEPOOL_COMPILE_CACHE_DIR") },

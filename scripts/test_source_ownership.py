@@ -278,6 +278,8 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
     })),
     ('tidepool-toolchain', frozenset({
+        'bridge/haskell/test-prepared-stg/ModuleProductA.hs',
+        'bridge/haskell/test-prepared-stg/ModuleProductB.hs',
         'tidepool/toolchain/src/fixtures/pure_command_projection_diagnostics.json',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs',
