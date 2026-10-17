@@ -31,13 +31,13 @@ import Tidepool.CompilerProducts (prepareCompilerProjectionContext)
 import Tidepool.ConstructorIdentity (captureIdentityResolver, resolveTypeIdentity)
 import Tidepool.EffectSchema (ysSite)
 import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
-import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
+import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget, projectPreparedModuleGroupsSelected, topBinders)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules, pprFinalizedModules
   , prHscEnv, finalizedHomeModInfo, runPipelineSelected )
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
-import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph)
+import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph, pmBindings, preparedBindingGroups)
 import Tidepool.TypePolicy qualified as Policy
 import Tidepool.TypeSyntaxIdentity (encodeTypeSyntaxIdentity)
 
@@ -198,6 +198,31 @@ runTypeEvidenceChecks directory = do
   auxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootDecode"])
   assert (all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors auxiliary)) ["Left", "Right"])
     "auxiliary root lost its own result constructors"
+  repeatedAuxiliary <- requireRight (project context original "unrelated"
+    ["auxiliaryRootDecode", "auxiliaryRootDecode"])
+  assert (auxiliary == repeatedAuxiliary)
+    "repeating an admitted auxiliary root changed its complete output"
+  polymorphicAuxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootPolymorphic"])
+  assert (IntMap.null (typeGraphNodes (programTypes polymorphicAuxiliary)))
+    "a polymorphic auxiliary answer acquired concrete evidence"
+  prepared <- case [value | value <- pprModules original,
+      moduleNameString (moduleName (pmModule value)) == "TypeEvidence"] of
+    [value] -> pure value
+    _ -> fail "auxiliary evidence fixture has no unique prepared source module"
+  ordinal <- case [index | (index, group) <- preparedBindingGroups prepared,
+      (binding, _) <- pmBindings group, binder <- topBinders binding,
+      occNameString (nameOccName (idName binder)) == "auxiliaryRootDecode"] of
+    [value] -> pure value
+    _ -> fail "auxiliary evidence fixture has no unique original group"
+  let auxiliaryContext = context { projectionAuxiliaryRoots =
+        [(projectionEntry context) { symbolOccurrence = "auxiliaryRootDecode" }] }
+  auxiliaryGroups <- requireRight (projectPreparedModuleGroupsSelected auxiliaryContext prepared
+    (Just (Set.singleton ordinal)))
+  assert (case auxiliaryGroups of
+      [group] -> all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity)
+        (projectedConstructors (projectedBody group))) ["Left", "Right"]
+      _ -> False)
+    "independent original group lost its auxiliary answer constructors"
   verifyOriginalScopes original alpha
   let cast = CastTy boolTy (mkNomReflCo (typeKind boolTy))
       coercion = CoercionTy (mkNomReflCo boolTy)

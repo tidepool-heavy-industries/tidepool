@@ -207,6 +207,9 @@ auxiliaryRootDecodeHelper _ = Left "unused"
 auxiliaryRootDecode :: Text -> Either Text Int
 auxiliaryRootDecode = auxiliaryRootDecodeHelper
 
+auxiliaryRootPolymorphic :: a -> a
+auxiliaryRootPolymorphic value = value
+
 provenLeading :: RequestSite '[Int] Int -> Console Int
 provenLeading = ProvenLeading
 provenSubmit :: Int -> RequestSite '[()] Int -> Int -> Console ()

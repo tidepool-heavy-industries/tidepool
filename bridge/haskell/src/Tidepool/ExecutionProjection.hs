@@ -783,10 +783,10 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             (projectionJsonAuthority context) (projectionTextUnit context) outside purpose FinalEntryContracts []
       evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
-        (do validatePreparedEvidence context [onlyGroup] [evidence] []
+        (do auxiliary <- validatePreparedEvidence context [onlyGroup] [evidence] []
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
-            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
+            (types, sites, verbSites) <- lowerPreparedEvidence [onlyGroup] [evidence] auxiliary
             jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
       pure (ProjectedGroupEvidence (ProjectedGroup
@@ -882,11 +882,11 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
   refuseUnelaboratedIntrinsics modules projectable
   ((bindingGroups, programTypes, programSites, programConstructorReplies, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
-        validatePreparedEvidence context projectable evidence
+        auxiliary <- validatePreparedEvidence context projectable evidence
           (concatMap hostBindingRepresentationConstructors hostBindings)
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
+        (types, sites, verbSites) <- lowerPreparedEvidence projectable evidence auxiliary
         hostJsonLayout <- lowerHostBindings hostBindings
         jsonLayout <- case hostJsonLayout of
           Just layout -> pure (Just layout)
@@ -1711,11 +1711,11 @@ preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepar
 -- nodes in module/original order and rebases every edge into one program table.
 -- An admitted auxiliary root's own result type follows the module evidence
 -- ('lowerAuxiliaryRootEvidence'); intrinsic constructor reply graphs follow.
-lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> P (TypeGraph, [SiteRow], [(ConstructorId, ConstructorReply)])
-lowerPreparedEvidence context modules evidence = do
+lowerPreparedEvidence :: [PreparedModule] -> [SelectedPreparedEvidence]
+  -> [AuxiliaryRootEvidence] -> P (TypeGraph, [SiteRow], [(ConstructorId, ConstructorReply)])
+lowerPreparedEvidence modules evidence auxiliary = do
   (moduleNodes, moduleSites) <- foldM lowerOne (emptyProjectedTypeGraph, []) evidence
-  auxNodes <- lowerAuxiliaryRootEvidence context modules (graphNodeCount moduleNodes)
+  auxNodes <- lowerAuxiliaryRootEvidence auxiliary (graphNodeCount moduleNodes)
   carriers <- fmap concat $ forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $
     traverse resolveProjectedTypeIdentity (maybe [] pure (pmRequestSiteTyCon prepared))
   (verbNodes, verbSites) <-
@@ -1765,16 +1765,23 @@ lowerPreparedEvidence context modules evidence = do
 -- lowering any one graph. Representation recovery may roll one graph's local
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
+-- Issued locally only after all early constructor validation succeeds. The
+-- captured resolver stays paired with the graph through subsequent lowering.
+data AuxiliaryRootEvidence = AuxiliaryRootEvidence IdentityResolver
+  TypePolicy.TypeGraph [TypePolicy.TypeNodeId]
+
 validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> [DataCon] -> P ()
+  -> [SelectedPreparedEvidence] -> [DataCon] -> P [AuxiliaryRootEvidence]
 validatePreparedEvidence context modules evidence hostConstructors = do
   forM_ evidence $ \selected -> withIdentityResolver (selectedIdentityResolver selected) $
     validateConstructorEvidence (constructorsForSelectedTypeGraph (selectedEvidenceGraph selected))
-  forM_ modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
+  auxiliary <- forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
     (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context [prepared]
     auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
     validateConstructorEvidence auxiliaryEvidence
+    pure (AuxiliaryRootEvidence (pmIdentityResolver prepared) auxiliaryNodes auxiliaryRoots)
   validateConstructorEvidence hostConstructors
+  pure auxiliary
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -1798,11 +1805,10 @@ validatePreparedEvidence context modules evidence hostConstructors = do
 -- variable, so interning one would fail the whole projection rather than
 -- leaving the root's own evidence merely absent. Concrete auxiliary roots
 -- are unaffected by this filter.
-lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P TypeGraph
-lowerAuxiliaryRootEvidence context modules base = foldM lowerOne emptyProjectedTypeGraph modules
+lowerAuxiliaryRootEvidence :: [AuxiliaryRootEvidence] -> Int -> P TypeGraph
+lowerAuxiliaryRootEvidence auxiliary base = foldM lowerOne emptyProjectedTypeGraph auxiliary
  where
-  lowerOne prior prepared = withIdentityResolver (pmIdentityResolver prepared) $ do
-    (nodes, graphRoots) <- auxiliaryRootTypeGraph context [prepared]
+  lowerOne prior (AuxiliaryRootEvidence resolver nodes graphRoots) = withIdentityResolver resolver $ do
     (lowered, _rebase) <- lowerTypeGraph (base + graphNodeCount prior) nodes graphRoots
     pure (unionTypeGraphs prior lowered)
 
