@@ -178,23 +178,29 @@ pub(super) fn bind_fresh_product_dependencies(
                 let InventoryNodeKey::Group(group) = node else {
                     continue;
                 };
-                let carrier = &group.binding;
-                let ordinal = &group.original_ordinal;
-                if carrier.artifact != key.artifact
-                    || *ordinal != key.original_ordinal
-                    || namespace
-                        .get(&key.artifact)
-                        .is_some_and(|selected| selected != carrier)
+                if group.binding.artifact() != key.artifact
+                    || group.original_ordinal != key.original_ordinal
                 {
                     continue;
                 }
-                if state
-                    .outgoing(InventoryNodeKey::Artifact(*carrier))
-                    .any(|(target, edge)| {
-                        target == InventoryNodeKey::Artifact(*binding)
-                            && *edge == ArtifactDependency::Interface
-                    })
-                {
+                // A scoped Group issuer is not its artifact carrier. Follow
+                // the checked same-original Interface edge without collapsing
+                // distinct Groups that happen to share that carrier.
+                let compatible = state.outgoing(*node).any(|(target, edge)| {
+                    let InventoryNodeKey::Artifact(carrier) = target else {
+                        return false;
+                    };
+                    carrier.artifact == key.artifact
+                        && *edge == ArtifactDependency::Interface
+                        && !namespace
+                            .get(&key.artifact)
+                            .is_some_and(|selected| *selected != carrier)
+                        && state.outgoing(target).any(|(target, edge)| {
+                            target == InventoryNodeKey::Artifact(*binding)
+                                && *edge == ArtifactDependency::Interface
+                        })
+                });
+                if compatible {
                     candidates.insert(*group);
                 }
             }
