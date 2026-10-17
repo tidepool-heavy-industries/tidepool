@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 pub(crate) const STATUS_VERSION: u32 = 5;
 // Root startup includes up to five minutes of resource admission before launch.
@@ -2935,13 +2935,11 @@ mod tests {
         assert!(!state.exists(), "scope admission does not create storage");
         let directory = boundary.child(relative).unwrap();
         assert_eq!(directory.path(), state.canonicalize().unwrap());
-        assert!(
-            directory
-                .child("exomonad/runs/new-run")
-                .unwrap()
-                .path()
-                .is_dir()
-        );
+        assert!(directory
+            .child("exomonad/runs/new-run")
+            .unwrap()
+            .path()
+            .is_dir());
     }
 
     #[test]
@@ -2988,12 +2986,10 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(
-            std::process::Command::new(selected)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(selected)
+            .status()
+            .unwrap()
+            .success());
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -3040,12 +3036,10 @@ mod tests {
             "provider = 'chatgpt_plan'\n{}",
             fields.replace("credential_file", "codex_auth_file")
         );
-        assert!(
-            toml::from_str::<EmbeddedLaunchConfig>(&legacy)
-                .unwrap_err()
-                .to_string()
-                .contains("codex_auth_file")
-        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("codex_auth_file"));
     }
 
     #[test]
@@ -3099,13 +3093,11 @@ mod tests {
             "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
         ).unwrap();
         assert!(config.session_secret_file.is_none());
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("tailscale0")
-        );
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tailscale0"));
     }
 
     #[test]
@@ -3124,12 +3116,10 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(
-            toml::from_str::<EmbeddedLaunchConfig>(&format!(
-                "{config}public_origin_scheme = 'ftp'\n"
-            ))
-            .is_err()
-        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{config}public_origin_scheme = 'ftp'\n"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -3139,13 +3129,11 @@ mod tests {
                 "provider = 'chatgpt_plan'\nlisten = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(
-                config
-                    .validate()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("tailscale0")
-            );
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0"));
         }
     }
 
@@ -3195,12 +3183,10 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.reasoning, effort);
         }
-        assert!(
-            toml::from_str::<ExomonadConfig>(
-                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-            )
-            .is_err()
-        );
+        assert!(toml::from_str::<ExomonadConfig>(
+            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+        )
+        .is_err());
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3287,20 +3273,16 @@ mod tests {
             scaffold::DEFAULT_WORKSPACE_REV
         );
         let configured = read_project_config(workspace.path()).unwrap().0;
-        assert!(
-            configured
-                .haskell
-                .source_roots
-                .iter()
-                .any(|root| root == Path::new("workspace"))
-        );
-        assert!(
-            configured
-                .haskell
-                .modules
-                .iter()
-                .any(|module| module == "Project.Work")
-        );
+        assert!(configured
+            .haskell
+            .source_roots
+            .iter()
+            .any(|root| root == Path::new("workspace")));
+        assert!(configured
+            .haskell
+            .modules
+            .iter()
+            .any(|module| module == "Project.Work"));
         check(Some(workspace.path().to_owned()), false)
             .await
             .expect(
@@ -3845,12 +3827,10 @@ mod tests {
             "[prompts]\ncore = 'core.md'\n",
         ] {
             std::fs::write(&path, format!("{base}{retired}")).unwrap();
-            assert!(
-                read_project_config(workspace.path())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid Exomonad configuration")
-            );
+            assert!(read_project_config(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Exomonad configuration"));
         }
     }
 
@@ -3872,12 +3852,10 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(
-            read_project_config(repo.path())
-                .unwrap_err()
-                .to_string()
-                .contains("contains tracked source")
-        );
+        assert!(read_project_config(repo.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains tracked source"));
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -4230,14 +4208,12 @@ mod tests {
         for version in [0, 3, 4, 6] {
             value["version"] = version.into();
             let bytes = serde_json::to_vec(&value).unwrap();
-            assert!(
-                decode_run_status(&bytes)
-                    .unwrap_err()
-                    .to_string()
-                    .contains(&format!(
-                        "unsupported Exomonad run status version {version}"
-                    ))
-            );
+            assert!(decode_run_status(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!(
+                    "unsupported Exomonad run status version {version}"
+                )));
         }
     }
 
@@ -4266,12 +4242,10 @@ mod tests {
             }))
             .unwrap();
         assert!(status.actors.is_none());
-        assert!(
-            serde_json::to_value(&status)
-                .unwrap()
-                .get("actors")
-                .is_none()
-        );
+        assert!(serde_json::to_value(&status)
+            .unwrap()
+            .get("actors")
+            .is_none());
         assert!(status.replace_actor_observations(2, Vec::new()));
         assert_eq!(
             serde_json::to_value(&status).unwrap()["actors"],
@@ -4546,18 +4520,16 @@ mod tests {
             "TIDEPOOL_TEST_TRACE_PROFILE".into(),
             "unknown".into(),
         )]);
-        assert!(
-            compiler_daemon_launch(
-                Path::new("/tmp/workspace"),
-                Path::new("/tmp/compiler.sock"),
-                "/tmp/compiler".into(),
-                "run",
-                Path::new("/tmp/compiler.log"),
-                &CompilerConfig::default(),
-                &invalid,
-            )
-            .is_err()
-        );
+        assert!(compiler_daemon_launch(
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/compiler.sock"),
+            "/tmp/compiler".into(),
+            "run",
+            Path::new("/tmp/compiler.log"),
+            &CompilerConfig::default(),
+            &invalid,
+        )
+        .is_err());
     }
 
     #[test]
@@ -4583,11 +4555,9 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
-        assert!(
-            launch
-                .unset_environment
-                .is_disjoint(&launch.environment.keys().cloned().collect())
-        );
+        assert!(launch
+            .unset_environment
+            .is_disjoint(&launch.environment.keys().cloned().collect()));
         assert_eq!(launch.window_name, "Compiler");
         assert_eq!(launch.cwd, workspace);
         assert_eq!(launch.program, "/tmp/tidepool-extract");
@@ -4642,47 +4612,35 @@ mod tests {
                 .map(String::as_str),
             Some("/bundle/compiler.json")
         );
-        assert!(
-            configured_launch
-                .unset_environment
-                .is_disjoint(&configured_launch.environment.keys().cloned().collect())
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--workers", "2"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--foreground-jobs", "8"])
-        );
+        assert!(configured_launch
+            .unset_environment
+            .is_disjoint(&configured_launch.environment.keys().cloned().collect()));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--foreground-jobs", "8"]));
         for setting in [
             "workers = 0",
             "rss_ceiling_mb = 0",
             "foreground_jobs = 0",
             "unknown = 2",
         ] {
-            assert!(
-                toml::from_str::<ExomonadConfig>(&format!(
-                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-                ))
-                .is_err()
-            );
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
         }
-        assert!(
-            !launch
-                .environment
-                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
-        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -4783,11 +4741,9 @@ mod tests {
                 ),
             },
         };
-        assert!(
-            admit_run_launch(root.path(), &coordinates, None)
-                .await
-                .is_err()
-        );
+        assert!(admit_run_launch(root.path(), &coordinates, None)
+            .await
+            .is_err());
         assert!(!root.path().join("launch.json").exists());
     }
 

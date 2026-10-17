@@ -366,11 +366,9 @@ mod tests {
             record.spans.as_ref().unwrap()[0]["execution"].as_str(),
             Some("outer")
         );
-        assert!(
-            record.spans.as_ref().unwrap()[1]["execution"]
-                .as_str()
-                .is_none()
-        );
+        assert!(record.spans.as_ref().unwrap()[1]["execution"]
+            .as_str()
+            .is_none());
         for bytes in [
             br#"{"fields":{"actor":"old"},"fields":null}"#.as_slice(),
             br#"{"spans":[{"actor":"old"}],"spans":{}}"#,
