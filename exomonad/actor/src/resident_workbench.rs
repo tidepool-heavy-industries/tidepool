@@ -1684,6 +1684,7 @@ enum PreparedGenerationCommit {
 /// Preparation binds immutable facts; publication still checks the live actor,
 /// current snapshot, native readiness and cancellation claim under its fence.
 pub(crate) struct PreparedActorGeneration {
+    machine_owner: std::sync::Weak<ActorMachineRegistry>,
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
     prompts: tidepool_runtime::session::ComposedPromptSnapshot,
@@ -1730,6 +1731,14 @@ where
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        if !prepared
+            .machine_owner
+            .ptr_eq(&Arc::downgrade(&self.access.machines))
+        {
+            return Ok(ActorGenerationCommit::Refused(
+                "prepared generation belongs to a different machine owner".into(),
+            ));
+        }
         let state = self.state.clone();
         self.access.with_machine(prepared.checkout_context.clone(), move |session, _, _| {
             let mut current = state.0.lock();
@@ -2179,6 +2188,7 @@ where
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let expected = expected_snapshot.generation().cloned();
         let checkout_context = context.clone();
+        let machine_owner = Arc::downgrade(&self.access.machines);
         installation
             .verify_recovered_generation(&references)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
@@ -2274,6 +2284,7 @@ where
                     native_owner,
                 )?;
                 Ok(PreparedActorGeneration {
+                    machine_owner,
                     checkout_context,
                     expected: expected_snapshot,
                     prompts,
@@ -19645,6 +19656,35 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
             }
+            let foreign = workbench
+                .prepare_actor_generation(
+                    context.clone(),
+                    descriptor.clone(),
+                    ActorRequestSnapshot::Generation(initial.clone()),
+                    next_installation.clone(),
+                    prompts.clone(),
+                )
+                .await
+                .unwrap();
+            let foreign_owner =
+                ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+                    Arc::new(ActorMachineRegistry::new()),
+                    source.clone(),
+                    None,
+                );
+            assert!(matches!(
+                foreign_owner
+                    .generation_publisher(state.clone())
+                    .publish(
+                        foreign,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        ActorGenerationPublication::Terminal,
+                    )
+                    .await
+                    .unwrap(),
+                ActorGenerationCommit::Refused(_)
+            ));
+            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
             let stale = workbench
                 .prepare_actor_generation(
                     context.clone(),
