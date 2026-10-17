@@ -5494,6 +5494,30 @@ mod tests {
 
     #[test]
     fn checked_value_capture_preserves_selected_child_over_relevant_historical_offer() {
+        checked_value_custody_histories(|_, _| Ok(()));
+    }
+
+    #[test]
+    fn authored_lifetime_query_ignores_unrelated_historical_owner_conflicts() {
+        checked_value_custody_histories(|_, context| {
+            let before = context.artifact_view().capture_graph_selection();
+            let roles = context.compiler_input_projection().snapshot_roles();
+            let requirements = context.authored_native_binding_custody_requirements(
+                &BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
+                    unit: "fixture".into(),
+                    module: "Epoch".into(),
+                }]),
+            ).map_err(|error| error.to_string())?;
+            assert!(requirements.is_empty(), "source originals issue no authored lifetime edges");
+            assert_eq!(context.artifact_view().capture_graph_selection(), before);
+            assert_eq!(context.compiler_input_projection().snapshot_roles(), roles);
+            Ok(())
+        });
+    }
+
+    fn checked_value_custody_histories(
+        observe: impl Fn(&Arc<CheckedValueArtifact>, &crate::declaration_context::ExactDeclarationContext) -> Result<(), String>,
+    ) {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -5837,7 +5861,7 @@ mod tests {
                         );
                         let next = ExactDeclarationContext::new(&[], &[], vec![])
                             .unwrap()
-                            .extend_retained_value_artifacts(&[captured])
+                            .extend_retained_value_artifacts(&[captured.clone()])
                             .unwrap();
                         assert_eq!(
                             next.compiler_input_projection().snapshot_roles()[&child_owner]
@@ -5885,7 +5909,10 @@ mod tests {
                         selected_source
                             .with_new_product_dependencies(&metadata, &requirements)
                             .unwrap();
-                        completed += 1;
+                        match observe(&captured, &next) {
+                            Ok(()) => completed += 1,
+                            Err(error) => failures.push(format!("changed_child={changed_child} selected={selected} template={template} prepared={prepared}: lifetime consumer: {error}")),
+                        }
                     }
                 }
             }
