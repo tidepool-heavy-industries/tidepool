@@ -785,6 +785,54 @@ class IsolatedLibtestTests(unittest.TestCase):
         case = json.loads((root / 'case.json').read_text())
         self.assertEqual(case['trace_profile'], 'minimal')
 
+    def test_trace_scan_retains_applied_profile_boot_and_generation_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiler = root / 'compiler'
+            compiler.mkdir()
+            rows = [
+                {'fields': {'message': 'compiler trace profile applied', 'profile': 'minimal',
+                            'raw_detail': 'off', 'filter_contract': 1, 'process_id': 42,
+                            'writer': str(compiler / 'compiler.jsonl')}},
+                {'fields': {'message': 'compiler daemon ready', 'daemon_pid': 42}},
+                {'fields': {'message': 'compiler timing', 'line': 'tidepool-compile-summary modules=1'}},
+                {'fields': {'message': 'compiler timing', 'line': 'tidepool-count forbidden=1'}},
+            ]
+            (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            capture = runner.diagnostic_summaries(root)['trace_capture']
+            self.assertTrue(capture['complete'])
+            self.assertEqual(capture['applied_profiles'], [rows[0]['fields']])
+            self.assertEqual(capture['compiler_boots'], [rows[1]['fields']])
+            self.assertEqual(capture['summary_lines'], 1)
+            self.assertEqual(capture['raw_detail_lines'], 1)
+
+    def test_retained_default_resolves_summary_before_launch_and_receipt(self):
+        for timing, expected in (("0", "minimal"), ("1", "full")):
+            with self.subTest(timing=timing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "artifacts"
+                observed = {}
+                def execute(args, timeout, environment=None):
+                    observed.update(environment or {})
+                    return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                with patch.dict(os.environ, {'TIDEPOOL_TIMING': timing}), \
+                     patch.object(runner, 'execute', side_effect=execute):
+                    os.environ.pop('TIDEPOOL_TEST_TRACE_PROFILE', None)
+                    result = runner.run_one(str(self.binary), 'suite::works', False, 10, {},
+                        artifact_root=root, retain_artifacts=True)
+                self.assertTrue(result[0])
+                self.assertEqual(observed['TIDEPOOL_TEST_TRACE_PROFILE'], expected)
+                self.assertEqual(observed['TIDEPOOL_TIMING'], timing)
+                self.assertEqual(observed['TIDEPOOL_TIMING_SUMMARY'], '1')
+                self.assertEqual(json.loads((root / 'case.json').read_text())['trace_profile'], expected)
+
+    def test_summary_capture_keeps_existing_artifact_retention_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            options = runner.parse_args([str(self.binary), '--trace-profile', 'minimal',
+                                         '--output-dir', directory])
+            self.assertFalse(options.retain_artifacts)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.parse_args([str(self.binary), '--trace-profile', 'full', '--output-dir', directory])
+
     def test_trace_profile_parser_requires_retained_case_artifacts(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             runner.parse_args([str(self.binary), '--trace-profile', 'minimal'])

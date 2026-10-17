@@ -282,7 +282,8 @@ const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const RAW_COMPILER_DETAIL_TARGET: &str = "tidepool_extract_cmd::daemon::compiler_detail";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CompilerTraceProfile {
+/// Compiler-owned diagnostic detail selection shared by process launchers.
+pub enum CompilerTraceProfile {
     Minimal,
     Full,
 }
@@ -299,11 +300,34 @@ impl CompilerTraceProfile {
         }
     }
 
-    fn name(self) -> &'static str {
+    /// Stable spelling retained in applied writer receipts.
+    pub fn name(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
             Self::Full => "full",
         }
+    }
+
+    /// Resolve capture before launching either the compiler or its consumer.
+    /// Explicit profiles own detail policy; low-level timing remains an opt-in.
+    pub fn select(profile: Option<&str>, timing: Option<&str>) -> Result<Self, FrontendError> {
+        Ok(Self::parse(profile)?.unwrap_or(if timing == Some("1") {
+            Self::Full
+        } else {
+            Self::Minimal
+        }))
+    }
+
+    /// Complete generation policy for a worker and its consumer.
+    pub fn environment(self) -> [(&'static str, &'static str); 3] {
+        [
+            ("TIDEPOOL_TEST_TRACE_PROFILE", self.name()),
+            (
+                "TIDEPOOL_TIMING",
+                if self == Self::Full { "1" } else { "0" },
+            ),
+            ("TIDEPOOL_TIMING_SUMMARY", "1"),
+        ]
     }
 
     fn raw_detail(self) -> &'static str {
@@ -500,7 +524,10 @@ pub(crate) fn init_tracing(
     config: &DaemonConfig,
 ) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>, FrontendError> {
     let selected = std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok();
-    let profile = CompilerTraceProfile::parse(selected.as_deref())?;
+    let profile = Some(CompilerTraceProfile::select(
+        selected.as_deref(),
+        std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
+    )?);
     let detailed: Box<dyn Write + Send> = match &config.log_path {
         Some(path) => {
             let parent = path.parent().ok_or_else(|| {
@@ -3182,6 +3209,11 @@ impl Worker {
         build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
         let mut command = prepared.command()?;
+        let profile = CompilerTraceProfile::select(
+            std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
+            std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
+        )?;
+        command.envs(profile.environment());
         command.arg("--worker-loop-v2");
         if matches!(
             build_products_namespace.transport,
@@ -3503,6 +3535,32 @@ mod response_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_capture_selection_defaults_to_summaries_and_preserves_full_opt_in() {
+        for (profile, timing, expected) in [
+            (None, None, CompilerTraceProfile::Minimal),
+            (None, Some("0"), CompilerTraceProfile::Minimal),
+            (None, Some("1"), CompilerTraceProfile::Full),
+            (Some("minimal"), Some("1"), CompilerTraceProfile::Minimal),
+            (Some("full"), Some("0"), CompilerTraceProfile::Full),
+        ] {
+            let selected = CompilerTraceProfile::select(profile, timing).unwrap();
+            assert_eq!(selected, expected);
+            let env = selected.environment();
+            assert_eq!(env[0].1, selected.name());
+            assert_eq!(
+                env[1].1,
+                if selected == CompilerTraceProfile::Full {
+                    "1"
+                } else {
+                    "0"
+                }
+            );
+            assert_eq!(env[2].1, "1");
+        }
+        assert!(CompilerTraceProfile::select(Some("unknown"), None).is_err());
+    }
 
     #[test]
     fn retained_trace_backpressure_preserves_every_row_and_flushes_on_shutdown() {

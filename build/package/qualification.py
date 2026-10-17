@@ -2013,6 +2013,41 @@ def verify(path: Path) -> dict:
         raise ValueError("native runtime loader dependency resolution changed")
     return descriptor
 
+def compiler_trace_selection(execution: dict, profile: str) -> bool:
+    """An applied compiler writer, not a requested label, owns capture evidence."""
+    expected_path = str(Path(execution.get("artifact_root", "/missing")) / "compiler")
+    roots = (execution.get("diagnostic_summaries") or {}).get("owned_compiler_roots", [])
+    selected = [root for root in roots if root.get("path") == expected_path]
+    if len(selected) != 1:
+        return False
+    capture = selected[0].get("trace_capture") or {}
+    receipts = capture.get("applied_profiles", [])
+    if capture.get("complete") is not True or len(receipts) != 1:
+        return False
+    receipt = receipts[0]
+    boots = capture.get("compiler_boots", [])
+    if (len(boots) != 1 or type(receipt.get("process_id")) is not int
+            or receipt["process_id"] <= 0 or type(boots[0].get("daemon_pid")) is not int
+            or receipt["process_id"] != boots[0]["daemon_pid"]):
+        return False
+    if (receipt.get("profile") != profile
+            or receipt.get("raw_detail") != ("debug" if profile == "full" else "off")
+            or type(receipt.get("filter_contract")) is not int or receipt["filter_contract"] != 1
+            or receipt.get("writer") != str(Path(expected_path) / "compiler.jsonl")):
+        return False
+    if profile == "minimal" and (type(capture.get("raw_detail_lines")) is not int or capture["raw_detail_lines"] != 0):
+        return False
+    physical = selected[0].get("physical_compiler_timing") or {}
+    return (physical.get("request_count_complete") is True
+            and physical.get("request_identities_truncated") is False
+            and type(physical.get("unclassified_request_records")) is int
+            and physical["unclassified_request_records"] == 0
+            and type(physical.get("physical_request_count")) is int
+            and physical["physical_request_count"] >= 0
+            and (physical["physical_request_count"] == 0
+                 or type(capture.get("summary_lines")) is int and capture["summary_lines"] > 0))
+
+
 def run_cohort(args) -> int:
     """Keep owner signal handling active through report publication."""
     with qualification_signal_owner():
@@ -2040,10 +2075,7 @@ def _run_cohort(args) -> int:
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
     requested_trace_profile = getattr(args, "trace_profile", None)
-    performance_cohort = "measurement_reporter" in cohort
-    if requested_trace_profile is not None and not performance_cohort:
-        raise ValueError("--trace-profile is only supported by retained Harness performance cohorts")
-    trace_profile = (requested_trace_profile or "minimal") if performance_cohort else None
+    trace_profile = requested_trace_profile or "minimal"
     required_compiler_mode = cohort.get("compiler_mode")
     if required_compiler_mode not in ("direct", "owned-resident"):
         raise ValueError(f"{args.cohort} requires an explicit sealed compiler mode")
@@ -2077,7 +2109,7 @@ def _run_cohort(args) -> int:
     for name, value in allowances.items():
         if value is not None:
             command.extend(["--" + name.replace("_", "-"), str(value)])
-    if cohort.get("retain_artifacts", False):
+    if trace_profile == "full" or cohort.get("retain_artifacts", False):
         command.append("--retain-artifacts")
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])
@@ -2130,12 +2162,15 @@ def _run_cohort(args) -> int:
             requested_trace_profile=trace_profile)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
         write_json(output / "harness-usecase-perf-report.json", measurement)
-    completed = behavioral_completed and compiler_allowance_selection_confirmed
+    trace_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
+        compiler_trace_selection(record.get("execution") or {}, trace_profile) for record in records)
+    completed = behavioral_completed and compiler_allowance_selection_confirmed and trace_selection_confirmed
     code = result.returncode if result.returncode else int(not completed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
+              "trace_selection_confirmed": trace_selection_confirmed,
               "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
                              "compiler_mode": compiler_mode, "trace_profile": trace_profile,

@@ -1060,7 +1060,8 @@ impl CampaignTraceProfile {
     fn selected() -> Self {
         match std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").as_deref() {
             Ok("minimal") => Self::Minimal,
-            Ok("full") | Err(_) => Self::Full,
+            Ok("full") => Self::Full,
+            Err(_) => Self::Minimal,
             Ok(other) => panic!("unsupported TIDEPOOL_TEST_TRACE_PROFILE {other:?}"),
         }
     }

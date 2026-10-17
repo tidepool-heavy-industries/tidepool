@@ -164,6 +164,26 @@ class RegisteredGcRootTests(unittest.TestCase):
             query.assert_not_called()
 
 
+def captured_execution(execution, profile="minimal"):
+    """Synthetic runner capture for qualification refusal tests, never native evidence."""
+    execution = dict(execution)
+    root = execution.setdefault("artifact_root", "/synthetic/case/artifacts")
+    compiler = str(Path(root) / "compiler")
+    execution["diagnostic_summaries"] = {"owned_compiler_roots": [{
+        "path": compiler,
+        "physical_compiler_timing": {"physical_request_count": 1,
+                                     "request_count_complete": True,
+                                     "request_identities_truncated": False,
+                                     "unclassified_request_records": 0},
+        "trace_capture": {"complete": True, "summary_lines": 1, "raw_detail_lines": 0,
+                          "compiler_boots": [{"daemon_pid": 42}],
+                          "applied_profiles": [{"profile": profile,
+                              "raw_detail": "debug" if profile == "full" else "off",
+                              "filter_contract": 1, "process_id": 42, "writer": compiler + "/compiler.jsonl"}]},
+    }]}
+    return execution
+
+
 class NativeQualificationTests(unittest.TestCase):
     def test_declared_recipe_package_matches_the_source_snapshot(self):
         source = SCRIPT.parents[2] / qualification.RECIPE_WORKSPACE_SOURCE
@@ -217,6 +237,81 @@ class NativeQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'complete recipe workspace'):
                     qualification.copy_recipe_workspace(incomplete, root / 'resource', root / 'bundle')
 
+    def test_trace_scanner_and_qualification_distinguish_idle_from_unclassified_work(self):
+        runner_path = SCRIPT.parents[1] / 'rust/isolated-libtest.py'
+        spec = importlib.util.spec_from_file_location('qualification_trace_scanner', runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        for scenario, expected in (("idle", True), ("work", True), ("work-without-summary", False),
+                                   ("unclassified", False), ("truncated", False), ("missing", False)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                compiler = root / 'compiler'
+                compiler.mkdir()
+                trace = compiler / 'compiler.jsonl'
+                rows = [
+                    {'fields': {'message': 'compiler trace profile applied', 'profile': 'minimal',
+                                'raw_detail': 'off', 'filter_contract': 1, 'process_id': 42,
+                                'writer': str(trace)}},
+                    {'fields': {'message': 'compiler daemon ready', 'daemon_pid': 42}},
+                ]
+                if scenario not in ('idle', 'missing'):
+                    rows.append({'fields': {'message': 'compiler request started',
+                        'compile_request': 'logical-request', 'physical_execution': 'physical-request',
+                        'execution_layer': 'unknown' if scenario == 'unclassified' else 'physical'}})
+                if scenario == 'work':
+                    rows.append({'fields': {'message': 'compiler timing',
+                                           'line': 'tidepool-compile-summary modules=1'}})
+                if scenario != 'missing':
+                    trace.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                with patch.object(runner, 'TRACE_IDENTITY_LIMIT', 0 if scenario == 'truncated' else runner.TRACE_IDENTITY_LIMIT):
+                    summaries = runner.diagnostic_summaries(root)
+                execution = {'artifact_root': str(root), 'diagnostic_summaries': summaries}
+                self.assertEqual(qualification.compiler_trace_selection(execution, 'minimal'), expected)
+                if scenario == 'idle':
+                    physical = summaries['owned_compiler_roots'][0]['physical_compiler_timing']
+                    self.assertEqual(physical['physical_request_count'], 0)
+                    for key in ('request_count_complete', 'request_identities_truncated', 'unclassified_request_records'):
+                        saved = physical.pop(key)
+                        self.assertFalse(qualification.compiler_trace_selection(execution, 'minimal'), key)
+                        physical[key] = saved
+                if scenario == 'unclassified':
+                    selected = summaries['owned_compiler_roots'][0]
+                    self.assertTrue(selected['trace_capture']['complete'])
+                    self.assertEqual(selected['physical_compiler_timing']['physical_request_count'], 0)
+                    self.assertEqual(selected['physical_compiler_timing']['unclassified_request_records'], 1)
+                if scenario == 'truncated':
+                    physical = summaries['owned_compiler_roots'][0]['physical_compiler_timing']
+                    self.assertTrue(physical['request_identities_truncated'])
+                    self.assertFalse(physical['request_count_complete'])
+
+    def test_applied_trace_selection_requires_writer_and_summary_evidence(self):
+        import copy
+        for profile in ("minimal", "full"):
+            execution = captured_execution({}, profile)
+            self.assertTrue(qualification.compiler_trace_selection(execution, profile))
+            for mutation in ("missing", "wrong-profile", "writer", "summary", "incomplete", "duplicate", "raw-detail"):
+                if mutation == "raw-detail" and profile == "full":
+                    continue
+                changed = copy.deepcopy(execution)
+                capture = changed['diagnostic_summaries']['owned_compiler_roots'][0]['trace_capture']
+                if mutation == "missing":
+                    capture['applied_profiles'] = []
+                elif mutation == "wrong-profile":
+                    capture['applied_profiles'][0]['profile'] = "full" if profile == "minimal" else "minimal"
+                elif mutation == "writer":
+                    capture['applied_profiles'][0]['writer'] = "/other/compiler.jsonl"
+                elif mutation == "summary":
+                    capture['summary_lines'] = 0
+                elif mutation == "incomplete":
+                    capture['complete'] = False
+                elif mutation == "duplicate":
+                    capture['applied_profiles'] *= 2
+                else:
+                    capture['raw_detail_lines'] = 1
+                with self.subTest(profile=profile, mutation=mutation):
+                    self.assertFalse(qualification.compiler_trace_selection(changed, profile))
+
     def setUp(self):
         # Legacy run_cohort fixtures mock subprocess.run to synthesize runner
         # records. Keep that seam behind the new owner boundary by adapting
@@ -232,6 +327,14 @@ class NativeQualificationTests(unittest.TestCase):
                                 descriptor_path, descriptor, cohort):
         result = qualification.subprocess.run(
             command, env=environment, stdout=stdout, stderr=stderr, check=False)
+        # These existing process mocks synthesize a completed runner; supply its
+        # explicit capture fixture along with its pre-existing count/cleanup fields.
+        for path in (receipt_path.parent / 'tests').glob('*.json'):
+            record = json.loads(path.read_text())
+            if 'execution' in record:
+                profile = command[command.index('--trace-profile') + 1]
+                record['execution'] = captured_execution(record['execution'], profile)
+                path.write_text(json.dumps(record))
         return result, {
             'runner': {'pid': -1, 'start_identity': None},
             'runner_reaped': True,
@@ -1509,7 +1612,7 @@ class NativeQualificationTests(unittest.TestCase):
                     execution = {'executed_test_count': 1, 'exit_code': 0}
                     if marker is not None:
                         execution['startup_diagnostic_seconds'] = marker
-                    receipt = {'test': 'suite::works', 'passed': True, 'execution': execution}
+                    receipt = {'test': 'suite::works', 'passed': True, 'execution': captured_execution(execution)}
                     def run_owned(command, environment, stdout, stderr, receipt_path,
                                   descriptor_path, descriptor_value, cohort):
                         tests = output / 'tests'
@@ -1808,8 +1911,14 @@ class NativeQualificationTests(unittest.TestCase):
         self.assert_run_scheduling('owned-resident', 2, 16, compiler_workers=2)
         self.assert_run_scheduling('owned-resident', compiler_workers=2, receipt_workers=1, expected_code=1)
 
+    def test_correctness_behavior_pass_cannot_replace_missing_applied_capture(self):
+        self.assert_run_scheduling('owned-resident', trace_profile='full', invalid_capture=True, expected_code=1)
+
+    def test_full_capture_is_available_for_correctness_cohort(self):
+        self.assert_run_scheduling('owned-resident', trace_profile='full')
+
     def assert_run_scheduling(self, compiler_mode, foreground_jobs=None, preparation_jobs=None,
-                              receipt_foreground_jobs=None, expected_code=0, compiler_workers=None, receipt_workers=None):
+                              receipt_foreground_jobs=None, expected_code=0, compiler_workers=None, receipt_workers=None, trace_profile=None, invalid_capture=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             descriptor_path = root / 'qualification.json'
@@ -1844,6 +1953,8 @@ class NativeQualificationTests(unittest.TestCase):
                 arguments = ['run', str(descriptor_path), '--cohort', 'm2',
                     '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',
                     '--service-slice', 'tidepool-completion-build.slice']
+                if trace_profile is not None:
+                    arguments.extend(['--trace-profile', trace_profile])
                 if compiler_mode is not None:
                     arguments.extend(['--compiler-mode', compiler_mode])
                 if compiler_workers is not None:
@@ -1851,7 +1962,19 @@ class NativeQualificationTests(unittest.TestCase):
                 for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
                     if value is not None:
                         arguments.extend([flag, str(value)])
-                code = qualification.main(arguments)
+                if invalid_capture:
+                    original = self.run_mocked_owned_runner
+                    def missing_capture(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        for path in (root / 'evidence/tests').glob('*.json'):
+                            record = json.loads(path.read_text())
+                            record['execution'].pop('diagnostic_summaries', None)
+                            path.write_text(json.dumps(record))
+                        return result
+                    with patch.object(qualification, 'run_owned_qualification_runner', side_effect=missing_capture):
+                        code = qualification.main(arguments)
+                else:
+                    code = qualification.main(arguments)
             self.assertEqual(code, expected_code)
             report = json.loads((root / 'evidence/report.json').read_text())
             command = report['command']
@@ -1866,7 +1989,7 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
                 'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident',
-                'trace_profile': None,
+                'trace_profile': trace_profile or 'minimal',
                 'compiler_allowances': {'requested_foreground_jobs': foreground_jobs,
                                         'requested_preparation_jobs': preparation_jobs, 'worker_processes': compiler_workers or 1},
                 'timeout_seconds': 600,
@@ -1879,7 +2002,8 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
             self.assertEqual(report['executed_test_count'], len(descriptor['cohorts']['m2']['tests']))
             self.assertTrue(report['behavioral_completed'])
-            self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0)
+            self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0 or invalid_capture)
+            self.assertEqual(report['trace_selection_confirmed'], not invalid_capture)
             self.assertEqual(report['completed'], expected_code == 0)
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
