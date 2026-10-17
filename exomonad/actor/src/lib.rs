@@ -221,3 +221,5 @@ pub(crate) use runtime_observation::ProviderTurnLease;
 
 #[path = "generated/nominal_keys.rs"]
 mod nominal_keys;
+
+pub use resident_actor::installed_intrinsic_effect_support;

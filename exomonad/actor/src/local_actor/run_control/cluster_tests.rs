@@ -211,3 +211,60 @@ proptest::proptest! {
         });
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let client = control.preparation_client();
+    let observer = crate::RetainedActorExit::new();
+    let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
+        .shared_preparation(client.producer());
+    let ticket = owner.register_work().unwrap();
+    let cancellation = ticket.cancellation().host_admission_cancellation();
+    let observed_cancellation = cancellation.clone();
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (cancelled, stopped) = tokio::sync::oneshot::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let physical = tokio::task::spawn_blocking(move || {
+        ticket.run(|_| {
+            started.send(()).unwrap();
+            while cancellation.checkpoint().is_ok() {
+                std::thread::yield_now();
+            }
+            cancelled.send(()).unwrap();
+            finish.recv_timeout(Duration::from_secs(10)).unwrap();
+        })
+    });
+    entered.await.unwrap();
+    // One caller's retirement owns observation, never the producer stop edge.
+    observer.request_shutdown(ActorTerminal::new(
+        ActorExitKind::Cancelled,
+        "waiter stopped",
+    ));
+    assert!(client.claim(|| ()).is_ok());
+    observed_cancellation.checkpoint().unwrap();
+    control.seal().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), stopped)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(client.claim(|| ()).is_err());
+    assert!(
+        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
+            .register_work()
+            .is_err()
+    );
+    assert!(!control.shared_cleanup.observation().is_confirmed());
+    assert!(matches!(
+        control.settle_preparations(Duration::from_millis(10)).await,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    release.send(()).unwrap();
+    physical.await.unwrap();
+    assert_eq!(
+        control.settle_preparations(Duration::from_secs(2)).await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    control.owner.stop(None);
+    task.await.unwrap();
+}

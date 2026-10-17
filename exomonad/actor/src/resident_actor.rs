@@ -65,6 +65,7 @@ mod status_rendering;
 mod terminal_transfer_tests;
 mod terminal_wait;
 mod tool_support;
+pub use tool_support::installed_intrinsic_effect_support;
 mod workbench_ledger;
 
 #[cfg(test)]
@@ -14243,10 +14244,6 @@ where
             },
             receiver,
         ))
-    }
-
-    pub fn preparation_source(&self) -> crate::BoundActorWorkbenchSource {
-        self.environment.runner.preparation_source()
     }
 
     /// Read whether an exact actor still owns a retained watch.
