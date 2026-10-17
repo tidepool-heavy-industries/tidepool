@@ -19,6 +19,7 @@ import System.IO.Error (isFullError)
 import System.Timeout (timeout)
 import System.Posix.Files (setFileMode)
 import GHC.Conc (getNumCapabilities)
+import GHC.Clock (getMonotonicTimeNSec)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
 import Tidepool.ExtractRequest (workerRequestFromArgv, workerArgv, RequestField(..))
@@ -345,6 +346,7 @@ checkCompilerClusterCancellation scratch = withCompilerCluster scratch $ \input 
 
 withCompilerCluster :: FilePath -> (Handle -> Handle -> ProcessHandle -> IO a) -> IO a
 withCompilerCluster scratch use = do
+  started <- getMonotonicTimeNSec
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared compiler-cluster child") pure
   bracket (createProcess (proc executable ["--compiler-cluster", scratch])
@@ -355,8 +357,12 @@ withCompilerCluster scratch use = do
       output <- maybe (fail "missing compiler-cluster stdout") pure outputHandle
       BS.hPut input (BS.singleton 1)
       hFlush input
+      -- A bounded control safeguard, not a production startup deadline or
+      -- evidence that cold GHC setup fits it. Retain actual startup separately.
       ack <- timeout 10000000 (exact output 1)
-      unless (ack == Just (BS.singleton 1)) (fail "real compiler cluster did not admit BEGIN")
+      finished <- getMonotonicTimeNSec
+      BSC.hPutStrLn stderr (BSC.pack ("compiler-cluster BEGIN elapsed-ns=" ++ show (finished - started)))
+      unless (ack == Just (BS.singleton 1)) (fail "real compiler cluster did not admit BEGIN within control budget")
       use input output child
 
 assertNoCaptureFiles :: FilePath -> IO ()
@@ -372,6 +378,6 @@ assertReport expected bytes = do
   python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe
     (fail "missing declared JSON verifier") pure
   (status, _, diagnostic) <- readProcessWithExitCode python
-    ["-c", "import json,sys; r=json.loads(sys.stdin.read()); assert r['version']==2; assert r['outcome']==sys.argv[1]; assert isinstance(r['diagnostics'],list)", expected]
-    (BSC.unpack bytes)
+    ["-c", "import json,sys; r=json.loads(bytes(json.loads(sys.stdin.read())).decode('utf-8')); assert r['version']==2; assert r['outcome']==sys.argv[1]; assert isinstance(r['diagnostics'],list)", expected]
+    (show (BS.unpack bytes))
   unless (status == ExitSuccess) (fail ("terminal report is not one complete document: " ++ diagnostic))
