@@ -37,7 +37,13 @@ export_file(name = "test_fixture_manifest", src = "build/test-fixtures.json", vi
 export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
 filegroup(
     name = "native_report_test_sources",
-    srcs = {source: source for source in ["build/testing/ghc_source_options.py", "build/pricing/deepseek-2026-10-17.json"]},
+    srcs = {source: source for source in ["build/testing/ghc_source_options.py"]},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "deepseek_usage_pricing_sources",
+    srcs = {"build/pricing/deepseek-2026-10-17.json": "build/pricing/deepseek-2026-10-17.json"},
     visibility = ["PUBLIC"],
 )
 

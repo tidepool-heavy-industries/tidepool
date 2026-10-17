@@ -126,9 +126,41 @@ sh_test(
 )
 
 sh_test(
+    name = "deepseek_usage_report_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_deepseek_usage_report"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :deepseek_usage_report_resources)",
+        "PATH": read_root_config("nix", "coreutils") + ":" + "/".join(read_root_config("nix", "bash").split("/")[:-1]),
+    },
+    resources = [":deepseek_usage_report_resources", "toolchains//:python", "toolchains//:bash", "toolchains//:coreutils"],
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "deepseek_usage_report_sources",
+    srcs = {"scripts/" + source: source for source in [
+        "run-unittests.sh",
+        "unittest-main.py",
+        "deepseek-usage-report.py",
+        "tests/test_deepseek_usage_report.py",
+        "tests/fixtures/deepseek-native-observations-v3.jsonl",
+    ]},
+)
+
+native_source_snapshot(
+    name = "deepseek_usage_report_resources",
+    trees = [
+        (":deepseek_usage_report_sources", ""),
+        ("//:deepseek_usage_pricing_sources", ""),
+    ],
+)
+
+sh_test(
     name = "native_bundle_qualification_tests",
     test = "run-unittests.sh",
-    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_deepseek_usage_report", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report", "scripts.tests.test_compiler_reuse_report", "scripts.tests.test_resident_performance_report", "scripts.tests.test_qualification_signal_lifetime"],
+    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report", "scripts.tests.test_compiler_reuse_report", "scripts.tests.test_resident_performance_report", "scripts.tests.test_qualification_signal_lifetime"],
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
