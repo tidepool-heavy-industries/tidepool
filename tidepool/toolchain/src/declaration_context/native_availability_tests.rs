@@ -3281,7 +3281,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                     if interface == current.module_interface().unwrap()
             ));
             assert_eq!(direct.artifacts.selected_native_groups(), before);
-            assert!(direct.selected_demand_source().is_some());
+            assert!(direct.issued_input_decisions().is_some());
             assert_eq!(
                 direct
                     .projection
@@ -6606,42 +6606,30 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         .roots
         .iter()
         .any(|node| matches!(node, ArtifactBindingNode::Group(_))));
-    let mut graph = published.artifact_view().capture_graph_selection();
-    let groups = graph
-        .roots
-        .iter()
-        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
-        .copied()
-        .collect::<Vec<_>>();
-    graph
-        .roots
-        .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
-    graph.custody_roots.extend(groups);
-    graph.custody_roots.sort();
-    graph.custody_roots.dedup();
-    let namespace = graph
-        .namespace
-        .iter()
-        .map(|binding| binding.artifact)
-        .collect();
-    let withdrawn = published
-        .artifact_view()
-        .select_issued(
-            namespace,
-            &ExactArtifactSelection::from_recovered_graph_selection(graph),
+    // Resolve the published role through its real merge issuer, then narrow
+    // the closed owner to canonical roots. The empty choice remains issued.
+    let resolved = published
+        .compiler_source_support()
+        .merge(&crate::artifact_inventory::CompilerSourceSupport::empty())
+        .unwrap();
+    let support = resolved
+        .select_support_roots(
+            published
+                .compiler_input_projection()
+                .roles()
+                .into_iter()
+                .map(|role| role.interface())
+                .collect(),
         )
         .unwrap();
-    assert!(withdrawn.selected_native_groups().is_empty());
-    let support = recover_fixture_compiler_support(
-        published.compiler_input_projection().clone(),
-        withdrawn,
-        published
-            .compiler_source_support()
-            .native_offers()
-            .iter()
-            .cloned(),
-    )
-    .unwrap();
+    assert!(support.artifacts().selected_native_groups().is_empty());
+    assert!(support
+        .recorded_input_decisions()
+        .values()
+        .all(|fact| fact.groups.is_empty()));
+    assert!(support
+        .recorded_input_decisions()
+        .contains_key(&entry.descriptor.owner));
     let context = published
         .as_ref()
         .clone()
@@ -6671,10 +6659,11 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
             .selected_native_groups()
             .is_empty());
         assert!(reused
-            .selected_demand_source()
+            .issued_input_decisions()
             .unwrap()
-            .selected_native_groups()
-            .is_empty());
+            .recorded_facts()
+            .values()
+            .all(|fact| fact.groups.is_empty()));
         let selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 published.compiler_input_projection(),
@@ -6684,16 +6673,17 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
             .unwrap();
         let policy_fragment =
             OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
-        assert!(policy_fragment.selected_demand_source().is_none());
+        assert!(policy_fragment.issued_input_decisions().is_none());
         for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
             let merged = left.merge(right).unwrap();
             assert!(merged.issued_artifacts().selected_native_groups().is_empty(),
             "an explicit empty source cannot fall back to the published role policy in either order");
             assert!(merged
-                .selected_demand_source()
+                .issued_input_decisions()
                 .unwrap()
-                .selected_native_groups()
-                .is_empty());
+                .recorded_facts()
+                .values()
+                .all(|fact| fact.groups.is_empty()));
         }
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context.clone()))

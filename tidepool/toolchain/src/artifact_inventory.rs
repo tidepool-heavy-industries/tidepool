@@ -16,8 +16,10 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
-pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+pub(crate) use compiler_projection::{
+    CompilerSourceSupport, IssuedInputNativeDecisions, RecordedInputNativeDecision,
+};
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeOfferContribution,
 };
@@ -943,11 +945,14 @@ enum CompilerInputValidation {
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
     SourceSelections {
-        left: Option<&'a ArtifactView>,
-        right: Option<&'a ArtifactView>,
+        left: Option<&'a compiler_projection::IssuedInputNativeDecisions>,
+        right: Option<&'a compiler_projection::IssuedInputNativeDecisions>,
     },
     ExtendInterfaces,
-    SelectedOriginals(&'a crate::certified_products::SelectedOriginalClosure),
+    SelectedOriginals {
+        originals: &'a crate::certified_products::SelectedOriginalClosure,
+        inherited: &'a compiler_projection::IssuedInputNativeDecisions,
+    },
 }
 
 enum ArtifactRootIntent<'a> {
@@ -6486,6 +6491,7 @@ impl ArtifactView {
         incoming: &CompilerInputProjection,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
         self.merge_compiler_inputs(projection, other, incoming)
+            .map(|(view, projection, _)| (view, projection))
     }
 
     #[cfg(test)]
@@ -6502,7 +6508,14 @@ impl ArtifactView {
         projection: &CompilerInputProjection,
         other: &Self,
         incoming: &CompilerInputProjection,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         self.merge_compiler_inputs_with_demand(
             projection,
             other,
@@ -6516,7 +6529,14 @@ impl ArtifactView {
         &self,
         projection: &CompilerInputProjection,
         interfaces: &compiler_projection::SelectedCompilerInterfaces<'_>,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         let incoming =
             interfaces.support_for_owners(interfaces.entries().keys().cloned().collect())?;
         self.merge_compiler_inputs_with_demand(
@@ -6534,7 +6554,15 @@ impl ArtifactView {
         &self,
         projection: &CompilerInputProjection,
         originals: &crate::certified_products::SelectedOriginalClosure,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        decisions: &compiler_projection::IssuedInputNativeDecisions,
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         let compiled = originals.native_closure();
         let owners = originals
             .products()
@@ -6552,7 +6580,10 @@ impl ArtifactView {
             incoming.projection(),
             self,
             projection,
-            CompilerNativeDemand::SelectedOriginals(originals),
+            CompilerNativeDemand::SelectedOriginals {
+                originals,
+                inherited: decisions,
+            },
             CompilerInputValidation::Closed,
         )
     }
@@ -6560,17 +6591,21 @@ impl ArtifactView {
     fn receive_original_fragment(
         baseline: &compiler_projection::CompilerSourceSupport,
         fragment: &crate::declaration_context::OriginalCompilerInputs,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         baseline.artifacts().merge_compiler_inputs_with_demand(
             baseline.projection(),
             fragment.issued_artifacts(),
             fragment.role_projection(),
-            match fragment.selected_demand_source() {
-                Some(source) => CompilerNativeDemand::SourceSelections {
-                    left: Some(baseline.artifacts()),
-                    right: Some(source),
-                },
-                None => CompilerNativeDemand::RoleIssuer,
+            CompilerNativeDemand::SourceSelections {
+                left: Some(baseline.input_decisions()),
+                right: fragment.issued_input_decisions(),
             },
             CompilerInputValidation::ReceivedFragment,
         )
@@ -6579,14 +6614,21 @@ impl ArtifactView {
     pub(crate) fn merge_original_fragments(
         left: &crate::declaration_context::OriginalCompilerInputs,
         right: &crate::declaration_context::OriginalCompilerInputs,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         left.issued_artifacts().merge_compiler_inputs_with_demand(
             left.role_projection(),
             right.issued_artifacts(),
             right.role_projection(),
             CompilerNativeDemand::SourceSelections {
-                left: left.selected_demand_source(),
-                right: right.selected_demand_source(),
+                left: left.issued_input_decisions(),
+                right: right.issued_input_decisions(),
             },
             CompilerInputValidation::FragmentPair,
         )
@@ -6599,7 +6641,14 @@ impl ArtifactView {
         incoming: &CompilerInputProjection,
         demand: CompilerNativeDemand<'_>,
         validation: CompilerInputValidation,
-    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
         match validation {
             CompilerInputValidation::Closed => {
                 projection.validate(self)?;
@@ -6617,6 +6666,7 @@ impl ArtifactView {
         let selected = projection.merge(incoming)?;
         let mut namespace = BTreeMap::new();
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
         for (owner, role) in selected.snapshot_roles() {
             let source = if projection.snapshot_roles().get(owner) == Some(role) {
                 self
@@ -6639,7 +6689,7 @@ impl ArtifactView {
                 continue;
             };
             let closure = match &demand {
-                CompilerNativeDemand::SelectedOriginals(originals)
+                CompilerNativeDemand::SelectedOriginals { originals, .. }
                     if originals.contains_original(original) =>
                 {
                     Some(*originals)
@@ -6661,54 +6711,85 @@ impl ArtifactView {
                     }
                     sources
                 }
+                CompilerNativeDemand::SelectedOriginals {
+                    originals,
+                    inherited,
+                } if !originals.contains_original(original) => vec![*inherited],
                 _ => Vec::new(),
             };
-            let requirements = if !selected_sources.is_empty() {
-                // An explicit empty source selection stays empty. Role policy
-                // cannot resurrect groups after source demand was withdrawn.
-                selected_sources
+            let selected_choices = selected_sources
+                .into_iter()
+                .filter_map(|decisions| {
+                    decisions
+                        .facts
+                        .get(owner)
+                        .filter(|fact| &fact.role == role)
+                        .map(|fact| fact.groups.values().copied().collect::<Vec<_>>())
+                })
+                .collect::<Vec<_>>();
+            let choices = if !selected_choices.is_empty() {
+                // An explicit empty decision suppresses role policy for this
+                // exact winning role, independently of every other owner.
+                selected_choices.into_iter().flatten().collect::<Vec<_>>()
+            } else {
+                let requirements = if let Some(originals) = closure {
+                    NativeOriginalRequirement::from_selected_view(
+                        original,
+                        originals.native_closure(),
+                    )?
                     .into_iter()
-                    .map(|selected| {
-                        NativeOriginalRequirement::from_selected_view(original, selected)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
                     .collect::<Vec<_>>()
-            } else if let Some(originals) = closure {
-                NativeOriginalRequirement::from_selected_view(original, originals.native_closure())?
+                } else {
+                    match NativeOriginalRequirement::from_role(role.clone()) {
+                        Some(issued) => Some(issued),
+                        None => NativeOriginalRequirement::from_selected_view(original, source)?,
+                    }
                     .into_iter()
                     .collect()
-            } else {
-                match NativeOriginalRequirement::from_role(role.clone()) {
-                    Some(issued) => Some(issued),
-                    None => NativeOriginalRequirement::from_selected_view(original, source)?,
-                }
-                .into_iter()
-                .collect()
+                };
+                requirements
+                    .into_iter()
+                    .flat_map(|requirement| {
+                        requirement
+                            .selection
+                            .snapshot()
+                            .roots
+                            .keys()
+                            .filter_map(|root| match root {
+                                ArtifactBindingNode::Group(group)
+                                    if group.binding.artifact() == original =>
+                                {
+                                    Some(*group)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
             };
-            for requirement in requirements {
-                for root in requirement.selection.snapshot().roots.keys() {
-                    let ArtifactBindingNode::Group(group) = root else {
-                        continue;
-                    };
-                    if group.binding.artifact() != original {
-                        continue;
-                    }
-                    let key = NativeGroupKey {
-                        artifact: original,
-                        original_ordinal: group.original_ordinal,
-                    };
-                    if groups
-                        .insert(key, *group)
-                        .is_some_and(|previous| previous != *group)
-                    {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
-                        ));
-                    }
+            let mut chosen = imbl::OrdMap::new();
+            for group in choices {
+                let key = NativeGroupKey {
+                    artifact: original,
+                    original_ordinal: group.original_ordinal,
+                };
+                if groups
+                    .insert(key, group)
+                    .is_some_and(|previous| previous != group)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+                    ));
                 }
+                chosen.insert(group.original_ordinal, group);
             }
+            input_decisions.facts.insert(
+                owner.clone(),
+                compiler_projection::RecordedInputNativeDecision {
+                    role: role.clone(),
+                    groups: chosen,
+                },
+            );
         }
         self.validate_issued_merge(other)?;
         let joined = self.merge_validated_namespace(other, namespace.clone())?;
@@ -6747,7 +6828,7 @@ impl ArtifactView {
         );
         let mut retained = joined.retain_projected_materializations(retained)?;
         retained.replace_namespace(&namespace);
-        Ok((retained, selected))
+        Ok((retained, selected, input_decisions))
     }
 
     /// Check existing issued owners without decoding or reconstructing authority.
@@ -13844,7 +13925,7 @@ mod tests {
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })),
             "a raw union must retain conflicting explicit native roots"
         );
-        let (selected, projection) = sources[0]
+        let (selected, projection, _) = sources[0]
             .merge_compiler_inputs(&projections[0], &sources[1], &projections[1])
             .unwrap();
         let recovery = ArtifactInventory::default();

@@ -339,26 +339,11 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// Complete private compiler inputs from one already certified output.
 /// This retains exact native roles and their custody without publishing either
 /// authored lexical rights or persistent source-reuse roles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum OriginalInputDemand {
     RolePolicy,
-    // This is the existing immutable selection owner, not a census of its custody.
-    SelectedSource(ArtifactView),
+    Issued(crate::artifact_inventory::IssuedInputNativeDecisions),
 }
-
-impl PartialEq for OriginalInputDemand {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::RolePolicy, Self::RolePolicy) => true,
-            (Self::SelectedSource(left), Self::SelectedSource(right)) => {
-                crate::artifact_inventory::ExactArtifactSelection::capture(left)
-                    == crate::artifact_inventory::ExactArtifactSelection::capture(right)
-            }
-            _ => false,
-        }
-    }
-}
-impl Eq for OriginalInputDemand {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OriginalCompilerInputs {
@@ -475,10 +460,12 @@ impl OriginalCompilerInputs {
         )
     }
 
-    pub(crate) fn selected_demand_source(&self) -> Option<&ArtifactView> {
+    pub(crate) fn issued_input_decisions(
+        &self,
+    ) -> Option<&crate::artifact_inventory::IssuedInputNativeDecisions> {
         match &self.demand {
             OriginalInputDemand::RolePolicy => None,
-            OriginalInputDemand::SelectedSource(source) => Some(source),
+            OriginalInputDemand::Issued(decisions) => Some(decisions),
         }
     }
 
@@ -612,7 +599,7 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
-            demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+            demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
@@ -661,7 +648,7 @@ impl OriginalCompilerInputs {
             let source = &context.owner.facts.compiler_support;
             let projection = source.projection().for_source_owners(&reused);
             let reused = Self {
-                demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+                demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
                 projection,
                 artifacts: source.artifacts().clone(),
                 native_offers: source.native_offers().to_vec(),
@@ -954,8 +941,14 @@ impl OriginalCompilerInputs {
         projection.validate(support)?;
         let native_offers = preserve_native_offers(&projection, support, &self.native_offers)?;
         let artifacts = retain_native_offers(support, &native_offers)?;
+        let demand = match &self.demand {
+            OriginalInputDemand::RolePolicy => OriginalInputDemand::RolePolicy,
+            OriginalInputDemand::Issued(decisions) => {
+                OriginalInputDemand::Issued(decisions.restricted(&projection, &artifacts))
+            }
+        };
         Ok(Self {
-            demand: self.demand.clone(),
+            demand,
             projection,
             artifacts,
             native_offers,
@@ -963,7 +956,8 @@ impl OriginalCompilerInputs {
     }
 
     fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        let (artifacts, projection) = ArtifactView::merge_original_fragments(self, other)?;
+        let (artifacts, projection, decisions) =
+            ArtifactView::merge_original_fragments(self, other)?;
         // This joins alternatives, rather than selecting a caller namespace.
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
@@ -972,13 +966,7 @@ impl OriginalCompilerInputs {
                 native_offers.push(offer.clone());
             }
         }
-        let demand = if self.selected_demand_source().is_some()
-            || other.selected_demand_source().is_some()
-        {
-            OriginalInputDemand::SelectedSource(artifacts.clone())
-        } else {
-            OriginalInputDemand::RolePolicy
-        };
+        let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
             demand,
             projection,
@@ -2130,7 +2118,7 @@ impl RecoveredArtifactInventory {
             .owner
             .facts
             .compiler_support
-            .restore_snapshot_offers(snapshot)?;
+            .restore_snapshot_evidence(snapshot)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
         Ok(context)
     }
@@ -6546,6 +6534,12 @@ impl ExactDeclarationContext {
                 })
                 .collect(),
             lexical: self.owner.facts.lexical.clone(),
+            input_decisions: self
+                .owner
+                .facts
+                .compiler_support
+                .recorded_input_decisions()
+                .clone(),
         }
     }
 
@@ -6563,7 +6557,10 @@ impl ExactDeclarationContext {
                 "restored compiler context differs from exact snapshot",
             ));
         }
-        if self.snapshot().offers != snapshot.offers {
+        if self.snapshot().offers != snapshot.offers
+            || self.owner.facts.compiler_support.recorded_input_decisions()
+                != &snapshot.input_decisions
+        {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",
             ));
@@ -6827,9 +6824,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "8"
+                    "10"
                 } else {
-                    "9"
+                    "11"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -6848,6 +6845,21 @@ impl ExactDeclarationContext {
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
+                    self.owner
+                        .facts
+                        .compiler_support
+                        .recorded_input_decisions()
+                        .iter()
+                        .map(|(owner, fact)| {
+                            (
+                                owner,
+                                fact.groups
+                                    .iter()
+                                    .map(|(ordinal, group)| (*ordinal, *group))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 ))
                 .expect("inventory encoding"),
             )
@@ -6972,9 +6984,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "8"
+                    "10"
                 } else {
-                    "9"
+                    "11"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -6993,6 +7005,21 @@ impl ExactDeclarationContext {
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
+                    self.owner
+                        .facts
+                        .compiler_support
+                        .recorded_input_decisions()
+                        .iter()
+                        .map(|(owner, fact)| {
+                            (
+                                owner,
+                                fact.groups
+                                    .iter()
+                                    .map(|(ordinal, group)| (*ordinal, *group))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 ))
                 .expect("inventory encoding"),
             )
