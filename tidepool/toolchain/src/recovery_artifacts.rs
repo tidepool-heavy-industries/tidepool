@@ -1031,9 +1031,14 @@ impl RetainedRecoveryArtifactObservations {
         if fs::canonicalize(root)? != self.root {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        for (path, observed) in self.files.iter().filter(|(_, file)| file.owned) {
-            let relative = path.strip_prefix(&self.root)
-                .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+        for (path, observed) in self.files.iter() {
+            // Physical membership and semantic witness role are independent:
+            // an external package witness may still live inside this container.
+            let relative = match path.strip_prefix(&self.root) {
+                Ok(relative) => relative,
+                Err(_) if !observed.owned => continue,
+                Err(_) => return Err(RecoveryArtifactError::InvalidReference),
+            };
             resolve_owned(root, relative)?;
             if inventory.get(relative) != Some(&hex(&observed.sha256)) {
                 return Err(RecoveryArtifactError::DigestMismatch(path.clone()));
@@ -3004,6 +3009,19 @@ mod tests {
             assert!(matches!(observations.observe(&root, &mut Default::default()),
                 Err(RecoveryArtifactError::DigestMismatch(_))));
         }
+        let inside_package = root.join("Package.hi");
+        fs::write(&inside_package, b"package-interface").unwrap();
+        let digest: [u8; 32] = Sha256::digest(b"package-interface").into();
+        let (_, package_observations) = PackageInterfaceValidation::capture_entry(
+            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            |validation| validation.verify(&inside_package, &digest),
+        ).unwrap();
+        // The package reader issues an external witness role. Its physical
+        // presence under raw still requires equality with the entry manifest.
+        assert!(matches!(package_observations.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::DigestMismatch(_))));
+        package_observations.verify_entry_inventory(&root,
+            &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))])).unwrap();
         let external = tempfile::NamedTempFile::new().unwrap();
         fs::write(external.path(), b"not-owned-by-entry").unwrap();
         let (_, escaped) = PackageInterfaceValidation::capture_entry(
