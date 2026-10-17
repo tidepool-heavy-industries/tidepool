@@ -42,6 +42,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     })),
     ('exomonad-host', frozenset({
+        'exomonad/host/src/actor_host/deepseek_offline_acceptance.rs',
         'exomonad/host/src/actor_host/startup_context_acceptance_tests.rs',
         'exomonad/host/src/actor_host/startup_persona_acceptance_tests.rs',
         'exomonad/host/src/actor_host/coherent_reload_acceptance_tests.rs',
@@ -144,6 +145,12 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     })),
     ('exomonad-host', frozenset({
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_spawn.hs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_score_tests.rs',
         'exomonad/host/src/actor_host/fixtures/saved-account-test.json',
         'exomonad/host/src/actor_host/fixtures/jev-recording-reload.hs',
         'exomonad/host/src/actor_host/fixtures/startup_persona_refresh.hs',

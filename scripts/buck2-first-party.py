@@ -799,6 +799,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
 NATIVE_RESOURCE_ENV_KEYS = (
+    "EXOMONAD_OFFLINE_RUSTC",
+    "EXOMONAD_OFFLINE_CC",
     "TIDEPOOL_WORKSPACE_SOURCE_ROOT",
     "PATH",
     "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY",
@@ -1291,9 +1293,11 @@ def facade_test_cases(binary):
     capture_recipe_env, capture_recipe_resources, _ = test_runtime_inputs("exomonad-host", "facade_recipe_source_capture_test")
     all_env = {**host_env, **prepared_recipe_env, **capture_recipe_env}
     all_paths = {**browser_paths,
+                 "EXOMONAD_OFFLINE_RUSTC": "$(exe toolchains//:rustc)",
+                 "EXOMONAD_OFFLINE_CC": "$(exe toolchains//:cc)",
                  "TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"}
     all_resources = sorted(set(browser_resources + prepared_recipe_resources + capture_recipe_resources
-                               + ["//bridge/atomic-write:directory_fault_shared"]))
+                               + ["//bridge/atomic-write:directory_fault_shared", "toolchains//:rustc", "toolchains//:cc"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
         ("host_inference_config_tests", [

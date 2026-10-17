@@ -1203,6 +1203,10 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertEqual(cases["exomonad_host_unit_tests_all"]["resource_env"]["PATH"], "$(location toolchains//:exomonad_runtime_tools)/bin")
         self.assertEqual(host["resource_env"]["EXOMONAD_NIX_BIN"], "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
         self.assertIn("toolchains//:exomonad_runtime_tools", host["resources"])
+        for variable, tool in (("EXOMONAD_OFFLINE_RUSTC", "rustc"), ("EXOMONAD_OFFLINE_CC", "cc")):
+            self.assertEqual(cases["exomonad_host_unit_tests_all"]["resource_env"][variable], "$(exe toolchains//:" + tool + ")")
+            self.assertIn("toolchains//:" + tool, cases["exomonad_host_unit_tests_all"]["resources"])
+            self.assertNotIn(variable, process["resource_env"])
         for browser_variable in ("TIDEPOOL_BROWSER_DRIVER", "PLAYWRIGHT_BROWSERS_PATH"):
             self.assertNotIn(browser_variable, host["resource_env"])
         for browser_resource in ("toolchains//:playwright_browsers", "//build/testing/browser:driver_bundle"):

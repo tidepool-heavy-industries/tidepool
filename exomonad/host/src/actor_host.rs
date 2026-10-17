@@ -90,6 +90,8 @@ mod m1_host_tests;
 #[cfg(test)]
 mod native_prefix_publication_tests;
 
+#[cfg(test)]
+mod deepseek_offline_acceptance;
 mod overlay_resource;
 #[cfg(test)]
 mod packaged_catalog_tests;
