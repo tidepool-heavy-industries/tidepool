@@ -48,6 +48,7 @@ import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , CanonicalInterfaceProof, bindCanonicalProofInputs, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , canonicalCorePath, canonicalCoreSha256, readExactScope, revalidateExactScope
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , writeCheckedExactCompilation, writeRetainedExactCompilation
@@ -267,7 +268,10 @@ ownedFixtureScope handles path = do
   _ <- readExactScope path >>= either fail pure
   pure path
 
--- Mutate only an already admitted packet. Its genuine artifact files remain
+-- Descriptor-completeness control: mutate only an already admitted packet.
+-- This refuses before the strict reader; reached-reader sensitivity is covered
+-- separately by incomplete captured canonical promotion below.
+-- Its genuine artifact files remain
 -- readable, and the remaining image digest is valid, so missing-part refusal
 -- cannot be explained by an unreadable trap or a stale image checksum.
 missingOwnedPartsRefuse :: FilePath -> IO ()
@@ -308,6 +312,34 @@ missingOwnedPartsRefuse path = do
     unchanged <- BS.readFile (originalInputPath reference)
     unless (unchanged == trap) (fail "missing-part refusal changed its original trap")
 
+missingCapturedProofPartsRefuse :: ExactScope -> IO ()
+missingCapturedProofPartsRefuse scope = do
+  (key,proof,core) <- case [(key,proof,core) | (key,proof) <- Map.toAscList (scopeModuleInterfaceProofs scope)
+      , Just core <- [canonicalCoreArtifact proof]] of
+    selected : _ -> pure selected
+    [] -> fail "genuine executable scope lacks canonical Core for promotion controls"
+  (iface,packages,_) <- case [row | row@(iface,_,_) <- scopeInterfaces scope
+      , (exactUnit iface,exactModule iface) == key] of
+    [row] -> pure row
+    _ -> fail "canonical promotion control lacks one exact interface row"
+  let required = [exactPath iface,packages,canonicalCertificatePath proof,canonicalCorePath core]
+      native = [originalProductPath product | product <- scopeProducts scope
+        , (originalUnit product,originalModule product) == key]
+      acquire paths = snd <$> captureRequestInputs Nothing (\reader ->
+        mapM_ (\path -> reader path (64 * 1024 * 1024)) paths)
+  full <- acquire (required ++ native)
+  _ <- captureCanonicalProofs Nothing [(bindCanonicalProofInputs full proof,ExecutableInterfaceUse)]
+  forM_ required $ \missing -> do
+    trap <- BS.readFile missing
+    partial <- acquire (filter (/=missing) (required ++ native))
+    rejected <- try (captureCanonicalProofs Nothing
+      [(bindCanonicalProofInputs partial proof,ExecutableInterfaceUse)])
+      :: IO (Either IOException [CanonicalInterfaceProof])
+    unless (either (const True) (const False) rejected)
+      (fail ("captured canonical promotion read a missing part from disk: " ++ missing))
+    unchanged <- BS.readFile missing
+    unless (unchanged == trap) (fail "refused canonical promotion changed its readable trap")
+
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
@@ -326,6 +358,8 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     owner <- newExactInputOwner
     firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
     missingOwnedPartsRefuse firstPath
+    capturedProofScope <- readExactScope firstPath >>= either fail pure
+    missingCapturedProofPartsRefuse capturedProofScope
     (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
     secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
     (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)
