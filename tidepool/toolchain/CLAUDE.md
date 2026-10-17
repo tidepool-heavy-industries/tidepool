@@ -65,8 +65,11 @@ Prepared-fixture and completed-corpus source admission share the caller's
 length-times-64 decode allowance before serde, then lends structural facts to
 source-closure checks and consumes them through `CompletedSourceEvidence`.
 Parsed facts alone do not authenticate consumed bytes or negative witnesses.
-Build actions retain separate checks of the physical input and captured invocation
-text; exact receipts and later product certification retain their own boundaries.
+Build-action admission authenticates one completed physical-input/dependency
+observation, then checks captured invocation text against its generated-source
+witness. These adjacent checks do not issue a later filesystem observation;
+exact receipts, later certification and standalone corpus validation retain
+their independent authentication boundaries.
 Standalone corpus validation creates one operation at its action boundary rather
 than resetting a budget for each validation.
 

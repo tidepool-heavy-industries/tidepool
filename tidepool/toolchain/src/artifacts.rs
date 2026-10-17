@@ -5022,10 +5022,10 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
-        let parsed_evidence = if exact_request.is_some() {
+        let (parsed_evidence, build_action_evidence) = if exact_request.is_some() {
             // Exact receipt admission owns its own parser and source proof.
             charge_source_evidence(&inventory_operation, evidence_bytes.len())?;
-            None
+            (None, None)
         } else {
             let build_action = matches!(&policy, CompilationPolicy::BuildAction { .. });
             let parsed = ParsedSourceEvidence::parse(
@@ -5039,12 +5039,15 @@ fn compile_invocation_inner(
                 &input_path,
             )?;
             if build_action {
-                parsed.validate_build_action_closure(&input_path, inv.include)?;
-                // A build action also authenticates the physical input. These
-                // raw facts are not a proof for the separate invocation text.
-                ParsedSourceEvidence(parsed.0.clone()).authenticate_build_input(&input_path)?;
+                // This adjacent admission owns one completed physical
+                // observation and checks the captured invocation against it.
+                (
+                    None,
+                    Some(parsed.admit_build_action(&input_path, inv.include, inv.source)?),
+                )
+            } else {
+                (Some(parsed), None)
             }
-            Some(parsed)
         };
         let exact_source = exact_request
             .as_ref()
@@ -5068,11 +5071,12 @@ fn compile_invocation_inner(
             );
         let evidence = match exact_source.as_ref() {
             Some(source) => Some((*source.evidence).clone()),
-            None => Some(
-                parsed_evidence
+            None => Some(match build_action_evidence {
+                Some(completed) => completed,
+                None => parsed_evidence
                     .expect("non-exact parsed evidence")
                     .authenticate(&input_path, inv.source)?,
-            ),
+            }),
         };
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
@@ -7198,6 +7202,129 @@ mod module_product_tests {
                 if message == "build-action consumed bytes or import witnesses changed",
         ));
         assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+    }
+
+    #[test]
+    fn build_admission_observes_one_closure_and_keeps_later_freshness_independent() {
+        use sha2::{Digest, Sha256};
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let dependency = root.path().join("Dependency.hs");
+        let shadow = root.path().join("earlier/Dependency.hs");
+        std::fs::create_dir(shadow.parent().unwrap()).unwrap();
+        let text = "module Main where\nresult = 42\n";
+        let dependency_bytes = b"module Dependency where\nvalue = 1\n";
+        std::fs::write(&source, text).unwrap();
+        std::fs::write(&dependency, dependency_bytes).unwrap();
+        let mut evidence = assembly_evidence(&["Main", "Dependency"]);
+        evidence.modules[0].source = source.clone();
+        evidence.modules[1].source = dependency.clone();
+        evidence.sources = [
+            (&source, text.as_bytes()),
+            (&dependency, dependency_bytes.as_slice()),
+        ]
+        .into_iter()
+        .map(|(path, bytes)| cache::SourceEvidence {
+            path: path.clone(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        })
+        .collect();
+        evidence.modules[0]
+            .imports
+            .push(cache::ModuleImportEvidence {
+                qualifier: cache::ImportQualifier::Unqualified,
+                module: "Dependency".into(),
+                boot: false,
+                selected: Some(dependency.clone()),
+            });
+        evidence.resolutions.push(cache::ResolutionEvidence {
+            qualifier: cache::ImportQualifier::Unqualified,
+            module: "Dependency".into(),
+            boot: false,
+            selected: Some(dependency.clone()),
+            candidates: vec![shadow.clone(), dependency.clone()],
+        });
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        cache::take_source_authentication_work();
+        let completed = parsed
+            .admit_build_action(&source, &[root.path().to_path_buf()], text)
+            .unwrap();
+        let observed = cache::take_source_authentication_work();
+        assert_eq!(
+            observed,
+            cache::DependencyEvidenceWork {
+                source_read_attempts: 1,
+                source_read_bytes: dependency_bytes.len() as u64,
+                negative_metadata_calls: 1,
+            }
+        );
+        // Independent old route and full recomputation preserve semantic facts;
+        // its repeated actual reads also sensitize the work observation.
+        let first = cache::CompletedSourceEvidence::from_worker(&bytes, &source, text).unwrap();
+        let second = cache::CompletedSourceEvidence::from_worker(&bytes, &source, text).unwrap();
+        assert_eq!(completed, first);
+        assert_eq!(completed, second);
+        let repeated = cache::take_source_authentication_work();
+        assert_eq!(repeated.source_read_attempts, 2);
+        assert_eq!(
+            repeated.source_read_bytes,
+            dependency_bytes.len() as u64 * 2
+        );
+        assert_eq!(repeated.negative_metadata_calls, 2);
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        // A new invocation-text check still refuses cancellation without
+        // revoking the already completed owner.
+        let cancelled = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || completed.validate_expected_source(text),
+        );
+        assert_eq!(
+            cancelled.action.unwrap_err(),
+            cache::DependencyEvidenceFailure::Interrupted
+        );
+        assert_eq!(
+            cache::take_source_authentication_work(),
+            cache::DependencyEvidenceWork::default()
+        );
+        std::fs::write(&dependency, b"changed after completed admission").unwrap();
+        completed.validate_expected_source(text).unwrap();
+        assert_eq!(
+            cache::take_source_authentication_work(),
+            cache::DependencyEvidenceWork::default()
+        );
+        assert!(
+            completed.revalidate(text).is_err(),
+            "later consumers retain their own freshness check"
+        );
+        std::fs::write(&dependency, dependency_bytes).unwrap();
+        std::fs::write(&shadow, b"higher priority provider").unwrap();
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        assert!(
+            matches!(parsed.admit_build_action(&source, &[root.path().to_path_buf()], "wrong"),
+                Err(CompileError::ExtractFailed(message))
+                    if message == "build-action consumed bytes or import witnesses changed",
+            )
+        );
     }
 
     fn product_metadata() -> Vec<u8> {

@@ -522,6 +522,20 @@ pub(crate) struct DependencyEvidenceWork {
     pub negative_metadata_calls: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_AUTHENTICATION_WORK: std::cell::Cell<DependencyEvidenceWork> =
+        const { std::cell::Cell::new(DependencyEvidenceWork {
+            source_read_attempts: 0, source_read_bytes: 0, negative_metadata_calls: 0,
+        }) };
+}
+
+/// Observe actual completed-source validators in this thread, not global IO.
+#[cfg(test)]
+pub(crate) fn take_source_authentication_work() -> DependencyEvidenceWork {
+    SOURCE_AUTHENTICATION_WORK.with(|work| work.replace(DependencyEvidenceWork::default()))
+}
+
 fn validate_source_digest(
     index: usize,
     item: &SourceEvidence,
@@ -601,7 +615,19 @@ impl DependencyEvidence {
     }
 
     fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
-        self.validate_consumed_sources_with_work(source, &mut DependencyEvidenceWork::default())
+        let mut work = DependencyEvidenceWork::default();
+        let result = self.validate_consumed_sources_with_work(source, &mut work);
+        #[cfg(test)]
+        SOURCE_AUTHENTICATION_WORK.with(|total| {
+            let previous = total.get();
+            total.set(DependencyEvidenceWork {
+                source_read_attempts: previous.source_read_attempts + work.source_read_attempts,
+                source_read_bytes: previous.source_read_bytes + work.source_read_bytes,
+                negative_metadata_calls: previous.negative_metadata_calls
+                    + work.negative_metadata_calls,
+            });
+        });
+        result
     }
 
     fn validate_consumed_sources_with_work(
