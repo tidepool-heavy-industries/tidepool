@@ -2122,6 +2122,68 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         &validation.inventory,
     )
     .unwrap();
+    // Exercise the worker's raw receipt boundary, rather than an already
+    // authenticated PendingImportOwner supplied directly to target admission.
+    {
+        use crate::certified_products::{AcceptedGlobal, ReceiptImportOwner};
+        use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
+        let membership = inputs
+            .available_original_sources(std::slice::from_ref(&native), &validation.inventory)
+            .unwrap();
+        let crate::certified_products::PendingImportOwner::Source { binder, .. } =
+            source_import(&native, 9001)
+        else {
+            unreachable!()
+        };
+        for case in ["exact", "unversioned", "wrong-version", "wrong-binder"] {
+            let mut binder = binder.clone();
+            if case == "wrong-binder" {
+                binder.occurrence.push_str("_absent");
+            }
+            let mut wire = testing::wire_program();
+            wire.globals = vec![GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }];
+            let prepared = testing::prepare(wire).unwrap();
+            let version = match case {
+                "unversioned" => None,
+                "wrong-version" => Some(tidepool_repr::execution_schema::ModuleVersion([255; 32])),
+                _ => Some(native.owner().module_version.clone()),
+            };
+            let accepted = [AcceptedGlobal {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: native.owner().unit.clone(),
+                    module: native.owner().module.clone(),
+                    module_version: version,
+                    original_ordinal: 9001,
+                    binder,
+                },
+            }];
+            let result = crate::certified_products::certify_target_available_owners_from_membership_with_validation(&prepared, &accepted, &membership, &request.groups, &selection, &BTreeMap::new(), &mut PackageInterfaceValidation::default());
+            if case == "exact" {
+                assert_eq!(result.unwrap(), vec![source_import(&native, 9001)]);
+            } else {
+                let expected = match case {
+                    "unversioned" => "unversioned source lacks compiler selection",
+                    "wrong-version" => "source outside compiler selection",
+                    "wrong-binder" => "source binder/group closure",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    matches!(result, Err(crate::certified_products::CertificationError::Mismatch(actual)) if actual == expected),
+                    "{case} must refuse at its owning boundary"
+                );
+            }
+        }
+    }
     let issued = inputs.native_availability(entry.descriptor.id).unwrap();
     let cloned = selection.clone();
     assert!(cloned
@@ -2243,6 +2305,18 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
             !transport.availability.contains_key(&entry.descriptor.id),
             "neither complete byte custody nor unions of subsets create a Full witness"
         );
+        let ArtifactPayload::Original(original) = &entry.payload else {
+            unreachable!()
+        };
+        assert!(transport
+            .private
+            .receipt_original(
+                &original.owner().unit,
+                &original.owner().module,
+                &original.owner().module_version
+            )
+            .unwrap()
+            .is_none());
     }
 }
 
@@ -2325,6 +2399,14 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
     )
     .unwrap();
     assert!(duplicate.availability[&entries[0].descriptor.id].permits(9001));
+    let original = duplicate.availability[&entries[0].descriptor.id].original_owner();
+    let receipt_owner = duplicate
+        .private
+        .receipt_original(&original.unit, &original.module, &original.module_version)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt_owner.original_owner(), original);
+    assert!(receipt_owner.permits(9001));
     for index in 0..2 {
         let selected =
             CompilerInputProjection::from_issued_entries(&[entries[index].clone()]).unwrap();

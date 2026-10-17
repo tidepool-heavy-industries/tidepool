@@ -1136,7 +1136,14 @@ pub(crate) struct RequestCompilerInputs {
 pub(crate) struct NativeTransportAvailability {
     original: Arc<ArtifactEntry>,
     mode: NativeTransportMode,
+    classification: NativeInputClassification,
     issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeInputClassification {
+    CompilerRole,
+    PrivateInput,
 }
 
 #[derive(Clone, Debug)]
@@ -1146,6 +1153,13 @@ enum NativeTransportMode {
 }
 
 impl NativeTransportAvailability {
+    pub(crate) fn original_owner(&self) -> &tidepool_repr::execution_schema::CachedHomeOwner {
+        let ArtifactPayload::Original(product) = &self.original.payload else {
+            unreachable!("transport issuer checked original payload")
+        };
+        product.owner()
+    }
+
     pub(crate) fn offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
         &self.issuance
     }
@@ -1168,7 +1182,30 @@ pub(crate) struct RequestNativeAvailability(
 
 impl RequestNativeAvailability {
     pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
-        self.0.values()
+        self.0
+            .values()
+            .filter(|row| row.classification == NativeInputClassification::PrivateInput)
+    }
+
+    pub(crate) fn receipt_original(
+        &self,
+        unit: &str,
+        module: &str,
+        version: &tidepool_repr::execution_schema::ModuleVersion,
+    ) -> Result<Option<&NativeTransportAvailability>, CompileError> {
+        let mut candidates = self.issued().filter(|row| {
+            let owner = row.original_owner();
+            owner.unit == unit && owner.module == module && &owner.module_version == version
+        });
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                    owner: first.unwrap().original.descriptor.owner.clone(),
+                },
+            ));
+        }
+        Ok(first.map(Arc::as_ref))
     }
 
     pub(crate) fn requirements(
@@ -1188,12 +1225,12 @@ impl RequestNativeAvailability {
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
         ordinal: u32,
     ) -> Option<bool> {
-        self.0.get(&original).map(|availability| {
-            availability.original.descriptor.id == original
-                && matches!(&availability.original.payload,
-                    ArtifactPayload::Original(product) if product.owner() == owner)
-                && availability.permits(ordinal)
-        })
+        self.0
+            .get(&original)
+            .filter(|row| row.classification == NativeInputClassification::PrivateInput)
+            .map(|availability| {
+                availability.original_owner() == owner && availability.permits(ordinal)
+            })
     }
 }
 
@@ -1201,7 +1238,7 @@ impl RequestNativeAvailability {
 /// Exact issuer bindings remain in the offers; transport records body availability.
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
-    availability: BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
+    availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     private: RequestNativeAvailability,
 }
 
@@ -1214,7 +1251,7 @@ impl NativeCompilerTransport {
         &self,
         mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
     ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
-        for (original, availability) in &self.availability {
+        for (original, availability) in self.availability.iter() {
             let entry = self
                 .metadata
                 .retained
@@ -1366,6 +1403,11 @@ impl NativeCompilerTransport {
                 ));
             }
         }
+        let role_originals = roles
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
         let availability = availability
             .into_iter()
             .map(|(id, offer)| {
@@ -1392,23 +1434,18 @@ impl NativeCompilerTransport {
                     Arc::new(NativeTransportAvailability {
                         original,
                         mode,
+                        classification: if role_originals.contains(&id) {
+                            NativeInputClassification::CompilerRole
+                        } else {
+                            NativeInputClassification::PrivateInput
+                        },
                         issuance: issuance.remove(&id).unwrap_or_default().into(),
                     }),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
-        let role_originals = roles
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
-            .collect::<BTreeSet<_>>();
-        let private = RequestNativeAvailability(Arc::new(
-            availability
-                .iter()
-                .filter(|(original, _)| !role_originals.contains(*original))
-                .map(|(original, availability)| (*original, Arc::clone(availability)))
-                .collect(),
-        ));
+        let availability = Arc::new(availability);
+        let private = RequestNativeAvailability(Arc::clone(&availability));
         Ok(Self {
             metadata,
             availability,

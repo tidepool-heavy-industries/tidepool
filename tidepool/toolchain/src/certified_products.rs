@@ -3010,6 +3010,65 @@ impl CertifiedSourceSelection {
         })
     }
 
+    fn receipt_source_owner(
+        &self,
+        unit: &str,
+        module: &str,
+        version: Option<&ModuleVersion>,
+        ordinal: u32,
+    ) -> CertResult<&CachedHomeOwner> {
+        if let Some(selected) = self
+            .modules
+            .get(&(unit.to_owned(), module.to_owned()))
+            .and_then(ReceiptSourceSelection::native)
+        {
+            match selected.version {
+                ReceiptSourceVersion::Original if version.is_none() => {
+                    return Err(CertificationError::Mismatch(
+                        "missing cached source version",
+                    ))
+                }
+                ReceiptSourceVersion::RetainedCore if version.is_some() => {
+                    return Err(CertificationError::Mismatch(
+                        "retained source version must be derived",
+                    ))
+                }
+                _ => {}
+            }
+            if version.is_some_and(|version| version != &selected.owner.module_version) {
+                return Err(CertificationError::Mismatch("source module version"));
+            }
+            if !selected.availability.permits(ordinal) {
+                return Err(CertificationError::OriginalAvailability(Box::new(
+                    OriginalAvailabilityRefusal {
+                        owner: selected.owner.clone(),
+                        original_ordinal: ordinal,
+                    },
+                )));
+            }
+            return Ok(&selected.owner);
+        }
+        let version = version.ok_or(CertificationError::Mismatch(
+            "unversioned source lacks compiler selection",
+        ))?;
+        let original = self
+            .private_native
+            .receipt_original(unit, module, version)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+            .ok_or(CertificationError::Mismatch(
+                "source outside compiler selection",
+            ))?;
+        if !original.permits(ordinal) {
+            return Err(CertificationError::OriginalAvailability(Box::new(
+                OriginalAvailabilityRefusal {
+                    owner: original.original_owner().clone(),
+                    original_ordinal: ordinal,
+                },
+            )));
+        }
+        Ok(original.original_owner())
+    }
+
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
         self.visible_modules()
             .map(|(_, row)| row)
@@ -3636,46 +3695,20 @@ fn resolve_receipt_owner_with_validation(
             original_ordinal,
             binder,
         } => {
-            let resolved = if let Some(selected) = selection.and_then(|selection| {
-                selection
-                    .modules
-                    .get(&(unit.clone(), module.clone()))
-                    .and_then(ReceiptSourceSelection::native)
-            }) {
-                match selected.version {
-                    ReceiptSourceVersion::Original if module_version.is_none() => {
-                        return Err(CertificationError::Mismatch(
-                            "missing cached source version",
-                        ));
-                    }
-                    ReceiptSourceVersion::RetainedCore if module_version.is_some() => {
-                        return Err(CertificationError::Mismatch(
-                            "retained source version must be derived",
-                        ));
-                    }
-                    _ => {}
-                }
-                if module_version
-                    .as_ref()
-                    .is_some_and(|version| version != &selected.owner.module_version)
-                {
-                    return Err(CertificationError::Mismatch("source module version"));
-                }
-                if !selected.availability.permits(original_ordinal) {
-                    return Err(CertificationError::OriginalAvailability(Box::new(
-                        OriginalAvailabilityRefusal {
-                            owner: selected.owner.clone(),
-                            original_ordinal,
-                        },
-                    )));
-                }
+            let resolved = if let Some(selection) = selection {
+                let owner = selection.receipt_source_owner(
+                    &unit,
+                    &module,
+                    module_version.as_ref(),
+                    original_ordinal,
+                )?;
                 sources
-                    .get(&(selected.owner.clone(), original_ordinal, binder.clone()))
+                    .get(&(owner.clone(), original_ordinal, binder.clone()))
                     .map(|(owner, _)| owner)
                     .ok_or_else(|| {
                         source_closure_mismatch(
                             "receipt_selected_source",
-                            Some(&selected.owner),
+                            Some(owner),
                             original_ordinal,
                             &binder,
                             Some(sources),
@@ -3687,11 +3720,6 @@ fn resolve_receipt_owner_with_validation(
                 let version = module_version.as_ref().ok_or(CertificationError::Mismatch(
                     "unversioned source lacks compiler selection",
                 ))?;
-                if selection.is_some() {
-                    return Err(CertificationError::Mismatch(
-                        "source outside compiler selection",
-                    ));
-                }
                 let mut matches = sources.iter().filter(|((owner, ordinal, candidate), _)| {
                     owner.unit == unit
                         && owner.module == module
