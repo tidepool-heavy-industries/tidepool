@@ -2,6 +2,7 @@ module SiteComponentHistoryChecks (verifySiteComponentHistories) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Control.Exception (bracket)
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
@@ -12,6 +13,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName)
 import System.Directory (copyFile, createDirectoryIfMissing)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.Process (readProcess)
 import Tidepool.EffectSchema (ysSite)
@@ -105,6 +107,22 @@ verifySiteComponentHistories directory = do
       assert (Wire.programTypes incremental == Wire.programTypes reference
           && sortOn Wire.siteId (Wire.programSites incremental) == sortOn Wire.siteId (Wire.programSites reference))
         "per-component site evidence differs from independently prepared eager evidence"
+      nextRequest <- newPreparedComponentUnitsPreparer environment owners bodies
+      nextTask <- nextRequest Nothing selectionAB >>= requireRight
+      next <- runPreparedComponentTask nextTask >>= requireRight
+      assertPreserved "cross-request consumed-authority cache re-prepared actual units" grown next
+      bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+        (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
+          setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
+          disabled <- newPreparedComponentUnitsPreparer environment owners bodies
+          disabledTask <- disabled (Just grown) selectionAB >>= requireRight
+          assert (length (preparedComponentTaskPending disabledTask) == 3)
+            "disabled-reuse work control did not schedule both bodies and workers"
+          fresh <- runPreparedComponentTask disabledTask >>= requireRight
+          assert (all (\(key,unit) -> maybe False (not . samePreparedUnit unit)
+              (Map.lookup key (preparedComponentUnitRows fresh)))
+              (Map.toList (preparedComponentUnitRows grown)))
+            "actual-object work observer could not detect forced fresh preparation"
       pure (fat,owners,bodies,selectionA,selectionAB,first,grown)
     -- A consumed sibling changes only its actual component variant. Keep the
     -- original selected Core and defining-context owner throughout the history.
