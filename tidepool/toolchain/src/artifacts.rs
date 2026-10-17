@@ -3315,7 +3315,7 @@ fn seal_turn_outputs_with_validation(
         })
         .transpose()?;
     let receipt_bytes = CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
-    let ordinary_inputs = if source_segment.is_none() {
+    let (ordinary_products, ordinary_evidence_bytes) = if source_segment.is_none() {
         let product_bytes =
             CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
         let packages =
@@ -3337,9 +3337,11 @@ fn seal_turn_outputs_with_validation(
             start.elapsed(),
             product_bytes.len() as u64,
         );
-        Some((products, evidence))
+        (Some(products), evidence)
     } else {
-        None
+        // Segment items use their already-admitted originals. This buffer is
+        // not read or admitted on that path.
+        (None, Vec::new())
     };
     let inventory = validation.inventory.clone();
     let exact_source_owned = if source_segment.is_none() {
@@ -3363,7 +3365,7 @@ fn seal_turn_outputs_with_validation(
         })
         .transpose()?;
     let source_admission = if source_segment.is_none() {
-        let evidence_bytes = &ordinary_inputs.as_ref().expect("ordinary products").1;
+        let evidence_bytes = ordinary_evidence_bytes.as_slice();
         Some(
             match offer.exact.as_ref().zip(exact_source_owned.as_ref()) {
                 Some((request, admitted)) => {
@@ -3396,7 +3398,7 @@ fn seal_turn_outputs_with_validation(
         });
     let fresh_products = segment_originals
         .map(|originals| originals.raw())
-        .or_else(|| ordinary_inputs.as_ref().map(|(products, _)| products))
+        .or(ordinary_products.as_ref())
         .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?;
     let needs_certificate = offer.has_candidates()
         || offer.exact.is_some()
@@ -3793,19 +3795,20 @@ fn seal_turn_outputs_with_validation(
             .as_ref()
             .is_none_or(|exact| empty_exact_context(exact.context()))
     {
-        let publication_products = ordinary_inputs.expect("ordinary product inputs").0;
+        let version_origin = exact.map_or(
+            module_candidates::CandidateVersionOrigin::Ordinary,
+            |admission| module_candidates::CandidateVersionOrigin::Exact {
+                semantic_sha256: admission.request.semantic_sha256,
+            },
+        );
+        let publication_products = ordinary_products.expect("ordinary product inputs");
         let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
             &offer.include,
             valid,
             publication_products,
             source,
-            exact.as_ref().map_or(
-                module_candidates::CandidateVersionOrigin::Ordinary,
-                |admission| module_candidates::CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.request.semantic_sha256,
-                },
-            ),
+            version_origin,
             &certified.recovery_products,
         );
         module_candidates::publish_prepared(publication)?;
@@ -5227,6 +5230,7 @@ fn compile_invocation_inner(
         };
         let exact = source_admission.exact();
         let evidence = Some(source_admission.completed());
+        let evidence_facts = evidence.map(|completed| &**completed);
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
@@ -5261,7 +5265,7 @@ fn compile_invocation_inner(
                     "fresh module product certificate unavailable".into(),
                 ));
             }
-            if evidence.as_deref().is_some_and(has_ready_home_module) {
+            if evidence_facts.is_some_and(has_ready_home_module) {
                 return Err(CompileError::ExtractFailed(
                     "ready module product certificate unavailable".into(),
                 ));
@@ -5271,7 +5275,7 @@ fn compile_invocation_inner(
                 &raw,
                 fresh_products,
                 Vec::new(),
-                evidence.as_deref(),
+                evidence_facts,
                 None,
                 None,
                 &mut *on_stage,
@@ -5387,7 +5391,7 @@ fn compile_invocation_inner(
             &raw,
             fresh_products,
             extra_products,
-            evidence.as_deref(),
+            evidence_facts,
             exact_request.as_ref(),
             Some(&certified.retained_core_products),
             &mut on_stage,

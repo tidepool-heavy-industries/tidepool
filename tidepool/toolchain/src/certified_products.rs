@@ -28,7 +28,9 @@ pub use finalized_module::{
     FinalizedModuleReceipt,
 };
 
-use crate::cache::{CompletedSourceEvidence, DependencyEvidence, ProductAvailability};
+#[cfg(test)]
+use crate::cache::CompletedSourceEvidence;
+use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
@@ -8551,9 +8553,8 @@ pub(crate) fn certify_products_with_validation(
                     source_path: fresh_input_path,
                     source: final_target_source,
                     evidence: final_evidence,
-                    exact_imports: exact.map_or(&empty_imports, |admission| {
-                        admission.source.exact_imports()
-                    }),
+                    exact_imports: exact
+                        .map_or(&empty_imports, |admission| admission.source.exact_imports()),
                     owners: &owners,
                     fresh_owners: &fresh_execution_owners,
                     retained_sources: &retained_sources,

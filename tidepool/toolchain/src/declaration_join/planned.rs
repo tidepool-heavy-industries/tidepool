@@ -690,7 +690,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     }
     let inventory: PlannedInventory = serde_json::from_slice(inventory_json)
         .map_err(|error| contract(format!("invalid planned inventory receipt: {error}")))?;
-    let evidence = source_admission.evidence().modules;
+    let evidence = &source_admission.evidence().modules;
     let candidates = evidence
         .iter()
         .filter(|row| row.module == module_name)
