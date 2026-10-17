@@ -879,6 +879,9 @@ pub enum CertifiedDeclarationJoin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AcceptedJoin {
+    // The accepted interface and its input edges are issued once together.
+    // Retained input custody cannot become additional dependency authority.
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     input: DeclarationJoinInput,
     outcome: DeclarationJoinOutcome,
     interface: crate::recovery_artifacts::CertifiedJoinedInterface,
@@ -909,6 +912,12 @@ pub struct MaterializedDeclarationJoin {
 }
 
 impl AcceptedJoin {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.compiler_support
+    }
+
     pub fn input(&self) -> &DeclarationJoinInput {
         &self.input
     }
@@ -1021,25 +1030,7 @@ impl AcceptedJoin {
             .map(|value| value.materialize_with_work(root, &mut work))
             .collect::<Result<Vec<_>, _>>()?;
         let join = self.interface.materialize_with_work(root, &mut work)?;
-        let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
-        let mut artifact_dependencies = self.context.artifact_view().interface_dependencies();
-        artifact_dependencies.extend(
-            self.context
-                .artifact_view()
-                .descriptors()
-                .into_iter()
-                .filter(|descriptor| {
-                    descriptor.kind != crate::artifact_inventory::ArtifactKind::OriginalModule
-                })
-                .map(|descriptor| descriptor.id)
-                .map(|id| {
-                    (
-                        descriptor.id,
-                        id,
-                        crate::artifact_inventory::ArtifactDependency::Interface,
-                    )
-                }),
-        );
+        let mut artifact_dependencies = self.compiler_support.artifacts().interface_dependencies();
         artifact_dependencies.sort();
         artifact_dependencies.dedup();
         Ok(MaterializedDeclarationJoin {
@@ -1153,7 +1144,44 @@ pub fn certify_declaration_join(
                 )
                 .map_err(|error| contract(format!("joined package witness rejected: {error}")))?;
             context.validate_artifacts(&input.artifacts)?;
+            let entry = Arc::new(crate::artifact_inventory::ArtifactEntry::interface(
+                interface.clone(),
+                crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin,
+                input
+                    .artifacts
+                    .iter()
+                    .map(|artifact| ExactModuleIdentity {
+                        unit: artifact.interface.unit.clone(),
+                        module: artifact.interface.module.clone(),
+                    })
+                    .collect(),
+            ));
+            let source = context.artifact_view();
+            let issued =
+                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                    entry.clone()
+                ])?;
+            let namespace = context.compiler_input_projection().merge(&issued)?;
+            let joined = source
+                .inventory()
+                .admit_projected_with_native_requirements(
+                    source,
+                    vec![entry],
+                    &namespace.interface_only(),
+                    &[],
+                )?;
+            let joined = joined.merge_selected(source, &namespace)?;
+            let compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+                namespace,
+                joined,
+                context
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .cloned(),
+            )?;
             Ok(CertifiedDeclarationJoin::Accepted(AcceptedJoin {
+                compiler_support,
                 input,
                 outcome,
                 interface,
@@ -2596,6 +2624,40 @@ mod authored_tests {
             )
             .unwrap();
         let original_graph = context.artifact_view().capture_graph_selection();
+        let original_group_roots = original_graph
+            .roots
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node,
+                    crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                )
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !original_group_roots.is_empty(),
+            "fixture must exercise native demand"
+        );
+        assert!(
+            !original_graph.native_groups.is_empty(),
+            "fixture must retain native bindings"
+        );
+        let original_offers = context
+            .compiler_source_support()
+            .native_offer_observations()
+            .unwrap();
+        assert!(
+            !original_offers.is_empty(),
+            "fixture must retain issued body availability"
+        );
+        let offer_snapshots = context
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .map(|offer| offer.custody().selection_snapshot().clone())
+            .collect::<Vec<_>>();
+
         let worker_root = Arc::new(tempfile::tempdir().unwrap());
         let materialized = context.materialize_scratch(&worker_root).unwrap();
         assert!(materialized
@@ -2627,6 +2689,17 @@ mod authored_tests {
             expected_exports: certificate.lexical_exports().to_vec(),
             expected_instances: certificate.instances().clone(),
         };
+        let expected_targets = input
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                context.compiler_input_projection().snapshot_roles()[&ExactModuleIdentity {
+                    unit: artifact.interface.unit.clone(),
+                    module: artifact.interface.module.clone(),
+                }]
+                    .interface()
+            })
+            .collect::<BTreeSet<_>>();
         let CertifiedDeclarationJoin::Accepted(accepted) =
             crate::artifacts::test_support::with_settlement(|settlement| {
                 certify_declaration_join(
@@ -2643,6 +2716,69 @@ mod authored_tests {
             panic!("expected real joined interface")
         };
         let joined_id = accepted.artifact_id();
+        let accepted_support = accepted.compiler_source_support();
+        let accepted_graph = accepted_support.artifacts().capture_graph_selection();
+        assert_eq!(accepted_graph.native_groups, original_graph.native_groups);
+        assert_eq!(
+            accepted_graph
+                .roots
+                .iter()
+                .filter(|node| matches!(
+                    node,
+                    crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                ))
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            original_group_roots
+        );
+        assert!(original_graph
+            .selections
+            .iter()
+            .all(|scope| accepted_graph.selections.contains(scope)));
+        assert_eq!(
+            accepted_support.native_offer_observations().unwrap(),
+            original_offers
+        );
+        assert_eq!(
+            accepted_support.native_offers().len(),
+            offer_snapshots.len()
+        );
+        for (offer, snapshot) in accepted_support
+            .native_offers()
+            .iter()
+            .zip(&offer_snapshots)
+        {
+            assert!(Arc::ptr_eq(offer.custody().selection_snapshot(), snapshot));
+        }
+        let joined_binding = *accepted_graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == joined_id)
+            .unwrap();
+        let expected_bound_edges = original_graph
+            .namespace
+            .iter()
+            .filter(|binding| expected_targets.contains(&binding.artifact))
+            .map(|binding| {
+                (
+                    crate::artifact_inventory::ArtifactBindingNode::Artifact(joined_binding),
+                    crate::artifact_inventory::ArtifactBindingNode::Artifact(*binding),
+                    ArtifactDependency::Interface,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_bound_edges.len(), expected_targets.len());
+        assert_eq!(
+            accepted_support
+                .artifacts()
+                .binding_dependencies()
+                .into_iter()
+                .filter(|(from, _, _)| *from
+                    == crate::artifact_inventory::ArtifactBindingNode::Artifact(joined_binding))
+                .collect::<BTreeSet<_>>(),
+            expected_bound_edges
+        );
+
         let lexical = vec![
             ExactLexicalNode {
                 owner: owner.clone(),
@@ -2668,6 +2804,14 @@ mod authored_tests {
             .filter(|(from, _, _)| *from == joined_id)
             .collect::<BTreeSet<_>>();
         assert!(!live_edges.is_empty());
+        assert_eq!(
+            live_edges
+                .iter()
+                .map(|(_, to, _)| *to)
+                .collect::<BTreeSet<_>>(),
+            expected_targets
+        );
+
         assert!(live_edges.iter().all(
             |(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface
         ));
@@ -2692,6 +2836,11 @@ mod authored_tests {
             .cloned()
             .collect::<BTreeSet<_>>();
         assert_eq!(durable_edges, live_edges);
+        assert!(stored
+            .module_interfaces
+            .iter()
+            .any(|reference| reference.module == "Expr"));
+
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let receipt = materializer
@@ -2725,6 +2874,16 @@ mod authored_tests {
                 .filter(|(from, _, _)| *from == joined_id)
                 .collect::<BTreeSet<_>>(),
             live_edges
+        );
+        assert!(hidden_ids
+            .iter()
+            .all(|id| recovered.artifact_view().artifact_ids().contains(id)));
+        assert_eq!(
+            recovered
+                .compiler_source_support()
+                .native_offer_observations()
+                .unwrap(),
+            original_offers
         );
         assert_eq!(recovered.semantic_sha256(), live.semantic_sha256());
     }

@@ -5504,48 +5504,15 @@ impl ExactDeclarationContext {
         }
         for join in joins {
             self = self.admit_producer(join.toolchain_identity_sha256())?;
-            let entry = Arc::new(ArtifactEntry::interface(
-                join.interface().clone(),
-                JoinedInterfaceRole::LexicalJoin,
-                join.context()
-                    .interface_owners()
-                    .into_iter()
-                    .map(|interface| interface.owner)
-                    .collect(),
-            ));
-            let issued = CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)])?;
-            // Bind the join against its issuer's exact graph before combining
-            // independently scoped native custody.
-            let source = join.context().artifact_view();
-            let namespace = join
-                .context()
-                .facts
-                .compiler_support
-                .projection
-                .merge(&issued)?;
-            let joined = source
-                .inventory()
-                .admit_projected_with_native_requirements(
-                    source,
-                    vec![entry],
-                    &namespace.interface_only(),
-                    &[],
-                )?;
-            let joined = joined.merge_selected(source, &namespace)?;
-            let incoming = join
-                .context()
-                .facts
-                .compiler_support
-                .projection
-                .for_source_owners(&selected_sources)
-                .merge(&issued)?;
+            let source = join.compiler_source_support();
+            let incoming = source.projection().for_source_owners(&selected_sources);
             let (inventory, projection) = self
                 .facts
                 .compiler_support
                 .artifacts
                 .merge_compiler_inputs(
                     &self.facts.compiler_support.projection,
-                    &joined,
+                    source.artifacts(),
                     &incoming,
                 )?;
             let offers = self
@@ -5553,7 +5520,7 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .native_offers
                 .iter()
-                .chain(join.context().facts.compiler_support.native_offers.iter())
+                .chain(source.native_offers().iter())
                 .cloned();
             let support = crate::artifact_inventory::CompilerSourceSupport::new(
                 projection, inventory, offers,
