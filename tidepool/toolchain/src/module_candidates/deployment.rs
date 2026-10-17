@@ -2695,7 +2695,7 @@ fn export_under(
     let inventory = &prepared.inventory;
     let producer = prepared.endpoint_identity;
     let include = prepared.include;
-    let evidence = prepared.evidence;
+    let evidence = prepared.evidence.evidence();
     source_selection.validate_under(policy)?;
     if producer != authority.producer_identity {
         return Err(ModulePackageError::CompilerMismatch);

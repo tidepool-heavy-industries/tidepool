@@ -72,6 +72,60 @@ impl SharedEvidence {
     }
 }
 
+/// Request-local ownership of one proof and its exact publication encoding.
+/// Rejected preparations retain their borrowed semantic proof for cohort checks.
+/// Captured bytes never enter the long-lived shared proof cache.
+pub(super) struct PublicationEvidence<'a>(PublicationEvidenceState<'a>);
+
+enum PublicationEvidenceState<'a> {
+    Unencoded(&'a DependencyEvidence),
+    Encoded {
+        shared: SharedEvidence,
+        bytes: Vec<u8>,
+    },
+}
+
+impl<'a> PublicationEvidence<'a> {
+    pub(super) fn new(evidence: &'a DependencyEvidence) -> Self {
+        Self(PublicationEvidenceState::Unencoded(evidence))
+    }
+
+    pub(super) fn evidence(&self) -> &DependencyEvidence {
+        match &self.0 {
+            PublicationEvidenceState::Unencoded(evidence) => evidence,
+            PublicationEvidenceState::Encoded { shared, .. } => shared,
+        }
+    }
+
+    pub(super) fn capture(&mut self) -> Option<(&SharedEvidence, &EvidenceRef)> {
+        if let PublicationEvidenceState::Unencoded(evidence) = &self.0 {
+            let (reference, bytes) = encode_evidence(evidence)?;
+            let shared = SharedEvidence(Arc::new(SharedProof {
+                evidence: (*evidence).clone(),
+                reference: std::sync::OnceLock::from(Some(reference)),
+                json_sha256: std::sync::OnceLock::new(),
+            }));
+            self.0 = PublicationEvidenceState::Encoded { shared, bytes };
+        }
+        match &self.0 {
+            PublicationEvidenceState::Encoded { shared, .. } => {
+                Some((shared, shared.0.reference.get()?.as_ref()?))
+            }
+            PublicationEvidenceState::Unencoded(_) => None,
+        }
+    }
+
+    pub(super) fn publish(&self, root: &Path) -> Option<()> {
+        let PublicationEvidenceState::Encoded { shared, bytes } = &self.0 else {
+            return None;
+        };
+        let reference = shared.0.reference.get()?.as_ref()?;
+        fs::create_dir_all(root).ok()?;
+        tidepool_atomic_write::write_best_effort(&evidence_path(root, &reference.sha256), bytes)
+            .ok()
+    }
+}
+
 /// One observation of mutable source contents and negative import witnesses.
 /// Acquisition and post-worker publication each construct a fresh stage; only
 /// owners sharing the exact immutable proof and generated input share its walk.
@@ -188,10 +242,11 @@ fn evidence_path(root: &Path, digest: &str) -> PathBuf {
     root.join(format!("evidence-{digest}.cbor"))
 }
 
+#[cfg(test)]
 pub(super) fn publish(root: &Path, evidence: &DependencyEvidence) -> Option<()> {
-    let (reference, bytes) = encode_evidence(evidence)?;
-    fs::create_dir_all(root).ok()?;
-    tidepool_atomic_write::write_best_effort(&evidence_path(root, &reference.sha256), &bytes).ok()
+    let mut evidence = PublicationEvidence::new(evidence);
+    evidence.capture()?;
+    evidence.publish(root)
 }
 
 pub(super) fn encode_record(record: &Record) -> Option<Vec<u8>> {
@@ -340,6 +395,56 @@ mod tests {
             root,
             budget,
         )
+    }
+
+    #[test]
+    fn captured_publication_owns_exact_bytes_reference_and_semantic_proof() {
+        let (root, record, _) = fixture();
+        let mut expected = Vec::new();
+        ciborium::ser::into_writer(&*record.evidence, &mut expected).unwrap();
+        let output = root.path().join("captured-publication");
+        let mut publication = PublicationEvidence::new(&record.evidence);
+        assert_eq!(publication.evidence(), &*record.evidence);
+        assert_eq!(publication.publish(&output), None);
+        assert!(
+            !output.exists(),
+            "uncaptured evidence cannot publish a proof"
+        );
+        let (shared, reference) = publication.capture().unwrap();
+        let retained = shared.clone();
+        let reference = reference.clone();
+        assert_eq!(reference.sha256, sha(&expected));
+        assert_eq!(reference.encoded_len, expected.len() as u64);
+        assert_eq!(shared.reference(), Some(&reference));
+        let (shared, repeated_reference) = publication.capture().unwrap();
+        assert!(Arc::ptr_eq(&shared.0, &retained.0));
+        assert_eq!(repeated_reference, &reference);
+        let mut replacement = retained.clone();
+        replacement.make_mut().sources[0].sha256 = sha(b"replacement input");
+        assert_ne!(&*replacement, publication.evidence());
+        assert_eq!(publication.evidence(), &*record.evidence);
+        publication.publish(&output).unwrap();
+        let bytes = fs::read(evidence_path(&output, &reference.sha256)).unwrap();
+        assert_eq!(bytes, expected);
+        let restored: DependencyEvidence = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(&restored, publication.evidence());
+        let blocked = root.path().join("blocked-publication");
+        fs::write(&blocked, b"regular file").unwrap();
+        assert_eq!(publication.publish(&blocked), None);
+        assert_eq!(fs::read(&blocked).unwrap(), b"regular file");
+    }
+
+    #[test]
+    fn oversized_publication_proof_remains_unpublishable() {
+        let (root, record, _) = fixture();
+        let mut evidence = (*record.evidence).clone();
+        evidence.packages.push("x".repeat(RECORD_LIMIT));
+        let mut publication = PublicationEvidence::new(&evidence);
+        assert!(publication.capture().is_none());
+        assert_eq!(publication.evidence(), &evidence);
+        let output = root.path().join("oversized-publication");
+        assert_eq!(publication.publish(&output), None);
+        assert!(!output.exists());
     }
 
     #[test]
