@@ -5503,7 +5503,7 @@ mod tests {
             let before = context.artifact_view().capture_graph_selection();
             let roles = context.compiler_input_projection().snapshot_roles();
             let requirements = context
-                .authored_native_binding_custody_requirements(&BTreeSet::from([
+                .authored_native_binding_custody_requirements(&std::collections::BTreeSet::from([
                     crate::declaration_join::ExactModuleIdentity {
                         unit: "fixture".into(),
                         module: "Epoch".into(),
@@ -5522,7 +5522,7 @@ mod tests {
 
     fn checked_value_custody_histories(
         observe: impl Fn(
-            &Arc<CheckedValueArtifact>,
+            &Arc<super::CheckedValueArtifact>,
             &crate::declaration_context::ExactDeclarationContext,
         ) -> Result<(), String>,
     ) {
