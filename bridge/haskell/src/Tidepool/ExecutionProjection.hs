@@ -1761,22 +1761,22 @@ lowerPreparedEvidence modules evidence auxiliary = do
               }) selected
     pure (unionTypeGraphs priorNodes lowered, priorSites <> rows)
 
+-- The captured resolver stays paired with the validated auxiliary graph through
+-- subsequent lowering. Only the early validator issues this private evidence.
+data AuxiliaryRootEvidence = AuxiliaryRootEvidence IdentityResolver
+  TypePolicy.TypeGraph [TypePolicy.TypeNodeId]
+
 -- Compare all reachable constructor evidence before projecting bindings or
 -- lowering any one graph. Representation recovery may roll one graph's local
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
--- Issued locally only after all early constructor validation succeeds. The
--- captured resolver stays paired with the graph through subsequent lowering.
-data AuxiliaryRootEvidence = AuxiliaryRootEvidence IdentityResolver
-  TypePolicy.TypeGraph [TypePolicy.TypeNodeId]
-
 validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
   -> [SelectedPreparedEvidence] -> [DataCon] -> P [AuxiliaryRootEvidence]
 validatePreparedEvidence context modules evidence hostConstructors = do
   forM_ evidence $ \selected -> withIdentityResolver (selectedIdentityResolver selected) $
     validateConstructorEvidence (constructorsForSelectedTypeGraph (selectedEvidenceGraph selected))
   auxiliary <- forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
-    (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context [prepared]
+    (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context prepared
     auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
     validateConstructorEvidence auxiliaryEvidence
     pure (AuxiliaryRootEvidence (pmIdentityResolver prepared) auxiliaryNodes auxiliaryRoots)
@@ -1812,15 +1812,14 @@ lowerAuxiliaryRootEvidence auxiliary base = foldM lowerOne emptyProjectedTypeGra
     (lowered, _rebase) <- lowerTypeGraph (base + graphNodeCount prior) nodes graphRoots
     pure (unionTypeGraphs prior lowered)
 
-auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
+auxiliaryRootTypeGraph :: ProjectionContext -> PreparedModule
   -> P (TypePolicy.TypeGraph, [TypePolicy.TypeNodeId])
-auxiliaryRootTypeGraph context modules = do
+auxiliaryRootTypeGraph context prepared = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
   let answerTypes =
         [ answerType
-        | prepared <- modules
-        , (binding, _) <- pmBindings prepared
+        | (binding, _) <- pmBindings prepared
         , binder <- topBinders binding
         , Just symbol <- [lookupVarEnv topSymbolMap binder]
         , symbol `Set.member` roots
