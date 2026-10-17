@@ -11154,6 +11154,8 @@ mod authored_publication_tests {
             let after = session.state.certified_resolution_work();
             assert_eq!(after.0 - before.0, 1);
             assert_eq!(after.1 - before.1, group_count);
+            eprintln!("ordinary admission work startup={startup} groups={group_count} resolver_calls={} outline_visits={} resolved_groups=unmeasured",
+                after.0 - before.0, after.1 - before.1);
         }
     }
 
@@ -11237,6 +11239,9 @@ mod authored_publication_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(group_owners(resolved), group_owners(&oracle));
+        eprintln!("snapshot admission work groups={candidate_groups} resolved_groups={} oracle_resolved_groups={} resolver_calls={} outline_visits={}",
+            resolved.groups.len(), oracle.groups.len(), after_resolution.0 - before_resolution.0,
+            after_resolution.1 - before_resolution.1);
         let compiled = pending.compile_off_checkout().unwrap();
         let admitted = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
