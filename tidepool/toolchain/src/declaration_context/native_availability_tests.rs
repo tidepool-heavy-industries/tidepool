@@ -6919,7 +6919,10 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             expected,
             "only an exact issued group3 can support this dependency"
         );
-        if let Ok(Some(inputs)) = result {
+        if expected {
+            let inputs = result
+                .expect("the exact dependency group is available")
+                .expect("fresh candidate issuance must produce a fragment");
             assert!(inputs
                 .issued_artifacts()
                 .selected_native_groups()
@@ -6928,6 +6931,14 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
                 .native_offers()
                 .iter()
                 .any(|offer| offer.is_full() && offer.original() == fresh_id));
+        } else {
+            assert!(
+                matches!(result, Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact, original_ordinal: 3,
+                } if artifact == entry.descriptor.id)),
+                "missing exact dependency availability must refuse at its typed owner"
+            );
         }
     }
 }
