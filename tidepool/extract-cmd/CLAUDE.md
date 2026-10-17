@@ -151,9 +151,9 @@ slot below the requested logical build-products root. Successive requests and
 worker rotations reuse that slot's directory only after its former child is
 reaped. Independent daemons and direct invocations receive fresh namespaces;
 disk warmth across daemon reboots/direct invocations is deliberately sacrificed
-for exclusive output ownership. This transport placement preserves the logical
-request used for artifact recipes and diagnostic correlation. The immutable
-artifact cache remains shared. The process owner removes its private scratch
+for exclusive output ownership. This transport placement preserves logical
+request identity for diagnostics and native product admission. The native
+module-candidate store remains independently owned. The process owner removes its private scratch
 directories after its final child is reaped, preserving the logical root and
 other owners. Ungraceful frontend/daemon death can leave orphan directories;
 this boundary does not sweep another process's outputs.

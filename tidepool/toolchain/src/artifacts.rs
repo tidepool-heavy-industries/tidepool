@@ -4,8 +4,8 @@
 //! the extractor, reading its output directory, and deserializing typed
 //! artifacts happen in exactly one place.
 //!
-//! All cacheable requests use one recipe and one named artifact bundle.
-//! Compiler dependency evidence is validated on publication and on every hit.
+//! Each request acquires one complete named physical output. Native reuse
+//! retains its source evidence and compiler-issued product authority.
 
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -37,6 +37,7 @@ use crate::{
 mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
+pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
@@ -824,7 +825,6 @@ impl PreparedCellProgram {
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
                 turn: output.turn,
-                metadata: output.metadata,
                 products: output.products.expect("program output was sealed"),
             };
             items.push(CellProgramItem {
@@ -2459,10 +2459,8 @@ impl SelectedModuleCandidateOffer {
                 generation,
                 observation,
                 true,
-                &output.directory,
+                output,
                 &initial.request_sha256,
-                &output.source,
-                &output.target,
                 sealed.original.execution().cloned().ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "program output lacks original execution evidence".into(),
@@ -2896,13 +2894,38 @@ impl SelectedModuleCandidateOffer {
 }
 
 #[derive(Debug)]
-struct ProgramNativeOutput {
+pub(crate) struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
     turn: Arc<[u8]>,
     metadata: Arc<[u8]>,
     products: Option<Arc<SealedTurnProducts>>,
     source: String,
+}
+
+impl ProgramNativeOutput {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+    pub(crate) fn target(&self) -> &Arc<PreparedProgram> {
+        &self.target
+    }
+    pub(crate) fn decode_metadata(&self) -> Result<(DataConTable, MetaWarnings), CompileError> {
+        let start = Instant::now();
+        let (table, warnings) =
+            tidepool_repr::serial::read_metadata_for_program(&self.metadata, &self.target)?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            "native.checked_metadata_decode",
+            start.elapsed(),
+            self.metadata.len() as u64,
+        );
+        Ok((table, warnings))
+    }
 }
 
 fn read_native_turn_artifacts(
@@ -2940,6 +2963,13 @@ fn read_native_turn_artifacts(
         timing::NO_NODE,
         timing::NO_ROUND,
         timing::STAGE_CBOR_READ,
+        metadata_read_start.elapsed(),
+        metadata.len() as u64,
+    );
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "native.metadata_read",
         metadata_read_start.elapsed(),
         metadata.len() as u64,
     );
@@ -4002,9 +4032,6 @@ pub struct CompileInvocation<'a> {
 /// so two targets' different `runLLMTurn`/`runLLMTurnFork` sites never
 /// collapse into one ambiguous file.
 ///
-/// **MEMOIZED** per [`CompileInvocation::cache`] — see the module doc for why
-/// both cacheable entry points share the same recipe and bundle.
-///
 /// `on_stage(name, elapsed, bytes)` fires once per measured stage —
 /// [`timing::STAGE_EXTRACT_SPAWN`], each forwarded `extract.<phase>` row
 /// parsed from the extract's stderr, [`timing::STAGE_CBOR_READ`],
@@ -4032,8 +4059,8 @@ pub fn compile_invocation(
 }
 
 /// Compile fresh source against immutable declaration owners through the same
-/// artifact front door. Ordinary source candidates and artifact memo are
-/// unavailable; successful products require context-bound compiler receipts.
+/// artifact front door. Ordinary source candidates are unavailable; successful
+/// products require context-bound compiler receipts.
 pub fn compile_invocation_in_context(
     inv: &CompileInvocation<'_>,
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -4053,8 +4080,8 @@ pub fn compile_invocation_in_context(
 
 /// Compile a declaration probe in full-home-product mode, which produces
 /// original products for every home module, including modules with no
-/// executable references from the probe. The probe bypasses memo lookup and
-/// candidate publication while retaining the shared certification front door.
+/// executable references from the probe. The probe bypasses candidate
+/// publication while retaining the shared certification front door.
 pub(crate) fn compile_authored_products(
     source: &str,
     target: &str,
@@ -4271,8 +4298,8 @@ impl CompilationOutputOwner {
 /// Compile one declared module and target set for an immutable build action.
 /// The action owns its current-directory scratch and an absent output directory.
 /// This policy uses a
-/// direct configured compiler and cannot read or publish runtime memo entries,
-/// module candidates, deployment catalogs or mutable runtime build products.
+/// direct configured compiler and cannot read or publish runtime module
+/// candidates, deployment catalogs or mutable runtime build products.
 /// Only portable code and metadata are exported; source-bound authority stays
 /// in its original compiler transaction and is never relocated or restamped.
 pub fn build_prepared_fixture(
@@ -4466,7 +4493,8 @@ fn compile_invocation_inner(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
     );
-    let multi = inv.targets.len() > 1;
+    crate::host_work::checkpoint()?;
+    let layout = invocation_output::InvocationOutputLayout::new(inv.targets)?;
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime { .. }
@@ -4617,13 +4645,10 @@ fn compile_invocation_inner(
         None
     };
 
-    // Bind the logical build-products root before recipe construction. The
-    // process boundary privately places mutable GHC outputs by daemon epoch
-    // and worker slot; its placement does not alter the logical recipe or
-    // authorize additional source inputs. Reaped slot rotations retain disk
-    // warmth, while new daemons and direct invocations use fresh namespaces.
-    let names = artifact_names(inv.targets, multi);
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    // Select build products for each bound endpoint. The process boundary
+    // privately places mutable GHC outputs by daemon epoch and worker slot;
+    // this placement never authorizes additional source inputs. Reaped slot
+    // rotations retain disk warmth; new daemons use fresh writer namespaces.
     let base_cmd = cmd;
     let attempt = retry_bounded(
         || {
@@ -4677,66 +4702,6 @@ fn compile_invocation_inner(
                     output_owner.path(),
                 )
                 .map_err(CompileAttemptError::ModulePackage)?
-            } else {
-                None
-            };
-
-            let inv_key = if allow_candidates {
-                let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: inv.source,
-                    argv: &argv,
-                    input_path: &input_path,
-                    include: inv.include,
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                });
-                if let Some(key) = &key {
-                    let load_start = Instant::now();
-                    if let Some((meta_bytes, raw, product_bytes, evidence)) = allow_candidates
-                        .then(|| load_memo(key, &name_refs, inv.targets, inv.source))
-                        .transpose()
-                        .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
-                        .flatten()
-                    {
-                        // Direct invocation memo lacks a worker group/target
-                        // certificate. Home products must use the exact
-                        // module-candidate transaction instead.
-                        if !evidence
-                            .modules
-                            .iter()
-                            .any(|module| module.product == cache::ProductAvailability::Ready)
-                        {
-                            if let Ok(mut artifacts) = decode_fresh_products(&product_bytes)
-                                .and_then(|fresh| {
-                                    assemble_with_products(
-                                        &meta_bytes,
-                                        &raw,
-                                        fresh,
-                                        Vec::new(),
-                                        Some(&evidence),
-                                        None,
-                                        None,
-                                        &mut on_stage,
-                                    )
-                                })
-                            {
-                                artifacts.producer_identity =
-                                    Some(*endpoint.identity().producer_bytes());
-                                on_stage(
-                                    timing::STAGE_CBOR_READ,
-                                    load_start.elapsed(),
-                                    total_bytes(&meta_bytes, &raw, &product_bytes),
-                                );
-                                return Ok(CompileAttempt::Cached(Box::new(artifacts)));
-                            }
-                            // An interrupted memo admission is a refusal, not
-                            // permission to retry with physical compiler work.
-                            crate::host_work::checkpoint()
-                                .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
-                        }
-                    }
-                }
-                key
             } else {
                 None
             };
@@ -4825,15 +4790,14 @@ fn compile_invocation_inner(
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
-                CompileAttempt::Executed((
+                (
                     cmd,
                     selected_session_values,
                     run,
-                    inv_key,
                     producer,
                     candidate_set,
                     deployment,
-                ))
+                )
             })
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
@@ -4853,16 +4817,7 @@ fn compile_invocation_inner(
             return Err(error.into_compile_error());
         }
     };
-    let (cmd, selected_session_values, run, inv_key, producer, candidate_set, deployment) =
-        match attempt {
-            CompileAttempt::Cached(artifacts) => {
-                return Ok(CompilationOutput {
-                    artifacts: *artifacts,
-                    original_entry: None,
-                });
-            }
-            CompileAttempt::Executed(executed) => executed,
-        };
+    let (cmd, selected_session_values, run, producer, candidate_set, deployment) = attempt;
 
     if let Some(request) = exact_request.as_ref() {
         let actual =
@@ -4926,8 +4881,7 @@ fn compile_invocation_inner(
     let extracted = extract_and_read(
         run,
         output_owner.path(),
-        inv.targets,
-        multi,
+        &layout,
         &mut on_stage,
         |stderr, success| {
             if !success && !stderr.is_empty() {
@@ -4937,27 +4891,26 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let (meta_bytes, raw, product_bytes, inventory_operation) =
-        extracted.map_err(|error| match &policy {
-            CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { .. },
-                ..
-            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        })?;
+    let bundle = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+    })?;
+    let meta_bytes = bundle.metadata();
+    let raw = bundle.targets();
+    let product_bytes = bundle.products();
+    let package_bundle_bytes = bundle.package_imports();
+    let inventory_operation = bundle.operation();
 
-    // Store only what DESERIALIZED, so a malformed artifact set is never
-    // memoized into a permanently-failing entry. Best-effort: an unwritable
-    // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory_operation.clone(),
         );
         let evidence_bytes =
             CompilerSidecar::Dependencies.read(output_owner.path(), &inventory_operation)?;
-        let package_bundle_bytes = CompilerSidecar::ModulePackageImports
-            .read(output_owner.path(), &inventory_operation)?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
@@ -5309,25 +5262,6 @@ fn compile_invocation_inner(
                 &artifacts.module_products[..fresh_count],
             );
         }
-        // A memo hit has no certified source group owner mapping. The module
-        // store owns reuse for invocations with home products.
-        if allow_candidates
-            && exact_request.is_none()
-            && cached_receipts.is_empty()
-            && fresh_count == 0
-        {
-            if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
-                store_memo(
-                    key,
-                    &name_refs,
-                    &meta_bytes,
-                    &raw,
-                    &product_bytes,
-                    evidence,
-                    inv.source,
-                );
-            }
-        }
         Ok(artifacts)
     })();
     let artifacts = assembled.map_err(|error| match &policy {
@@ -5354,7 +5288,7 @@ fn compile_invocation_inner(
             )?;
             std::fs::write(
                 output.join(format!("{}.asks.json", target.target)),
-                &target.asks_bytes,
+                target.asks_bytes.as_slice(),
             )?;
         }
     }
@@ -5752,11 +5686,6 @@ impl CompileAttemptError {
     }
 }
 
-enum CompileAttempt<T> {
-    Cached(Box<CompiledArtifacts>),
-    Executed(T),
-}
-
 fn retry_bounded<T, E>(
     mut attempt: impl FnMut() -> Result<T, E>,
     permits_retry: impl Fn(&E) -> bool,
@@ -5772,7 +5701,7 @@ fn retry_bounded<T, E>(
 
 /// Compile `source` against multiple named targets through
 /// [`compile_invocation`]. See its doc for the full contract
-/// (target semantics, asks sidecar shape, memoization, timing hook).
+/// (target semantics, asks sidecar shape, timing hook).
 pub fn compile_targets(
     source: &str,
     targets: &[&str],
@@ -5800,7 +5729,7 @@ pub fn compile_targets(
 /// One target's raw (pre-deserialize) bytes.
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
-    asks_bytes: Vec<u8>,
+    asks_bytes: Arc<Vec<u8>>,
     prepared_bytes: Arc<Vec<u8>>,
 }
 
@@ -5819,19 +5748,10 @@ pub(crate) struct RawTargetOutput {
 pub(crate) fn extract_and_read(
     run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
-    targets: &[&str],
-    multi: bool,
+    layout: &invocation_output::InvocationOutputLayout,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<
-    (
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ),
-    CompileError,
-> {
+) -> Result<invocation_output::InvocationOutputBundle, CompileError> {
     let inventory_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
         Default::default(),
     ));
@@ -5849,9 +5769,8 @@ pub(crate) fn extract_and_read(
     // Default-on per-compile summary (compile-attribution lane): unlike
     // `extract_timing` above, this is emitted by the extract UNCONDITIONALLY
     // (no `TIDEPOOL_TIMING` required) — see `Tidepool.Timing.emitCompileSummary`.
-    // Logged at INFO so it lands in the ordinary compile log; absent on
-    // a memo hit (this function isn't reached) or on a compile that threw
-    // before reaching the summary line.
+    // Logged at INFO so it lands in the ordinary compile log; absent when
+    // compilation threw before reaching the summary line.
     if let Some(summary) = timing::CompileSummary::parse(&stderr) {
         timing::log_compile_summary(&summary);
     }
@@ -5868,52 +5787,13 @@ pub(crate) fn extract_and_read(
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
 
     let cbor_read_start = Instant::now();
-    let meta_path = temp_dir.join("meta.cbor");
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-    let meta_bytes = certified_products::read_bounded_with_operation(
-        &meta_path,
-        inventory_operation.limits().max_bytes as u64,
-        &inventory_operation,
-    )
-    .map_err(compiler_evidence_failure)?;
-    let products_path = temp_dir.join("module-products.cbor");
-    if !products_path.exists() {
-        return Err(CompileError::MissingOutput(products_path));
-    }
-    let product_bytes = CompilerSidecar::ModuleProducts.read(temp_dir, &inventory_operation)?;
-
-    let mut raw = Vec::with_capacity(targets.len());
-    for target in targets {
-        let prepared_path = temp_dir.join(prepared_artifact_name(target));
-        if !prepared_path.exists() {
-            return Err(CompileError::MissingOutput(prepared_path));
-        }
-        let prepared_bytes = certified_products::read_bounded_with_operation(
-            &prepared_path,
-            DecodeLimits::default().max_bytes as u64,
-            &inventory_operation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let asks_path = if multi {
-            temp_dir.join(format!("{target}.asks.json"))
-        } else {
-            temp_dir.join("asks.json")
-        };
-        let asks_bytes = read_asks_bytes(&asks_path)?;
-        raw.push(RawTargetOutput {
-            target: (*target).to_string(),
-            asks_bytes,
-            prepared_bytes: Arc::new(prepared_bytes),
-        });
-    }
+    let bundle = layout.read(temp_dir, inventory_operation)?;
     on_stage(
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        total_bytes(&meta_bytes, &raw, &product_bytes),
+        bundle.bytes_len(),
     );
-    Ok((meta_bytes, raw, product_bytes, inventory_operation))
+    Ok(bundle)
 }
 
 /// A prepared output and its complete constructor table disagree.
@@ -5939,10 +5819,7 @@ pub fn check_constructor_identity_agreement(
         })
 }
 
-/// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
-/// — into a [`CompiledArtifacts`]. Both paths landing here (rather than each
-/// deserializing separately) is what makes a cache hit observationally
-/// identical to a cold compile.
+/// Deserialize physical metadata and ordered target outputs into checked artifacts.
 pub(crate) fn assemble(
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
@@ -6003,14 +5880,6 @@ pub(crate) fn assemble(
         completed_source_evidence: None,
         exact_source_admission: None,
     })
-}
-
-fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
-    Ok(tidepool_repr::execution_schema::parse_module_products(
-        bytes,
-        &crate::prepared_artifact::production_requirements()?,
-        module_candidates::product_decode_limits(),
-    )?)
 }
 
 fn assemble_with_products(
@@ -6118,112 +5987,6 @@ fn parse_asks(bytes: &[u8]) -> Result<YieldSites, CompileError> {
 pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
     let bytes = read_asks_bytes(path)?;
     serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Invocation-keyed memo glue
-// ---------------------------------------------------------------------------
-
-/// The logical artifact names of one invocation's output set — exactly the
-/// filenames [`compile_targets`] reads out of the extract's output dir, in a
-/// fixed order: shared `meta.cbor`, then per target `<target>.cbor`,
-/// `<target>.prepared.cbor`, and its asks sidecar. `multi` picks the sidecar SHAPE on the same
-/// `targets.len() > 1` test the Haskell side uses to decide which shape to
-/// write, so the memo's names track the extract's own contract.
-fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(2 + targets.len() * 2);
-    names.push("meta.cbor".to_string());
-    for target in targets {
-        names.push(prepared_artifact_name(target));
-        names.push(if multi {
-            format!("{target}.asks.json")
-        } else {
-            "asks.json".to_string()
-        });
-    }
-    names.push("module-products.cbor".to_string());
-    names.push("module-package-imports.cbor".to_string());
-    names
-}
-
-/// Total bytes read for this compile, for the `cbor_read` timing stage —
-/// identical on the memo path and the spawn path, since both count the same
-/// artifacts.
-fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput], product_bytes: &[u8]) -> u64 {
-    let total = meta_bytes.len()
-        + product_bytes.len()
-        + raw
-            .iter()
-            .map(|r| r.prepared_bytes.len() + r.asks_bytes.len())
-            .sum::<usize>();
-    total as u64
-}
-
-/// Reassemble a memoized artifact set into the same `(meta, raw)` pair the
-/// spawn path produces. `None` — any absent-but-required artifact, or a set
-/// the memo declines — falls through to a cold compile.
-fn load_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    targets: &[&str],
-    source: &str,
-) -> std::io::Result<
-    Option<(
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        cache::DependencyEvidence,
-    )>,
-> {
-    let Some((loaded, evidence)) = cache::artifacts_load(key, names, source)? else {
-        return Ok(None);
-    };
-    Ok((|| {
-        let mut it = loaded.into_iter();
-        // Every artifact is required. An extractor represents a target with no
-        // typed suspension sites by writing an `[]` sidecar.
-        let meta_bytes = it.next()??;
-        let mut raw = Vec::with_capacity(targets.len());
-        for target in targets {
-            let prepared_bytes = it.next()??;
-            let asks_bytes = it.next()??;
-            raw.push(RawTargetOutput {
-                target: (*target).to_string(),
-                asks_bytes,
-                prepared_bytes: Arc::new(prepared_bytes),
-            });
-        }
-        Some((meta_bytes, raw, it.next()??, evidence))
-    })())
-}
-
-/// Store this invocation's full artifact set under `names`, in the order
-/// [`artifact_names`] fixed.
-fn store_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    meta_bytes: &[u8],
-    raw: &[RawTargetOutput],
-    product_bytes: &[u8],
-    evidence: &cache::DependencyEvidence,
-    source: &str,
-) {
-    let mut artifacts: Vec<(&str, Option<&[u8]>)> = Vec::with_capacity(names.len());
-    let mut names = names.iter();
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(meta_bytes)));
-    }
-    for r in raw {
-        let (Some(prepared_name), Some(asks_name)) = (names.next(), names.next()) else {
-            return;
-        };
-        artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
-        artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
-    }
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(product_bytes)));
-    }
-    cache::artifacts_store(key, &artifacts, evidence, source);
 }
 
 #[cfg(test)]
@@ -6598,7 +6361,7 @@ mod typed_site_tests {
 
     #[test]
     #[serial_test::serial]
-    fn safe_refusal_rederives_cache_and_build_products_identity() {
+    fn safe_refusal_rederives_producer_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
 
         struct RestoreDaemon(Option<std::ffi::OsString>);
@@ -6649,20 +6412,12 @@ mod typed_site_tests {
                 attempt_index += 1;
                 crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
                 let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: "result = 1",
-                    argv: &argv,
-                    input_path: Path::new("Input.hs"),
-                    include: &[],
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                })
-                .expect("test invocation is cacheable");
                 let products = argv
                     .windows(2)
                     .find(|pair| pair[0] == "--build-products-dir")
                     .map(|pair| PathBuf::from(&pair[1]))
                     .expect("bound attempt must select build products");
-                selections.push((key, products));
+                selections.push((*endpoint.identity().producer_bytes(), products));
                 if attempt_index == 1 {
                     Err(true)
                 } else {
@@ -7352,6 +7107,13 @@ mod module_product_tests {
 
     #[test]
     fn fresh_product_byte_admission_refuses_malformed_and_duplicate_wire_owners() {
+        fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
+            Ok(tidepool_repr::execution_schema::parse_module_products(
+                bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                module_candidates::product_decode_limits(),
+            )?)
+        }
         let rows = |names: &[&str]| {
             Value::Array(vec![
                 Value::Text("TPMOD".into()),
@@ -7398,7 +7160,7 @@ mod module_product_tests {
     }
 
     /// This test intentionally crosses the matched Rust frontend, Haskell
-    /// worker, entry-free wire reader and invocation bundle. Run it with
+    /// worker, entry-free wire reader and physical output owner. Run it with
     /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
@@ -8902,6 +8664,68 @@ mod constructor_identity_tests {
         assert!(retained.products().is_none());
     }
 
+    #[test]
+    fn captured_checked_metadata_never_reopens_a_changed_file_for_the_same_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = prepared_fixture_bytes();
+        let artifact = PreparedArtifact::parse(bytes.clone(), DecodeLimits::default()).unwrap();
+        let mut table = DataConTable::new();
+        for decl in artifact.prepared().constructors() {
+            table.insert_checked(matching_dc(decl)).unwrap();
+        }
+        let mut warnings = MetaWarnings::default();
+        warnings.captured_type = Some("captured observation".into());
+        let original = write_metadata(&table, &warnings).unwrap();
+        std::fs::write(directory.path().join("__prepared.prepared.cbor"), &bytes).unwrap();
+        // Both table-only and warning-only changes remain valid for exactly P.
+        for changed_table in [false, true] {
+            std::fs::write(directory.path().join("meta.cbor"), &original).unwrap();
+            let output = read_native_turn_artifacts(
+                directory.path(),
+                Arc::from(&b"turn"[..]),
+                "source".into(),
+            )
+            .unwrap();
+            let target = output.target().clone();
+            let mut alternate = table.clone();
+            if changed_table {
+                let decl = artifact.prepared().constructors().first().unwrap();
+                alternate = table_with_one_entry_mutated(&artifact, decl, |dc| {
+                    dc.qualified_name = Some("another.display.alias".into())
+                });
+            }
+            let changed_warnings = if changed_table {
+                warnings.clone()
+            } else {
+                MetaWarnings::default()
+            };
+            let replacement = write_metadata(&alternate, &changed_warnings).unwrap();
+            assert_ne!(original, replacement);
+            let (replacement_table, replacement_warnings) =
+                tidepool_repr::serial::read_metadata_for_program(&replacement, &target).unwrap();
+            assert_eq!(replacement_table == table, !changed_table);
+            assert_eq!(
+                replacement_warnings.captured_type == warnings.captured_type,
+                changed_table
+            );
+            std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
+            let (decoded, observed) = output.decode_metadata().unwrap();
+            assert!(Arc::ptr_eq(&target, output.target()));
+            assert_eq!(output.metadata.as_ref(), original.as_slice());
+            assert_eq!(decoded, table);
+            assert_eq!(observed.captured_type, warnings.captured_type);
+            std::fs::remove_file(directory.path().join("meta.cbor")).unwrap();
+            assert_eq!(output.decode_metadata().unwrap().0, table);
+        }
+        // A later valid file cannot repair the actual invalid observation.
+        std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
+        let invalid =
+            read_native_turn_artifacts(directory.path(), Arc::from(&b"turn"[..]), "source".into())
+                .unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), original).unwrap();
+        assert!(invalid.decode_metadata().is_err());
+    }
+
     /// A table entry that agrees with `decl` on every fact this crate checks
     /// (id, occurrence name, field count) — what a table from the SAME
     /// compile as `decl`'s prepared program necessarily contains.
@@ -8942,7 +8766,7 @@ mod constructor_identity_tests {
     fn raw_target(target: &str, prepared_bytes: Vec<u8>) -> RawTargetOutput {
         RawTargetOutput {
             target: target.to_string(),
-            asks_bytes: b"[]".to_vec(),
+            asks_bytes: Arc::new(b"[]".to_vec()),
             prepared_bytes: Arc::new(prepared_bytes),
         }
     }
@@ -9329,7 +9153,7 @@ mod dependency_cache_tests {
     use super::*;
 
     /// A package-importing graph, including implicit Prelude, must enter GHC
-    /// for package selection even if its paired bundle remains available.
+    /// for package selection across repeated requests and home shadow changes.
     #[test]
     fn package_imports_force_worker_selection_for_home_shadow_changes() {
         let root = tempfile::tempdir().unwrap();
@@ -9358,7 +9182,7 @@ mod dependency_cache_tests {
             .expect("fixture compiler request");
             prepared
         };
-        assert!(compile(), "fresh recipe compiles");
+        assert!(compile(), "fresh request compiles");
         assert!(
             compile(),
             "package lookup requires the worker on a repeated request"

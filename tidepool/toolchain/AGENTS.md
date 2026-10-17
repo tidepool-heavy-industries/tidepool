@@ -4,17 +4,18 @@ This crate owns toolchain/stdlib discovery, deploy compatibility, shared paths,
 compile diagnostics, and the one policy-bearing artifact compile front door.
 It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 
-- All compilation policy enters through `artifacts`; do not add a cache-free
-  alternate frontend.
-- A cache key must describe the exact invocation and every readable input.
-  Unknown flags or unenumerable inputs make an invocation explicitly
-  uncacheable rather than silently under-keyed.
-- Use one immutable recipe and named bundle. Authored dependencies retain path
-  identity; generated source markers exclude scratch-directory identity.
-  Normalize diagnostics before caching so temporary paths do not escape.
+- All compilation policy enters through `artifacts`; do not add an alternate
+  frontend or an invocation-output memo alongside the physical compile path.
+- Acquire required named outputs from the ordered request through the typed
+  physical-output owner. Native products require their paired package sidecar;
+  portable output never grants native certificate authority. Keep missing and
+  inaccessible members distinct, decoding bounded and cancellation a refusal.
 - Compiler evidence owns consumed bytes and import-resolution witnesses.
-  Missing, incomplete, or incompatible evidence cannot yield a cache hit.
-  CPP, TH and other untracked inputs remain uncacheable until proven complete.
+  Authored dependencies retain path identity; generated source markers exclude
+  scratch-directory identity. Native candidates, deployment catalogs and retained
+  entries validate that evidence through their own certified reuse boundaries.
+  CPP, TH and other untracked inputs cannot authorize replay without complete
+  evidence; completed source observations remain distinct from replay eligibility.
 - `CertifiedSourceSelection` owns compiler roles. Full artifact custody and
   `recovery_products` may retain several native versions of one module;
   authored consumers use the issued `SelectedOriginalClosure`. Validate its
@@ -77,13 +78,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   lexical and type roles and cannot validate a promoted request artifact closure.
 - `tidepool-extract-cmd` stays the small invocation builder. Do not move cache
   or runtime policy into that dependency leaf.
-- Cache tests must cover invalidation, relocation, warnings, and uncacheable
-  negative cases, not only hits.
-- Session salts and injected session interfaces bypass the artifact cache.
-  Inside the resident compiler daemon, dependency-validated memo entries can
-  still reuse immutable support modules; this module memo is distinct from the
-  Rust artifact cache. Use the matched measurement tests as evidence for cost
-  and savings, not projected estimates.
+- Native reuse tests cover invalidation, relocation, warnings and refusal as
+  well as successful acquisition through the production consumer.
+- The resident compiler owns dependency-validated module memoization, including
+  immutable support reused across session requests. Runtime module candidates
+  and retained entries own certified artifact reuse. Use matched measurements
+  as evidence for costs and savings, not projected estimates.
 - `build_prepared_fixture` is the build-action mode of that same front door.
   It requires action-owned current-directory scratch and declared source roots,
   uses the configured direct compiler, and has no runtime cache authority.
