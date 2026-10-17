@@ -2302,6 +2302,115 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
 }
 
 #[test]
+fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("EqualPrivateFull", 125);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    for shared_carrier in [false, true] {
+        let inventory = ArtifactInventory::default();
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![if shared_carrier {
+                    entry.clone()
+                } else {
+                    canonical.clone()
+                }],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let issue = |marker: &str, version| {
+            inventory
+                .admit_recovery_selection(
+                    &base,
+                    vec![
+                        entry.clone(),
+                        Arc::new(ArtifactEntry::canonical(
+                            product(marker, version).module_interface().unwrap().clone(),
+                        )),
+                    ],
+                    &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal,
+                    })),
+                )
+                .unwrap()
+        };
+        let views = [issue("EqualFullLeft", 126), issue("EqualFullRight", 127)];
+        let offers = views
+            .iter()
+            .map(|view| {
+                let proof = NativeOriginalRequirement::from_issued_group_custody(
+                    entry.descriptor.id,
+                    canonical.descriptor.id,
+                    view,
+                )
+                .unwrap()
+                .unwrap();
+                let offer =
+                    IssuedNativeOffer::issue(entry.descriptor.id, view, Some(proof)).unwrap();
+                assert!(offer.is_full());
+                offer
+            })
+            .collect::<Vec<_>>();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
+        let namespace = inventory
+            .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+            .unwrap()
+            .retain_custody(&views[0])
+            .unwrap()
+            .retain_custody(&views[1])
+            .unwrap();
+        let witnesses = offers
+            .iter()
+            .map(|offer| {
+                offer
+                    .qualified_private_availability(&projection, &namespace)
+                    .expect("same selected canonical supports each genuine Full in isolation")
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            witnesses[0], witnesses[1],
+            "equal payload cannot identify exact carrier/group issuance"
+        );
+        let metadata = projection
+            .project_metadata(namespace.metadata_snapshot())
+            .unwrap();
+        for selected in [offers.clone(), vec![offers[1].clone(), offers[0].clone()]] {
+            let error =
+                NativeCompilerTransport::issue(&projection, &metadata, &namespace, &selected)
+                    .err()
+                    .expect("competing exact Full qualifications cannot be unioned or ranked");
+            assert!(matches!(error, CompileError::ArtifactInventory(error)
+                if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. })));
+        }
+        if !shared_carrier {
+            let namespace = views[0].retain_custody(&views[1]).unwrap();
+            assert!(offers[0]
+                .qualified_private_availability(&projection, &namespace)
+                .is_some());
+            assert!(offers[1]
+                .qualified_private_availability(&projection, &namespace)
+                .is_none());
+            let metadata = projection
+                .project_metadata(namespace.metadata_snapshot())
+                .unwrap();
+            let transport =
+                NativeCompilerTransport::issue(&projection, &metadata, &namespace, &offers)
+                    .unwrap();
+            assert!(transport.availability[&entry.descriptor.id].permits(9001));
+        }
+    }
+}
+
+#[test]
 fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     use crate::artifact_inventory::{
         ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
