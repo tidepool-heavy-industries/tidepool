@@ -12602,6 +12602,15 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
+            let mut missing_input_owner = selection.clone();
+            missing_input_owner.input_origin = CertifiedInputOrigin::NewProducts;
+            assert!(matches!(
+                OriginalCompilerInputs::from_selection(&missing_input_owner, request.compiler_inputs().artifacts()),
+                Err(crate::CompileError::CompilerEvidence(error))
+                    if matches!(*error, CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::MissingContinuationOwner, ..
+                    })
+            ), "a continuation cannot fall back to fresh policy when its exact input owner is lost");
             if mode == "current" {
                 // A newly certified complete product is issued by the current
                 // source owner, independently of this request's empty baseline.
