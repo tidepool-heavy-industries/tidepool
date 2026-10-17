@@ -495,18 +495,14 @@ fn bash(round: Round, call: &str, cmd: String) {
 }
 
 fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
-    super::scaffold_admission_tests::prepared_scaffold(config);
-    configure_command_path(config);
     config.model = exomonad_actor::Model::DeepSeekFlash;
     config.reasoning = exomonad_actor::Reasoning::DeepSeekReasoning(
         exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
     );
+    super::scaffold_admission_tests::prepared_scaffold(config);
+    configure_command_path(config);
     config.inference_auth = Some(RunAuth::DeepSeek(auth));
     config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
-    crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
-        project.defaults.model = config.model.clone();
-        project.defaults.reasoning = config.reasoning.clone();
-    });
     std::fs::write(config.workspace.join("score.rs"), INITIAL).unwrap();
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
