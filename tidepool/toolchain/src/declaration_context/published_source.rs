@@ -618,6 +618,350 @@ mod tests {
     use tidepool_repr::execution_schema::SymbolIdentity;
 
     #[test]
+    fn published_source_composition_preserves_selected_issuer_over_historical_custody() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactInventoryFailure, CompilerSourceSupport, IssuedNativeOffer,
+        };
+        let producer = [2; 32];
+        let child_interface = crate::certified_products::fixture_module_interface(
+            producer,
+            "fixture",
+            "Child",
+            BTreeMap::new(),
+        );
+        let child_owner = identity("fixture", "Child");
+        let root_owner = identity("fixture", "Root");
+        let target = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                producer,
+                "fixture",
+                "Target",
+                BTreeMap::new(),
+            ),
+        ));
+        let root = |version| {
+            let product = crate::certified_products::fixture_finalized_product_with_requirements(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
+                    "Root",
+                    vec![(3, vec![]), (29, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    b"published root interface".to_vec(),
+                ),
+                producer,
+                Some(BTreeMap::from([(
+                    ("fixture".into(), "Child".into()),
+                    child_interface.interface_sha256(),
+                )])),
+            );
+            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                .remove(0)
+                .product;
+            Arc::new(ArtifactEntry::original(producer, product).unwrap())
+        };
+        let native = root(1);
+        let lexical = vec![
+            ExactLexicalNode {
+                owner: target.descriptor.owner.clone(),
+                imports: vec![root_owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: root_owner.clone(),
+                imports: vec![child_owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: child_owner.clone(),
+                imports: vec![],
+            },
+        ];
+        let mut failures = Vec::new();
+        let mut completed = 0;
+        for changed_child in [false, true] {
+            let children = [
+                Arc::new(ArtifactEntry::canonical(child_interface.clone())),
+                Arc::new(ArtifactEntry::canonical(if changed_child {
+                    crate::certified_products::fixture_module_core(
+                        &child_interface,
+                        b"next Child Core".to_vec(),
+                    )
+                } else {
+                    child_interface.clone()
+                })),
+            ];
+            assert_eq!(
+                children[0].descriptor.interface_sha256,
+                children[1].descriptor.interface_sha256
+            );
+            assert_eq!(
+                children[0].descriptor.id != children[1].descriptor.id,
+                changed_child
+            );
+            for reverse in [false, true] {
+                let views = children
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        let inventory = ArtifactInventory::default();
+                        let sibling = Arc::new(ArtifactEntry::canonical(
+                            crate::certified_products::fixture_module_interface(
+                                producer,
+                                "fixture",
+                                ["Left", "Right"][index],
+                                BTreeMap::new(),
+                            ),
+                        ));
+                        let mut entries =
+                            vec![native.clone(), child.clone(), target.clone(), sibling];
+                        if reverse {
+                            entries.reverse();
+                        }
+                        inventory
+                            .admit_shared(&inventory.empty_view(), entries)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let binding = |index: usize| {
+                    *views[index]
+                        .capture_graph_selection()
+                        .namespace
+                        .iter()
+                        .find(|binding| binding.artifact == native.descriptor.id)
+                        .unwrap()
+                };
+                assert_ne!(
+                    binding(0),
+                    binding(1),
+                    "equal native payloads retain distinct issuers"
+                );
+                let edges = views
+                    .iter()
+                    .flat_map(|view| view.binding_dependencies())
+                    .filter(|(from, to, _)| {
+                        matches!(
+                            (from, to),
+                            (
+                                ArtifactBindingNode::Artifact(_),
+                                ArtifactBindingNode::Artifact(_)
+                            )
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                for selected in 0..2 {
+                    let projection = CompilerInputProjection::from_issued_entries(&[
+                        native.clone(),
+                        children[selected].clone(),
+                        target.clone(),
+                    ])
+                    .unwrap();
+                    let old =
+                        IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
+                            .unwrap();
+                    let support = CompilerSourceSupport::new(
+                        projection.clone(),
+                        views[selected].clone(),
+                        [old.clone(), old],
+                    )
+                    .unwrap();
+                    let issued = ExactDeclarationContext::from_authenticated_execution(
+                        producer,
+                        &views[selected],
+                        projection,
+                        lexical.clone(),
+                        target.descriptor.owner.clone(),
+                        &[
+                            target.descriptor.owner.clone(),
+                            root_owner.clone(),
+                            child_owner.clone(),
+                        ],
+                    )
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap();
+                    let publication = issued
+                        .issue_published_source_original("revision", "input", &root_owner)
+                        .expect("the completed target directly imported the native root");
+                    let publication_sha = publication.context().semantic_sha256();
+                    let publication_graph = publication
+                        .context()
+                        .artifact_view()
+                        .capture_graph_selection();
+                    let published_role = publication
+                        .context()
+                        .compiler_input_projection()
+                        .snapshot_roles()[&root_owner]
+                        .clone();
+                    assert!(published_role.is_published_source_original());
+                    assert_eq!(
+                        publication
+                            .context()
+                            .compiler_input_projection()
+                            .snapshot_roles()[&child_owner]
+                            .interface(),
+                        children[selected].descriptor.id
+                    );
+                    assert!(
+                        edges.iter().all(|edge| publication
+                            .context()
+                            .artifact_view()
+                            .binding_dependencies()
+                            .contains(edge)),
+                        "the publication retains both exact historical child graphs"
+                    );
+                    let expected_groups = views[selected].selected_native_groups();
+                    for start_empty in [false, true] {
+                        let mut receiver = if start_empty {
+                            ExactDeclarationContext::new(&[], &[], vec![]).unwrap()
+                        } else {
+                            issued.clone()
+                        };
+                        let initial = receiver.semantic_sha256();
+                        let mut accepted = true;
+                        for repetition in 0..3 {
+                            match receiver
+                                .clone()
+                                .with_published_source_originals(&publication)
+                            {
+                                Ok(next) => {
+                                    assert_eq!(
+                                        next.compiler_input_projection().snapshot_roles()
+                                            [&root_owner],
+                                        published_role
+                                    );
+                                    assert_eq!(
+                                        next.compiler_input_projection().snapshot_roles()
+                                            [&child_owner]
+                                            .interface(),
+                                        children[selected].descriptor.id
+                                    );
+                                    assert!(next
+                                        .compiler_input_projection()
+                                        .snapshot_roles()
+                                        .keys()
+                                        .all(|owner| owner == &root_owner
+                                            || owner == &child_owner
+                                            || owner == &target.descriptor.owner));
+                                    assert_eq!(
+                                        next.artifact_view().selected_native_groups(),
+                                        expected_groups
+                                    );
+                                    assert!(edges.iter().all(|edge| next
+                                        .artifact_view()
+                                        .binding_dependencies()
+                                        .contains(edge)));
+                                    if repetition > 0 {
+                                        assert_eq!(
+                                            next.semantic_sha256(),
+                                            receiver.semantic_sha256(),
+                                            "reimport is idempotent"
+                                        );
+                                    }
+                                    receiver = next;
+                                }
+                                Err(error) => {
+                                    failures.push(format!("changed_child={changed_child} reverse={reverse} selected={selected} start_empty={start_empty} repetition={repetition}: published consumer: {error}"));
+                                    if repetition == 0 {
+                                        assert_eq!(receiver.semantic_sha256(), initial);
+                                    }
+                                    accepted = false;
+                                    break;
+                                }
+                            }
+                        }
+                        completed += usize::from(accepted);
+                    }
+                    assert_eq!(publication.context().semantic_sha256(), publication_sha);
+                    assert_eq!(
+                        publication
+                            .context()
+                            .artifact_view()
+                            .capture_graph_selection(),
+                        publication_graph
+                    );
+                    if changed_child {
+                        let competing_projection = CompilerInputProjection::from_issued_entries(&[
+                            native.clone(),
+                            children[1 - selected].clone(),
+                            target.clone(),
+                        ])
+                        .unwrap();
+                        let competing = ExactDeclarationContext::from_authenticated_execution(
+                            producer,
+                            &views[1 - selected],
+                            competing_projection,
+                            lexical.clone(),
+                            target.descriptor.owner.clone(),
+                            &[],
+                        )
+                        .unwrap();
+                        assert!(
+                            matches!(competing.with_published_source_originals(&publication),
+                            Err(CompileError::ArtifactInventory(error))
+                            if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. })),
+                            "different selected canonical roles must refuse"
+                        );
+                    }
+                    let alternative = issued
+                        .issue_published_source_original("other revision", "input", &root_owner)
+                        .unwrap();
+                    assert!(
+                        publication
+                            .context()
+                            .as_ref()
+                            .clone()
+                            .with_published_source_originals(&alternative)
+                            .is_err(),
+                        "different publication policies must refuse"
+                    );
+                    let conflicting_root = root(2);
+                    assert_ne!(conflicting_root.descriptor.id, native.descriptor.id);
+                    let conflict_inventory = ArtifactInventory::default();
+                    let conflict_view = conflict_inventory
+                        .admit_shared(
+                            &conflict_inventory.empty_view(),
+                            vec![
+                                conflicting_root.clone(),
+                                children[selected].clone(),
+                                target.clone(),
+                            ],
+                        )
+                        .unwrap();
+                    let conflict_projection = CompilerInputProjection::from_issued_entries(&[
+                        conflicting_root,
+                        children[selected].clone(),
+                        target.clone(),
+                    ])
+                    .unwrap();
+                    let conflicting = ExactDeclarationContext::from_authenticated_execution(
+                        producer,
+                        &conflict_view,
+                        conflict_projection,
+                        lexical.clone(),
+                        target.descriptor.owner.clone(),
+                        &[],
+                    )
+                    .unwrap();
+                    assert!(
+                        matches!(conflicting.with_published_source_originals(&publication),
+                        Err(CompileError::ArtifactInventory(error))
+                        if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { .. })),
+                        "different selected native originals must refuse"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "published composition histories: completed={completed} failed={}\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        assert!(
+            failures.is_empty(),
+            "published composition rejected an issuer-preserving history"
+        );
+        assert_eq!(completed, 16);
+    }
+
+    #[test]
     fn authored_certifier_keeps_published_subset_policy_separate_from_complete_demand() {
         let producer = [2; 32];
         let product = crate::certified_products::tests::recovered_witness_fixtures(&[
