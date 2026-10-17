@@ -1,7 +1,7 @@
-//! Bounded projection of host trace metadata. Never retain tool input, output or errors.
+//! Bounded projection of host trace metadata and the review owner's selected prefixes.
+use super::trace_projection::{Atom, Fields, Record};
 use super::{Evidence, Limits, TimeWindow};
 use serde::Serialize;
-use super::trace_projection::{Atom, Fields, Record};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -272,7 +272,8 @@ fn lenient_u64(value: &Atom<'_>) -> Option<u64> {
 
 /// The innermost span field named `name`, falling back to the current span.
 fn span_field<'a>(record: &'a Record<'_>, name: &str) -> Option<&'a str> {
-    record.spans
+    record
+        .spans
         .as_deref()
         .and_then(|spans| spans.iter().rev().find_map(|span| span[name].as_str()))
         .or_else(|| record.span[name].as_str())
@@ -951,7 +952,41 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn structured_trace_counts_without_reading_output_or_error_prose() {
+    fn projected_spans_and_rejection_prefix_keep_existing_semantics() {
+        let bytes =
+            br#"{"span":{"execution":"current"},"spans":[{"execution":"outer"},{"execution":7}]}"#;
+        let record: Record<'_> = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(span_field(&record, "execution"), Some("outer"));
+        let record: Record<'_> =
+            serde_json::from_slice(br#"{"span":{"execution":"current"},"spans":[{}]}"#).unwrap();
+        assert_eq!(span_field(&record, "execution"), Some("current"));
+        let mut events = TraceEvents::default();
+        for (index, length) in [(1, 64), (2, 65)] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "fields":{"message":"input unit receipt","status":"Rejected","index":index,
+                    "output":format!("reply rejected: {}(private suffix λ)","A".repeat(length))},
+                "span":{"execution":"rejected-execution"}
+            }))
+            .unwrap();
+            let record: Record<'_> = serde_json::from_slice(&bytes).unwrap();
+            events.observe(0, &record);
+        }
+        assert_eq!(
+            events.rejected_units.get(&("rejected-execution".into(), 1)),
+            Some(&Some("A".repeat(64)))
+        );
+        assert_eq!(
+            events.rejected_units.get(&("rejected-execution".into(), 2)),
+            Some(&None)
+        );
+        let record: Record<'_> = serde_json::from_slice(br#"{"fields":{"total_ms":"19","preparation_wait_ms":null,"actor":3,"incarnation":"1"}}"#).unwrap();
+        assert_eq!(lenient_u64(&record.fields["total_ms"]), Some(19));
+        assert_eq!(lenient_u64(&record.fields["preparation_wait_ms"]), None);
+        assert_eq!(lenient_u64(&record.fields["incarnation"]), Some(1));
+    }
+
+    #[test]
+    fn structured_trace_counts_without_classifying_output_or_error_prose() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trace.jsonl");
         let records = [
