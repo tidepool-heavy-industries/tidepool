@@ -92,9 +92,11 @@ while the supervisor continues. Qualifying other startup effects needs execution
 evidence through their actual services; effect membership alone is no support
 claim. Root has no caller seed; only fresh child admission issues one, so legacy
 absent-hook caller publication has no root successor to repeat it.
-These startup events and host interruption exits use actor-journal version 10. Older runs remain on their
-existing binaries; the new reader refuses them without mutation. This change
-does not supply a migration or authorize restarting a live run.
+Actor journals write version 11 with provider-qualified reasoning. The reader
+normalizes version 10's OpenAI-only effort values in memory and never rewrites
+retained bytes. Earlier versions require their matching binary. Reading a
+journal does not authorize restarting a live run or select its transport;
+startup must retain the run's frozen backend contract.
 
 Root startup pins the exact selected notebook public owner separately from
 canonical actor admission. Carry that pin through the lifecycle claim, journal

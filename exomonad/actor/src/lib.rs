@@ -202,8 +202,8 @@ pub use runtime_observation::{
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorReplacementDefinition, ActorStartCaptureError,
-    ForkEffort, Model, ResidentActorStart, SpawnContextWire, SpawnError, SpawnRetainedResources,
-    WorkerLifetime,
+    Backend, DeepSeekReasoning, Model, OpenAIModel, OpenAIReasoning, Reasoning, ResidentActorStart,
+    SpawnContextWire, SpawnError, SpawnRetainedResources, WorkerLifetime,
 };
 pub use termination::{
     ActorCompilerCloseOwner, ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle,

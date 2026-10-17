@@ -75,7 +75,7 @@ pub struct ActorDescriptor {
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
     persistence_policy: ActorPersistencePolicy,
-    fork_effort: Option<crate::ForkEffort>,
+    reasoning: Option<crate::Reasoning>,
     model: Option<crate::Model>,
     instructions: Option<String>,
     composed_prompts: Option<tidepool_runtime::session::ComposedPromptSnapshot>,
@@ -107,7 +107,7 @@ impl ActorDescriptor {
             context_parent: None,
             actor_path: None,
             persistence_policy: ActorPersistencePolicy::Ephemeral,
-            fork_effort: None,
+            reasoning: None,
             model: None,
             instructions: None,
             composed_prompts: None,
@@ -269,8 +269,8 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn fork_effort(&self) -> Option<crate::ForkEffort> {
-        self.fork_effort
+    pub fn reasoning(&self) -> Option<crate::Reasoning> {
+        self.reasoning
     }
 
     pub(crate) fn fork_budget(&self) -> Option<(i64, i64)> {
@@ -306,8 +306,8 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn with_fork_effort(mut self, effort: Option<crate::ForkEffort>) -> Self {
-        self.fork_effort = effort;
+    pub fn with_reasoning(mut self, reasoning: Option<crate::Reasoning>) -> Self {
+        self.reasoning = reasoning;
         self
     }
 

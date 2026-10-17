@@ -83,6 +83,13 @@ impl CellExit {
 /// context values and actor effect membership never supply this authority.
 /// Finalization records eligibility; publication remains the Engine/Store owner.
 pub trait HostedContextBinding: Send + Sync {
+    /// Observe the active selection of this exact hosted conversation. Generic
+    /// bindings without inference return None; hosted inference bindings refuse
+    /// unavailable observations rather than substituting admission defaults.
+    fn effective_inference(&self) -> Result<Option<(crate::Model, crate::Reasoning)>, EffectError> {
+        Ok(None)
+    }
+
     /// Holds the scheduler's existing registration/start mutex while `claim`
     /// checks native terminal overrides and claims the exact request. Callback
     /// refusal leaves admission open; success fences this activation's starts.

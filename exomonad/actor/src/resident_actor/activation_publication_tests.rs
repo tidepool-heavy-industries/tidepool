@@ -292,7 +292,7 @@ async fn interrupt_during_preview(
                     launch_worktrees: Vec::new(),
                     worktree_custody: None,
                     capabilities: descriptor.capabilities().clone(),
-                    fork_effort: None,
+                    reasoning: None,
                     model: None,
                     instructions: None,
                     creator: None,

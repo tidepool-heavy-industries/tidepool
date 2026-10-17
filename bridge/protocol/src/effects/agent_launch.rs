@@ -234,6 +234,20 @@ fn spec_type(
 ) -> TypeDef {
     let mut definition = sum_type(name, Some(rust), variants);
     definition.json = JsonInstance::Generic;
+    if name != "Model" {
+        definition.derives = WireDerives(&[
+            WireDerive::FromHaskell,
+            WireDerive::ToHaskell,
+            WireDerive::Clone,
+            WireDerive::Copy,
+            WireDerive::Debug,
+            WireDerive::PartialEq,
+            WireDerive::Eq,
+            WireDerive::Serialize,
+            WireDerive::Deserialize,
+        ]);
+        return definition;
+    }
     definition
 }
 
@@ -401,6 +415,19 @@ fn inference_type(name: &'static str, variants: Vec<(&'static str, Vec<HsType>)>
         WireDerive::Serialize,
         WireDerive::Deserialize,
     ]);
+    if name != "Model" {
+        definition.derives = WireDerives(&[
+            WireDerive::FromHaskell,
+            WireDerive::ToHaskell,
+            WireDerive::Clone,
+            WireDerive::Copy,
+            WireDerive::Debug,
+            WireDerive::PartialEq,
+            WireDerive::Eq,
+            WireDerive::Serialize,
+            WireDerive::Deserialize,
+        ]);
+    }
     definition
 }
 
@@ -478,25 +505,6 @@ fn context_types() -> Vec<TypeDef> {
             derives: WireDerives(&[]),
             domain: None,
             doc: &["Why an exact hosted context checkpoint cannot be captured or used."],
-        },
-        TypeDef {
-            name: "ForkEffort",
-            wire_rust: None,
-            haskell_module: None,
-            shape: TypeShape::Sum {
-                variants: ["Low", "Medium", "High"]
-                    .into_iter()
-                    .map(|ctor| SumVariant {
-                        ctor,
-                        fields: VariantFields::Positional(Vec::new()),
-                        doc: &[],
-                    })
-                    .collect(),
-            },
-            json: JsonInstance::None,
-            derives: WireDerives(&[]),
-            domain: None,
-            doc: &["Reasoning effort selected before a context child's first inference."],
         },
         crate::actor_profiles::actor_key_definition(),
     ]

@@ -181,7 +181,7 @@ pub struct LocalResidentInstallation {
     pub launch_worktrees: Vec<String>,
     pub worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     pub capabilities: crate::ActorCapabilities,
-    pub fork_effort: Option<crate::ForkEffort>,
+    pub reasoning: Option<crate::Reasoning>,
     pub model: Option<crate::Model>,
     pub instructions: Option<String>,
     pub creator: Option<crate::ActorRef>,
@@ -5615,19 +5615,44 @@ where
                     ))
                 })?;
             }
+            let effective_parent = effect_owner
+                .context_binding()
+                .map(|binding| binding.effective_inference())
+                .transpose()
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+                .flatten();
+            let parent_model = effective_parent
+                .as_ref()
+                .map(|(model, _)| model.clone())
+                .or_else(|| self.descriptor.model().cloned());
+            let parent_reasoning = effective_parent
+                .as_ref()
+                .map(|(_, reasoning)| *reasoning)
+                .or(self.descriptor.reasoning());
             if descriptor.model().is_none() {
                 let checkpoint_model = checkpoint_lease
                     .as_ref()
                     .and_then(|lease| lease.issuer_model.clone());
-                descriptor = descriptor
-                    .with_model(checkpoint_model.or_else(|| self.descriptor.model().cloned()));
+                descriptor = descriptor.with_model(checkpoint_model.or(parent_model.clone()));
             }
-            if descriptor.fork_effort().is_none() {
+            if descriptor.reasoning().is_none() {
                 let checkpoint_effort = checkpoint_lease
                     .as_ref()
-                    .and_then(|lease| lease.issuer_effort);
-                descriptor = descriptor
-                    .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
+                    .and_then(|lease| lease.issuer_reasoning);
+                descriptor = descriptor.with_reasoning(checkpoint_effort.or(parent_reasoning));
+            }
+            if let Some(parent_backend) = parent_model.as_ref().map(crate::Model::backend) {
+                if descriptor
+                    .model()
+                    .is_some_and(|model| model.backend() != parent_backend)
+                    || descriptor
+                        .reasoning()
+                        .is_some_and(|reasoning| reasoning.backend() != parent_backend)
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "child model and reasoning must match the run backend".into(),
+                    ));
+                }
             }
             let capabilities = self
                 .descriptor
@@ -7046,6 +7071,20 @@ where
                 name,
             }) => Box::pin(async move {
                 let result: Result<String, crate::CheckpointRefusal> = async {
+                    let effective = effect_owner
+                        .context_binding()
+                        .map(|binding| binding.effective_inference())
+                        .transpose()
+                        .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?
+                        .flatten();
+                    let issuer_model = effective
+                        .as_ref()
+                        .map(|(model, _)| model.clone())
+                        .or_else(|| self.descriptor.model().cloned());
+                    let issuer_reasoning = effective
+                        .as_ref()
+                        .map(|(_, reasoning)| *reasoning)
+                        .or(self.descriptor.reasoning());
                     let boundary = effect_owner
                         .publication()
                         .hosted_boundary()
@@ -7088,8 +7127,8 @@ where
                             name,
                             context.actor,
                             self.descriptor.capabilities().clone(),
-                            self.descriptor.model().cloned(),
-                            self.descriptor.fork_effort(),
+                            issuer_model,
+                            issuer_reasoning,
                             before,
                             context.placement.session,
                             scope,
@@ -8074,7 +8113,7 @@ where
                             launch_worktrees: self.launch_worktrees.clone(),
                             worktree_custody: self.worktree_custody.clone(),
                             capabilities: self.descriptor.capabilities().clone(),
-                            fork_effort: self.descriptor.fork_effort(),
+                            reasoning: self.descriptor.reasoning(),
                             model: self.descriptor.model().cloned(),
                             instructions: self.descriptor.instructions().map(str::to_owned),
                             creator: self.descriptor.creator(),
@@ -8963,7 +9002,7 @@ where
             launch_worktrees: self.launch_worktrees.clone(),
             worktree_custody: self.worktree_custody.clone(),
             capabilities: self.descriptor.capabilities().clone(),
-            fork_effort: self.descriptor.fork_effort(),
+            reasoning: self.descriptor.reasoning(),
             model: self.descriptor.model().cloned(),
             instructions: self.descriptor.instructions().map(str::to_owned),
             creator: self.descriptor.creator(),
@@ -17375,7 +17414,9 @@ mod tests {
                 changes: Vec::new(),
             }),
             crate::ContextReq::SetNextModelWith("next-model".into()),
-            crate::ContextReq::SetNextEffortWith(crate::ForkEffort::High),
+            crate::ContextReq::SetNextEffortWith(crate::Reasoning::OpenAIReasoning(
+                crate::OpenAIReasoning::OpenAIHigh,
+            )),
         ];
         let mut operations = Vec::new();
         for (ordinal, request) in requests.into_iter().enumerate() {

@@ -15,28 +15,9 @@ use tidepool_runtime::session::{MaterializedFacade, OutputSink, ResidentHole, Re
 
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    tidepool_bridge_derive::FromHaskell,
-    tidepool_bridge_derive::ToHaskell,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ForkEffort {
-    #[haskell(module = "Tidepool.Effects.Core")]
-    Low,
-    #[haskell(module = "Tidepool.Effects.Core")]
-    Medium,
-    #[haskell(module = "Tidepool.Effects.Core")]
-    High,
-}
-
-pub use tidepool_bridge_effects::Model;
+pub use tidepool_bridge_effects::{
+    Backend, DeepSeekReasoning, Model, OpenAIModel, OpenAIReasoning, Reasoning,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum WorkerLifetime {
@@ -225,7 +206,7 @@ impl ResidentActorStart {
         effects: Vec<ActorEffectKeyWire>,
         label: Option<String>,
         model: Option<Model>,
-        effort: Option<ForkEffort>,
+        reasoning: Option<Reasoning>,
         instructions: Option<String>,
         lifetime: WorkerLifetime,
         limits: Option<(i64, i64)>,
@@ -293,7 +274,7 @@ impl ResidentActorStart {
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades))
         .with_model(model)
-        .with_fork_effort(effort)
+        .with_reasoning(reasoning)
         .with_instructions(instructions)
         .with_fork_budget(limits);
         if lifetime != WorkerLifetime::RunOwned {
