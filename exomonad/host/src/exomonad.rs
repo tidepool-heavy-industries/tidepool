@@ -3271,7 +3271,7 @@ mod tests {
             .haskell
             .source_roots
             .iter()
-            .any(|root| root == "workspace"));
+            .any(|root| root == Path::new("workspace")));
         assert!(configured
             .haskell
             .modules
