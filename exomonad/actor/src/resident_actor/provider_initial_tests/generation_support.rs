@@ -228,7 +228,13 @@ impl GenerationSupport {
             preparation: uuid::Uuid::new_v4(),
             revision: AtomicU64::new(0),
         });
-        let source = ActorWorkbenchSource::new("", paths).with_spec("QuotedAgentSpec.agentSpec");
+        let source = forest
+            .environment
+            .runner
+            .preparation_source()
+            .with_config(|_| {
+                ActorWorkbenchSource::new("", paths).with_spec("QuotedAgentSpec.agentSpec")
+            });
         let runner = ResidentActorRunner::new(
             forest.environment.runner.machines_for_test().clone(),
             source,

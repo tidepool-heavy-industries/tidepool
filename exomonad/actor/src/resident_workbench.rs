@@ -20007,6 +20007,16 @@ pub(crate) mod request_tests {
                 "replacement context and its artifacts remain resolvable after rebase and restart"
             );
             }
+            let late_prepared = workbench
+                .prepare_actor_generation(
+                    context.clone(),
+                    descriptor.clone(),
+                    ActorRequestSnapshot::Generation(replacement.clone()),
+                    next_installation.clone(),
+                    prompts.clone(),
+                )
+                .await
+                .unwrap();
             *state.0.lock() =
                 InstalledToolsAvailability::GenerationUnavailable(replacement.clone());
             assert!(
@@ -20029,6 +20039,31 @@ pub(crate) mod request_tests {
                 if Arc::ptr_eq(retained, &replacement))
             );
             state.clear();
+            let revision = recovery.store.read_domain(domain).unwrap().unwrap().revision;
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            assert!(matches!(
+                workbench
+                    .generation_publisher(state.clone())
+                    .publish(
+                        late_prepared,
+                        decision.clone(),
+                        ActorGenerationPublication::Terminal,
+                    )
+                    .await
+                    .unwrap(),
+                ActorGenerationCommit::Refused(_)
+            ));
+            assert!(matches!(state.observe(), InstalledToolsObservation::Empty));
+            assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Running,
+                "released installation custody refuses late publication before a native claim"
+            );
+            assert_eq!(
+                recovery.store.read_domain(domain).unwrap().unwrap().revision,
+                revision,
+                "late publication cannot change the retained public generation"
+            );
 
             return;
         }
