@@ -5449,6 +5449,18 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .capture_graph_selection(),
                 custody_graph
             );
+            let extended = original
+                .clone()
+                .extend_interface_context(&original)
+                .unwrap();
+            assert_eq!(
+                extended.compiler_input_projection(),
+                original.compiler_input_projection()
+            );
+            assert_eq!(
+                extended.artifact_view().capture_graph_selection().roots,
+                before.roots
+            );
             let mut malformed = original.clone();
             let mut roles = CompilerInputProjection::default();
             roles
