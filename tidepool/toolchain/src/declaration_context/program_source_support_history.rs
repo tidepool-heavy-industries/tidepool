@@ -319,10 +319,10 @@ mod program_source_support_history {
             let source = "module Consumer where\n";
             let effective = request.compiler_inputs();
             let full_view = effective
-                .artifacts
+                .artifacts()
                 .merge_fixture_selections(&sparse_view)
                 .unwrap();
-            let full_projection = effective.projection.merge(&sparse_projection).unwrap();
+            let full_projection = effective.projection().merge(&sparse_projection).unwrap();
             let full_selection = source_selection(&full_projection, &full_view);
             let full_input =
                 OriginalCompilerInputs::from_selection(&full_selection, &full_view).unwrap();

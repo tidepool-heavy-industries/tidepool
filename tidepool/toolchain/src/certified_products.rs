@@ -12796,7 +12796,7 @@ pub(crate) mod tests {
             .unwrap()
             .permits(17));
         assert!(!inputs
-            .artifacts
+            .artifacts()
             .contains_namespace_artifact(future.descriptor.id));
         assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(request.groups.is_empty());

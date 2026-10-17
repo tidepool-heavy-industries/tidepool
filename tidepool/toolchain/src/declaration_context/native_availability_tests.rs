@@ -222,7 +222,7 @@ fn eager_artifact_custody_reference(
     issuer: &ArtifactView,
     offer: &crate::artifact_inventory::IssuedNativeOffer,
 ) -> ArtifactView {
-    let mut graph = offer.custody_snapshot().graph_selection().clone();
+    let mut graph = offer.custody_snapshot().graph_selection().unwrap();
     graph.native_groups.clear();
     graph.roots.clear();
     graph.namespace.clear();
@@ -600,7 +600,7 @@ fn issued_offer_retention_preserves_historical_canonical_custody() {
         );
         for offer in &offers[..end] {
             let actual = retained.artifacts().capture_graph_selection();
-            let expected = offer.custody_snapshot().graph_selection();
+            let expected = offer.custody_snapshot().graph_selection().unwrap();
             assert!(expected
                 .bindings
                 .iter()
@@ -774,23 +774,23 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         .expect("the final request closes the fragment against receiving baseline roles");
     let final_inputs = request.compiler_inputs();
     final_inputs
-        .projection
-        .validate(&final_inputs.artifacts)
+        .projection()
+        .validate(&final_inputs.artifacts())
         .unwrap();
     assert_eq!(
         final_inputs
-            .projection
+            .projection()
             .snapshot_roles()
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([dependency.clone(), offered.clone()])
     );
-    assert!(final_inputs.projection.snapshot_roles()[&dependency]
+    assert!(final_inputs.projection().snapshot_roles()[&dependency]
         .original()
         .is_none());
     assert_eq!(
-        final_inputs.artifacts.selected_native_groups(),
+        final_inputs.artifacts().selected_native_groups(),
         roots,
         "private availability cannot add executable body roots"
     );
@@ -800,7 +800,9 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         .find(|proof| proof.original == original)
         .unwrap();
     assert_eq!(
-        final_proof.issued_groups(&final_inputs.artifacts).unwrap(),
+        final_proof
+            .issued_groups(&final_inputs.artifacts())
+            .unwrap(),
         groups
     );
     assert_eq!(baseline.semantic_sha256(), before);
@@ -1530,8 +1532,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .flat_map(|availability| availability.offers().iter().cloned())
         .collect::<Vec<_>>();
     let selected = request
-        .projection
-        .admit_interfaces_with_native_offers(&request.artifacts, vec![], &offers)
+        .projection()
+        .admit_interfaces_with_native_offers(&request.artifacts(), vec![], &offers)
         .unwrap();
     let graph = selected.capture_graph_selection();
     assert!(graph
@@ -1665,7 +1667,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             .iter()
             .all(|offer| offer.proof().is_none() && !offer.is_full()));
         assert!(
-            matches!(baseline.artifacts.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            matches!(baseline.artifacts().native_requirements_from_roots(&[NativeRequirementRoot::Group {
             artifact: entry.descriptor.id, original_ordinal: 7,
         }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == entry.descriptor.id)),
             "a real demand without an exact choice must still refuse"
@@ -4349,7 +4351,7 @@ fn replay_native_transport_history(
     .unwrap();
     let bind = || {
         inputs
-            .artifacts
+            .artifacts()
             .inventory()
             .bind_segment(inputs.artifacts(), vec![], &selected)
     };
@@ -4825,7 +4827,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         .unwrap();
         for demanded in [7, 9001] {
             let mut fixed = inputs
-                .artifacts
+                .artifacts()
                 .inventory()
                 .bind_segment(inputs.artifacts(), vec![], &selection)
                 .unwrap();
@@ -4850,7 +4852,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             }
         }
         let mut fixed = inputs
-            .artifacts
+            .artifacts()
             .inventory()
             .bind_segment(inputs.artifacts(), vec![], &selection)
             .unwrap();
@@ -5526,6 +5528,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         assert!(offer
                             .custody_snapshot()
                             .graph_selection()
+                            .unwrap()
                             .bindings
                             .iter()
                             .all(|node| graph.bindings.contains(node)));
@@ -5909,10 +5912,10 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     assert!(merged.artifacts.selected_native_groups().is_empty());
     let request = protected.unwrap();
     assert_eq!(
-        request.artifacts.capture_graph_selection().namespace,
+        request.artifacts().capture_graph_selection().namespace,
         baseline.artifact_view().capture_graph_selection().namespace
     );
-    assert!(request.artifacts.selected_native_groups().is_empty());
+    assert!(request.artifacts().selected_native_groups().is_empty());
 }
 
 #[test]
@@ -6235,15 +6238,19 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
             expected_offers,
             "candidate issuance cannot alter the retained offer mode or exact proof",
         );
-        let retained = inputs.artifacts().capture_graph_selection();
+        let retained = inputs.issued_artifacts().capture_graph_selection();
         assert!(expected_custody
             .bindings
             .iter()
             .all(|binding| retained.bindings.contains(binding)));
-        assert!(expected_edges
-            .iter()
-            .all(|edge| inputs.artifacts().binding_dependencies().contains(edge)));
-        assert!(inputs.artifacts().selected_native_groups().is_empty());
+        assert!(expected_edges.iter().all(|edge| inputs
+            .issued_artifacts()
+            .binding_dependencies()
+            .contains(edge)));
+        assert!(inputs
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
         assert!(context.lexical_graph().is_empty());
         assert_eq!(
             inputs
@@ -6429,7 +6436,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let baseline = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&context, None)
             .expect("independently selected B remains valid with A only in availability custody");
-        assert_eq!(exact_groups(&baseline.artifacts), b_groups);
+        assert_eq!(exact_groups(&baseline.artifacts()), b_groups);
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("native-issuance-does-not-read-manifest"),
             by_owner: BTreeMap::new(),
@@ -6555,7 +6562,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
 
 #[test]
 fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
-    use crate::artifact_inventory::{ArtifactBindingNode, ExactArtifactSelection};
+    use crate::artifact_inventory::ArtifactBindingNode;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("PublishedCandidateDemand", 136);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
