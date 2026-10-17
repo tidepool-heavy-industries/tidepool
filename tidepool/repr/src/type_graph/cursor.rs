@@ -1123,11 +1123,16 @@ mod tests {
         let unused_binder = root(&mut storage, explicit, 2);
         let explicit = root(&mut storage, explicit, 1);
         let changed = root(&mut storage, changed, 1);
+        let closed_body = application(&mut storage, proxy, &[kind, kind]);
+        let closed = root(&mut storage, closed_body, 1);
+        let same_closed = root(&mut storage, closed_body, 1);
+        let unused_closed_binder = root(&mut storage, closed_body, 2);
         let graph = publish(storage, &[]);
         for (left, right) in [
             (original, swapped),
             (explicit, changed),
             (explicit, unused_binder),
+            (closed, unused_closed_binder),
         ] {
             assert!(!graph
                 .rooted_compatible(left, &graph, right, &mut TypeWorkBudget::new(20_000))
@@ -1135,6 +1140,14 @@ mod tests {
         }
         assert!(graph
             .rooted_compatible(original, &graph, original, &mut TypeWorkBudget::new(20_000))
+            .unwrap());
+        assert!(graph
+            .rooted_compatible(
+                closed,
+                &graph,
+                same_closed,
+                &mut TypeWorkBudget::new(20_000)
+            )
             .unwrap());
     }
     fn template(
