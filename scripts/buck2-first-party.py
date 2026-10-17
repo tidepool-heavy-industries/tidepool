@@ -1013,6 +1013,11 @@ def toolchain_compiler_free_test_cases(binary):
 
 def actor_observation_test_cases(binary):
     groups = [
+        ("actor_inference_journal_tests", "recovery::tests::", (
+            "version_ten_reasoning_is_explicitly_openai_without_rewriting_source",
+            "version_ten_history_reopens_without_rewriting",
+            "version_ten_refuses_nonhistorical_reasoning_encodings",
+        )),
         ("actor_forest_shutdown_tests", "", (
             'termination::tests::shutdown_batch_holds_every_fence_before_admission_wake',
             'termination::tests::overlapping_shutdown_batches_preserve_one_intent_in_opposite_input_orders',

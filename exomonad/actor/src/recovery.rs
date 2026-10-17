@@ -2266,6 +2266,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn version_ten_history_reopens_without_rewriting() {
+        // Source-derived v10 wire fixture, independent of the v11 writer.
+        let legacy = concat!(
+            "{\"version\":10,\"sequence\":1,\"event\":\"created\"}\n",
+            r#"{"version":10,"sequence":2,"event":"admitted","admission":{"actor":{"id":1,"incarnation":1},"label":null,"creator":null,"supervisor_parent":null,"context_parent":null,"actor_path":null,"effect_keys":[],"descendant_depth":8,"descendant_active_children":null,"model":null,"effort":"high","instructions":null,"launch_worktrees":[],"source_layer":[]},"startup":null}"#,
+            "\n",
+        );
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let path = directory.path().join("actors.jsonl");
+        std::fs::write(&path, legacy).unwrap();
+        let journal =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
+        let records = journal.records().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].admission.model.is_none());
+        assert_eq!(
+            records[0].admission.reasoning,
+            Some(crate::Reasoning::OpenAIReasoning(
+                crate::OpenAIReasoning::OpenAIHigh
+            ))
+        );
+        drop(journal);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+    }
+
+    #[test]
+    fn version_ten_refuses_nonhistorical_reasoning_encodings() {
+        let admission =
+            DurableActorAdmission::capture(ActorRef::first(ActorId(1)), &descriptor("legacy"), &[]);
+        let row = Row {
+            version: VERSION,
+            sequence: 1,
+            event: EventKind::Admitted {
+                admission: Box::new(admission),
+                startup: None,
+            },
+        };
+        let mut value = serde_json::to_value(row).unwrap();
+        value["version"] = 10.into();
+        value["admission"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning");
+        for absent in [true, false] {
+            let mut optional = value.clone();
+            if !absent {
+                optional["admission"]["effort"] = serde_json::Value::Null;
+            }
+            let EventKind::Admitted { admission, .. } =
+                parse_row(&optional.to_string()).unwrap().event
+            else {
+                panic!("admission")
+            };
+            assert!(admission.reasoning.is_none());
+        }
+        for invalid in [
+            serde_json::json!("none"),
+            serde_json::json!("max"),
+            serde_json::json!(42),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            value["admission"]["effort"] = invalid;
+            assert!(parse_row(&value.to_string()).is_err());
+        }
+        value["admission"]["effort"] = "high".into();
+        value["admission"]["reasoning"] = serde_json::Value::Null;
+        assert!(parse_row(&value.to_string()).is_err());
+    }
+
+    #[tokio::test]
     async fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
         let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();

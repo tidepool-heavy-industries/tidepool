@@ -614,6 +614,21 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "actor_inference_journal_tests",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "recovery::tests::version_ten_reasoning_is_explicitly_openai_without_rewriting_source",
+        "recovery::tests::version_ten_history_reopens_without_rewriting",
+        "recovery::tests::version_ten_refuses_nonhistorical_reasoning_encodings",
+    ],
+    expected_count = 3,
+    jobs = 1,
+    timeout = 30,
+    test_rule_timeout_ms = 150000,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "actor_forest_shutdown_tests",
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [
