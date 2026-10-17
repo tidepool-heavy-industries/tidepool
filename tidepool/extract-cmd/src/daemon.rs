@@ -1482,8 +1482,7 @@ fn service_transaction(
                 stdout,
                 stderr,
                 &error.to_string(),
-            )
-            .and_then(|()| connection.flush().map_err(FrontendError::Io));
+            );
             log_reject_failure(run_id, "report with failed END evidence", delivered);
         }
         drop(connection);
@@ -3019,7 +3018,7 @@ pub(crate) fn write_unconfirmed_response(
             .and_then(|()| stream.write_all(bytes))
             .map_err(FrontendError::Io)?;
     }
-    Ok(())
+    stream.flush().map_err(FrontendError::Io)
 }
 
 fn check_response_size(total: u64) -> Result<(), FrontendError> {
@@ -5380,6 +5379,33 @@ tidepool-reuse-error: witness failed\n";
             )
             .is_err(),
             "diagnostic delivery loss became confirmed completion"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_response_does_not_hide_final_flush_failure() {
+        struct FlushLost(Vec<u8>);
+        impl Write for FlushLost {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "diagnostic delivery lost",
+                ))
+            }
+        }
+        let mut output = FlushLost(Vec::new());
+        assert!(matches!(write_unconfirmed_response(
+            &mut output, 23, b"body report", b"visible diagnostic", "original END failure"
+        ), Err(FrontendError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe));
+        // Even when all bytes reached the buffer, they issue only diagnostics.
+        let error = decode_output(&mut Cursor::new(output.0)).unwrap_err();
+        assert_eq!(
+            error.completion_failure().unwrap().end_cause(),
+            "original END failure"
         );
     }
 
