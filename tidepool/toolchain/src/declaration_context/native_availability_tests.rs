@@ -2186,13 +2186,16 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .selection
         .groups_for_target(&demanded.artifacts, None, &imports)
         .unwrap();
-    assert_eq!(
-        groups
-            .iter()
-            .map(|group| (group.binding.artifact(), group.original_ordinal))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([(entry.descriptor.id, 9001)])
-    );
+    let expected = offer
+        .issued_group_carriers()
+        .unwrap()
+        .into_keys()
+        .filter(|group| {
+            group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 9001
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
     assert_eq!(context.as_ref(), &before);
 }
 
@@ -5552,13 +5555,17 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                         .selection
                         .groups_for_target(&demanded.artifacts, None, &imports)
                         .unwrap();
-                    assert_eq!(
-                        groups
-                            .iter()
-                            .map(|group| (group.binding.artifact(), group.original_ordinal))
-                            .collect::<BTreeSet<_>>(),
-                        BTreeSet::from([(entry.descriptor.id, 9001)])
-                    );
+                    let expected = offer
+                        .issued_group_carriers()
+                        .unwrap()
+                        .into_keys()
+                        .filter(|group| {
+                            group.binding.artifact() == entry.descriptor.id
+                                && group.original_ordinal == 9001
+                        })
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(expected.len(), 1);
+                    assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
                 }
             }
             assert_eq!(
