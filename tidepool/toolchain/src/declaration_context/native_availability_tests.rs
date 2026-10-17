@@ -2076,6 +2076,38 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     assert!(inputs.metadata.retained.selected_native_groups.is_empty());
     assert!(inputs.artifacts.selected_native_groups().is_empty());
     assert_eq!(context.as_ref(), &before);
+    let owner = native.owner();
+    let held_graph = Value::Array(vec![
+        Value::Array(vec![]),
+        Value::Array(vec![Value::Array(vec![
+            text(&owner.unit),
+            text(&owner.module),
+            text(hex(&owner.module_version.0)),
+            text(hex(&owner.skinny_iface_sha256)),
+            text(hex(&owner.product_sha256)),
+            text(hex(&[7; 32])),
+        ])]),
+    ]);
+    assert!(inputs
+        .native_transport
+        .metadata
+        .entries
+        .values()
+        .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
+    assert!(inputs
+        .metadata
+        .entries
+        .values()
+        .all(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_))));
+    assert!(compiler_execution_scope(&held_graph, &inputs.metadata)
+        .unwrap()
+        .as_array()
+        .unwrap()[1]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(compiler_execution_scope(&held_graph, &inputs.native_transport.metadata).unwrap(), held_graph,
+        "private body metadata would incorrectly preserve this replay root if used as compiler policy");
     let validation = PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
