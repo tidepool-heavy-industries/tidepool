@@ -4947,11 +4947,7 @@ fn compile_invocation_inner(
             )?;
             validate_prepared_fixture_sources(bundle.dependencies(), &input_path, inv.include)?;
             let raw = bundle.targets();
-            let artifacts = assemble(bundle.metadata(), &raw, &mut on_stage)?;
-            for (target, artifact) in &artifacts.targets {
-                check_constructor_identity_agreement(target, &artifact.prepared, &artifacts.table)
-                    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            }
+            let artifacts = assemble_portable(bundle.metadata(), &raw, &mut on_stage)?;
             std::fs::create_dir(output)?;
             std::fs::write(output.join("meta.cbor"), bundle.metadata())?;
             for target in &raw {
@@ -5978,6 +5974,22 @@ pub(crate) fn assemble(
         completed_source_evidence: None,
         exact_source_admission: None,
     })
+}
+
+/// A portable fixture has no external native, package or retained-value owner.
+/// Every executable import must have been closed by its compiler transaction.
+fn assemble_portable(
+    meta_bytes: &[u8],
+    raw: &[RawTargetOutput],
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    let artifacts = assemble(meta_bytes, raw, on_stage)?;
+    ensure_no_uncertified_globals(&artifacts)?;
+    for (target, artifact) in &artifacts.targets {
+        check_constructor_identity_agreement(target, &artifact.prepared, &artifacts.table)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    }
+    Ok(artifacts)
 }
 
 fn assemble_with_products(
@@ -8733,6 +8745,30 @@ mod constructor_identity_tests {
         tidepool_test_data::prepared_encode::encode_wire_program(
             &tidepool_test_data::prepared::constructor_program(),
         )
+    }
+
+    #[test]
+    fn portable_assembly_refuses_all_unexported_import_owners() {
+        use tidepool_repr::execution_schema::testing;
+        let metadata = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
+        let target = |wire: &tidepool_repr::execution_schema::WireProgram| RawTargetOutput {
+            target: "entry".into(),
+            asks_bytes: Arc::new(b"[]".to_vec()),
+            prepared_bytes: Arc::new(tidepool_test_data::prepared_encode::encode_wire_program(
+                wire,
+            )),
+        };
+        let closed = testing::wire_program();
+        assemble_portable(&metadata, &[target(&closed)], |_, _, _| {}).unwrap();
+        for (unit, generation) in [("main", None), ("package-unit", None), ("main", Some(9))] {
+            let mut open = tidepool_test_data::prepared::callable_import_program();
+            open.globals[0].identity.unit = unit.into();
+            open.globals[0].required_generation = generation;
+            assert!(
+                assemble_portable(&metadata, &[target(&open)], |_, _, _| {}).is_err(),
+                "portable output cannot borrow any absent external authority"
+            );
+        }
     }
 
     #[test]
