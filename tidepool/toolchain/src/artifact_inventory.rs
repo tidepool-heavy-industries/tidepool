@@ -8792,6 +8792,103 @@ mod tests {
     }
 
     #[test]
+    fn bound_native_demand_repeats_new_carrier_before_recorded_historical_choice() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "CarrierRepeat",
+            vec![(0, vec![]), (1, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let historical = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![native.clone(), Arc::new(entry("HistoricalMarker", &[]))],
+            )
+            .unwrap();
+        let current = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![native.clone(), Arc::new(entry("CurrentMarker", &[]))],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let old_carrier = historical.namespace()[&native.descriptor.id];
+        let current_carrier = current.namespace()[&native.descriptor.id];
+        assert_ne!(old_carrier, current_carrier);
+        let proof =
+            NativeOriginalRequirement::from_selected_view(native.descriptor.id, &historical)
+                .unwrap()
+                .unwrap();
+        let old_groups = proof.selection.graph_selection().native_groups.clone();
+        assert_eq!(old_groups.len(), 2);
+        let available = historical.merge_fixture_selections(&current).unwrap();
+        assert_eq!(
+            available.namespace()[&native.descriptor.id],
+            current_carrier
+        );
+        let mut selected = bound_selection_for_entries(&available, &[native.clone()]);
+        selected
+            .with_new_product_dependencies(&available.metadata_snapshot(), &[proof])
+            .unwrap();
+        let mut fixed = inventory
+            .bind_segment(&available, vec![], &selected)
+            .unwrap();
+        let first_imports = [issued_source(&native, 0)];
+        let first = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&first_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        let first_groups = first.capture_graph_selection().native_groups;
+        assert_eq!(first_groups.len(), 1);
+        assert!(!old_groups.contains(&first_groups[0]));
+        let before_repeat = inventory.metrics();
+        let repeated = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &first,
+                NativeArtifactDemand::CertifiedTargetImports(&first_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        assert_eq!(
+            repeated.capture_graph_selection().native_groups,
+            first_groups
+        );
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes,
+            before_repeat.issued_scope_nodes
+        );
+        let union_imports = [issued_source(&native, 0), issued_source(&native, 1)];
+        let union = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &repeated,
+                NativeArtifactDemand::CertifiedTargetImports(&union_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        let union_groups = union.capture_graph_selection().native_groups;
+        assert_eq!(union_groups.len(), 2);
+        assert!(union_groups.contains(&first_groups[0]));
+        assert!(union_groups.iter().all(|group| !old_groups.contains(group)));
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes - before_repeat.issued_scope_nodes,
+            1
+        );
+    }
+
+    #[test]
     fn bound_native_demand_refuses_future_type_without_mutating_demand_or_cache() {
         use crate::certified_products::PendingImportOwner;
         let inventory = ArtifactInventory::default();
