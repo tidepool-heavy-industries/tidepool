@@ -875,8 +875,30 @@ struct SegmentCursor {
     end: usize,
     request: crate::declaration_context::ExactCompilationRequest,
     context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    artifacts: crate::artifact_inventory::ArtifactView,
-    groups: Arc<[certified_products::PendingCertifiedGroup]>,
+    native_prefix: SegmentNativePrefix,
+}
+
+// Keep the issued target decision with the artifacts and certified groups that
+// it was sealed alongside. Artifact custody alone does not select native code.
+enum SegmentNativePrefix {
+    Initial(Arc<crate::declaration_context::ExactCompilationRequest>),
+    Advanced(Arc<SealedTurnProducts>),
+}
+
+impl SegmentNativePrefix {
+    fn artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
+        match self {
+            Self::Initial(request) => request.compiler_inputs().artifacts(),
+            Self::Advanced(products) => &products.artifact_view,
+        }
+    }
+
+    fn groups(&self) -> &[certified_products::PendingCertifiedGroup] {
+        match self {
+            Self::Initial(request) => &request.groups,
+            Self::Advanced(products) => &products.certified_groups,
+        }
+    }
 }
 
 struct ItemAdmission<'a> {
@@ -928,8 +950,8 @@ impl ItemAdmission<'_> {
             &self.segment.source,
             SegmentItemDemand {
                 selection: &mut self.segment.artifacts,
-                view: &self.cursor.artifacts,
-                groups: self.cursor.groups.as_ref(),
+                view: self.cursor.native_prefix.artifacts(),
+                groups: self.cursor.native_prefix.groups(),
             },
             validation,
         )?;
@@ -949,8 +971,7 @@ impl ItemAdmission<'_> {
         )?;
         // All fallible admission work precedes the single prefix/demand advance.
         let products = output.products.as_ref().expect("program output was sealed");
-        self.cursor.artifacts = products.artifact_view.clone();
-        self.cursor.groups = products.certified_groups.clone();
+        self.cursor.native_prefix = SegmentNativePrefix::Advanced(Arc::clone(products));
         self.cursor.request = request;
         self.cursor.context = next_context;
         self.cursor.next += 1;
@@ -2377,21 +2398,9 @@ impl SelectedModuleCandidateOffer {
                 let mut cursor = SegmentCursor {
                     next: index,
                     end,
-                    artifacts: bound
-                        .offer
-                        .exact
-                        .as_ref()
-                        .expect("exact segment")
-                        .compiler_inputs()
-                        .artifacts()
-                        .clone(),
-                    groups: bound
-                        .offer
-                        .exact
-                        .as_ref()
-                        .expect("exact segment")
-                        .groups
-                        .clone(),
+                    native_prefix: SegmentNativePrefix::Initial(Arc::new(
+                        bound.offer.exact.as_ref().expect("exact segment").clone(),
+                    )),
                     request: bound.offer.exact.as_ref().expect("exact segment").clone(),
                     context,
                 };
