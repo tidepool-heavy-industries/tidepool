@@ -10,7 +10,7 @@ module Tidepool.CompilerRequest
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
   , PreparedCompilation, preparedCompilationResult, prepareCompilationOriginals
-  , PreparedArtifact(..), PreparedOutputIntent(..), prepareArtifacts, prepareArtifactsWithIntent
+  , PreparedArtifact(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
 
@@ -248,8 +248,12 @@ compileWithWorklist request@(BoundCompilerRequest _ args _ _ _ executor _) selec
 
 compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
-compilePreparedRequest request@(BoundCompilerRequest _ _ _ _ _ executor _) selection retained purpose session path = do
-  (completed,worklist) <- compileWithWorklist request selection retained purpose session path
+compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) selection retained purpose session path = do
+  (completed,worklist) <- case preparedOutputIntent args of
+    NativeOriginals -> compileWithWorklist request selection retained purpose session path
+    PortableExecutable -> do
+      completed <- compileBoundCompleted request selection retained purpose session path
+      pure (completed,Nothing)
   pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist)
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
@@ -289,6 +293,14 @@ prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilatio
 prepareArtifacts = prepareArtifactsWithIntent NativeOriginals
 
 data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
+
+-- The request chooses its output contract before module completion observers
+-- run. Portable compilation keeps the same checked pipeline and executor but
+-- does not observe unrelated modules as native-original export products.
+preparedOutputIntent :: WorkerRequest -> PreparedOutputIntent
+preparedOutputIntent args
+  | requestPortableOutput args = PortableExecutable
+  | otherwise = NativeOriginals
 
 prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]

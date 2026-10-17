@@ -439,7 +439,7 @@ processFile bound timing path = do
           [] -> maybe [] pure mTarget
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     (preparedArtifacts, productContext) <- prepareArtifactsWithIntent
-      (if requestPortableOutput args then PortableExecutable else NativeOriginals)
+      (preparedOutputIntent args)
       originalInterfaces outDir completion preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
