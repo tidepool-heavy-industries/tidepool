@@ -594,26 +594,12 @@ mod tests {
 
     fn write_status(run_root: &Path, session: &str, phase: crate::exomonad::RunPhase) {
         std::fs::create_dir_all(run_root).unwrap();
-        let status = serde_json::json!({
-            "version": 4,
-            "run_id": run_root.file_name().unwrap().to_str().unwrap(),
-            "workspace": "/tmp/workspace",
-            "session": session,
-            "agent": {"model": "test-model", "effort": "low"},
-            "phase": match phase {
-                crate::exomonad::RunPhase::Starting => serde_json::json!({"state": "starting"}),
-                crate::exomonad::RunPhase::Exited => serde_json::json!({"state": "exited"}),
-                crate::exomonad::RunPhase::Failed { error } => {
-                    serde_json::json!({"state": "failed", "error": error})
-                }
-                crate::exomonad::RunPhase::AwaitingBinding { .. }
-                | crate::exomonad::RunPhase::Ready { .. }
-                | crate::exomonad::RunPhase::EmbeddedReady { .. }
-                | crate::exomonad::RunPhase::Recovering { .. } => {
-                    unreachable!("not exercised by these tests")
-                }
-            },
-        });
+        let status = crate::exomonad::run_status_fixture(
+            run_root.file_name().unwrap().to_str().unwrap(),
+            Path::new("/tmp/workspace"),
+            session,
+            phase,
+        );
         std::fs::write(
             run_root.join("status.json"),
             serde_json::to_vec(&status).unwrap(),
