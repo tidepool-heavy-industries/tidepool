@@ -967,10 +967,6 @@ impl CellProgramItem {
             .as_ref()
             .map(|value| value.turn.as_ref())
     }
-    pub fn native_metadata_bytes(&self) -> Option<&[u8]> {
-        self.native_observations.as_ref()?;
-        self.native.as_ref().map(|value| value.metadata_bytes())
-    }
     pub fn native_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
         self.native_observations
             .as_ref()
@@ -2535,7 +2531,6 @@ pub struct ExactCompiledItem {
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
-    metadata: Arc<[u8]>,
     warnings: tidepool_repr::serial::MetaWarnings,
     yield_sites_digest: [u8; 32],
     value_interface: Option<Arc<CheckedValueArtifact>>,
@@ -2860,10 +2855,6 @@ impl CheckedTypedEntry {
 }
 
 impl ExactCompiledItem {
-    /// The same captured metadata observation admitted with this exact target.
-    pub fn metadata_bytes(&self) -> &[u8] {
-        &self.metadata
-    }
     pub fn table(&self) -> &tidepool_repr::DataConTable {
         &self.table
     }
@@ -3575,7 +3566,6 @@ impl CheckedItemOffer {
             original_execution,
             target,
             table,
-            metadata,
             warnings,
             bound_binders,
             authenticated_sites,
@@ -3602,7 +3592,6 @@ impl CheckedItemOffer {
             item: self.item.clone(),
             target,
             table,
-            metadata,
             warnings,
             yield_sites_digest: authenticated_sites,
             value_interface,
@@ -3632,7 +3621,6 @@ pub(crate) struct PreparedCheckedItemOutput {
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
-    metadata: Arc<[u8]>,
     warnings: tidepool_repr::serial::MetaWarnings,
     bound_binders: Vec<Value>,
     authenticated_sites: [u8; 32],
@@ -3769,7 +3757,7 @@ impl PreparedCheckedItemOutput {
                 })
             })
             .transpose()?;
-        let (metadata, table, warnings) = output.decode_metadata()?;
+        let (table, warnings) = output.decode_metadata()?;
         Ok(Self {
             item: item.clone(),
             generation,
@@ -3777,7 +3765,6 @@ impl PreparedCheckedItemOutput {
             is_program,
             target: target.clone(),
             table,
-            metadata,
             warnings,
             original_execution,
             bound_binders,

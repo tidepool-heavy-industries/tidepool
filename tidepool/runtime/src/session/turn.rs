@@ -1857,7 +1857,6 @@ impl CompiledTurn {
         };
         let products = item.native_products().ok_or_else(missing)?;
         let execution = item.native().ok_or_else(missing)?;
-        item.native_metadata_bytes().ok_or_else(missing)?;
         let certification = TurnCertification {
             artifact_view: products.artifact_view.clone(),
             original_compile_input: None,
@@ -3727,7 +3726,7 @@ fn audit_compiler_issued_item_receipts(
                     let item = native[item_index];
                     let (ordinal, module) = captures[capture_index];
                     let selected = item.native_products().unwrap().artifact_view.descriptors();
-                    let (table, _) = read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+                    let table = item.native().unwrap().table();
                     let sites = match decode_turn_out(item.native_turn_bytes().unwrap()).unwrap() {
                         DecodedTurnOut::Bind { asks, .. } | DecodedTurnOut::Expr { asks, .. } => {
                             asks
@@ -3739,7 +3738,7 @@ fn audit_compiler_issued_item_receipts(
                         .unwrap()
                         .original_execution_context(
                             &item.native().unwrap().target_owned(),
-                            &table,
+                            table,
                             &sites,
                         )
                         .unwrap()
@@ -7218,11 +7217,23 @@ mod tests {
         );
         assert!(before.0 >= 2, "actual multi-item output must be observed");
         assert_eq!(before.0, before.1, "one decode per captured item");
+        let mut originals = std::collections::BTreeMap::new();
         let mut changed = 0;
         for entry in std::fs::read_dir(prepared.root.path()).unwrap() {
-            let path = entry.unwrap().path().join("meta.cbor");
+            let directory = entry.unwrap().path();
+            let path = directory.join("meta.cbor");
             if path.is_file() {
+                let ordinal: usize = directory
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("item-")
+                    .expect("actual item output directory")
+                    .parse()
+                    .unwrap();
                 let bytes = std::fs::read(&path).unwrap();
+                assert!(originals.insert(ordinal, bytes.clone()).is_none());
                 let (table, mut warnings) = tidepool_repr::serial::read_metadata(&bytes).unwrap();
                 warnings.captured_type = Some("later file observation".into());
                 let replacement = tidepool_repr::serial::write_metadata(&table, &warnings).unwrap();
@@ -7244,7 +7255,7 @@ mod tests {
         assert_eq!(natives.len(), before.1);
         for owner in &natives {
             let (table, warnings) =
-                tidepool_repr::serial::read_metadata(owner.metadata_bytes()).unwrap();
+                tidepool_repr::serial::read_metadata(&originals[&owner.item().index()]).unwrap();
             assert_eq!(&table, owner.table());
             assert_eq!(warnings.captured_type, owner.warnings().captured_type);
             assert_ne!(

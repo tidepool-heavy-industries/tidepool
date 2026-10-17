@@ -2912,9 +2912,7 @@ impl ProgramNativeOutput {
     pub(crate) fn target(&self) -> &Arc<PreparedProgram> {
         &self.target
     }
-    pub(crate) fn decode_metadata(
-        &self,
-    ) -> Result<(Arc<[u8]>, DataConTable, MetaWarnings), CompileError> {
+    pub(crate) fn decode_metadata(&self) -> Result<(DataConTable, MetaWarnings), CompileError> {
         let start = Instant::now();
         let (table, warnings) =
             tidepool_repr::serial::read_metadata_for_program(&self.metadata, &self.target)?;
@@ -2925,7 +2923,7 @@ impl ProgramNativeOutput {
             start.elapsed(),
             self.metadata.len() as u64,
         );
-        Ok((self.metadata.clone(), table, warnings))
+        Ok((table, warnings))
     }
 }
 
@@ -8978,13 +8976,13 @@ mod constructor_identity_tests {
                 changed_table
             );
             std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
-            let (captured, decoded, observed) = output.decode_metadata().unwrap();
+            let (decoded, observed) = output.decode_metadata().unwrap();
             assert!(Arc::ptr_eq(&target, output.target()));
-            assert_eq!(&*captured, original.as_slice());
+            assert_eq!(output.metadata.as_ref(), original.as_slice());
             assert_eq!(decoded, table);
             assert_eq!(observed.captured_type, warnings.captured_type);
             std::fs::remove_file(directory.path().join("meta.cbor")).unwrap();
-            assert_eq!(output.decode_metadata().unwrap().0.as_ref(), original);
+            assert_eq!(output.decode_metadata().unwrap().0, table);
         }
         // A later valid file cannot repair the actual invalid observation.
         std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
