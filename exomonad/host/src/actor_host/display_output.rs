@@ -10,10 +10,24 @@ use harness::{
     store::{actor_output::*, Store, StoreError},
 };
 
+fn run_store_path(run_root: &Path) -> std::path::PathBuf {
+    run_root.join("harness/store.sqlite")
+}
+
+/// Preadmitted transports have no retained run-level recovery authority yet.
+/// Refuse an existing Store rather than infer that authority from requests.
+pub(super) fn require_unopened_run_store(run_root: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(run_store_path(run_root)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot inspect run Store before transport admission: {error}")),
+        Ok(_) => Err("preadmitted transport cannot reopen an existing run Store without retained run transport authority".into()),
+    }
+}
+
 pub(super) fn open_run_store(run_root: &Path) -> Result<Arc<Store>, String> {
     let root = run_root.join("harness");
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    Store::open(root.join("store.sqlite"))
+    Store::open(run_store_path(run_root))
         .map(Arc::new)
         .map_err(|error| error.to_string())
 }
@@ -186,5 +200,31 @@ fn publish_inner(
             };
             request.answer(outcome);
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_admission_tests {
+    use super::*;
+
+    #[test]
+    fn preadmitted_transport_requires_unopened_store_and_preserves_existing_state() {
+        let run = tempfile::tempdir().unwrap();
+        require_unopened_run_store(run.path()).unwrap();
+        let store = open_run_store(run.path()).unwrap();
+        assert!(require_unopened_run_store(run.path()).is_err());
+        drop(store);
+        assert!(require_unopened_run_store(run.path()).is_err());
+        assert!(
+            open_run_store(run.path()).is_ok(),
+            "ordinary frozen startup can reopen through the existing Store owner"
+        );
+    }
+
+    #[test]
+    fn preadmitted_transport_does_not_treat_uninspectable_store_as_fresh() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::write(run.path().join("harness"), "not a directory").unwrap();
+        assert!(require_unopened_run_store(run.path()).is_err());
     }
 }

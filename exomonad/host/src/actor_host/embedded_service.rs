@@ -299,14 +299,28 @@ impl EmbeddedService {
         let browser_bundle =
             harness::server::verify_browser_bundle(&settings.asset_root, &browser_identity)
                 .map_err(|error| error.to_string())?;
+        if inference_auth.is_some() {
+            super::display_output::require_unopened_run_store(run_root)?;
+        }
         let runtime = Arc::new(
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
         let auth = match inference_auth {
-            Some(auth) if auth.backend() == settings.provider => auth,
-            Some(_) => {
-                return Err("preadmitted transport differs from configured run backend".into())
+            Some(auth) => {
+                if auth.backend() != settings.provider {
+                    return Err("preadmitted transport differs from configured run backend".into());
+                }
+                let admission = harness::transport::Auth::admission(&auth)
+                    .map_err(|error| error.to_string())?;
+                if admission.contract().limits
+                    != settings.inference_limits.resolve(settings.provider)
+                {
+                    return Err(
+                        "preadmitted transport differs from configured inference limits".into(),
+                    );
+                }
+                auth
             }
             None => super::run_auth::RunAuth::from_settings(
                 settings,

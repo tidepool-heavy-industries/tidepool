@@ -1816,6 +1816,10 @@ async fn run_owned(
     if config.model.value().trim().is_empty() {
         return Err(runtime_error("run model must be nonempty"));
     }
+    if config.inference_auth.is_some() {
+        display_output::require_unopened_run_store(config.run_directory.path())
+            .map_err(runtime_error)?;
+    }
     let (host_incarnation, boot_registration) = host_incarnation.into_boot_registration();
     let run_root = config.run_directory.path().to_path_buf();
     if !host_incarnation.owns_run(&run_root)? {
