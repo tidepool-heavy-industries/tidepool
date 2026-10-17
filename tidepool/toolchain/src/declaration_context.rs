@@ -923,17 +923,22 @@ impl OriginalCompilerInputs {
             .filter_map(|role| role.original())
             .collect::<BTreeSet<_>>();
         let mut namespace_offers = Vec::new();
-        for offer in &dependency_offers {
-            let Some(consumed) = offer.within_projection(&effective, inventory)? else {
-                continue;
-            };
-            if namespace_originals.contains(&consumed.original())
-                || consumed
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| namespace_originals.contains(&group.binding.artifact()))
-            {
-                namespace_offers.push(consumed);
+        // A physical request already froze its row-level permissions. Its
+        // supporting parent proofs cannot be replayed as namespace grants.
+        // Fresh-body dependencies use the exact request catalog below.
+        if !matches!(source, CompleteAvailabilitySource::Request(_)) {
+            for offer in &dependency_offers {
+                let Some(consumed) = offer.within_projection(&effective, inventory)? else {
+                    continue;
+                };
+                if namespace_originals.contains(&consumed.original())
+                    || consumed
+                        .issued_group_carriers()?
+                        .keys()
+                        .any(|group| namespace_originals.contains(&group.binding.artifact()))
+                {
+                    namespace_offers.push(consumed);
+                }
             }
         }
         // Available code retains custody without selecting executable groups.
