@@ -7258,6 +7258,8 @@ mod tests {
                 tidepool_repr::serial::read_metadata(&originals[&owner.item().index()]).unwrap();
             assert_eq!(&table, owner.table());
             assert_eq!(warnings.captured_type, owner.warnings().captured_type);
+            assert_eq!(warnings.has_io, owner.warnings().has_io);
+            assert_eq!(warnings.warnings, owner.warnings().warnings);
             assert_ne!(
                 warnings.captured_type.as_deref(),
                 Some("later file observation")
