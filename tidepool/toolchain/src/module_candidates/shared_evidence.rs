@@ -72,51 +72,121 @@ impl SharedEvidence {
     }
 }
 
-/// Request-local ownership of one proof and its exact publication encoding.
-/// Rejected preparations retain their borrowed semantic proof for cohort checks.
-/// Captured bytes never enter the long-lived shared proof cache.
-pub(super) struct PublicationEvidence<'a>(PublicationEvidenceState<'a>);
+/// One preparation owns its proof, exact encoding and every issued record.
+/// Uncaptured preparations retain semantics for refusal diagnostics and cannot
+/// hold records. Captured bytes remain local to this publication.
+pub(super) struct PublicationCohort<'a>(PublicationCohortState<'a>);
 
-enum PublicationEvidenceState<'a> {
-    Unencoded(&'a DependencyEvidence),
-    Encoded {
+enum PublicationCohortState<'a> {
+    Uncaptured(&'a DependencyEvidence),
+    Captured {
         shared: SharedEvidence,
         bytes: Vec<u8>,
+        records: Vec<Record>,
     },
 }
 
-impl<'a> PublicationEvidence<'a> {
+impl<'a> PublicationCohort<'a> {
     pub(super) fn new(evidence: &'a DependencyEvidence) -> Self {
-        Self(PublicationEvidenceState::Unencoded(evidence))
+        Self(PublicationCohortState::Uncaptured(evidence))
     }
 
     pub(super) fn evidence(&self) -> &DependencyEvidence {
         match &self.0 {
-            PublicationEvidenceState::Unencoded(evidence) => evidence,
-            PublicationEvidenceState::Encoded { shared, .. } => shared,
+            PublicationCohortState::Uncaptured(evidence) => evidence,
+            PublicationCohortState::Captured { shared, .. } => shared,
         }
     }
 
-    pub(super) fn capture(&mut self) -> Option<(&SharedEvidence, &EvidenceRef)> {
-        if let PublicationEvidenceState::Unencoded(evidence) = &self.0 {
+    pub(super) fn capture(&mut self) -> Option<()> {
+        if let PublicationCohortState::Uncaptured(evidence) = &self.0 {
             let (reference, bytes) = encode_evidence(evidence)?;
             let shared = SharedEvidence(Arc::new(SharedProof {
                 evidence: (*evidence).clone(),
                 reference: std::sync::OnceLock::from(Some(reference)),
                 json_sha256: std::sync::OnceLock::new(),
             }));
-            self.0 = PublicationEvidenceState::Encoded { shared, bytes };
+            self.0 = PublicationCohortState::Captured {
+                shared,
+                bytes,
+                records: Vec::new(),
+            };
         }
+        Some(())
+    }
+
+    pub(super) fn records(&self) -> &[Record] {
         match &self.0 {
-            PublicationEvidenceState::Encoded { shared, .. } => {
-                Some((shared, shared.0.reference.get()?.as_ref()?))
-            }
-            PublicationEvidenceState::Unencoded(_) => None,
+            PublicationCohortState::Uncaptured(_) => &[],
+            PublicationCohortState::Captured { records, .. } => records,
         }
     }
 
-    pub(super) fn publish(&self, root: &Path) -> Option<()> {
-        let PublicationEvidenceState::Encoded { shared, bytes } = &self.0 else {
+    pub(super) fn into_records(self) -> Vec<Record> {
+        match self.0 {
+            PublicationCohortState::Uncaptured(_) => Vec::new(),
+            PublicationCohortState::Captured { records, .. } => records,
+        }
+    }
+
+    pub(super) fn issue_record(
+        &mut self,
+        data: impl FnOnce(&EvidenceRef) -> RecordData,
+        certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    ) -> bool {
+        let PublicationCohortState::Captured {
+            shared, records, ..
+        } = &mut self.0
+        else {
+            return false;
+        };
+        let reference = shared
+            .0
+            .reference
+            .get()
+            .and_then(Option::as_ref)
+            .expect("captured proof has its issued reference");
+        let mut data = data(reference);
+        if &data.evidence != reference {
+            data.evidence = reference.clone();
+        }
+        let owner = computed_owner(&data);
+        data.original_owner = OriginalOwner::from_owner(&owner);
+        let mut record = Record {
+            evidence: shared.clone(),
+            module_interface_proof: None,
+            execution_source: None,
+            data,
+        };
+        if let Some(original) = certified.iter().find(|original| {
+            original.owner().unit == record.unit && original.owner().module == record.module
+        }) {
+            if original.owner() != &owner
+                || original.interface_bytes() != record.interface
+                || original.product_bytes() != record.products
+                || original.package_imports_bytes() != record.package_imports
+            {
+                return false;
+            }
+            record.module_interface_proof = original.module_interface().cloned();
+            record.data.original_certification = original.certification_bytes().to_vec();
+            record.execution_source = original.execution_source().cloned();
+            record.data.execution_source_sha256 =
+                record.execution_source.as_ref().map(|graph| graph.digest());
+        }
+        records.push(record);
+        true
+    }
+
+    pub(super) fn publish_if_records(&self, root: &Path) -> Option<()> {
+        if self.records().is_empty() {
+            return Some(());
+        }
+        self.publish_captured(root)
+    }
+
+    fn publish_captured(&self, root: &Path) -> Option<()> {
+        let PublicationCohortState::Captured { shared, bytes, .. } = &self.0 else {
             return None;
         };
         let reference = shared.0.reference.get()?.as_ref()?;
@@ -254,9 +324,9 @@ fn evidence_path(root: &Path, digest: &str) -> PathBuf {
 
 #[cfg(test)]
 pub(super) fn publish(root: &Path, evidence: &DependencyEvidence) -> Option<()> {
-    let mut evidence = PublicationEvidence::new(evidence);
+    let mut evidence = PublicationCohort::new(evidence);
     evidence.capture()?;
-    evidence.publish(root)
+    evidence.publish_captured(root)
 }
 
 pub(super) fn encode_record(record: &Record) -> Option<Vec<u8>> {
@@ -413,34 +483,54 @@ mod tests {
         let mut expected = Vec::new();
         ciborium::ser::into_writer(&*record.evidence, &mut expected).unwrap();
         let output = root.path().join("captured-publication");
-        let mut publication = PublicationEvidence::new(&record.evidence);
+        let mut publication = PublicationCohort::new(&record.evidence);
         assert_eq!(publication.evidence(), &*record.evidence);
-        assert_eq!(publication.publish(&output), None);
+        assert_eq!(publication.publish_if_records(&output), Some(()));
         assert!(
             !output.exists(),
             "uncaptured evidence cannot publish a proof"
         );
-        let (shared, reference) = publication.capture().unwrap();
-        let retained = shared.clone();
-        let reference = reference.clone();
+        publication.capture().unwrap();
+        assert!(publication.records().is_empty());
+        assert_eq!(publication.publish_if_records(&output), Some(()));
+        assert!(!output.exists(), "captured empty cohorts publish no proof");
+        assert!(publication.issue_record(|_| record.data.clone(), &[]));
+        let retained = publication.records()[0].evidence.clone();
+        let reference = publication.records()[0].data.evidence.clone();
         assert_eq!(reference.sha256, sha(&expected));
         assert_eq!(reference.encoded_len, expected.len() as u64);
-        assert_eq!(shared.reference(), Some(&reference));
-        let (shared, repeated_reference) = publication.capture().unwrap();
-        assert!(Arc::ptr_eq(&shared.0, &retained.0));
-        assert_eq!(repeated_reference, &reference);
+        assert_eq!(retained.reference(), Some(&reference));
+        publication.capture().unwrap();
+        assert!(Arc::ptr_eq(
+            &publication.records()[0].evidence.0,
+            &retained.0
+        ));
+        assert_eq!(publication.records()[0].data.evidence, reference);
         let mut replacement = retained.clone();
         replacement.make_mut().sources[0].sha256 = sha(b"replacement input");
         assert_ne!(&*replacement, publication.evidence());
         assert_eq!(publication.evidence(), &*record.evidence);
-        publication.publish(&output).unwrap();
+        assert!(publication.issue_record(
+            |_| {
+                let mut data = record.data.clone();
+                data.evidence.sha256 = "not the captured proof".into();
+                data
+            },
+            &[]
+        ));
+        assert_eq!(publication.records()[1].data.evidence, reference);
+        assert!(Arc::ptr_eq(
+            &publication.records()[1].evidence.0,
+            &retained.0
+        ));
+        publication.publish_if_records(&output).unwrap();
         let bytes = fs::read(evidence_path(&output, &reference.sha256)).unwrap();
         assert_eq!(bytes, expected);
         let restored: DependencyEvidence = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(&restored, publication.evidence());
         let blocked = root.path().join("blocked-publication");
         fs::write(&blocked, b"regular file").unwrap();
-        assert_eq!(publication.publish(&blocked), None);
+        assert_eq!(publication.publish_if_records(&blocked), None);
         assert_eq!(fs::read(&blocked).unwrap(), b"regular file");
     }
 
@@ -449,11 +539,11 @@ mod tests {
         let (root, record, _) = fixture();
         let mut evidence = (*record.evidence).clone();
         evidence.packages.push("x".repeat(RECORD_LIMIT));
-        let mut publication = PublicationEvidence::new(&evidence);
+        let mut publication = PublicationCohort::new(&evidence);
         assert!(publication.capture().is_none());
         assert_eq!(publication.evidence(), &evidence);
         let output = root.path().join("oversized-publication");
-        assert_eq!(publication.publish(&output), None);
+        assert_eq!(publication.publish_if_records(&output), Some(()));
         assert!(!output.exists());
     }
 
