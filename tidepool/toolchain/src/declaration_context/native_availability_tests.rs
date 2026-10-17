@@ -657,6 +657,108 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
 }
 
 #[test]
+fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
+    let baseline_product = product("BaselineOnly", 87);
+    let baseline = type_context(std::slice::from_ref(&baseline_product));
+    let dependency = identity("fixture", "BaselineOnly");
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let consumer = crate::certified_products::fixture_finalized_product_with_requirements(
+        original_groups_fixture_with_interface(
+            "PrivateFragment",
+            vec![(7, vec![])],
+            88,
+            &BTreeMap::new(),
+            b"private fragment interface".to_vec(),
+        ),
+        producer.sha256(),
+        Some(BTreeMap::from([(
+            (dependency.unit.clone(), dependency.module.clone()),
+            baseline_product
+                .module_interface()
+                .unwrap()
+                .interface_sha256(),
+        )])),
+    );
+    let consumer = recovered_witness_fixtures(&[consumer]).remove(0).product;
+    let private =
+        OriginalCompilerInputs::from_native_availability(&baseline, producer, &[consumer])
+            .expect("the private issuer may use receiving baseline type evidence");
+    let offered = identity("fixture", "PrivateFragment");
+    assert_eq!(
+        private
+            .projection
+            .snapshot_roles()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([offered.clone()])
+    );
+    assert!(
+        matches!(private.projection.validate(&private.artifacts),
+        Err(CompileError::ArtifactInventory(error))
+        if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { required, .. }
+            if required == dependency)),
+        "the issued fragment intentionally leaves its baseline dependency unoffered"
+    );
+    assert_eq!(private.native_offers.len(), 1);
+    let proof = private.native_offers[0]
+        .proof()
+        .expect("the owner issued its actual empty group");
+    let groups = proof
+        .issued_groups(private.native_offers[0].custody())
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups.first().unwrap().original_ordinal, 7);
+    assert!(private.native_offers[0].is_full());
+    let before = baseline.semantic_sha256();
+    let roots = baseline.artifact_view().capture_graph_selection().roots;
+    let original = private.native_offers[0].original();
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(baseline.clone())
+        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+        .expect("the final request closes the fragment against receiving baseline roles");
+    let final_inputs = request.compiler_inputs();
+    final_inputs
+        .projection
+        .validate(&final_inputs.artifacts)
+        .unwrap();
+    assert_eq!(
+        final_inputs
+            .projection
+            .snapshot_roles()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([dependency.clone(), offered])
+    );
+    assert!(final_inputs.projection.snapshot_roles()[&dependency]
+        .original()
+        .is_none());
+    assert_eq!(
+        final_inputs.artifacts.capture_graph_selection().roots,
+        roots,
+        "private availability cannot add executable body roots"
+    );
+    let final_proof = final_inputs
+        .native_original_requirements()
+        .into_iter()
+        .find(|proof| proof.original == original)
+        .unwrap();
+    assert_eq!(
+        final_proof.issued_groups(&final_inputs.artifacts).unwrap(),
+        groups
+    );
+    assert_eq!(baseline.semantic_sha256(), before);
+    assert!(
+        !baseline
+            .compiler_input_projection()
+            .snapshot_roles()
+            .contains_key(&identity("fixture", "PrivateFragment")),
+        "private request composition cannot publish its fragment into declarations"
+    );
+}
+
+#[test]
 fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallback() {
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
 
