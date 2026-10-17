@@ -513,17 +513,11 @@ impl OriginalCompilerInputs {
     pub(crate) fn reuse_selected_authored(
         context: &ExactDeclarationContext,
     ) -> Result<Option<Self>, CompileError> {
-        let metadata = context
-            .facts
-            .compiler_support
-            .artifacts()
-            .metadata_snapshot();
-        let authored = context
-            .compiler_input_projection()
-            .roles()
-            .iter()
-            .filter_map(|role| {
-                let entry = metadata.artifacts.get(&role.interface())?;
+        let interfaces = context.facts.compiler_support.selected_interfaces()?;
+        let authored = interfaces
+            .entries()
+            .values()
+            .filter_map(|entry| {
                 let ArtifactPayload::Canonical(interface) = &entry.payload else {
                     return None;
                 };

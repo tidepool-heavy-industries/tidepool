@@ -3149,6 +3149,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         .unwrap();
         assert!(other.native_offers().iter().any(|offer| offer.is_full()));
         for reverse in [false, true] {
+            let before = selected_context.artifact_view().selected_native_groups();
             let mut historical = selected_context.clone();
             let mut offers = historical
                 .compiler_source_support()
@@ -3162,14 +3163,36 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 .compiler_source_support()
                 .retain_offers(offers)
                 .unwrap();
-            let before = historical.artifact_view().selected_native_groups();
             assert!(
                 before.is_empty(),
                 "the selected authored owner has explicit zero demand"
             );
+            let inventory = historical.artifact_view().inventory();
+            let before_origin = inventory.metrics();
             let direct = OriginalCompilerInputs::reuse_selected_authored(&historical)
                 .unwrap()
                 .expect("catalog-absent authored reuse carries its selected exact owner");
+            let after_origin = inventory.metrics();
+            assert_eq!(after_origin.graph_visits, before_origin.graph_visits);
+            assert_eq!(
+                after_origin.entry_handle_copies,
+                before_origin.entry_handle_copies
+            );
+            // Observe the old route only after the consumer: its graph work
+            // proves this history supplied a cold view, not a warmed no-op.
+            let metadata = historical.artifact_view().metadata_snapshot();
+            assert!(inventory.metrics().graph_visits > after_origin.graph_visits);
+            let selected_role = historical
+                .compiler_input_projection()
+                .snapshot_roles()
+                .get(&identity("main", &module))
+                .unwrap()
+                .clone();
+            assert!(matches!(
+                &metadata.artifacts[&selected_role.interface()].payload,
+                ArtifactPayload::Canonical(interface)
+                    if interface == current.module_interface().unwrap()
+            ));
             assert_eq!(direct.artifacts.selected_native_groups(), before);
             assert!(direct.selected_demand_source().is_some());
             assert_eq!(
