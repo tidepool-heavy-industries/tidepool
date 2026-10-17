@@ -16266,7 +16266,10 @@ pub(crate) mod tests {
         std::fs::write(&bundle.package_imports_path, b"changed package witness").unwrap();
         let stale_package = certify_cached(&cached_receipt);
         std::fs::write(&bundle.package_imports_path, &bundle.package_imports_bytes).unwrap();
-        assert!(matches!(stale_package, Err(CertificationError::StaleEvidence)));
+        assert!(matches!(
+            stale_package,
+            Err(CertificationError::StaleEvidence)
+        ));
         let restored_package = certify_cached(&cached_receipt).unwrap();
         assert_eq!(restored_package.recovery_products[0].owner(), &bundle.owner);
         assert_eq!(
