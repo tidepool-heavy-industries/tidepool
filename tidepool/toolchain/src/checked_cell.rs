@@ -5502,13 +5502,18 @@ mod tests {
         checked_value_custody_histories(|_, context| {
             let before = context.artifact_view().capture_graph_selection();
             let roles = context.compiler_input_projection().snapshot_roles();
-            let requirements = context.authored_native_binding_custody_requirements(
-                &BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
-                    unit: "fixture".into(),
-                    module: "Epoch".into(),
-                }]),
-            ).map_err(|error| error.to_string())?;
-            assert!(requirements.is_empty(), "source originals issue no authored lifetime edges");
+            let requirements = context
+                .authored_native_binding_custody_requirements(&BTreeSet::from([
+                    crate::declaration_join::ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "Epoch".into(),
+                    },
+                ]))
+                .map_err(|error| error.to_string())?;
+            assert!(
+                requirements.is_empty(),
+                "source originals issue no authored lifetime edges"
+            );
             assert_eq!(context.artifact_view().capture_graph_selection(), before);
             assert_eq!(context.compiler_input_projection().snapshot_roles(), roles);
             Ok(())
@@ -5516,7 +5521,10 @@ mod tests {
     }
 
     fn checked_value_custody_histories(
-        observe: impl Fn(&Arc<CheckedValueArtifact>, &crate::declaration_context::ExactDeclarationContext) -> Result<(), String>,
+        observe: impl Fn(
+            &Arc<CheckedValueArtifact>,
+            &crate::declaration_context::ExactDeclarationContext,
+        ) -> Result<(), String>,
     ) {
         use super::*;
         use crate::artifact_inventory::{
