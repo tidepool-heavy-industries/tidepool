@@ -9,7 +9,7 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (hClose, openTempFile)
 import System.IO.Error (isDoesNotExistError, isUserError, ioeGetErrorString, ioeGetFileName)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), DependencyLoadFailure(..))
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), LookupNameInspection(..), LookupNameMode(..), workerArgv, workerRequestFromArgv)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.InspectionRunner (runInspectionRequests)
 import Tidepool.Introspection (InspectionResult(..))
@@ -34,6 +34,16 @@ inspectionRunnerChecks = do
         if path == "bad" then throwIO sourceFailure else pure environment
       mixed = request [Input "same", Input "same", Input "same", Input "other", Input "bad", Input "bad"]
         [InspectType "a", InspectInfo "name", InspectSearch "_", InspectType "b", InspectInfo "x", InspectType "c"]
+  let hosted = request [Input "metadata"]
+        [HostedLookup (HostedLookupBatch
+          [HostedLookupPrimary 1 "value" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly))]
+          Nothing)]
+  unsupported <- try (runInspectionRequests hosted record inspect) :: IO (Either IOException [InspectionResult])
+  assert "codec checkpoint refuses hosted execution before any compiler work"
+    (case unsupported of Left exception -> isUserError exception; Right _ -> False)
+  beforeComplete <- readIORef calls
+  beforeInspect <- readIORef inspected
+  assert "unsupported hosted execution does not compile or inspect" (null beforeComplete && null beforeInspect)
   answers <- runInspectionRequests mixed compile inspect
   history <- reverse <$> readIORef calls
   assert "memo distinguishes exact paths and wildcard policy; source failures are reused"

@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v20";
-const MAGIC: &[u8; 8] = b"TPREQ020";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v21";
+const MAGIC: &[u8; 8] = b"TPREQ021";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -98,6 +98,85 @@ pub struct ExactNameInspection {
     pub name: String,
 }
 
+/// One compiler operation retains its authored position, including gaps left by host docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostedLookupOperation {
+    Primary {
+        ordinal: u32,
+        origin: String,
+        query: HostedLookupQuery,
+    },
+    ExactReference {
+        destinations: Vec<u32>,
+        query: ExactNameInspection,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostedLookupQuery {
+    Name(LookupNameInspection),
+    TypeSearch(String),
+}
+
+/// Admission is supplied by the host; actual conditional search is worker-owned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedLookupDiscovery {
+    pub candidate_limit: u32,
+    pub scopes: Vec<InspectionScope>,
+    pub eligible_modules: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedLookupBatch {
+    pub operations: Vec<HostedLookupOperation>,
+    pub discovery: Option<HostedLookupDiscovery>,
+}
+
+impl HostedLookupBatch {
+    fn valid(&self) -> bool {
+        let mut primary = BTreeSet::new();
+        let mut references = BTreeSet::new();
+        if self.operations.is_empty()
+            || !self.operations.iter().all(|operation| match operation {
+                HostedLookupOperation::Primary { ordinal, .. } => primary.insert(*ordinal),
+                HostedLookupOperation::ExactReference {
+                    destinations,
+                    query,
+                } => {
+                    !destinations.is_empty()
+                        && query.namespace != InspectionNamespace::Any
+                        && destinations
+                            .iter()
+                            .all(|ordinal| references.insert(*ordinal))
+                }
+            })
+        {
+            return false;
+        }
+        self.discovery.as_ref().is_none_or(|discovery| {
+            let modules = discovery
+                .scopes
+                .iter()
+                .filter(|scope| matches!(scope, InspectionScope::PublicModule(_)))
+                .count();
+            discovery.candidate_limit <= 128
+                && modules <= 128
+                && modules <= discovery.eligible_modules as usize
+                && discovery
+                    .scopes
+                    .iter()
+                    .filter(|scope| **scope == InspectionScope::Current)
+                    .count()
+                    == 1
+                && discovery
+                    .scopes
+                    .iter()
+                    .enumerate()
+                    .all(|(index, scope)| !discovery.scopes[..index].contains(scope))
+        })
+    }
+}
+
 /// Mirrors `tidepool_repr::execution_schema::SymbolIdentity` field-for-field.
 /// This crate stays a dependency leaf for proc macros (see this crate's
 /// `CLAUDE.md`), so the shape is duplicated here rather than the type reused;
@@ -153,6 +232,7 @@ enum Field {
     InspectInfo(String),
     InspectLookupName(LookupNameInspection),
     InspectExactName(ExactNameInspection),
+    HostedLookup(HostedLookupBatch),
     InspectBrowse(String),
     InspectBrowseExpanded(String),
     InspectScopeBrowse,
@@ -250,6 +330,70 @@ impl ExtractRequest {
         if preview && !turn {
             return Err(CliError::new("activation preview requires turn mode"));
         }
+        let hosted = self
+            .fields
+            .iter()
+            .filter_map(|field| match field {
+                Field::HostedLookup(batch) => Some(batch),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let Some(batch) = hosted.first() {
+            if hosted.len() != 1
+                || !batch.valid()
+                || self.fields.iter().any(|field| {
+                    matches!(
+                        field,
+                        Field::InspectType(_)
+                            | Field::InspectInfo(_)
+                            | Field::InspectLookupName(_)
+                            | Field::InspectExactName(_)
+                            | Field::InspectBrowse(_)
+                            | Field::InspectBrowseExpanded(_)
+                            | Field::InspectScopeBrowse
+                            | Field::InspectSearch(_)
+                            | Field::InspectStructuredInfo(_)
+                            | Field::InspectStructuredType(_)
+                            | Field::InspectTypeBatch(_)
+                    )
+                })
+                || {
+                    let sources = self
+                        .fields
+                        .iter()
+                        .filter_map(|field| match field {
+                            Field::Input(path) => Some(path),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut metadata = None;
+                    sources.len() != batch.operations.len()
+                        || !sources
+                            .iter()
+                            .zip(&batch.operations)
+                            .all(|(path, operation)| {
+                                if matches!(
+                                    operation,
+                                    HostedLookupOperation::Primary {
+                                        query: HostedLookupQuery::TypeSearch(_),
+                                        ..
+                                    }
+                                ) {
+                                    return true;
+                                }
+                                match metadata {
+                                    None => {
+                                        metadata = Some(*path);
+                                        true
+                                    }
+                                    Some(previous) => previous == *path,
+                                }
+                            })
+                }
+            {
+                return Err(CliError::new("invalid or mixed hosted lookup batch"));
+            }
+        }
         let selections = [
             (join, RequestMode::DeclarationInterface),
             (
@@ -286,6 +430,7 @@ impl ExtractRequest {
                             | Field::InspectBrowseExpanded(_)
                             | Field::InspectLookupName(_)
                             | Field::InspectExactName(_)
+                            | Field::HostedLookup(_)
                             | Field::InspectScopeBrowse
                             | Field::InspectSearch(_)
                             | Field::InspectStructuredInfo(_)
@@ -529,6 +674,7 @@ impl ExtractRequest {
                     },
                 }),
                 55 => Field::InspectExactName(decoder.exact_name_inspection()?),
+                56 => Field::HostedLookup(decoder.hosted_lookup()?),
                 28 => Field::InspectOut(decoder.os_string()?),
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
@@ -556,11 +702,17 @@ impl ExtractRequest {
             fields.push(field);
         }
         decoder.finish()?;
-        Ok(Self {
+        let request = Self {
             fields,
             workload,
             execution_grant,
-        })
+        };
+        if request.hosted_lookup_batch().is_some() {
+            request
+                .admitted_mode()
+                .map_err(|_| ProtocolError::InvalidHostedLookup)?;
+        }
+        Ok(request)
     }
 
     /// Decode the complete argv accepted by the compiler worker.
@@ -833,6 +985,17 @@ impl ExtractRequest {
         self.fields.push(Field::InspectLookupName(query));
     }
 
+    pub(crate) fn hosted_lookup(&mut self, batch: HostedLookupBatch) {
+        self.fields.push(Field::HostedLookup(batch));
+    }
+
+    pub fn hosted_lookup_batch(&self) -> Option<&HostedLookupBatch> {
+        self.fields.iter().find_map(|field| match field {
+            Field::HostedLookup(batch) => Some(batch),
+            _ => None,
+        })
+    }
+
     pub(crate) fn inspect_exact_name(&mut self, query: ExactNameInspection) {
         self.fields.push(Field::InspectExactName(query));
     }
@@ -944,6 +1107,11 @@ impl ExtractRequest {
                         "query={};qualifier={:?};mode={:?}",
                         query.query, query.qualifier_module, query.mode
                     )),
+                ),
+                Field::HostedLookup(batch) => flag(
+                    &mut flags,
+                    "<hosted-lookup>",
+                    OsStr::new(&format!("{batch:?}")),
                 ),
                 Field::InspectExactName(query) => flag(
                     &mut flags,
@@ -1098,6 +1266,79 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    fn hosted_lookup(&mut self) -> Result<HostedLookupBatch, ProtocolError> {
+        let count = self.count(1)?;
+        let mut operations = Vec::with_capacity(count);
+        for _ in 0..count {
+            operations.push(match self.byte()? {
+                0 => {
+                    let ordinal = self.u32()?;
+                    let origin = self.string()?;
+                    let query = match self.byte()? {
+                        0 => HostedLookupQuery::Name(LookupNameInspection {
+                            query: self.string()?,
+                            qualifier_module: self.maybe_string()?,
+                            mode: match self.byte()? {
+                                0 => LookupNameMode::Name,
+                                1 => LookupNameMode::NameOrModule,
+                                _ => return Err(ProtocolError::InvalidHostedLookup),
+                            },
+                        }),
+                        1 => HostedLookupQuery::TypeSearch(self.string()?),
+                        _ => return Err(ProtocolError::InvalidHostedLookup),
+                    };
+                    HostedLookupOperation::Primary {
+                        ordinal,
+                        origin,
+                        query,
+                    }
+                }
+                1 => {
+                    let count = self.count(4)?;
+                    let destinations = (0..count).map(|_| self.u32()).collect::<Result<_, _>>()?;
+                    HostedLookupOperation::ExactReference {
+                        destinations,
+                        query: self.exact_name_inspection()?,
+                    }
+                }
+                _ => return Err(ProtocolError::InvalidHostedLookup),
+            });
+        }
+        let discovery = match self.byte()? {
+            0 => None,
+            1 => {
+                let candidate_limit = self.u32()?;
+                let eligible_modules = self.u32()?;
+                let count = self.count(1)?;
+                if count > 129 {
+                    return Err(ProtocolError::InvalidHostedLookup);
+                }
+                let mut scopes = Vec::with_capacity(count);
+                for _ in 0..count {
+                    scopes.push(match self.byte()? {
+                        0 => InspectionScope::Current,
+                        1 => InspectionScope::PublicModule(self.string()?),
+                        _ => return Err(ProtocolError::InvalidHostedLookup),
+                    });
+                }
+                Some(HostedLookupDiscovery {
+                    candidate_limit,
+                    scopes,
+                    eligible_modules,
+                })
+            }
+            _ => return Err(ProtocolError::InvalidHostedLookup),
+        };
+        let batch = HostedLookupBatch {
+            operations,
+            discovery,
+        };
+        if !batch.valid() {
+            return Err(ProtocolError::InvalidHostedLookup);
+        }
+        Ok(batch)
+    }
+
     fn exact_name_inspection(&mut self) -> Result<ExactNameInspection, ProtocolError> {
         let scope = match self.byte()? {
             0 => InspectionScope::Current,
@@ -1167,6 +1408,7 @@ pub enum ProtocolError {
     UnknownFieldTag(u8),
     UnknownInspectionScope(u8),
     UnknownLookupNameMode(u8),
+    InvalidHostedLookup,
     UnknownInspectionNamespace(u8),
     UnknownOptionalTextTag(u8),
 }
@@ -1184,6 +1426,7 @@ impl std::fmt::Display for ProtocolError {
                 )
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
+            Self::InvalidHostedLookup => f.write_str("invalid hosted lookup batch"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
             Self::Truncated => f.write_str("truncated worker request"),
             Self::NonUtf8Text => f.write_str("worker request text is not UTF-8"),
@@ -1290,6 +1533,73 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 LookupNameMode::Name => 0,
                 LookupNameMode::NameOrModule => 1,
             });
+        }
+        Field::HostedLookup(batch) => {
+            out.push(56);
+            push_u32(out, batch.operations.len());
+            for operation in &batch.operations {
+                match operation {
+                    HostedLookupOperation::Primary {
+                        ordinal,
+                        origin,
+                        query,
+                    } => {
+                        out.push(0);
+                        out.extend_from_slice(&ordinal.to_le_bytes());
+                        push_frame(out, OsStr::new(origin));
+                        match query {
+                            HostedLookupQuery::Name(query) => {
+                                out.push(0);
+                                push_frame(out, OsStr::new(&query.query));
+                                match &query.qualifier_module {
+                                    None => out.push(0),
+                                    Some(module) => {
+                                        out.push(1);
+                                        push_frame(out, OsStr::new(module));
+                                    }
+                                }
+                                out.push(match query.mode {
+                                    LookupNameMode::Name => 0,
+                                    LookupNameMode::NameOrModule => 1,
+                                });
+                            }
+                            HostedLookupQuery::TypeSearch(query) => {
+                                out.push(1);
+                                push_frame(out, OsStr::new(query));
+                            }
+                        }
+                    }
+                    HostedLookupOperation::ExactReference {
+                        destinations,
+                        query,
+                    } => {
+                        out.push(1);
+                        push_u32(out, destinations.len());
+                        for ordinal in destinations {
+                            out.extend_from_slice(&ordinal.to_le_bytes());
+                        }
+                        encode_exact_name(out, query);
+                    }
+                }
+            }
+            match &batch.discovery {
+                None => out.push(0),
+                Some(discovery) => {
+                    out.push(1);
+                    out.extend_from_slice(&discovery.candidate_limit.to_le_bytes());
+                    out.extend_from_slice(&discovery.eligible_modules.to_le_bytes());
+                    push_u32(out, discovery.scopes.len());
+                    for scope in &discovery.scopes {
+                        match scope {
+                            InspectionScope::Current => out.push(0),
+                            InspectionScope::PublicModule(module) => {
+                                out.push(1);
+                                push_frame(out, OsStr::new(module));
+                            }
+                        }
+                    }
+                }
+            }
         }
         Field::InspectExactName(query) => {
             out.push(55);
@@ -1487,6 +1797,131 @@ mod tests {
     }
 
     use super::*;
+
+    fn hosted_fixture() -> (ExtractRequest, HostedLookupBatch) {
+        let batch = HostedLookupBatch {
+            operations: vec![
+                HostedLookupOperation::Primary {
+                    ordinal: 1,
+                    origin: "name α".into(),
+                    query: HostedLookupQuery::Name(LookupNameInspection {
+                        query: "value".into(),
+                        qualifier_module: None,
+                        mode: LookupNameMode::Name,
+                    }),
+                },
+                HostedLookupOperation::Primary {
+                    ordinal: 3,
+                    origin: "Int -> Int".into(),
+                    query: HostedLookupQuery::TypeSearch("Int -> Int".into()),
+                },
+                HostedLookupOperation::ExactReference {
+                    destinations: vec![0, 2],
+                    query: ExactNameInspection {
+                        scope: InspectionScope::PublicModule("Project.Work".into()),
+                        namespace: InspectionNamespace::Type,
+                        name: "Token".into(),
+                    },
+                },
+            ],
+            discovery: Some(HostedLookupDiscovery {
+                candidate_limit: 2,
+                scopes: vec![
+                    InspectionScope::Current,
+                    InspectionScope::PublicModule("Project.Work".into()),
+                ],
+                eligible_modules: 7,
+            }),
+        };
+        let mut request = ExtractRequest::default();
+        for path in ["metadata.hs", "type.hs", "metadata.hs"] {
+            request.input(path);
+        }
+        request.hosted_lookup(batch.clone());
+        request.inspect_out("out.cbor");
+        (request, batch)
+    }
+
+    #[test]
+    fn hosted_lookup_matches_shared_independent_wire_fixture() {
+        let (request, batch) = hosted_fixture();
+        // Fixed independently encoded bytes also consumed by the Haskell codec test.
+        let bytes = unhex("545052455130323100010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72").unwrap();
+        assert_eq!(request.encode(), bytes);
+        let decoded = ExtractRequest::decode(&bytes).unwrap();
+        assert_eq!(decoded.hosted_lookup_batch(), Some(&batch));
+        assert_eq!(decoded.mode(), RequestMode::Inspection);
+        assert_eq!(batch.operations.len(), 3);
+    }
+
+    #[test]
+    fn hosted_lookup_rejects_mixed_cohorts_ordinals_and_generic_queries() {
+        let (request, batch) = hosted_fixture();
+        let mut invalid = Vec::new();
+        let mut changed = batch.clone();
+        if let HostedLookupOperation::Primary { ordinal, .. } = &mut changed.operations[1] {
+            *ordinal = 1;
+        }
+        invalid.push(changed);
+        let mut changed = batch.clone();
+        if let HostedLookupOperation::ExactReference { destinations, .. } =
+            &mut changed.operations[2]
+        {
+            destinations.push(0);
+        }
+        invalid.push(changed);
+        let mut changed = batch.clone();
+        if let HostedLookupOperation::ExactReference { destinations, .. } =
+            &mut changed.operations[2]
+        {
+            destinations.clear();
+        }
+        invalid.push(changed);
+        let mut changed = batch.clone();
+        changed.discovery.as_mut().unwrap().candidate_limit = 129;
+        invalid.push(changed);
+        let mut changed = batch.clone();
+        changed
+            .discovery
+            .as_mut()
+            .unwrap()
+            .scopes
+            .push(InspectionScope::Current);
+        invalid.push(changed);
+        let mut changed = batch.clone();
+        changed.discovery.as_mut().unwrap().eligible_modules = 0;
+        invalid.push(changed);
+        for changed in invalid {
+            let mut bad = request.clone();
+            bad.fields[3] = Field::HostedLookup(changed);
+            assert!(bad.admitted_mode().is_err());
+            assert_eq!(
+                ExtractRequest::decode(&bad.encode()).unwrap_err(),
+                ProtocolError::InvalidHostedLookup
+            );
+        }
+        let mut bad = request.clone();
+        bad.fields[2] = Field::Input("different-metadata.hs".into());
+        assert_eq!(
+            ExtractRequest::decode(&bad.encode()).unwrap_err(),
+            ProtocolError::InvalidHostedLookup
+        );
+        let mut bad = request.clone();
+        bad.inspect_info("value");
+        assert_eq!(
+            ExtractRequest::decode(&bad.encode()).unwrap_err(),
+            ProtocolError::InvalidHostedLookup
+        );
+        let mut bad = request.clone();
+        bad.hosted_lookup(batch);
+        assert_eq!(
+            ExtractRequest::decode(&bad.encode()).unwrap_err(),
+            ProtocolError::InvalidHostedLookup
+        );
+        for end in 0..request.encode().len() {
+            assert!(ExtractRequest::decode(&request.encode()[..end]).is_err());
+        }
+    }
 
     #[test]
     fn execution_header_round_trips_and_refuses_nonpositive_grants() {
@@ -1917,6 +2352,7 @@ mod tests {
             b"TPREQ016",
             b"TPREQ017",
             b"TPREQ018",
+            b"TPREQ020",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());

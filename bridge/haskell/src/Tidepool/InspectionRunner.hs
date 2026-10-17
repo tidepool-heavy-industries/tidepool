@@ -24,6 +24,9 @@ runInspectionRequests ::
   (environment -> [InspectionRequest] -> IO [InspectionResult]) ->
   IO [InspectionResult]
 runInspectionRequests args compile inspect = do
+  case requestHostedLookup args of
+    Just _ -> fail "hosted lookup batch execution is not implemented"
+    Nothing -> pure ()
   let queries = requestInspections args
   if length queries /= length (requestFiles args)
     then fail "inspection request must carry exactly one source per query"
