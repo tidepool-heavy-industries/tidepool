@@ -549,6 +549,17 @@ impl CompilerSourceSupport {
             .collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.projection.merge(&issued)?;
+        // Retained offers own historical code independently of current roles.
+        // Only contributions to this namespace belong in projected admission;
+        // the resulting support still retains every original offer below.
+        let contributions = self
+            .native_offers
+            .iter()
+            .map(|offer| offer.within_projection(&projection, &self.artifacts))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let artifacts = self
             .artifacts
             .inventory()
@@ -556,7 +567,7 @@ impl CompilerSourceSupport {
                 &self.artifacts,
                 entries,
                 &projection,
-                &self.native_offers,
+                &contributions,
             )?;
         Self::new(projection, artifacts, self.native_offers.iter().cloned())
     }
