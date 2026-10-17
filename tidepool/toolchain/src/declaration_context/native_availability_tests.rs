@@ -696,8 +696,8 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
     assert!(
         matches!(private.projection.validate(&private.artifacts),
         Err(CompileError::ArtifactInventory(error))
-        if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { required, .. }
-            if required == dependency)),
+        if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { required, .. }
+            if required == &dependency)),
         "the issued fragment intentionally leaves its baseline dependency unoffered"
     );
     assert_eq!(private.native_offers.len(), 1);
