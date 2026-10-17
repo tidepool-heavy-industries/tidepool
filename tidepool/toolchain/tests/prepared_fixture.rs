@@ -379,3 +379,111 @@ fn build_fixture_closes_home_helpers_without_exporting_native_authority() {
         .expect("portable source closure links without native products");
     }
 }
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "differential control executes the declared pinned GHC"
+)]
+fn portable_package_closure_matches_ghc_with_unrelated_exports() {
+    use tidepool_codegen::prepared_program::{
+        CompiledProgram, PreparedCallOptions, PreparedMachine, PreparedMachineOptions,
+        PreparedOuter, PreparedResult,
+    };
+    use tidepool_codegen::suspension::RealmId;
+    use tidepool_repr::execution_schema::{link_program, MachineImports};
+
+    for unrelated in [2, 16] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("PortableScaling.hs");
+        let exports = (0..unrelated)
+            .map(|index| {
+                format!(
+                    "unrelated{index} :: Int -> Int\nunrelated{index} n = packageValue n + {index}\n{{-# NOINLINE unrelated{index} #-}}\n"
+                )
+            })
+            .collect::<String>();
+        std::fs::write(
+            &source,
+            include_str!("fixtures/PortableScaling.hs").replace("-- UNRELATED_EXPORTS", &exports),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("PortableSupport.hs"),
+            include_str!("fixtures/PortableSupport.hs"),
+        )
+        .unwrap();
+        let ghc = Command::new("ghc")
+            .current_dir(root.path())
+            .args(["-v0", "-ignore-dot-ghci", "-i."])
+            .arg(&source)
+            .args(["-e", "print [first, second]"])
+            .env("GHC_ENVIRONMENT", "-")
+            .env_remove("GHC_PACKAGE_PATH")
+            .env_remove("GHCRTS")
+            .output()
+            .unwrap();
+        assert!(
+            ghc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ghc.stderr)
+        );
+        let expected: Vec<i64> = serde_json::from_slice(&ghc.stdout).unwrap();
+        assert_eq!(expected, [10, 11]);
+
+        let output = root.path().join("portable");
+        require_success(
+            compiler(
+                &source,
+                &output,
+                &["first", "second"],
+                &[root.path().to_path_buf()],
+            )
+            .output()
+            .unwrap(),
+        );
+        for (target, expected) in ["first", "second"].into_iter().zip(expected) {
+            let artifact = PreparedArtifact::parse(
+                std::fs::read(output.join(format!("{target}.prepared.cbor"))).unwrap(),
+                DecodeLimits::default(),
+            )
+            .unwrap();
+            assert!(artifact.prepared().globals().is_empty());
+            let entry = artifact.prepared().entry();
+            let linked = link_program(artifact.prepared().clone(), &MachineImports::default())
+                .expect("portable target links without package or native imports");
+            let (mut machine, program) = PreparedMachine::new(
+                CompiledProgram::compile(&linked).unwrap(),
+                PreparedMachineOptions {
+                    nursery_bytes: 4096,
+                },
+            )
+            .unwrap();
+            let result = machine
+                .run_entry_retained(
+                    program,
+                    entry,
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: 16,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(handle)] = result.values.as_slice() else {
+                panic!("boxed Int result required: {:?}", result.values);
+            };
+            let PreparedOuter::Constructor { fields, .. } =
+                machine.inspect_outer(*handle, RealmId::ROOT).unwrap();
+            let [PreparedResult::Scalar(value)] = fields.as_slice() else {
+                panic!("boxed Int must contain one scalar: {fields:?}");
+            };
+            assert_eq!(
+                *value as i64, expected,
+                "{target}, {unrelated} unrelated exports"
+            );
+            assert!(machine.release(*handle));
+        }
+    }
+}
