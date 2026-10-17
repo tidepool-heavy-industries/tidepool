@@ -552,7 +552,13 @@ fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String>
     let mut projected = Vec::with_capacity(tools.len());
     let mut schemas = HashMap::new();
     let mut scheduling = HashMap::new();
+    let mut text_fields = HashMap::new();
     for tool in tools {
+        if matches!(tool, HostedTool::Custom(_))
+            && tool.implementation() == exomonad_tool::ToolImplementation::HaskellCell
+        {
+            text_fields.insert(tool.name().to_owned(), "source".to_owned());
+        }
         scheduling.insert(
             tool.name().to_owned(),
             match tool.scheduling() {
@@ -586,8 +592,12 @@ fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String>
             }),
         });
     }
-    let manifest = harness::embedding::EmbeddedToolManifest::with_scheduling(projected, scheduling)
-        .map_err(|error| error.to_string())?;
+    let manifest = harness::embedding::EmbeddedToolManifest::with_text_fields(
+        projected,
+        scheduling,
+        text_fields,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(EmbeddedToolProjection {
         manifest: Arc::new(manifest),
         schemas: Arc::new(schemas),
