@@ -545,23 +545,23 @@ assert :: Bool -> String -> IO ()
 assert condition message = unless condition (fail message)
 requireRight :: Show e => Either e a -> IO a
 requireRight = either (fail . show) pure
-nodeAt :: TypeGraph -> TypeNodeId -> TypeNode
+nodeAt :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeNodeF constructor TypeIdentity RuntimeRep
 nodeAt graph (TypeNodeId index) = maybe (error "missing finite graph node") id
   (IntMap.lookup (fromIntegral index) (typeGraphNodes graph))
-outgoing :: TypeGraph -> TypeNodeId -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]
+outgoing :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]
 outgoing graph (TypeNodeId index) = IntMap.findWithDefault [] (fromIntegral index) (typeGraphEdges graph)
-edge :: TypeGraph -> TypeNodeId -> TypeEdgeRoleF RuntimeRep -> TypeNodeId
+edge :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeEdgeRoleF RuntimeRep -> TypeNodeId
 edge graph root role = case [target | (actual, target) <- outgoing graph root, actual == role] of
   [target] -> target
   _ -> error ("missing/duplicate finite graph edge " ++ show role)
-rootBody :: TypeGraph -> TypeNodeId -> TypeNodeId
+rootBody :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeNodeId
 rootBody graph root = case nodeAt graph root of TypeRoot{} -> edge graph root TypeBody; _ -> error "reply is not a scoped root"
-nominal :: TypeGraph -> TypeNodeId -> (TypeIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
+nominal :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> (TypeIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
 nominal graph expression = case nodeAt graph expression of
   TypeNominalApplication -> case nodeAt graph (edge graph expression TypeHead) of
     TypeDeclaration identity _ form _ -> (identity, form, [target | (TypeArgument _, target) <- outgoing graph expression])
     _ -> error "nominal expression has no declaration"
-  other -> error ("expected nominal expression, got " ++ show other)
+  _ -> error "expected nominal expression"
 headName :: TypeGraph -> TypeNodeId -> Text.Text
 headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence (typeSymbol identity)
 -- The two captures also change SameLayout Int to SameLayout Bool, which
