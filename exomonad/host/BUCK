@@ -1168,6 +1168,25 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "facade_source_inspection_tests",
+    binary = ":exomonad_host_unit_tests",
+    exact_tests = [
+        "exomonad::source::tests::inspection_service_retains_exact_owner_and_refuses_foreign_source",
+        "exomonad::source::tests::source_graph_keeps_workspace_resource_once_through_live_updates",
+        "exomonad::source::tests::coherent_source_generation_retains_reads_prompts_and_recovers_without_links",
+        "exomonad::source::tests::source_reference_refuses_incomplete_graph_aliases_and_raw_file_drift",
+        "exomonad::source::tests::source_generation_history_support_reaches_delayed_reads_and_refusals",
+        "exomonad::source::tests::source_generation_histories_preserve_issued_reads_and_exact_recovery",
+    ],
+    expected_count = 6,
+    ignored = False,
+    jobs = 1,
+    timeout = 60,
+    test_rule_timeout_ms = 420000,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "facade_source_revision_tests",
     binary = ":exomonad_host_unit_tests",
     exact_tests = [
