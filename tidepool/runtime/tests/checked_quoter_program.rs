@@ -92,7 +92,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             )
             .unwrap();
         let started = std::time::Instant::now();
-        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
             compile_cell_program_admitted(admission.clone(), settlement)
         })
         .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
@@ -103,10 +103,13 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         }
         let first = &program.items()[0];
         let sealed = first.native_products().unwrap();
-        let reservation = session
+        let prefix = session
             .begin_cell_program(admission, program.clone())
             .unwrap()
             .expect("checked program starts with its first expression");
+        let reservation = session
+            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
+            .unwrap();
         let TurnResult::Expr { compiled, .. } = consume_cell_program_item(reservation).unwrap()
         else {
             panic!("checked program starts with its first expression");
