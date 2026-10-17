@@ -11097,12 +11097,24 @@ mod authored_publication_tests {
 
     #[test]
     fn ordinary_turn_admission_resolves_once_for_owned_startup_and_sync_execution() {
-        use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
+        use crate::session::{
+            assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
+            TurnResult, TurnTemplate,
+        };
         use tidepool_testing::effect_surface::TestEffectSurface;
 
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
+        let templates = vec![TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                effects.preamble(),
+                "__result",
+                effects.row(),
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        }];
         for startup in [true, false] {
             let root = tempfile::tempdir().unwrap();
             let mut includes = effects.include_paths().to_vec();
