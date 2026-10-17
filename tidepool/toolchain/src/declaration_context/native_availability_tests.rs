@@ -6941,4 +6941,119 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             );
         }
     }
+    let historical_view = inventory
+        .admit_shared(
+            &inventory.empty_view(),
+            vec![
+                entry.clone(),
+                Arc::new(ArtifactEntry::canonical(
+                    product("HistoricalDependencyMarker", 163)
+                        .module_interface()
+                        .unwrap()
+                        .clone(),
+                )),
+            ],
+        )
+        .unwrap();
+    let historical_proof =
+        NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &historical_view)
+            .unwrap()
+            .unwrap();
+    let historical = IssuedNativeOffer::issue(
+        entry.descriptor.id,
+        &historical_view,
+        Some(historical_proof),
+    )
+    .unwrap();
+    assert!(historical.is_full());
+    let group3 = |offer: &IssuedNativeOffer| {
+        *offer
+            .issued_group_carriers()
+            .unwrap()
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 3
+            })
+            .unwrap()
+    };
+    let current_group = group3(&full);
+    assert_ne!(
+        current_group,
+        group3(&historical),
+        "independent scopes genuinely issue different group bindings"
+    );
+    for offers in [
+        vec![full.clone(), historical.clone()],
+        vec![historical.clone(), full.clone()],
+        vec![full.clone(), full.clone()],
+    ] {
+        let support = recover_fixture_compiler_support(
+            context.compiler_input_projection().clone(),
+            context.artifact_view().clone(),
+            offers,
+        )
+        .unwrap();
+        let scoped = context
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support);
+        assert_eq!(
+            scoped.artifact_view().capture_graph_selection().namespace,
+            before.namespace
+        );
+        assert!(scoped.artifact_view().selected_native_groups().is_empty());
+        let inputs = OriginalCompilerInputs::from_candidates(&scoped, producer, &candidates)
+            .unwrap()
+            .unwrap();
+        let fresh_offer = inputs
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == fresh_id)
+            .unwrap();
+        assert!(fresh_offer.is_full());
+        let groups = fresh_offer.issued_group_carriers().unwrap();
+        let dependent = *groups
+            .keys()
+            .find(|group| group.binding.artifact() == fresh_id && group.original_ordinal == 11)
+            .unwrap();
+        let expected = (
+            ArtifactBindingNode::Group(dependent),
+            ArtifactBindingNode::Group(current_group),
+            crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                dependent_ordinal: 11,
+                required_ordinal: 3,
+            },
+        );
+        assert!(
+            fresh_offer
+                .custody()
+                .binding_dependencies()
+                .contains(&expected),
+            "the fresh body uses the exact current carrier's issued dependency edge"
+        );
+        assert!(inputs
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+    }
+    let support = recover_fixture_compiler_support(
+        context.compiler_input_projection().clone(),
+        context.artifact_view().clone(),
+        [historical],
+    )
+    .unwrap();
+    let wrong_scope = context
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support);
+    assert_eq!(
+        wrong_scope
+            .artifact_view()
+            .capture_graph_selection()
+            .namespace,
+        before.namespace
+    );
+    assert!(
+        matches!(OriginalCompilerInputs::from_candidates(&wrong_scope, producer, &candidates), Err(CompileError::ArtifactInventory(error))
+        if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 3 } if artifact == entry.descriptor.id)),
+        "only a historical different carrier's offer cannot authorize the current dependency"
+    );
 }
