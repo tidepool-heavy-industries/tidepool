@@ -622,26 +622,13 @@ impl OriginalCompilerInputs {
         if fresh.is_empty() {
             return Ok(carried);
         }
-        // Fresh bodies own their new issuance. Existing external demand comes
-        // from the source's selected groups, never all historical offer roots.
-        let mut selected_requirements = Vec::new();
-        for role in context.compiler_input_projection().roles() {
-            if let Some(original) = role.original() {
-                if let Some(requirement) =
-                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original,
-                        context.facts.compiler_support.artifacts(),
-                    )?
-                {
-                    selected_requirements.push(requirement);
-                }
-            }
-        }
-        let configured = Self::from_native_availability_with_requirements(
-            context,
-            producer,
+        let configured = Self::issue_complete_native_availability_with_source(
+            context.facts.compiler_support.artifacts(),
+            context.facts.compiler_support.projection(),
+            producer.sha256(),
             &fresh,
-            &selected_requirements,
+            &[],
+            Some(context.facts.compiler_support.artifacts()),
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -731,6 +718,7 @@ impl OriginalCompilerInputs {
         Self::from_native_availability_with_requirements(context, producer, products, &[])
     }
 
+    #[cfg(test)]
     fn from_native_availability_with_requirements(
         context: &ExactDeclarationContext,
         producer: CanonicalProducerIdentity,
@@ -746,12 +734,31 @@ impl OriginalCompilerInputs {
         )
     }
 
+    #[cfg(test)]
     fn issue_complete_native_availability(
         inventory: &ArtifactView,
         baseline: &CompilerInputProjection,
         producer_sha256: [u8; 32],
         products: &[CertifiedRecoveryProduct],
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
+    ) -> Result<Self, CompileError> {
+        Self::issue_complete_native_availability_with_source(
+            inventory,
+            baseline,
+            producer_sha256,
+            products,
+            availability,
+            None,
+        )
+    }
+
+    fn issue_complete_native_availability_with_source(
+        inventory: &ArtifactView,
+        baseline: &CompilerInputProjection,
+        producer_sha256: [u8; 32],
+        products: &[CertifiedRecoveryProduct],
+        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
+        selected_source: Option<&ArtifactView>,
     ) -> Result<Self, CompileError> {
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
@@ -790,14 +797,34 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let mut preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            baseline,
-            inventory,
-            availability,
-        )?;
-        for proof in availability {
-            if !preferred.contains(proof) {
-                preferred.push(proof.clone());
+        let mut preferred = if let Some(source) = selected_source {
+            // Candidate issuance consumes exact selected external demand. An
+            // explicit empty selection cannot fall back to published policy.
+            baseline
+                .roles()
+                .into_iter()
+                .filter_map(|role| role.original())
+                .map(|original| {
+                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                        original, source,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+                baseline,
+                inventory,
+                availability,
+            )?
+        };
+        if selected_source.is_none() {
+            for proof in availability {
+                if !preferred.contains(proof) {
+                    preferred.push(proof.clone());
+                }
             }
         }
         let mut native_original_requirements =
