@@ -883,7 +883,14 @@ pub(super) async fn production_browser_journey() {
     let terminal = fixture.context.actor.terminal().get();
     let retirement_cleanup = fixture.context.actor.terminal().cleanup();
     let cleanup_started = tokio::time::Instant::now();
-    let cleanup = fixture.stop().await;
+    let scenario = match &outcome {
+        Ok(()) => crate::actor_host::hosted_test_context::ScenarioOutcome::Passed,
+        Err(message) => crate::actor_host::hosted_test_context::ScenarioOutcome::Failed {
+            phase: crate::actor_host::hosted_test_context::ScenarioPhase::Scenario,
+            message: message.clone(),
+        },
+    };
+    let cleanup = fixture.stop(&scenario).await;
     eprintln!(
         "browser gate cleanup elapsed={:?} test_total={:?}",
         cleanup_started.elapsed(),

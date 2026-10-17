@@ -1982,14 +1982,7 @@ impl HostedTestRuntime {
         Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await
     }
 
-    pub(super) async fn stop(self) -> Result<(), String> {
-        self.stop_with_scenario(&ScenarioOutcome::Passed).await
-    }
-
-    pub(super) async fn stop_with_scenario(
-        mut self,
-        scenario: &ScenarioOutcome,
-    ) -> Result<(), String> {
+    pub(super) async fn stop(mut self, scenario: &ScenarioOutcome) -> Result<(), String> {
         let mut released = self.released.clone();
         let mut journal = self.context.journal_status.clone();
         let diagnostics = self.diagnostics.clone();

@@ -832,7 +832,7 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
     assert_ne!(resumed_head, interrupted_head);
 
     assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production interrupt host acknowledges cleanup");
 }

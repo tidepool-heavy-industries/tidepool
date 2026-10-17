@@ -411,7 +411,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         .expect("retirement keeps read-only observer");
     // Conversation retains execution/boot authority; InputObserver retains only read facts.
     drop(conversation);
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production notification host acknowledges physical cleanup");
     assert!(matches!(

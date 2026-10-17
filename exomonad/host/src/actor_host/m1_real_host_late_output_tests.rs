@@ -595,7 +595,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .all(|claim| claim.operation == operation && claim.state == ClaimState::Settled));
     assert_eq!(target.actor, AgentPath("/root".into()));
 
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production host cleanup should succeed");
 }

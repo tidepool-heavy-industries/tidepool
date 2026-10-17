@@ -707,7 +707,10 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     assert_eq!(following.request.session_id, session);
     assert_eq!(fixture.context.actor.identity(), actor);
     following.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
@@ -867,7 +870,10 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     assert_eq!(test_campaign::explicit_display_text(&output), INPUT);
     replied.finish();
     completed.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -935,7 +941,10 @@ async fn resident_targeted_transaction_reconciles_after_cell_and_retains_origina
         "assistant-source-note"
     ));
     observed.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1005,7 +1014,10 @@ async fn resident_authored_note_removal_roundtrips_through_native_projection() {
         "native bytes and relative order are unchanged"
     );
     observed.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1130,7 +1142,10 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
         }
     }
     assert_eq!(child_sessions.len(), 2);
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1208,7 +1223,10 @@ async fn resident_sync_notes_commit_atomically_without_changing_captured_childre
     assert_eq!(child_sessions.len(), 2);
     assert_eq!(fixture.context.actor.identity(), root_identity);
     assert!(fixture.context.actor.terminal().get().is_none());
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1323,7 +1341,10 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     assert_eq!(fixture.context.actor.identity(), actor);
     assert!(fixture.context.actor.terminal().get().is_none());
     inspected.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1411,7 +1432,10 @@ async fn resident_sync_context_failure_rolls_back_edits_and_keeps_activated_chil
     )
     .await;
     successor.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1505,7 +1529,10 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
     assert_eq!(fixture.context.actor.identity(), actor);
     assert!(fixture.context.actor.terminal().get().is_none());
     reused.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1744,7 +1771,10 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
     )
     .await;
     successor.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[path = "harness_usecase_performance.rs"]

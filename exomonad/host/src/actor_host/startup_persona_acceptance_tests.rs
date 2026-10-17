@@ -438,7 +438,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     );
     }).catch_unwind().await;
     let scenario_outcome = ScenarioOutcome::from_result(&scenario);
-    let stopped = host.stop_with_scenario(&scenario_outcome).await;
+    let stopped = host.stop(&scenario_outcome).await;
     if scenario.is_err() || stopped.is_err() {
         files.disable_cleanup(true);
         repository.disable_cleanup(true);

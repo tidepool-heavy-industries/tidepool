@@ -506,7 +506,7 @@ async fn production_engine_store_active_cancellation_50() {
     assert_eq!(operations.len(), SAMPLES);
     assert_eq!(transport.issued.lock().len(), SAMPLES);
     fixture
-        .stop()
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production host and resident forest acknowledge final cleanup");
 }

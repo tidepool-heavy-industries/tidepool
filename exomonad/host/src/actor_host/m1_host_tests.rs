@@ -543,7 +543,10 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
     assert_eq!(rejection["event"]["event"]["value"]["outcome"], "refused");
     retired_socket.close(None).await.unwrap();
 
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -625,10 +628,13 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
     .expect("the admitted resident Haskell cell must reach its actual Sleep suspension");
 
     let started = tokio::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(8), host.stop())
-        .await
-        .expect("host cancellation failed to stop the 30-second resident Haskell cell")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed),
+    )
+    .await
+    .expect("host cancellation failed to stop the 30-second resident Haskell cell")
+    .unwrap();
     assert!(started.elapsed() < Duration::from_secs(8));
     assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
 }
@@ -763,8 +769,17 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
                 },
             )
             .expect("the isolated test delegates production command resources");
-            config.command_resources =
-                Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
+            config.command_resources = Some(
+                exomonad_node::command_resources::CommandResourceClient::local(
+                    owner,
+                    exomonad_node::command_resources::CommandRunIdentity::new(
+                        "isolated-test".into(),
+                        1,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            );
         }
     })
     .await
@@ -1147,5 +1162,8 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
     drop(requests);
     assert!(fixture.context.actor.terminal().get().is_none());
     socket.close(None).await.unwrap();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }

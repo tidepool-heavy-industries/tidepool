@@ -137,7 +137,9 @@ async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_
     let predecessor = conversation.identity().clone();
     let retained_run_id = host.context.config.run_id.clone();
     drop(conversation);
-    host.stop().await.unwrap();
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
     drop(provider);
 
     let (provider, mut requests) = hosted_script_provider();
@@ -190,7 +192,9 @@ async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_
         Some(retained)
     );
     drop(conversation);
-    host.stop().await.unwrap();
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[derive(Clone, Copy)]

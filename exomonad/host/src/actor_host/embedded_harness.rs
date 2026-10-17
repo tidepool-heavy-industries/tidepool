@@ -3156,7 +3156,9 @@ mod tests {
             );
             socket.close(None).await.unwrap();
         }
-        host.stop().await.unwrap();
+        host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+            .await
+            .unwrap();
         let rotated_secret = "rotated-embedded-browser-test-secret-32-bytes";
         std::fs::write(
             settings.session_secret_file.as_ref().unwrap(),
@@ -3194,7 +3196,10 @@ mod tests {
                 .unwrap();
             assert_eq!(login.status(), expected);
         }
-        restarted.stop().await.unwrap();
+        restarted
+            .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
