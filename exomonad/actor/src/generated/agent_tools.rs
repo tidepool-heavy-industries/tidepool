@@ -24,6 +24,7 @@ pub enum AgentToolsReq {
     AgentToolsInstallWith(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
     AgentToolsInstallReceiverWith(i64, tidepool_bridge::HaskellValue),
     AgentToolsInputWith,
+    AgentToolsPublishResultWith(String),
     AgentToolsAwaitWith(tidepool_bridge::HaskellValue, String, Option<String>),
     AgentToolsReplyWith(tidepool_bridge::HaskellValue),
 }

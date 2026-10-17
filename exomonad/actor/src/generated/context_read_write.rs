@@ -23,7 +23,12 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum ContextReadWriteReq {
     GetInitialContextWith,
     GetContextWith,
-    PutContextWith(tidepool_bridge_effects::ContextDocument),
+    StageContextWith(tidepool_bridge_effects::ContextPatch),
+    InspectContextTransactionWith(tidepool_bridge_effects::ContextTransaction),
+    InspectOriginalTextWith(
+        tidepool_bridge_effects::ContextReference,
+        tidepool_bridge_effects::ContextTextSelector,
+    ),
     SetNextModelWith(String),
     SetNextEffortWith(crate::ForkEffort),
 }

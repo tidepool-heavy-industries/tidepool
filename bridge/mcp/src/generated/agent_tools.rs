@@ -11,6 +11,7 @@ pub fn agent_tools_decl() -> crate::EffectDecl {
             "AgentToolsInstallWith :: Value -> (Int -> Eff toolEffs Text) -> AgentTools ()",
             "AgentToolsInstallReceiverWith :: RequestSite '[] () -> (Int -> Eff receiverEffs ()) -> AgentTools ()",
             "AgentToolsInputWith :: AgentTools (Text, Value)",
+            "AgentToolsPublishResultWith :: Text -> AgentTools ()",
             "AgentToolsAwaitWith :: Value -> Text -> Maybe Text -> AgentTools (Text, Value)",
             "AgentToolsReplyWith :: Value -> AgentTools ()",
         ],

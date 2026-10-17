@@ -21,5 +21,6 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum ReflectReq {
+    ReflectResultWith(tidepool_bridge::HaskellValue),
     ReflectWith(i64),
 }

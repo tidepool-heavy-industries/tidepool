@@ -2,6 +2,164 @@
 
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextTextVersion {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub digest: String,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextUnitVersion {
+    pub reference: ContextReference,
+    pub digest: String,
+}
+
+/// Immutable canonical original occurrence role/type; Unknown remains explicit. Replacement overlays do not change this attribution; later edits retain separate transaction receipts.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextTextAuthor {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorUser,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorAssistant,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorTool,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorSystem,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorDeveloper,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextAuthorUnknown,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextTextAuthorship {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub author: ContextTextAuthor,
+    pub authored_note: bool,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextInspection {
+    pub document: ContextDocument,
+    pub text_versions: Vec<ContextTextVersion>,
+    pub unit_versions: Vec<ContextUnitVersion>,
+    pub authorship: Vec<ContextTextAuthorship>,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextPatch {
+    pub changes: Vec<ContextChange>,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextChange {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ReplaceContextText {
+        reference: ContextReference,
+        selector: ContextTextSelector,
+        expected: String,
+        text: String,
+    },
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RemoveContextUnit {
+        reference: ContextReference,
+        expected: String,
+    },
+    #[haskell(module = "Tidepool.Effects.Core")]
+    AppendContextNote {
+        text: String,
+        sources: Vec<ContextReference>,
+    },
+}
+
+/// Typed context patch refusal; rendered detail never controls behavior.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextProblemCode {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemStale,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemMissing,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemAmbiguous,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemDenied,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemInvalidPatch,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemAlreadyStaged,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemIneligible,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextProblemUnsupportedSelector,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextProblem {
+    pub code: ContextProblemCode,
+    pub reference: Option<ContextReference>,
+    pub detail: String,
+}
+
+/// Owner-issued transaction identifier; possession does not grant observation authority.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextTransaction {
+    pub raw: String,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct ContextTransactionReceipt {
+    pub head: String,
+    pub generation: i64,
+    pub changed: bool,
+    pub appended: Vec<ContextReference>,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextTransactionStatus {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextTransactionStaged,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextTransactionCommitted(ContextTransactionReceipt),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextTransactionRejected(Vec<ContextProblem>),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextTransactionCancelled,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextTransactionUnknown(String),
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextStageResult {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextStaged(ContextTransaction),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ContextStageRefused(Vec<ContextProblem>),
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum OriginalTextObservation {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OriginalTextAvailable(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OriginalTextMissing,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OriginalTextDenied(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OriginalTextUnavailable(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OriginalTextUnsupported(String),
+}
+
 /// Owner-issued startup operation, actor, installed spec and exact source identity.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(module = "Tidepool.Effects.Core")]
@@ -130,6 +288,21 @@ pub enum ContextBlock {
 #[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextDocument {
     pub blocks: Vec<ContextBlock>,
+}
+
+impl ContextTransaction {
+    /// An untrusted raw value becomes a wire id here — infallibly:
+    /// this identity carries no string policy.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
+    /// The validated payload.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
 }
 
 impl ContextReference {

@@ -8,17 +8,22 @@ pub fn reflect_decl() -> crate::EffectDecl {
         description: "Read your own recent conversation as data. `reflect n` returns your latest n turns including the active turn, oldest first, each carrying the recorded messages, tool calls and tool results that belong to it. `turnState` records response progress independently of optional timestamps; pending results are never invented. Fewer than n turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own conversation — there is no argument naming another actor or a file. `Left ReflectUnbound` means this context has no bound conversation to read, which an operator proxy and a recreated host both are; the root's conversation is never substituted for a caller's. Because it is an ordinary effect, an authored function can fetch its own recent context once and reuse it across a whole sequence of later calls.",
         prompt_card: None,
         constructors: &[
+            "ReflectResultWith :: ResultReference -> Reflect (Either ResultInspectionError Value)",
             "ReflectWith :: Int -> Reflect (Either ReflectError [ConversationTurn])",
         ],
         type_defs: &[
+            "data ResultReference = ResultReference { resultRun :: Text, resultActor :: Text, resultIncarnation :: Text, resultRequest :: Text, resultCall :: Text } deriving (Show, Eq, Generic)",
+            "data ResultInspectionError = ResultUnbound | ResultMissing | ResultUnauthorized | ResultUnreadable Text deriving (Show, Eq)",
             "data ConversationRole = RoleSystem | RoleDeveloper | RoleUser | RoleAssistant deriving (Show, Eq)",
             "data TurnItem = TurnMessage ConversationRole Text | TurnToolCall Text Text Text | TurnToolResult Text Text deriving (Show, Eq)",
             "data ConversationTurnState = TurnInProgress | TurnCompleted (Maybe Text) | TurnInterrupted | TurnUnknown deriving (Show, Eq)",
             "data ConversationTurn = ConversationTurn { turnIdentity :: Text, turnState :: ConversationTurnState, turnStartedAt :: Maybe Text, turnCompletedAt :: Maybe Text, turnItems :: [TurnItem] } deriving (Show, Eq)",
             "data ReflectError = ReflectUnbound | ReflectUnreadable Text deriving (Show, Eq)",
+            "instance ToJSON ResultReference\ninstance FromJSON ResultReference\ninstance JsonSchema ResultReference",
         ],
         extra_imports: &[],
         helpers: &[
+            crate::effect_defs::helper_decl!(@ Some("inspectResult"), Public, { raw ["-- | Read canonical JSON from this exact retained operation without executing its handler again. Bind the result and select or display it.\ninspectResult :: forall effs. Member Reflect effs => ResultReference -> Eff effs (Either ResultInspectionError Value)\ninspectResult = send . ReflectResultWith"] }),
             crate::effect_defs::helper_decl!(@ Some("reflect"), Public, { raw ["-- | `reflect n` reads your OWN latest n conversation turns including the active\n-- turn, oldest first, each carrying recorded messages, tool calls and tool\n-- results. `turnState` distinguishes progress from missing timestamps; pending\n-- tool results are never invented. Fewer than n turns returns the ones that exist,\n-- and `n <= 0` returns none.\n-- Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`\n-- means this context has no conversation of its own — no other actor's is\n-- returned in its place. Bind the result once and reuse it across the\n-- calls that need it rather than reading it again per call.\nreflect :: forall effs. Member Reflect effs => Int -> Eff effs (Either ReflectError [ConversationTurn])\nreflect = send . ReflectWith"] }),
         ],
         type_params: &[],
