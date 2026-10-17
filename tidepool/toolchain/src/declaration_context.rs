@@ -1221,23 +1221,20 @@ impl ProtectedScaffoldRequirements {
         #[cfg(test)]
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
         let declaration_semantic_sha256 = context.semantic_sha256();
-        let mut projection = context
-            .facts
-            .compiler_support
-            .projection
-            .merge(&self.projection)?;
-        // Baseline context and protected scaffold are independent issuance
-        // ingresses. Private custody must not fill a missing baseline proof.
+        // Context selection and private contribution keep their respective
+        // issuers. Protected scaffolds constrain that composed request once.
         let mut native_offers = context.facts.compiler_support.native_offers.to_vec();
-        let artifacts = match private {
+        let (artifacts, projection) = match private {
             Some(private) => {
-                projection = projection.merge(&private.projection)?;
                 native_offers.extend(private.native_offers.iter().cloned());
                 ArtifactView::receive_original_fragment(context.compiler_source_support(), private)?
-                    .0
             }
-            None => context.artifact_view().clone(),
+            None => (
+                context.artifact_view().clone(),
+                context.compiler_input_projection().clone(),
+            ),
         };
+        let projection = projection.merge(&self.projection)?;
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         let artifacts = retain_native_offers(&artifacts, &native_offers)?;
         let metadata = projection.project_metadata(artifacts.metadata_snapshot())?;

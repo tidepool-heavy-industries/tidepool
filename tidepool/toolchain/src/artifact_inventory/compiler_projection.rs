@@ -300,8 +300,9 @@ impl CompilerSourceSupport {
             .namespace()
             .keys()
             .map(|id| Arc::clone(&artifacts.lease.payloads[id]))
+            .filter(|entry| !entry.is_native())
             .collect::<Vec<_>>();
-        let projection = CompilerInputProjection::from_issued_entries(&entries)?.interface_only();
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
         let interfaces = artifacts.select_roots(
             projection
                 .roles()
