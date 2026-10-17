@@ -275,6 +275,10 @@ issuance scopes; transport neither selects nor collapses those bindings. Full
 availability requires an individual offer's complete proof. Combining issued
 subsets cannot create Full. The inventory owns execution selection through exact
 root and carrier choices, and refuses any remaining demand ambiguity.
+An interface-only role may consume an existing Full body's exact canonical and
+carrier qualification without selecting an Original role or executable roots.
+Competing qualified histories require an exact prior choice; equal payload IDs
+do not resolve their carrier and group bindings.
 Target admission uses exact offered graph candidates before explicit execution
 root qualification. Retained custody cannot fill an empty or partial request
 offer, including dependency-only originals absent from its compiler namespace.

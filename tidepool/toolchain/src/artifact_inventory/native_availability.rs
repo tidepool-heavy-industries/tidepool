@@ -456,6 +456,25 @@ impl IssuedNativeOffer {
         matches!(self.0.body, NativeOfferBody::Full { .. })
     }
 
+    /// Consume this issuer's complete private body beside an exact type role.
+    /// Body availability does not select an original or executable roots.
+    pub(crate) fn qualified_private_availability(
+        &self,
+        projection: &CompilerInputProjection,
+        namespace: &ArtifactView,
+    ) -> Option<&QualifiedNativeAvailability> {
+        let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
+            return None;
+        };
+        let role = projection.snapshot_roles().get(&self.0.owner)?;
+        (role.interface() == self.0.interface
+            && role
+                .original()
+                .is_none_or(|original| original == self.0.original)
+            && qualification.matches_namespace(namespace))
+        .then_some(qualification)
+    }
+
     pub(crate) fn custody(&self) -> &ArtifactView {
         &self.0.custody
     }

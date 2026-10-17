@@ -1219,15 +1219,39 @@ impl NativeCompilerTransport {
         }
         let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
+        // A type-only role cannot choose between independently qualified histories.
+        let mut qualified = BTreeMap::new();
+        for offer in offers {
+            let Some(witness) = offer.qualified_private_availability(roles, artifacts) else {
+                continue;
+            };
+            let entry = metadata
+                .retained
+                .artifacts
+                .get(&offer.original())
+                .ok_or_else(|| failure("qualified native original is outside request custody"))?;
+            let owner = &entry.descriptor.owner;
+            if let Some(previous) = qualified.insert(owner.clone(), witness) {
+                if previous != witness {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                            owner: owner.clone(),
+                        },
+                    ));
+                }
+            }
+        }
         let mut issuance =
             BTreeMap::<ArtifactId, Vec<crate::artifact_inventory::IssuedNativeOffer>>::new();
         for offer in offers {
-            let groups = if offered_roots.contains(&offer.original()) {
+            let private = offer.qualified_private_availability(roles, artifacts);
+            let groups = if offered_roots.contains(&offer.original()) || private.is_some() {
                 offer.issued_group_carriers()?
             } else {
                 offer.dependency_group_carriers(&offered_roots)?
             };
             if !offered_roots.contains(&offer.original())
+                && private.is_none()
                 && !groups
                     .keys()
                     .any(|group| offered_roots.contains(&group.binding.artifact()))
@@ -1242,7 +1266,7 @@ impl NativeCompilerTransport {
                 offer.clone()
             };
             let offer = &consumed;
-            if offered_roots.contains(&offer.original()) {
+            if offered_roots.contains(&offer.original()) || private.is_some() {
                 let sources = issuance.entry(offer.original()).or_default();
                 if !sources.contains(offer) {
                     sources.push(offer.clone());
@@ -1250,7 +1274,7 @@ impl NativeCompilerTransport {
             }
             // Each offer authenticates its own exact group-to-carrier edges.
             // Independent offers may retain different bindings for the same body.
-            if offered_roots.contains(&offer.original()) && offer.is_full() {
+            if private.is_some() {
                 if !groups
                     .keys()
                     .any(|group| group.binding.artifact() == offer.original())

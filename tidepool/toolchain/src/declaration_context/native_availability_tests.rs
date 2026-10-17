@@ -2017,6 +2017,259 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
 }
 
 #[test]
+fn interface_only_full_availability_preserves_roles_and_admits_later_exact_demand() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("PrivateFullInterface", 121);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full)
+        .unwrap()
+        .unwrap();
+    let offer = IssuedNativeOffer::issue(entry.descriptor.id, &full, Some(proof)).unwrap();
+    assert!(offer.is_full());
+    let issued = recover_fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+        full.clone(),
+        [],
+    )
+    .unwrap();
+    let interfaces = issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![entry.descriptor.owner.clone()])
+        .unwrap()
+        .retain_offers([offer.clone(), offer.clone()])
+        .unwrap();
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: interfaces,
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    let before = context.as_ref().clone();
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context.clone())
+        .prepare_compilation(root.path(), PRODUCER)
+        .unwrap();
+    assert_eq!(wire_mode(&request, "PrivateFullInterface"), full_mode());
+    assert!(wire_groups(&request)["PrivateFullInterface"].is_empty());
+    assert!(request
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.interface.module == "PrivateFullInterface")
+        .unwrap()
+        .product
+        .is_none());
+    let inputs = request.compiler_inputs();
+    assert!(inputs
+        .projection
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(inputs.metadata.retained.selected_native_groups.is_empty());
+    assert!(inputs.artifacts.selected_native_groups().is_empty());
+    assert_eq!(context.as_ref(), &before);
+    let validation = PackageInterfaceValidation::default();
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        inputs,
+        &inputs.metadata,
+        &validation.inventory,
+    )
+    .unwrap();
+    let mut fixed = inputs
+        .artifacts
+        .inventory()
+        .bind_segment(&inputs.artifacts, vec![], &selection)
+        .unwrap();
+    let imports = [source_import(&native, 9001)];
+    let demanded = inputs
+        .artifacts
+        .inventory()
+        .admit_bound_target(
+            &mut fixed,
+            &inputs.artifacts,
+            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+            vec![],
+            &selection,
+        )
+        .expect("later target uses the same issuer's previously unselected body");
+    assert!(demanded
+        .artifacts
+        .selected_native_groups()
+        .iter()
+        .any(|group| group.artifact == entry.descriptor.id && group.original_ordinal == 9001));
+    assert_eq!(context.as_ref(), &before);
+}
+
+#[test]
+fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry = Arc::new(
+        ArtifactEntry::original(producer.sha256(), product("PrivatePartial", 122)).unwrap(),
+    );
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()])
+        .unwrap()
+        .interface_only();
+    let mut partials = Vec::new();
+    for ordinal in [7, 9001] {
+        let selected = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![entry.clone()],
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: ordinal,
+                }]),
+            )
+            .unwrap();
+        let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &selected)
+            .unwrap()
+            .unwrap();
+        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &selected, Some(proof)).unwrap();
+        assert!(!offer.is_full());
+        partials.push(offer);
+    }
+    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &full, None).unwrap();
+    for offers in [vec![], vec![empty], vec![partials[0].clone()], partials] {
+        let metadata = projection
+            .project_metadata(full.metadata_snapshot())
+            .unwrap();
+        let transport =
+            NativeCompilerTransport::issue(&projection, &metadata, &full, &offers).unwrap();
+        assert!(
+            !transport.availability.contains_key(&entry.descriptor.id),
+            "neither complete byte custody nor unions of subsets create a Full witness"
+        );
+    }
+}
+
+#[test]
+fn private_full_availability_requires_exact_namespace_and_refuses_historical_ambiguity() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let natives = [
+        product("PrivateFullHistory", 123),
+        product("PrivateFullHistory", 124),
+    ];
+    assert_eq!(natives[0].module_interface(), natives[1].module_interface());
+    let entries = natives
+        .into_iter()
+        .map(|native| Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap()))
+        .collect::<Vec<_>>();
+    assert_ne!(entries[0].descriptor.id, entries[1].descriptor.id);
+    let inventory = ArtifactInventory::default();
+    let canonical = Arc::new(ArtifactEntry::canonical(match &entries[0].payload {
+        ArtifactPayload::Original(native) => native.module_interface().unwrap().clone(),
+        _ => unreachable!(),
+    }));
+    let base = inventory
+        .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+        .unwrap();
+    let views = entries
+        .iter()
+        .map(|entry| inventory.admit_shared(&base, vec![entry.clone()]).unwrap())
+        .collect::<Vec<_>>();
+    let offers = entries
+        .iter()
+        .zip(&views)
+        .map(|(entry, view)| {
+            let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, view)
+                .unwrap()
+                .unwrap();
+            let offer = IssuedNativeOffer::issue(entry.descriptor.id, view, Some(proof)).unwrap();
+            assert!(offer.is_full());
+            offer
+        })
+        .collect::<Vec<_>>();
+    let projection = CompilerInputProjection::from_issued_entries(&[canonical]).unwrap();
+    let custody = base
+        .retain_custody(&views[0])
+        .unwrap()
+        .retain_custody(&views[1])
+        .unwrap();
+    for offer in &offers {
+        assert!(offer
+            .qualified_private_availability(&projection, &custody)
+            .is_some());
+        assert!(offer
+            .qualified_private_availability(&projection, &inventory.empty_view())
+            .is_none());
+        assert!(offer
+            .qualified_private_availability(&CompilerInputProjection::default(), &custody)
+            .is_none());
+    }
+    let metadata = projection
+        .project_metadata(custody.metadata_snapshot())
+        .unwrap();
+    for reversed in [false, true] {
+        let selected = if reversed {
+            vec![offers[1].clone(), offers[0].clone()]
+        } else {
+            offers.clone()
+        };
+        let error = NativeCompilerTransport::issue(&projection, &metadata, &custody, &selected)
+            .err()
+            .expect("type-only role cannot choose among distinct qualified historical Fulls");
+        assert!(matches!(error, CompileError::ArtifactInventory(error)
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { ref owner }
+                if owner == &entries[0].descriptor.owner)));
+    }
+    let duplicate = NativeCompilerTransport::issue(
+        &projection,
+        &metadata,
+        &custody,
+        &[offers[0].clone(), offers[0].clone()],
+    )
+    .unwrap();
+    assert!(duplicate.availability[&entries[0].descriptor.id].permits(9001));
+    for index in 0..2 {
+        let selected =
+            CompilerInputProjection::from_issued_entries(&[entries[index].clone()]).unwrap();
+        let view = views[index].retain_custody(&views[1 - index]).unwrap();
+        let metadata = selected.project_metadata(view.metadata_snapshot()).unwrap();
+        let transport =
+            NativeCompilerTransport::issue(&selected, &metadata, &view, &offers).unwrap();
+        assert!(transport.availability[&entries[index].descriptor.id].permits(9001));
+        assert!(!transport
+            .availability
+            .contains_key(&entries[1 - index].descriptor.id));
+    }
+    let wrong = Arc::new(ArtifactEntry::canonical(fixture_module_core(
+        match &entries[0].payload {
+            ArtifactPayload::Original(native) => native.module_interface().unwrap(),
+            _ => unreachable!(),
+        },
+        b"different canonical Core".to_vec(),
+    )));
+    let wrong_projection = CompilerInputProjection::from_issued_entries(&[wrong.clone()]).unwrap();
+    let wrong_view = inventory
+        .admit_shared(&inventory.empty_view(), vec![wrong])
+        .unwrap()
+        .retain_custody(&custody)
+        .unwrap();
+    for offer in &offers {
+        assert!(offer
+            .qualified_private_availability(&wrong_projection, &wrong_view)
+            .is_none());
+        assert!(offer
+            .qualified_private_availability(&projection, &wrong_view)
+            .is_none());
+    }
+}
+
+#[test]
 fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     use crate::artifact_inventory::{
         ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
@@ -4968,75 +5221,100 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     let root = tempfile::tempdir().unwrap();
 
     for (index, offer) in [full, partial, empty].into_iter().enumerate() {
-        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
-            producer: producer.sha256(),
-            compiler_support: recover_fixture_compiler_support(
-                projection.clone(),
-                artifacts.clone(),
-                [offer.clone()],
-            )
-            .unwrap(),
-            lexical: Default::default(),
-            template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-        });
-        let snapshot = context.snapshot();
-        let store = MemoryBlockstore::new();
-        let mut materializer = Materializer::new(&store);
-        let receipt = materializer.materialize_context(None, &snapshot).unwrap();
-        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
-            store.put_keyed(&cid, &bytes).unwrap();
-        }
-        let receipt = hydrate_context(&store, receipt.root()).unwrap();
-        let snapshot = receipt.snapshot();
-        let graph = snapshot.graph_selection().unwrap();
-        let view = context.artifact_view();
-        // A fresh acquisition reconstructs the exact graph from authenticated
-        // fixture entries, then restores the decoded offer through production.
-        let recovered = RecoveredArtifactInventory {
-            producer: producer.sha256(),
-            entries: view
-                .entries()
-                .into_iter()
-                .map(|entry| (entry.descriptor.id, entry))
-                .collect(),
-            recorded_inventory: true,
-            bindings: graph.bindings.iter().copied().collect(),
-            binding_edges: snapshot.binding_dependencies().unwrap(),
-            interfaces: view.interface_dependencies(),
-        };
-        let mut restored = recovered.context_with_snapshot(snapshot).unwrap();
-        restored.bind_snapshot_baseline(&receipt).unwrap();
-        let restored_offer = &restored.owner.facts.compiler_support.native_offers()[0];
-        assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
-        assert_eq!(restored_offer.is_full(), index == 0);
-        assert!(proof
-            .qualify_availability(restored.artifact_view())
-            .unwrap()
-            .is_some());
-        assert!(match (&restored_offer.snapshot_facts().body, index) {
-            (NativeOfferSnapshotBody::Full(_), 0)
-            | (NativeOfferSnapshotBody::Partial(_), 1)
-            | (NativeOfferSnapshotBody::Empty(_), 2) => true,
-            _ => false,
-        });
-        let request = ExactCompileContext::new(Arc::new(restored))
-            .prepare_compilation(&root.path().join(format!("restored-{index}")), PRODUCER)
-            .unwrap();
-        assert_eq!(
-            wire_mode(&request, "RestoredOffer"),
-            if index == 0 {
-                full_mode()
-            } else if index == 1 {
-                issued_mode(&[7, 9001])
-            } else {
-                issued_mode(&[])
+        for interface_only in [false, true] {
+            let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+                producer: producer.sha256(),
+                compiler_support: recover_fixture_compiler_support(
+                    if interface_only {
+                        projection.interface_only()
+                    } else {
+                        projection.clone()
+                    },
+                    artifacts.clone(),
+                    [offer.clone()],
+                )
+                .unwrap(),
+                lexical: Default::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            });
+            let snapshot = context.snapshot();
+            let store = MemoryBlockstore::new();
+            let mut materializer = Materializer::new(&store);
+            let receipt = materializer.materialize_context(None, &snapshot).unwrap();
+            for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
             }
-        );
-        assert_eq!(
-            request.context().artifact_view().selected_native_groups(),
-            context.artifact_view().selected_native_groups()
-        );
+            let receipt = hydrate_context(&store, receipt.root()).unwrap();
+            let snapshot = receipt.snapshot();
+            let graph = snapshot.graph_selection().unwrap();
+            let view = context.artifact_view();
+            // A fresh acquisition reconstructs the exact graph from authenticated
+            // fixture entries, then restores the decoded offer through production.
+            let recovered = RecoveredArtifactInventory {
+                producer: producer.sha256(),
+                entries: view
+                    .entries()
+                    .into_iter()
+                    .map(|entry| (entry.descriptor.id, entry))
+                    .collect(),
+                recorded_inventory: true,
+                bindings: graph.bindings.iter().copied().collect(),
+                binding_edges: snapshot.binding_dependencies().unwrap(),
+                interfaces: view.interface_dependencies(),
+            };
+            let mut restored = recovered.context_with_snapshot(snapshot).unwrap();
+            restored.bind_snapshot_baseline(&receipt).unwrap();
+            let restored_offer = &restored.owner.facts.compiler_support.native_offers()[0];
+            assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
+            assert_eq!(restored_offer.is_full(), index == 0);
+            assert!(proof
+                .qualify_availability(restored.artifact_view())
+                .unwrap()
+                .is_some());
+            assert!(match (&restored_offer.snapshot_facts().body, index) {
+                (NativeOfferSnapshotBody::Full(_), 0)
+                | (NativeOfferSnapshotBody::Partial(_), 1)
+                | (NativeOfferSnapshotBody::Empty(_), 2) => true,
+                _ => false,
+            });
+            let request = ExactCompileContext::new(Arc::new(restored))
+                .prepare_compilation(
+                    &root
+                        .path()
+                        .join(format!("restored-{index}-{interface_only}")),
+                    PRODUCER,
+                )
+                .unwrap();
+            if interface_only && index != 0 {
+                assert!(!request
+                    .compiler_inputs()
+                    .native_transport
+                    .availability
+                    .contains_key(&entry.descriptor.id));
+            } else {
+                assert_eq!(
+                    wire_mode(&request, "RestoredOffer"),
+                    if index == 0 {
+                        full_mode()
+                    } else if index == 1 {
+                        issued_mode(&[7, 9001])
+                    } else {
+                        issued_mode(&[])
+                    }
+                );
+            }
+            assert!(request
+                .compiler_inputs()
+                .projection
+                .roles()
+                .iter()
+                .all(|role| !interface_only || role.original().is_none()));
+            assert_eq!(
+                request.context().artifact_view().selected_native_groups(),
+                context.artifact_view().selected_native_groups()
+            );
+        }
     }
 }
 
