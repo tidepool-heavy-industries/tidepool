@@ -159,6 +159,31 @@ pub(crate) struct CompilerSourceSupport {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     native_offers: Arc<[IssuedNativeOffer]>,
+    selected: Arc<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>>,
+}
+
+/// Exact binding observations retained from successful compiler-role admission.
+/// These entries are acquisition owners, not a reconstruction from payload IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedCompilerRole {
+    interface: (ArtifactBinding, Arc<ArtifactEntry>),
+    original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+}
+
+impl ResolvedCompilerRole {
+    fn retain_acquisitions(&mut self, retained: &ArtifactView) -> Result<(), CompileError> {
+        for (binding, entry) in std::iter::once(&mut self.interface).chain(self.original.iter_mut())
+        {
+            *entry = Arc::clone(
+                retained
+                    .lease
+                    .payloads
+                    .get(&binding.artifact)
+                    .ok_or_else(|| failure("retained compiler role lost its payload owner"))?,
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Borrowed selected interface observations and the same issuing view that
@@ -251,7 +276,7 @@ impl CompilerSourceSupport {
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
-        projection.validate_associations(&artifacts)?;
+        let mut selected = projection.resolve_associations(&artifacts)?;
         let mut offers = Vec::new();
         let retained = artifacts.retain_issued_offer_custody(
             native_offers.into_iter().filter_map(|offer| {
@@ -263,10 +288,16 @@ impl CompilerSourceSupport {
                 }
             }),
         )?;
+        // Custody-only retention preserves these exact selected bindings while
+        // it may acquire additional immutable sources for their payloads.
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&retained)?;
+        }
         Ok(Self {
             projection,
             artifacts: retained,
             native_offers: offers.into(),
+            selected: Arc::new(selected),
         })
     }
 
@@ -295,18 +326,11 @@ impl CompilerSourceSupport {
     pub(crate) fn selected_interfaces(
         &self,
     ) -> Result<SelectedCompilerInterfaces<'_>, CompileError> {
-        let metadata = self.artifacts.metadata_snapshot();
-        let mut entries = BTreeMap::new();
-        for (owner, role) in &self.projection.roles {
-            let entry = metadata
-                .artifacts
-                .get(&role.interface())
-                .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
-            if entry.descriptor.owner != *owner || entry.is_native() {
-                return Err(failure("compiler interface role has another owner or kind"));
-            }
-            entries.insert(owner.clone(), entry.clone());
-        }
+        let entries = self
+            .selected
+            .iter()
+            .map(|(owner, row)| (owner.clone(), Arc::clone(&row.interface.1)))
+            .collect();
         Ok(SelectedCompilerInterfaces {
             artifacts: &self.artifacts,
             entries,
@@ -1171,12 +1195,21 @@ impl CompilerInputProjection {
         Ok(selected)
     }
     pub(crate) fn validate_associations(&self, view: &ArtifactView) -> Result<(), CompileError> {
-        self.associated_entries(&view.metadata_snapshot().artifacts)?;
+        self.resolve_associations(view).map(|_| ())
+    }
+
+    fn resolve_associations(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
+        let metadata = view.metadata_snapshot();
+        let entries = self.associated_entries(&metadata.artifacts)?;
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
-        for role in self.roles.values() {
+        let mut selected = BTreeMap::new();
+        for (owner, role) in &self.roles {
             let canonical = view.resolve_binding(role.interface(), owned)?;
-            if let Some(original) = role.original() {
+            let original = if let Some(original) = role.original() {
                 let carrier = view.resolve_binding(original, owned)?;
                 if !state
                     .outgoing(InventoryNodeKey::Artifact(carrier))
@@ -1189,9 +1222,22 @@ impl CompilerInputProjection {
                         "compiler fragment canonical pair differs from its issuing bindings",
                     ));
                 }
-            }
+                Some((carrier, Arc::clone(&entries[owner])))
+            } else {
+                None
+            };
+            selected.insert(
+                owner.clone(),
+                ResolvedCompilerRole {
+                    interface: (
+                        canonical,
+                        Arc::clone(&metadata.artifacts[&role.interface()]),
+                    ),
+                    original,
+                },
+            );
         }
-        Ok(())
+        Ok(selected)
     }
 
     fn associated_entries(
