@@ -2,23 +2,80 @@
 
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
-/// A configured built-in tier, custom workspace alias, or explicit provider model name.
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum Backend {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeek,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAIPlan,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum OpenAIModel {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    Gpt61Sol,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    Gpt6Sol,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    Gpt6Astra,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    Gpt6Luna,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    Gpt56Sol,
+}
+
 #[derive(
     ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 #[serde(tag = "tag", content = "contents", deny_unknown_fields)]
 pub enum Model {
-    /// The configured Luna tier.
     #[haskell(module = "Tidepool.Effects.Core")]
-    Luna,
-    /// The configured Sol tier.
+    DeepSeekFlash,
     #[haskell(module = "Tidepool.Effects.Core")]
-    Sol,
-    /// The configured Astra tier.
+    DeepSeekPro,
     #[haskell(module = "Tidepool.Effects.Core")]
-    Astra,
+    OpenAIModel(OpenAIModel),
     #[haskell(module = "Tidepool.Effects.Core")]
-    CustomAlias(String),
+    CustomModel(Backend, String),
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum DeepSeekReasoning {
     #[haskell(module = "Tidepool.Effects.Core")]
-    ProviderModel(String),
+    DeepSeekNone,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeekLow,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeekHigh,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeekMax,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum OpenAIReasoning {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAILow,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAIMedium,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAIHigh,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(tag = "tag", content = "contents", deny_unknown_fields)]
+pub enum Reasoning {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeekReasoning(DeepSeekReasoning),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAIReasoning(OpenAIReasoning),
 }
