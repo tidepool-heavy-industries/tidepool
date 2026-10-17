@@ -2839,7 +2839,7 @@ mod authored_tests {
         assert!(stored
             .module_interfaces
             .iter()
-            .any(|reference| reference.module == "Expr"));
+            .any(|reference| reference.interface.module == "Expr"));
 
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
