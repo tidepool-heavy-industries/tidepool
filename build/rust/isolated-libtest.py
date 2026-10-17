@@ -526,7 +526,7 @@ def parse_args(argv, *, require_binary=True):
     parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default=None,
                         help='select an explicitly owned compiler for each isolated test')
     parser.add_argument('--trace-profile', choices=('full', 'minimal'),
-                        help='campaign trace detail profile for a retained performance case')
+                        help='compiler/campaign trace detail profile for a retained case')
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
@@ -885,6 +885,7 @@ def diagnostic_summaries(artifact_root):
             }
             result['compiler_job_queue'] = {'records': [], 'data_status': 'trace_absent', 'complete': False}
             return result
+        profile_receipts, compiler_boots, summary_lines, raw_detail_lines = [], [], 0, 0
         physical, retained_bytes, total = [], 0, 0
         unknown, physical_requests, physical_jobs = 0, set(), set()
         requests_truncated = jobs_truncated = False
@@ -896,6 +897,16 @@ def diagnostic_summaries(artifact_root):
                 try:
                     context, request = compiler_trace_context(row)
                     fields = row.get('fields', row)
+                    if fields.get('message') == 'compiler trace profile applied' and len(profile_receipts) < 2:
+                        profile_receipts.append(fields)
+                    if fields.get('message') == 'compiler daemon ready' and len(compiler_boots) < 2:
+                        compiler_boots.append(fields)
+                    line = fields.get('line', '')
+                    if fields.get('message') == 'compiler timing' and isinstance(line, str):
+                        if line.startswith(('tidepool-compile-summary ', 'tidepool-validation ', 'tidepool-reuse ')):
+                            summary_lines += 1
+                        if line.startswith(('tidepool-count ', 'tidepool-timing-detail ', 'tidepool-timing-module-detail ')):
+                            raw_detail_lines += 1
                     if fields.get('phase') == 'compiler_queue':
                         queue_rows += 1
                         epoch, admission, elapsed = (fields.get(key) for key in
@@ -952,6 +963,9 @@ def diagnostic_summaries(artifact_root):
         scanned = scan.get('complete', False) and scan.get('malformed_lines', 0) == 0
         scan['complete'] = scanned
         result['compiler_trace_scan'] = scan
+        result['trace_capture'] = {'applied_profiles': profile_receipts, 'compiler_boots': compiler_boots,
+                                   'summary_lines': summary_lines, 'raw_detail_lines': raw_detail_lines,
+                                   'complete': scanned}
         result['physical_compiler_timing'] = {
             'records': physical, 'physical_record_count': total,
             'physical_request_count': len(physical_requests),
@@ -1239,6 +1253,11 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record['startup_diagnostic_seconds'] = startup_diagnostic_seconds
     if artifact_root is not None:
         artifact_root = Path(artifact_root).absolute()
+        if trace_profile is None:
+            trace_profile = os.environ.get('TIDEPOOL_TEST_TRACE_PROFILE') or (
+                'full' if os.environ.get('TIDEPOOL_TIMING') == '1' else 'minimal')
+        if trace_profile not in ('minimal', 'full'):
+            raise ValueError('unsupported trace profile')
         artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),

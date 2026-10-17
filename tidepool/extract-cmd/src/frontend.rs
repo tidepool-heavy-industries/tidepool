@@ -151,21 +151,12 @@ impl Drop for OwnedDaemonChild {
     }
 }
 
-fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> Command {
+fn owned_timing_command(
+    program: impl AsRef<OsStr>,
+    profile: crate::CompilerTraceProfile,
+) -> Command {
     let mut command = crate::process::command(program);
-    // Owned qualification keeps detailed timing by default. Explicit zero
-    // selects ordinary worker execution for a matched measurement control.
-    command.env(
-        "TIDEPOOL_TIMING",
-        if timing == Some(OsStr::new("0")) {
-            "0"
-        } else {
-            "1"
-        },
-    );
-    if let Some(summary) = std::env::var_os("TIDEPOOL_TIMING_SUMMARY") {
-        command.env("TIDEPOOL_TIMING_SUMMARY", summary);
-    }
+    command.envs(profile.environment());
     command
 }
 
@@ -293,7 +284,10 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         program,
         child_args,
     } = parse_owned_invocation(args)?;
-    let timing = std::env::var_os("TIDEPOOL_TIMING");
+    let profile = crate::CompilerTraceProfile::select(
+        std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
+        std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
+    )?;
     for key in OWNED_COMPILER_ENV {
         if std::env::var_os(key).is_some() {
             return Err(FrontendError::Usage(format!(
@@ -349,7 +343,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
         allowances,
     );
-    let mut command = owned_timing_command(&frontend, timing.as_deref());
+    let mut command = owned_timing_command(&frontend, profile);
     command
         .args(&arguments)
         .env("XDG_CACHE_HOME", &cache)
@@ -399,7 +393,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         .map_err(FrontendError::Io)?;
     let mut descendants =
         crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
-    let mut child_command = owned_timing_command(program, timing.as_deref());
+    let mut child_command = owned_timing_command(program, profile);
     evidence.configure_child(&mut child_command);
     let child = child_command
         .args(child_args)
@@ -1440,13 +1434,15 @@ mod tests {
             crate::CompilerJobAllowances::default(),
         );
         for (timing, expected) in [
-            (None, "1"),
+            (None, "0"),
             (Some(OsStr::new("0")), "0"),
             (Some(OsStr::new("1")), "1"),
         ] {
-            let mut daemon = owned_timing_command("/selected/frontend", timing);
+            let profile =
+                crate::CompilerTraceProfile::select(None, timing.and_then(OsStr::to_str)).unwrap();
+            let mut daemon = owned_timing_command("/selected/frontend", profile);
             daemon.args(&daemon_arguments);
-            let mut child = owned_timing_command("/selected/libtest", timing);
+            let mut child = owned_timing_command("/selected/libtest", profile);
             child.args(["--exact", "selected_case"]);
             for command in [&daemon, &child] {
                 assert_eq!(

@@ -623,7 +623,13 @@ For repeat launch, the activation control aliases `launch-1`; it is not an
 additional interval. Readiness is nested within its launch window. Cleanup
 reports the sum of the three disjoint input, completion and shutdown windows.
 
-Performance cohorts default to `--trace-profile minimal`: phase outcomes,
+Retained correctness and performance cohorts default to `--trace-profile minimal`.
+The selected profile is applied before the owned compiler and test child start;
+qualification checks the compiler writer's applied receipt and required summaries.
+`--trace-profile full` is also available for a bounded correctness reproduction.
+Routine live startup and recovery use the same summary policy; explicit full
+capture or low-level `TIDEPOOL_TIMING=1` opts into detailed generation.
+Minimal capture retains: phase outcomes,
 exact compiler request/service joins, per-call timing, validation summaries,
 native-image decisions, successful Cranelift compile summaries and machine
 publication records remain enabled. `TIDEPOOL_TIMING_SUMMARY=1` is forwarded

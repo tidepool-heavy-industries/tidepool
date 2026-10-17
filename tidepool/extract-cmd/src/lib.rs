@@ -29,6 +29,7 @@ pub const EXTRACTOR_FRONTEND_ROLE_RESPONSE: &[u8] = b"tidepool-extractor-role-v1
 pub const EXTRACTOR_WORKER_ROLE_RESPONSE: &[u8] = b"tidepool-extractor-role-v1 worker\n";
 
 mod daemon;
+pub use daemon::CompilerTraceProfile;
 pub mod diagnostics;
 mod endpoint;
 pub mod exec_check;
