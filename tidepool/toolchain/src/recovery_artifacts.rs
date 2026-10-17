@@ -2402,6 +2402,40 @@ pub fn materialize_certified_products_with_work(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static NATIVE_MATERIALIZATION_WORK: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn observe_native_materialization<T>(operation: impl FnOnce() -> T) -> (T, (u64, u64)) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_MATERIALIZATION_WORK.with(|work| work.set(None));
+        }
+    }
+    NATIVE_MATERIALIZATION_WORK.with(|work| {
+        assert!(
+            work.replace(Some((0, 0))).is_none(),
+            "nested native work observation"
+        );
+    });
+    let _reset = Reset;
+    let result = operation();
+    let work = NATIVE_MATERIALIZATION_WORK.with(|work| work.get().unwrap());
+    (result, work)
+}
+
+#[cfg(test)]
+fn record_native_materialization(hashed: usize, copied: usize) {
+    NATIVE_MATERIALIZATION_WORK.with(|work| {
+        if let Some((hashes, copies)) = work.get() {
+            work.set(Some((hashes + hashed as u64, copies + copied as u64)));
+        }
+    });
+}
+
 pub(crate) fn materialize_certified_products_with_validation(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2453,8 +2487,12 @@ pub(crate) fn materialize_certified_products_with_validation(
         if owner.unit.is_empty() || owner.module.is_empty() {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256
-            || validation.digest(&product.product_bytes) != owner.product_sha256
+        if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256 || {
+            #[cfg(test)]
+            record_native_materialization(product.product_bytes.len(), 0);
+            validation.digest(&product.product_bytes)
+        } != owner
+            .product_sha256
         {
             return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
                 owner,
@@ -2518,6 +2556,8 @@ pub(crate) fn materialize_certified_products_with_validation(
             mode,
             validation,
         )?;
+        #[cfg(test)]
+        record_native_materialization(0, product.product_bytes.len());
         materialize_copy_with_validation(
             &owned.join(
                 product_path

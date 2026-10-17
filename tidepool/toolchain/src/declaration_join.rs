@@ -3078,19 +3078,56 @@ mod authored_tests {
             .source_sha256()
             .is_none());
         assert!(recovered.authored_native_root(2).is_err());
-        let recovered_join = certify_recovered_declaration_tip_in_context(
-            Arc::new(recovered.clone()),
-            RecoveryDeclarationSelection {
-                origin: RecoveryDeclarationOrigin::Join,
-                root: recovered.lexical_graph()[0].owner.clone(),
-                lexical: recovered.lexical_graph().to_vec(),
-                exports: certificate.lexical_exports().to_vec(),
-                instances: certificate.instances().clone(),
-                family_closure: certificate.family_closure().to_vec(),
-            },
-            &[],
-        )
-        .unwrap();
+        let (recovered_join, native_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                certify_recovered_declaration_tip_in_context(
+                    Arc::new(recovered.clone()),
+                    RecoveryDeclarationSelection {
+                        origin: RecoveryDeclarationOrigin::Join,
+                        root: recovered.lexical_graph()[0].owner.clone(),
+                        lexical: recovered.lexical_graph().to_vec(),
+                        exports: certificate.lexical_exports().to_vec(),
+                        instances: certificate.instances().clone(),
+                        family_closure: certificate.family_closure().to_vec(),
+                    },
+                    &[],
+                )
+            });
+        let recovered_join = recovered_join.unwrap();
+        assert_eq!(
+            native_work,
+            (0, 0),
+            "recovery certifier copied or hashed native bytes"
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let (old_route, old_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                recovered.materialize_scratch(&scratch)
+            });
+        old_route.unwrap();
+        assert!(
+            old_work.0 > 0 && old_work.1 > 0,
+            "full native scratch must exercise the observed boundary"
+        );
+        let inspection = Arc::new(recovered.clone())
+            .recovery_inspection_inputs()
+            .unwrap();
+        let path = inspection
+            .interface(recovered_join.root())
+            .unwrap()
+            .path
+            .clone();
+        let mutation = crate::artifacts::test_support::with_settlement(|settlement| {
+            inspection.inspect(&[], &mut |close| {
+                settlement(close);
+                std::fs::write(&path, b"changed during real compiler inspection").unwrap();
+            })
+        });
+        assert!(
+            mutation.is_err(),
+            "inspection must refuse an interface changed during its compiler transaction"
+        );
+
         assert_eq!(recovered_join.authored_generation(), None);
         let recovered_identity = recovered.semantic_sha256();
         let selected_instances = certificate.instances().clone();
