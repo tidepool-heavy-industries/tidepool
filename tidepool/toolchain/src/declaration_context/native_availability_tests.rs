@@ -6120,14 +6120,62 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
     assert_eq!(a_groups.len(), 2);
     assert_eq!(b_groups.len(), 2);
     assert!(a_groups.is_disjoint(&b_groups));
+    let parent = dependent_product(
+        "HistoricalDependencyParent",
+        134,
+        vec![(7, vec![source_import(&native, 7)])],
+    );
+    let parent = recovered_witness_fixtures(&[native.clone(), parent])
+        .remove(1)
+        .product;
+    let parent_entry = Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
+    let parent_projection = projection
+        .merge(&CompilerInputProjection::from_issued_entries(&[parent_entry.clone()]).unwrap())
+        .unwrap();
+    let parent_view = parent_projection
+        .admit_complete_native_products(&left, vec![parent_entry.clone()], std::slice::from_ref(&a))
+        .unwrap();
+    let parent_proof =
+        NativeOriginalRequirement::from_selected_view(parent_entry.descriptor.id, &parent_view)
+            .unwrap()
+            .unwrap();
+    let parent_offer =
+        IssuedNativeOffer::issue(parent_entry.descriptor.id, &parent_view, Some(parent_proof))
+            .unwrap();
+    let groups = parent_offer.issued_group_carriers().unwrap();
+    let parent_group = *groups
+        .keys()
+        .find(|group| {
+            group.binding.artifact() == parent_entry.descriptor.id && group.original_ordinal == 7
+        })
+        .unwrap();
+    let historical_child = *a_groups
+        .iter()
+        .find(|group| group.original_ordinal == 7)
+        .unwrap();
+    let historical_edge = (
+        crate::artifact_inventory::ArtifactBindingNode::Group(parent_group),
+        crate::artifact_inventory::ArtifactBindingNode::Group(historical_child),
+        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+            dependent_ordinal: 7,
+            required_ordinal: 7,
+        },
+    );
+    assert!(parent_offer
+        .custody()
+        .binding_dependencies()
+        .contains(&historical_edge));
+    assert!(!b_groups.contains(&historical_child));
     let support = fixture_compiler_support(projection.clone(), right.clone());
     let original_graph = support.artifacts().capture_graph_selection();
     for extra in [
         vec![b.clone()],
         vec![a.clone(), b.clone()],
         vec![b.clone(), a.clone()],
+        vec![a.clone(), b.clone(), parent_offer.clone()],
     ] {
         let includes_a = extra.iter().any(|offer| offer == &a);
+        let includes_parent = extra.iter().any(|offer| offer == &parent_offer);
         let carried = support.retain_offers(extra).unwrap();
         let graph = carried.artifacts().capture_graph_selection();
         assert_eq!(
@@ -6139,6 +6187,12 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             "adding availability cannot change selected namespace"
         );
         assert_eq!(exact_groups(carried.artifacts()), b_groups);
+        if includes_parent {
+            assert!(carried
+                .artifacts()
+                .binding_dependencies()
+                .contains(&historical_edge));
+        }
         if includes_a {
             assert!(a
                 .custody()
@@ -6185,6 +6239,16 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(reused))
             .unwrap();
         assert_eq!(exact_groups(&request.compiler_inputs().artifacts), b_groups);
+        if includes_parent {
+            assert!(
+                request
+                    .compiler_inputs()
+                    .artifacts
+                    .binding_dependencies()
+                    .contains(&historical_edge),
+                "historical parent must retain its A child, never rebind to current B"
+            );
+        }
     }
     // Both issuer proofs explicitly supplied as root authority remain a real conflict.
     let both = right
