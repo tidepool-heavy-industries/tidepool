@@ -83,7 +83,8 @@ pub fn emit_bundle(
         let relative = relative.to_string_lossy().replace('\\', "/");
         #[cfg(test)]
         EMITTED_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
-        let source = std::fs::read_to_string(path)?;
+        let source = String::from_utf8(crate::host_work::read(&path)?)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         generated.push_str(&format!("    ({relative:?}, {source:?}),\n"));
     }
     generated.push_str("];\n");
@@ -140,7 +141,11 @@ mod tests {
             content_hash(&[("A.hs", "module A where\nvalue = 3\n")])
         );
         std::fs::write(root.join("Z.hs"), [0xff]).unwrap();
-        assert!(emit_bundle(&root, "SOURCES", &output).is_err());
+        let error = emit_bundle(&root, "SOURCES", &output).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
         assert_eq!(std::fs::read_to_string(output).unwrap(), changed);
         eprintln!("source bundle work: selected_payload_reads=2 unused_manifest_reads={} unused_hashes={} namespace_entries={}", work.content_read_attempts, work.hashes, work.entries);
     }
