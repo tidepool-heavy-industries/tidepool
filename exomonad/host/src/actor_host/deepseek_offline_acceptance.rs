@@ -640,7 +640,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
         // Both actors reach actual HTTP before either receives a scripted answer.
         let editor_round = driver.next(host, editor).await;
         let tester_round = driver.next(host, tester).await;
-        assert_eq!(editor_round.body["model"], "deepseek-pro");
+        assert_eq!(editor_round.body["model"], "deepseek-v4-pro");
         assert_eq!(editor_round.body["reasoning"], json!({"effort":"high"}));
         assert_eq!((tester_round.body["model"].clone(), tester_round.body["reasoning"].clone()), parent_selection);
         let mut commands = Vec::new();
