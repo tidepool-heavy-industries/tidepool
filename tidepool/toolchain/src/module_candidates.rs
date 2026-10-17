@@ -1684,6 +1684,7 @@ impl CacheOfferDiagnostics {
 
 /// Deployment packages remain all-or-nothing through shared record validation.
 /// Ordinary cache rows are optional and can be omitted independently.
+#[track_caller]
 fn omit_or_refuse_candidate(
     origin: &CandidateOrigin,
     diagnostics: &mut CacheOfferDiagnostics,
@@ -1692,6 +1693,9 @@ fn omit_or_refuse_candidate(
     reason: CacheOfferOmission,
 ) -> bool {
     if matches!(origin, CandidateOrigin::Deployment { .. }) {
+        tracing::warn!(target: "tidepool_toolchain::module_candidates",
+            unit, module, ?reason, location = %std::panic::Location::caller(),
+            "deployment candidate refused");
         true
     } else {
         diagnostics.omit(unit, module, reason);
@@ -2698,6 +2702,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
         Some(context) => protected_native_closure(&validated, context, &mut package_validation)?,
         None => BTreeSet::new(),
     };
+    tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_inventory", owners = validated.len());
     let mut inventory = inventory::InventoryTables::new(
         validated
             .iter()
@@ -2794,7 +2799,10 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 .ok()?,
             ),
         };
-        let core_reference = canonical_reference.core.as_ref()?;
+        let core_reference = canonical_reference.core.as_ref().or_else(|| {
+        tracing::warn!(target: "tidepool_toolchain::module_candidates", unit = %record.unit, module = %record.module, "candidate has no core reference");
+        None
+    })?;
         let bundle = CandidateBundle {
             owner: owner.clone(),
             product: record.record.product(product),
@@ -2935,7 +2943,11 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             Vec::new(),
         ),
         CandidateInputTransport::OwnedArena => {
-            candidate_owned_acquisition(&value, &by_owner, endpoint_identity)?
+            tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_owned_acquisition", owners = by_owner.len());
+            candidate_owned_acquisition(&value, &by_owner, endpoint_identity).or_else(|| {
+                tracing::warn!(target: "tidepool_toolchain::module_candidates", "candidate owned acquisition refused");
+                None
+            })?
         }
     };
     let Value::Array(mut fields) = value else {
@@ -3038,7 +3050,7 @@ fn candidate_owned_acquisition(
     let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(
         tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64,
     )
-    .ok()?;
+    .inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?;
     let mut pending = Vec::new();
     let mut pending_graphs = BTreeMap::new();
     let mut graph_receivers = BTreeMap::<[u8; 32], Vec<(String, String)>>::new();
@@ -3099,20 +3111,20 @@ fn candidate_owned_acquisition(
                 if let std::collections::btree_map::Entry::Vacant(entry) =
                     pending_graphs.entry(digest)
                 {
-                    entry.insert(builder.append(bytes).ok()?);
+                    entry.insert(builder.append(bytes).inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?);
                 }
                 graph_receivers.entry(digest).or_default().push(key.clone());
             } else {
-                pending.push((key.clone(), kind, builder.append(bytes).ok()?));
+                pending.push((key.clone(), kind, builder.append(bytes).inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?));
             }
         }
     }
-    let arena = builder.finish().ok()?;
+    let arena = builder.finish().inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?;
     for (key, kind, pending) in pending {
-        acquired.insert((key, kind), arena.issue_slice(pending).ok()?);
+        acquired.insert((key, kind), arena.issue_slice(pending).inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?);
     }
     for (digest, pending) in pending_graphs {
-        let slice = arena.issue_slice(pending).ok()?;
+        let slice = arena.issue_slice(pending).inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?;
         for key in graph_receivers.remove(&digest)? {
             acquired.insert((key, Kind::Graph), slice.clone());
         }
@@ -3146,10 +3158,10 @@ fn candidate_owned_acquisition(
                 bundle.original_module_interface.original_input_origins(),
                 &mut table,
             )
-            .ok()?,
+            .inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?,
         );
     }
-    Some((table.acquisition(images).ok()?, leases))
+    Some((table.acquisition(images).inspect_err(|error| { tracing::warn!(target: "tidepool_toolchain::module_candidates", line = line!(), ?error, "candidate arena operation failed"); }).ok()?, leases))
 }
 
 /// Encoding data is separate from the retained executable candidate set.

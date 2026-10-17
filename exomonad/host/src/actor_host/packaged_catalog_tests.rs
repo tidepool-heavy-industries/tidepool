@@ -8,6 +8,12 @@ use tidepool_toolchain::certified_products::ProductOrigin;
 #[test]
 #[ignore = "requires the matched native deployment catalog and empty user caches"]
 fn packaged_cohort_executes_and_displays_without_build_inputs() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("tidepool_toolchain::module_candidates=debug")
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .finish();
+    let _trace = tracing::subscriber::set_default(subscriber);
     assert!(
         !Path::new(env!("CARGO_MANIFEST_DIR")).exists(),
         "run this retained binary with checkout and build outputs inaccessible"
