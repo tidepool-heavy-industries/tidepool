@@ -38,11 +38,11 @@ impl<'a> NativeDependencyCatalog<'a> {
         }
     }
 
-    pub(crate) fn decision<'b>(
-        &'b self,
-        projection: &CompilerInputProjection,
-        owner: &ExactModuleIdentity,
-    ) -> InputNativeDecision<'b> {
+    pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
+        let projection = match &self.0 {
+            DependencyGrantSource::Source { source, .. } => source.projection(),
+            DependencyGrantSource::Request(inputs) => inputs.projection(),
+        };
         match projection.snapshot_roles().get(owner) {
             Some(role) => self.input_decisions().for_role(owner, role),
             None => InputNativeDecision::UnissuedPolicy,
@@ -80,7 +80,6 @@ pub(super) fn bind_fresh_product_dependencies(
     state: &InventoryState,
     parent: &ArtifactView,
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    roles: &CompilerInputProjection,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
     dependencies: &NativeDependencyCatalog<'_>,
@@ -195,7 +194,7 @@ pub(super) fn bind_fresh_product_dependencies(
             }
         }
         if let InputNativeDecision::IssuedChoices(choices) =
-            dependencies.decision(roles, &entries[&key.artifact].descriptor.owner)
+            dependencies.decision(&entries[&key.artifact].descriptor.owner)
         {
             if let Some(chosen) = choices.get(&key.original_ordinal) {
                 if !candidates.contains(chosen) {

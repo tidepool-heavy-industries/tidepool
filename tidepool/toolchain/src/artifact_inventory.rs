@@ -3799,7 +3799,6 @@ impl ArtifactInventory {
                 consumed_namespace
                     .as_ref()
                     .expect("private compiler namespace"),
-                projection,
                 &selected,
                 &groups,
                 dependencies,
@@ -3809,8 +3808,7 @@ impl ArtifactInventory {
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         if let Some((roles, catalog)) = root_intent.input_constraints() {
             for (owner, role) in roles.snapshot_roles() {
-                let InputNativeDecision::IssuedChoices(choices) = catalog.decision(roles, owner)
-                else {
+                let InputNativeDecision::IssuedChoices(choices) = catalog.decision(owner) else {
                     continue;
                 };
                 for (ordinal, chosen) in choices {
@@ -4216,11 +4214,11 @@ impl ArtifactInventory {
                         .roots()
                         .iter()
                         .filter(|node| match (node, root_intent.input_constraints()) {
-                            (InventoryNodeKey::Group(group), Some((roles, catalog))) => {
+                            (InventoryNodeKey::Group(group), Some((_roles, catalog))) => {
                                 let Some(entry) = selected.get(&group.binding.artifact()) else {
                                     return false;
                                 };
-                                match catalog.decision(roles, &entry.descriptor.owner) {
+                                match catalog.decision(&entry.descriptor.owner) {
                                     InputNativeDecision::UnissuedPolicy => true,
                                     InputNativeDecision::IssuedChoices(choices) => {
                                         choices.contains_key(&group.original_ordinal)

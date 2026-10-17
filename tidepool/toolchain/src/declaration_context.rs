@@ -1008,6 +1008,7 @@ enum NativeTransportMode {
 /// No caller can combine rows from one request with another request's decisions.
 pub(crate) struct ContinuationNativeInputs<'a> {
     _selection: &'a crate::certified_products::CertifiedSourceSelection,
+    projection: CompilerInputProjection,
     rows: Vec<Arc<NativeTransportAvailability>>,
     decisions: crate::artifact_inventory::IssuedInputNativeDecisions,
 }
@@ -1019,12 +1020,17 @@ impl<'a> ContinuationNativeInputs<'a> {
     ) -> Result<Self, CompileError> {
         Ok(Self {
             _selection: selection,
+            projection: projection.clone(),
             rows: selection.issued_native_availability().cloned().collect(),
             decisions:
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
                     selection, projection,
                 )?,
         })
+    }
+
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        &self.projection
     }
 
     pub(crate) fn availability_rows(&self) -> &[Arc<NativeTransportAvailability>] {
