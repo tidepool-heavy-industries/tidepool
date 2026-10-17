@@ -2181,12 +2181,17 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
             &selection,
         )
         .expect("later target uses the same issuer's previously unselected body");
+    assert!(demanded.artifacts.selected_native_groups().is_empty());
+    let groups = demanded
+        .selection
+        .groups_for_target(&demanded.artifacts, None, &imports)
+        .unwrap();
     assert_eq!(
-        demanded.artifacts.selected_native_groups(),
-        BTreeSet::from([NativeGroupKey {
-            artifact: entry.descriptor.id,
-            original_ordinal: 9001,
-        }])
+        groups
+            .iter()
+            .map(|group| (group.binding.artifact(), group.original_ordinal))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(entry.descriptor.id, 9001)])
     );
     assert_eq!(context.as_ref(), &before);
 }
@@ -5542,12 +5547,17 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                             &selection,
                         )
                         .expect("restored private Full survives certification and actual demand");
+                    assert!(demanded.artifacts.selected_native_groups().is_empty());
+                    let groups = demanded
+                        .selection
+                        .groups_for_target(&demanded.artifacts, None, &imports)
+                        .unwrap();
                     assert_eq!(
-                        demanded.artifacts.selected_native_groups(),
-                        BTreeSet::from([NativeGroupKey {
-                            artifact: entry.descriptor.id,
-                            original_ordinal: 9001,
-                        }])
+                        groups
+                            .iter()
+                            .map(|group| (group.binding.artifact(), group.original_ordinal))
+                            .collect::<BTreeSet<_>>(),
+                        BTreeSet::from([(entry.descriptor.id, 9001)])
                     );
                 }
             }
