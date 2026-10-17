@@ -506,6 +506,8 @@ impl ExactDeclarationContext {
 
     /// Compose the exact issuer-owned public graph and native closure. Identical
     /// selections are idempotent; a conflicting original or policy refuses.
+    /// Composition selects role-issued source-support policy. Later executable
+    /// selections remain authenticated custody; target demand is issued separately.
     pub fn with_published_source_originals(
         mut self,
         selection: &PublishedSourceOriginalSelection,
