@@ -123,6 +123,26 @@ ownedArenaRangeReads = withScratch $ \work -> do
     cold <- continueRequestInputs emptyCapturedOriginalContent [selected]
     actual <- capturedRequestInput cold (originalInputPath selected) (digest bytes)
     unless (actual == bytes && requestInputBytes cold == 3) (fail "cold arena range capture differs")
+    -- These receiving aliases deliberately contain valid readable bytes. A
+    -- missing continued part must refuse rather than acquire any trap file.
+    forM_ ["interface.hi", "packages", "certificate", "core", "native", "census", "execution-graph"] $ \name -> do
+      let trap = work </> name
+      BS.writeFile trap bytes
+      attempted <- try (withCapturedRequestInputTokens cold $ \reader -> reader trap 3)
+        :: IO (Either IOException (ArtifactBytes,RequestOriginalInputs))
+      unless (either (const True) (const False) attempted)
+        (fail ("continued input used a readable trap file: " ++ name))
+      unchanged <- BS.readFile trap
+      unless (unchanged == bytes && requestInputBytes cold == 3)
+        (fail "refused continued input changed its prior owner or trap")
+    (strictBody,_) <- withCapturedRequestInputTokens cold $ \reader ->
+      reader (originalInputPath selected) 3
+    unless (artifactBytes strictBody == bytes) (fail "strict continued reader lost its sealed part")
+    overBound <- try (withCapturedRequestInputTokens cold $ \reader ->
+      reader (originalInputPath selected) 2)
+      :: IO (Either IOException (ArtifactBytes,RequestOriginalInputs))
+    unless (either (const True) (const False) overBound)
+      (fail "strict continued reader ignored its consumer bound")
     retained <- either fail pure (selectedOriginalContent [selected] cold)
     badSha <- reference endpoint (work </> "bad-sha") (digest (BS.singleton 0)) 3 7 2
     badLength <- reference endpoint (work </> "bad-length") (digest bytes) 2 7 2
