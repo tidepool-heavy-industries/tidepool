@@ -113,7 +113,7 @@ where
         if !Arc::ptr_eq(&active, &generation) {
             return Err(SourceError::SourceUnavailable("issued generation is no longer current; an already accepted computation remains pinned".into()));
         }
-        let tools = generation.installation.tools().ok_or_else(|| {
+        let tools = generation.installation().tools().ok_or_else(|| {
             SourceError::SourceUnavailable("actor has no source-defined tool installation".into())
         })?;
         if tools.resolved_spec().is_none() {

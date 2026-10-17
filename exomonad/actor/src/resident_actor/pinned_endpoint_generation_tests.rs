@@ -44,8 +44,8 @@ pub(crate) fn assert_pinned_preflight(
     issuer: crate::SourceLayerIssuer,
 ) {
     assert_ne!(
-        initial.context.placement.lexical_scope,
-        replacement.context.placement.lexical_scope
+        initial.context().placement.lexical_scope,
+        replacement.context().placement.lexical_scope
     );
     let (deployments, _receiver) = mpsc::channel(1);
     let mut environment = ResidentEnvironment::new(runner, deployments, None);
@@ -83,7 +83,7 @@ pub(crate) fn assert_pinned_preflight(
             None,
         );
         let preflight = behavior
-            .preflight_workbench(expected.context.actor, invocation, None)
+            .preflight_workbench(expected.context().actor, invocation, None)
             .unwrap_or_else(|failure| panic!("pinned endpoint admission failed: {failure:?}"));
         let WorkbenchPreflight::Admitted(admission) = preflight else {
             panic!("fresh endpoint invocation must be admitted");
@@ -98,14 +98,17 @@ pub(crate) fn assert_pinned_preflight(
             &expected,
         ));
         let mut expected_context = expected
-            .context
+            .context()
             .clone()
-            .with_issued_source(expected.installation.source())
+            .with_issued_source(expected.installation().source())
             .unwrap();
         expected_context.haskell_effects_alias = endpoint_effects;
         assert_eq!(admission.context, expected_context);
-        assert_eq!(&admission.admitted_source, expected.installation.source());
-        assert!(Arc::ptr_eq(&admission.public_owner, &expected.public_owner));
+        assert_eq!(&admission.admitted_source, expected.installation().source());
+        assert!(Arc::ptr_eq(
+            &admission.public_owner,
+            expected.public_owner()
+        ));
         assert!(Arc::ptr_eq(
             &admission
                 .operation

@@ -4130,7 +4130,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .and_then(|snapshot| snapshot.generation())
             .map_or_else(
                 || self.descriptor.session_context(actor),
-                |generation| generation.context.clone(),
+                |generation| generation.context().clone(),
             )
     }
 
@@ -4180,7 +4180,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => None,
         };
         if let Some(generation) = &issued_generation {
-            context = generation.context.clone();
+            context = generation.context().clone();
         }
         if initial_context_invocation {
             let initial_context = installed_tools
@@ -4362,7 +4362,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(authority)
         };
         let public_owner = if let Some(generation) = &issued_generation {
-            generation.public_owner.clone()
+            generation.public_owner().clone()
         } else {
             let snapshot = self
                 .lifecycle
@@ -8366,7 +8366,7 @@ where
             };
             let request_message =
                 contract.message(request.request, request.initial_user_message.as_deref());
-            let installation = match prepared_installation {
+            let mut installation = match prepared_installation {
                 Some(mut installation) => {
                     installation.initial_user_message =
                         Some(match installation.initial_user_message.take() {
@@ -8416,14 +8416,18 @@ where
                     ));
                 }
             };
-            if let Some(installation) = &installation {
+            if let Some(installation) = &mut installation {
                 self.bind_initial_generation(context, installation).await?;
             }
             self.check_application_readiness(kernel, context).await?;
+            let mut installation_error = None;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
                     if let Some(installation) = installation {
-                        self.publish_interactive_installation(installation);
+                        if let Err(error) = self.publish_interactive_installation(installation) {
+                            installation_error = Some(error);
+                            return false;
+                        }
                     }
                     self.installed_tools.publish_reply(reply_activation);
                     self.assignment_base = assignment_base;
@@ -8479,6 +8483,9 @@ where
             match publication {
                 Ok(claim) => {
                     claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                    if let Some(error) = installation_error {
+                        return Err(error);
+                    }
                     Ok(InteractivePark::Parked)
                 }
                 Err(crate::ReplyError::CancellationRequested) => {
@@ -8616,19 +8623,19 @@ where
             .as_ref()
             .and_then(|snapshot| snapshot.generation())
             .cloned()
-            .filter(|generation| generation.public_owner.matches_context(context))
+            .filter(|generation| generation.public_owner().matches_context(context))
             .or_else(|| {
                 self.installed_tools
                     .current_generation()
-                    .filter(|generation| generation.public_owner.matches_context(context))
+                    .filter(|generation| generation.public_owner().matches_context(context))
             });
         if let Some(generation) = retained {
-            if !generation.public_owner.is_current() {
+            if !generation.public_owner().is_current() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "retained generation native ownership is unavailable".into(),
                 ));
             }
-            return Ok(generation.public_owner.clone());
+            return Ok(generation.public_owner().clone());
         }
         let lifecycle = self
             .lifecycle
@@ -8646,9 +8653,10 @@ where
     async fn bind_initial_generation(
         &self,
         context: &ActorSessionContext,
-        installation: &LocalResidentInstallation,
+        installation: &mut LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if self.installed_tools.current_generation().is_some() {
+            installation.prepared_tools.take();
             return Ok(());
         }
         let (Some(tools), Some(prompts)) =
@@ -8686,6 +8694,7 @@ where
                 if let Some(lifecycle) = &self.lifecycle {
                     lifecycle.generation_published(generation);
                 }
+                installation.prepared_tools.take();
                 Ok(())
             }
             crate::resident_workbench::ActorGenerationCommit::Refused(detail)
@@ -8699,27 +8708,49 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        installation: LocalResidentInstallation,
+        mut installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.bind_initial_generation(context, &installation).await?;
+        self.bind_initial_generation(context, &mut installation)
+            .await?;
         self.check_application_readiness(kernel, context).await?;
+        let mut installation_error = None;
         kernel
             .retained_exit()
-            .claim_before_shutdown(|| {
-                self.publish_interactive_installation(installation);
-                true
-            })
+            .claim_before_shutdown(
+                || match self.publish_interactive_installation(installation) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        installation_error = Some(error);
+                        false
+                    }
+                },
+            )
             .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+        if let Some(error) = installation_error {
+            return Err(error);
+        }
         #[cfg(test)]
         capture_workspace_tests::installation_gate(context.placement.session, kernel, true).await;
         Ok(())
     }
 
-    fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
+    fn publish_interactive_installation(
+        &mut self,
+        mut installation: LocalResidentInstallation,
+    ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(tools) = installation.prepared_tools.take() {
-            if self.installed_tools.current_generation().is_none() {
-                self.installed_tools.publish(tools);
-            }
+            let expected = self
+                .actor_program_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    crate::resident_workbench::BootstrapExpectation::Available(
+                        snapshot.installation(),
+                    )
+                })
+                .unwrap_or(crate::resident_workbench::BootstrapExpectation::Empty);
+            self.installed_tools
+                .install_bootstrap(expected, tools)
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         }
         self.publish_installation(installation);
         self.policy_installed = true;
@@ -8734,6 +8765,7 @@ where
                 .try_send(LocalResidentDeployment::ChildExited { notice })
                 .ok();
         }
+        Ok(())
     }
 
     async fn settle_interactive_publication(
@@ -9014,7 +9046,12 @@ where
         if self.actor_program_snapshot.is_none() {
             let source = self.freeze_installed_source(context.actor)?;
             let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);
-            self.installed_tools.publish(bootstrap.clone());
+            self.installed_tools
+                .install_bootstrap(
+                    crate::resident_workbench::BootstrapExpectation::Empty,
+                    bootstrap.clone(),
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.actor_program_snapshot = Some(
                 crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap),
             );
@@ -9126,11 +9163,21 @@ where
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
-            self.installed_tools.publish(crate::InstalledToolLease::new(
-                context.actor,
-                source,
-                None,
-            ));
+            let expected = self
+                .actor_program_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    crate::resident_workbench::BootstrapExpectation::Available(
+                        snapshot.installation(),
+                    )
+                })
+                .unwrap_or(crate::resident_workbench::BootstrapExpectation::Empty);
+            self.installed_tools
+                .install_bootstrap(
+                    expected,
+                    crate::InstalledToolLease::new(context.actor, source, None),
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));

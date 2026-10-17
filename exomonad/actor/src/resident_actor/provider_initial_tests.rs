@@ -1,3 +1,5 @@
+mod generation_support;
+
 use super::*;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
@@ -5,6 +7,8 @@ struct NativeFixture {
     forest: Arc<ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>>,
     actor: LocalActorRef,
     admission: Arc<ActorProviderAdmission>,
+    installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
+    generation_support: Option<generation_support::GenerationSupport>,
     _deployments: mpsc::Receiver<LocalResidentDeployment>,
     _root: Arc<tempfile::TempDir>,
     journal: Option<Arc<crate::ActorRecoveryJournal>>,
@@ -19,6 +23,14 @@ impl NativeFixture {
     }
 
     async fn start_with_journal(journal_data: bool) -> Self {
+        Self::start_configured(journal_data, false).await
+    }
+
+    async fn start_with_generations(journal_data: bool) -> Self {
+        Self::start_configured(journal_data, true).await
+    }
+
+    async fn start_configured(journal_data: bool, generations: bool) -> Self {
         let root = Arc::new(tempfile::tempdir().unwrap());
         let session = tidepool_runtime::session::fresh_session_id();
         let mut library =
@@ -69,14 +81,16 @@ impl NativeFixture {
         let descriptor = ActorDescriptor::new("native provider initial", placement)
             .with_actor_path(crate::ActorPath::parse("root/provider-initial").unwrap())
             .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+        let behavior = ResidentKernelBehavior::with_boot(
+            descriptor.clone(),
+            forest.environment.clone(),
+            ResidentBoot::Workbench,
+            vec![],
+        );
+        let installed_tools = behavior.installed_tools.clone();
         let (actor, _) = crate::local_actor::spawn_local_actor_in_directory(
             None,
-            ResidentKernelBehavior::with_boot(
-                descriptor,
-                forest.environment.clone(),
-                ResidentBoot::Workbench,
-                vec![],
-            ),
+            behavior,
             crate::Incarnation::FIRST,
             forest.directory.clone(),
         )
@@ -86,6 +100,19 @@ impl NativeFixture {
             .bind_durable_root_public_owner(actor.identity())
             .await
             .unwrap();
+        let generation_support = if generations {
+            Some(
+                generation_support::GenerationSupport::install(
+                    &forest,
+                    &actor,
+                    &descriptor,
+                    &installed_tools,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         let operation = journal_data.then(|| WorkbenchExecutionId::from_digest([73; 16]));
         let publication = journal_data.then(|| crate::InitialContextPublication {
             conversation: crate::ApplicationConversation::Embedded {
@@ -169,6 +196,8 @@ impl NativeFixture {
             forest,
             actor,
             admission,
+            installed_tools,
+            generation_support,
             _deployments: deployments,
             _root: root,
             _run: run,
@@ -196,78 +225,11 @@ impl NativeFixture {
     }
 
     async fn publish_next_native_generation(&self) {
-        use crate::resident_workbench::ActorGeneration;
-        use tidepool_runtime::session::{
-            ComposedPromptSnapshot, DurableGenerationReferences, DurablePublicOwnerPublication,
-            GenerationArtifactReference, PublicationDecision,
-        };
-        let snapshot = self.admission.lifecycle.resident_snapshot().unwrap();
-        let mut context = snapshot.context;
-        let machines = self.forest.environment.runner.machines_for_test().clone();
-        let (mut resident, receipt) = machines
-            .checkout_run(context.placement.session)
-            .unwrap()
-            .into_parts();
-        let canonical = self.admission.owner.durable().unwrap().clone();
-        let previous = resident.active_notebook_generation(&canonical).unwrap();
-        let scope = if previous.is_some() {
-            resident.mint_isolated_scope_with_lease().unwrap()
-        } else {
-            resident
-                .adopt_initial_notebook_scope(context.placement.lexical_scope)
-                .unwrap()
-        };
-        context.placement.lexical_scope = scope.scope();
-        let prompts = ComposedPromptSnapshot::capture("native provider generation".into());
-        // Retained data exercise native publication without issuing compiler/spec authority.
-        let references = DurableGenerationReferences {
-            source: GenerationArtifactReference::capture(vec![1]),
-            installation: GenerationArtifactReference::capture(vec![2]),
-            prompts: prompts.clone(),
-        };
-        let prepared = resident
-            .prepare_notebook_generation(scope.scope(), &canonical, previous, references, None)
-            .unwrap();
-        let selected = prepared.selection();
-        let owner = WorkbenchPublicOwner::prepare_generation(
-            &context,
-            &snapshot.descriptor,
-            &scope,
-            Some(prepared.owner()),
-        )
-        .unwrap();
-        let mut generation = None;
-        let published = resident
-            .commit_notebook_generation(prepared, &PublicationDecision::new(), |readiness| {
-                generation = Some(Arc::new(ActorGeneration {
-                    id: selected.generation(),
-                    installation: crate::InstalledToolLease::new(
-                        context.actor,
-                        crate::CheckpointSourceLayer::default(),
-                        None,
-                    ),
-                    prompts,
-                    context,
-                    public_owner: owner.bind(Some(readiness)),
-                    scope,
-                    configuration_digest: [0; 32],
-                    durable: Some(selected),
-                }));
-            })
-            .unwrap();
-        assert!(matches!(
-            published,
-            DurablePublicOwnerPublication::Committed { .. }
-        ));
-        let holes = resident
-            .parked_holes()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        machines.settle_suspended(receipt, resident, holes);
-        self.admission
-            .lifecycle
-            .generation_published(generation.unwrap());
+        self.generation_support
+            .as_ref()
+            .expect("generation cases install actual source support")
+            .publish_next(self)
+            .await;
         // The following RPC runs after the publication notification in this mailbox.
         let current = self
             .admission
@@ -303,7 +265,7 @@ impl NativeFixture {
 #[tokio::test]
 async fn retained_provider_observes_and_acknowledges_initial_context_after_generation_replacement()
 {
-    let fixture = NativeFixture::start_with_journal(true).await;
+    let fixture = NativeFixture::start_with_generations(true).await;
     fixture.publish_next_native_generation().await;
     fixture.publish_next_native_generation().await;
     let current = fixture.admission.lifecycle.resident_snapshot().unwrap();
@@ -952,7 +914,7 @@ async fn closed_transaction_refusal_cannot_release_another_issued_provider_turn(
 
 #[tokio::test]
 async fn startup_generation_distinguishes_public_bootstrap_from_selected_notebook() {
-    let fixture = NativeFixture::start().await;
+    let fixture = NativeFixture::start_with_generations(false).await;
     let snapshot = fixture.admission.lifecycle.resident_snapshot().unwrap();
     let workbench = fixture.forest.environment.runner.application_workbench();
     // Native admission has published the public owner, but no notebook

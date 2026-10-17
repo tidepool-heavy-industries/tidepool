@@ -1622,7 +1622,17 @@ impl InstalledToolLease {
         })
     }
 
-    pub(crate) fn generation_references(
+    fn same_installation(&self, expected: &Self) -> bool {
+        self.actor() == expected.actor()
+            && self.source().same_revision(expected.source())
+            && match (&self.tools, &expected.tools) {
+                (Some(active), Some(expected)) => Arc::ptr_eq(active, expected),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn generation_references(
         &self,
         source: tidepool_runtime::session::GenerationArtifactReference,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
@@ -1644,25 +1654,39 @@ impl InstalledToolLease {
             PersistedActorInstallation::decode(&references.installation, &references.source)?;
         installation.verify(self, &references.source)
     }
-
-    pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {
-        Self {
-            source,
-            ..self.clone()
-        }
-    }
 }
 
 /// Immutable actor configuration and its notebook publication domain.
 pub(crate) struct ActorGeneration {
-    pub(crate) id: tidepool_runtime::session::NotebookGenerationId,
-    pub(crate) installation: InstalledToolLease,
-    pub(crate) prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-    pub(crate) context: crate::ActorSessionContext,
-    pub(crate) public_owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
-    pub(crate) scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    pub(crate) configuration_digest: [u8; 32],
-    pub(crate) durable: Option<tidepool_runtime::session::ActiveNotebookGeneration>,
+    id: tidepool_runtime::session::NotebookGenerationId,
+    installation: InstalledToolLease,
+    prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    context: crate::ActorSessionContext,
+    public_owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+    scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    configuration_digest: [u8; 32],
+    durable: Option<tidepool_runtime::session::ActiveNotebookGeneration>,
+}
+
+impl ActorGeneration {
+    pub(crate) fn id(&self) -> tidepool_runtime::session::NotebookGenerationId {
+        self.id
+    }
+    pub(crate) fn installation(&self) -> &InstalledToolLease {
+        &self.installation
+    }
+    pub(crate) fn context(&self) -> &crate::ActorSessionContext {
+        &self.context
+    }
+    pub(crate) fn public_owner(&self) -> &Arc<crate::resident_actor::WorkbenchPublicOwner> {
+        &self.public_owner
+    }
+    pub(crate) fn prompts(&self) -> &tidepool_runtime::session::ComposedPromptSnapshot {
+        &self.prompts
+    }
+    pub(crate) fn scope(&self) -> &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease> {
+        &self.scope
+    }
 }
 
 enum PreparedGenerationCommit {
@@ -1745,9 +1769,7 @@ where
             let mut current = state.0.lock();
             let same = match (&*current, &prepared.expected) {
                 (InstalledToolsAvailability::Generation(active), ActorRequestSnapshot::Generation(expected)) => Arc::ptr_eq(active,expected),
-                (InstalledToolsAvailability::Available(active), ActorRequestSnapshot::Bootstrap(expected)) => active.actor() == expected.actor()
-                    && active.source().same_revision(expected.source())
-                    && match (&active.tools, &expected.tools) { (Some(a),Some(b))=>Arc::ptr_eq(a,b),(None,None)=>true,_=>false },
+                (InstalledToolsAvailability::Available(active), ActorRequestSnapshot::Bootstrap(expected)) => active.same_installation(expected),
                 _ => false,
             };
             if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
@@ -1906,10 +1928,6 @@ enum InstalledToolsAvailability {
     Available(InstalledToolLease),
     Generation(Arc<ActorGeneration>),
     GenerationUnavailable(Arc<ActorGeneration>),
-    SourceUnavailable {
-        actor: crate::ActorRef,
-        tools: Option<Arc<ResidentWorkbenchTools>>,
-    },
 }
 
 pub(crate) enum InstalledToolsObservation {
@@ -1923,9 +1941,25 @@ impl InstalledToolsAvailability {
         match self {
             Self::Available(lease) => Some(lease),
             Self::Generation(generation) => Some(&generation.installation),
-            Self::Empty | Self::GenerationUnavailable(_) | Self::SourceUnavailable { .. } => None,
+            Self::Empty | Self::GenerationUnavailable(_) => None,
         }
     }
+}
+
+/// Expected bootstrap state captured by its existing initialization owner.
+pub(crate) enum BootstrapExpectation<'a> {
+    Empty,
+    Available(&'a InstalledToolLease),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum BootstrapInstallationError {
+    #[error("bootstrap installation changed before publication")]
+    Changed,
+    #[error("bootstrap cannot replace a published generation")]
+    PublishedGeneration,
+    #[error("bootstrap cannot replace an unconfirmed generation")]
+    UnconfirmedGeneration,
 }
 
 impl InstalledToolsState {
@@ -1963,9 +1997,6 @@ impl InstalledToolsState {
             InstalledToolsAvailability::GenerationUnavailable(generation) => {
                 InstalledToolsObservation::SourceUnavailable(generation.installation.tools_arc())
             }
-            InstalledToolsAvailability::SourceUnavailable { tools, .. } => {
-                InstalledToolsObservation::SourceUnavailable(tools.clone())
-            }
         }
     }
 
@@ -1994,15 +2025,35 @@ impl InstalledToolsState {
             InstalledToolsAvailability::Empty => Err(crate::ResidentToolError::Unavailable(
                 "actor has no installed endpoint snapshot".into(),
             )),
-            InstalledToolsAvailability::SourceUnavailable { actor, .. } => Err(unavailable(*actor)),
             InstalledToolsAvailability::GenerationUnavailable(generation) => {
                 Err(unavailable(generation.context.actor))
             }
         }
     }
 
-    pub(crate) fn publish(&self, lease: InstalledToolLease) {
-        *self.0.lock() = InstalledToolsAvailability::Available(lease);
+    /// Bootstrap installation cannot replace a published or uncertain generation.
+    pub(crate) fn install_bootstrap(
+        &self,
+        expected: BootstrapExpectation<'_>,
+        lease: InstalledToolLease,
+    ) -> Result<(), BootstrapInstallationError> {
+        let mut current = self.0.lock();
+        match (&*current, expected) {
+            (InstalledToolsAvailability::Generation(_), _) => {
+                return Err(BootstrapInstallationError::PublishedGeneration)
+            }
+            (InstalledToolsAvailability::GenerationUnavailable(_), _) => {
+                return Err(BootstrapInstallationError::UnconfirmedGeneration)
+            }
+            (InstalledToolsAvailability::Empty, BootstrapExpectation::Empty) => {}
+            (
+                InstalledToolsAvailability::Available(active),
+                BootstrapExpectation::Available(expected),
+            ) if active.same_installation(expected) && active.actor() == lease.actor() => {}
+            _ => return Err(BootstrapInstallationError::Changed),
+        }
+        *current = InstalledToolsAvailability::Available(lease);
+        Ok(())
     }
 
     pub(crate) fn current_tools(&self) -> Option<Arc<ResidentWorkbenchTools>> {
@@ -2059,24 +2110,6 @@ impl InstalledToolsState {
             _ => InstalledToolsAvailability::Available(replacement),
         };
         Ok(())
-    }
-
-    /// Refuse new source/tool snapshots while retaining the unchanged handlers
-    /// for a later helper-source recovery. Retirement releases this custody.
-    pub(crate) fn invalidate_source(&self) {
-        let mut current = self.0.lock();
-        *current = match std::mem::take(&mut *current) {
-            InstalledToolsAvailability::Available(lease) => {
-                InstalledToolsAvailability::SourceUnavailable {
-                    actor: lease.actor(),
-                    tools: lease.tools_arc(),
-                }
-            }
-            InstalledToolsAvailability::Generation(generation) => {
-                InstalledToolsAvailability::GenerationUnavailable(generation)
-            }
-            unavailable => unavailable,
-        };
     }
 
     pub(crate) fn clear(&self) {
@@ -19537,7 +19570,40 @@ pub(crate) mod request_tests {
                 generation_source.clone(),
                 Some(second.clone()),
             );
-            state.publish(installation.clone());
+            assert_eq!(
+                state.install_bootstrap(
+                    BootstrapExpectation::Available(&installation),
+                    installation.clone()
+                ),
+                Err(BootstrapInstallationError::Changed)
+            );
+            assert!(state.snapshot().is_none());
+            state
+                .install_bootstrap(BootstrapExpectation::Empty, installation.clone())
+                .unwrap();
+            assert_eq!(
+                state.install_bootstrap(BootstrapExpectation::Empty, installation.clone()),
+                Err(BootstrapInstallationError::Changed)
+            );
+            let stale_bootstrap = InstalledToolLease::new(
+                context.actor,
+                generation_source.clone(),
+                Some(first.clone()),
+            );
+            assert_eq!(
+                state.install_bootstrap(
+                    BootstrapExpectation::Available(&stale_bootstrap),
+                    installation.clone()
+                ),
+                Err(BootstrapInstallationError::Changed)
+            );
+            assert!(state.current().unwrap().same_installation(&installation));
+            state
+                .install_bootstrap(
+                    BootstrapExpectation::Available(&installation),
+                    installation.clone(),
+                )
+                .unwrap();
             let prompts = tidepool_runtime::session::ComposedPromptSnapshot::capture(
                 "quoted generation".into(),
             );
@@ -19564,6 +19630,14 @@ pub(crate) mod request_tests {
                 ActorGenerationCommit::Published { generation, .. } => generation,
                 _ => panic!("initial generation must publish"),
             };
+            assert_eq!(
+                state.install_bootstrap(
+                    BootstrapExpectation::Available(&installation),
+                    installation.clone()
+                ),
+                Err(BootstrapInstallationError::PublishedGeneration)
+            );
+            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
             let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
             let (before, before_visibility) = workbench
                 .access
@@ -19933,6 +20007,27 @@ pub(crate) mod request_tests {
                 "replacement context and its artifacts remain resolvable after rebase and restart"
             );
             }
+            *state.0.lock() =
+                InstalledToolsAvailability::GenerationUnavailable(replacement.clone());
+            assert!(
+                state.current_generation().is_none(),
+                "uncertainty is not bootstrap admission"
+            );
+            assert!(matches!(
+                state.observe(),
+                InstalledToolsObservation::SourceUnavailable(_)
+            ));
+            assert_eq!(
+                state.install_bootstrap(
+                    BootstrapExpectation::Available(&installation),
+                    installation.clone()
+                ),
+                Err(BootstrapInstallationError::UnconfirmedGeneration)
+            );
+            assert!(
+                matches!(&*state.0.lock(), InstalledToolsAvailability::GenerationUnavailable(retained)
+                if Arc::ptr_eq(retained, &replacement))
+            );
             state.clear();
 
             return;
@@ -20018,7 +20113,9 @@ pub(crate) mod request_tests {
             let current =
                 InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&second)));
             let state = InstalledToolsState::default();
-            state.publish(current.clone());
+            state
+                .install_bootstrap(BootstrapExpectation::Empty, current.clone())
+                .unwrap();
             let decision = tidepool_runtime::session::PublicationDecision::new();
             if matches!(outcome, CandidateOutcome::Cancelled) {
                 decision.request_cancellation();
@@ -20559,7 +20656,7 @@ pub(crate) mod request_tests {
                 "live values do not claim source-cache acquisition"
             );
             let state = InstalledToolsState::default();
-            state.publish(expected.clone());
+            state.install_bootstrap(BootstrapExpectation::Empty, expected.clone()).unwrap();
             let pinned = expected.select("probe").unwrap();
             let pinned_last = expected.select("last_probe").unwrap();
             assert_eq!(pinned.entry_index(), 3);
@@ -20612,13 +20709,8 @@ pub(crate) mod request_tests {
             let later_last = state.current().unwrap().select("last_probe").unwrap();
             assert_eq!(pinned.lease().tools().unwrap().install, 1);
             assert_eq!(later.lease().tools().unwrap().install, 2);
-            state.invalidate_source();
-            assert!(matches!(
-                state.snapshot_for_call(),
-                Err(crate::ResidentToolError::Invocation(
-                    crate::KernelInvocationFailure::Rejected { actor, receipts, .. }
-                )) if actor == context.actor && receipts.is_empty()
-            ));
+            state.clear();
+            assert!(matches!(state.snapshot_for_call(), Err(crate::ResidentToolError::Unavailable(_))));
             for (selected, expected_output) in [
                 (pinned, "retained notebook value"),
                 (pinned_last, "retained notebook value"),
@@ -20965,11 +21057,16 @@ pub(crate) mod request_tests {
                 Some(first),
             );
             let state = InstalledToolsState::default();
-            state.publish(InstalledToolLease::new(
-                context.actor,
-                crate::CheckpointSourceLayer::default(),
-                Some(second.clone()),
-            ));
+            state
+                .install_bootstrap(
+                    BootstrapExpectation::Empty,
+                    InstalledToolLease::new(
+                        context.actor,
+                        crate::CheckpointSourceLayer::default(),
+                        Some(second.clone()),
+                    ),
+                )
+                .unwrap();
             assert!(matches!(
                 state.replace_explicit(&expected, second.clone()),
                 Err(SpecReplacementError::Unavailable)
@@ -20980,15 +21077,6 @@ pub(crate) mod request_tests {
                 1,
                 "accepted original installation survives replacement"
             );
-            state.invalidate_source();
-            assert!(
-                state.snapshot().is_none(),
-                "unavailable installation cannot issue new requests"
-            );
-            assert!(matches!(
-                state.replace_explicit(&expected, second.clone()),
-                Err(SpecReplacementError::Unavailable)
-            ));
             state.clear();
             assert!(matches!(
                 state.replace_explicit(&expected, second),

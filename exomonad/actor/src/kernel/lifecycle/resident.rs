@@ -57,13 +57,13 @@ impl ResidentSnapshot {
         &mut self,
         generation: Arc<crate::resident_workbench::ActorGeneration>,
     ) -> Result<(), String> {
-        let context = &generation.context;
+        let context = generation.context();
         let original = self.descriptor.placement();
         if context.actor != self.context.actor
-            || generation.installation.actor() != context.actor
+            || generation.installation().actor() != context.actor
             || context.placement.session != original.session
             || context.placement.resource_scope != original.resource_scope
-            || !generation.public_owner.matches_context(context)
+            || !generation.public_owner().matches_context(context)
         {
             return Err("published generation differs from its original actor incarnation".into());
         }
@@ -72,8 +72,8 @@ impl ResidentSnapshot {
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &generation));
         match generation_publication_order(
-            self.generation.as_ref().map(|current| current.id),
-            generation.id,
+            self.generation.as_ref().map(|current| current.id()),
+            generation.id(),
             same_owner,
         )? {
             GenerationPublicationOrder::Stale | GenerationPublicationOrder::Duplicate => {
@@ -82,12 +82,12 @@ impl ResidentSnapshot {
             GenerationPublicationOrder::Newer => {}
         }
         self.context = context.clone();
-        self.public_owner = if generation.public_owner.native_readiness().is_some() {
-            ActorPublicOwnerPlane::DurableCommitted(generation.public_owner.clone())
+        self.public_owner = if generation.public_owner().native_readiness().is_some() {
+            ActorPublicOwnerPlane::DurableCommitted(generation.public_owner().clone())
         } else {
-            ActorPublicOwnerPlane::Ephemeral(generation.public_owner.clone())
+            ActorPublicOwnerPlane::Ephemeral(generation.public_owner().clone())
         };
-        self.installed_policy = Some(generation.installation.clone());
+        self.installed_policy = Some(generation.installation().clone());
         self.generation = Some(generation);
         Ok(())
     }

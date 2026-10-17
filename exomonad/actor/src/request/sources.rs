@@ -57,7 +57,7 @@ impl CallbackExecution {
             self.snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.generation())
-                .map(|generation| generation.scope.clone())
+                .map(|generation| generation.scope().clone())
         });
         Ok(Self {
             context,

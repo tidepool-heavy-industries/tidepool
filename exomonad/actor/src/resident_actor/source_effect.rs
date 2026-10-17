@@ -22,12 +22,12 @@ pub(super) async fn refresh_source_observation(
         );
         return;
     };
-    let source = active.installation.source().clone();
-    let active_generation = active.id.get();
+    let source = active.installation().source().clone();
+    let active_generation = active.id().get();
     let issued_generation = issued
         .as_ref()
         .and_then(ActorRequestSnapshot::generation)
-        .map(|generation| generation.id.get());
+        .map(|generation| generation.id().get());
     // Filesystem observation needs only immutable issued source evidence. Do
     // not retain the generation's native scope through an uncancellable read.
     let issued_source = issued
