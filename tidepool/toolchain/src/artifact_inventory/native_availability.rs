@@ -175,23 +175,48 @@ struct NativeOfferCustody {
 
 impl NativeOfferCustody {
     fn from_checked_nodes(
+        state: &InventoryState,
         lease: Arc<ViewLease>,
         reachable: imbl::OrdSet<ArtifactBindingNode>,
-    ) -> Self {
-        let native_originals = reachable
-            .iter()
-            .filter_map(|node| match node {
-                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
-                _ => None,
-            })
-            .collect();
-        Self {
+    ) -> Result<Self, CompileError> {
+        let mut native_originals = BTreeSet::new();
+        for node in &reachable {
+            let ArtifactBindingNode::Group(group) = node else {
+                continue;
+            };
+            let mut carriers = state
+                .outgoing(*node)
+                .filter_map(|(target, edge)| match target {
+                    ArtifactBindingNode::Artifact(carrier)
+                        if carrier.artifact == group.binding.artifact()
+                            && *edge == ArtifactDependency::Interface =>
+                    {
+                        Some(carrier)
+                    }
+                    _ => None,
+                });
+            let carrier = carriers
+                .next()
+                .ok_or_else(|| failure("issued native group has no carrier"))?;
+            if carriers.next().is_some() {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: carrier.artifact,
+                    },
+                ));
+            }
+            if !reachable.contains(&ArtifactBindingNode::Artifact(carrier)) {
+                return Err(failure("issued native carrier is outside checked closure"));
+            }
+            native_originals.insert(group.binding.artifact());
+        }
+        Ok(Self {
             lease,
             reachable,
             native_originals,
             #[cfg(test)]
             observed: Arc::new(OnceLock::new()),
-        }
+        })
     }
 }
 
@@ -469,7 +494,7 @@ impl IssuedNativeOffer {
                 interface,
                 owner: entry.descriptor.owner.clone(),
                 body,
-                custody: NativeOfferCustody::from_checked_nodes(lease, nodes),
+                custody: NativeOfferCustody::from_checked_nodes(&state, lease, nodes)?,
             })));
         }
         drop(state);
@@ -626,16 +651,20 @@ impl IssuedNativeOffer {
                 (body, custody)
             }
         };
-        let reachable = {
+        let custody = {
             let state = custody.lease.inventory.0.lock().expect("inventory lock");
-            custody.read_projection(&state).nodes.clone()
+            NativeOfferCustody::from_checked_nodes(
+                &state,
+                Arc::clone(&custody.lease),
+                custody.read_projection(&state).nodes.clone(),
+            )?
         };
         Ok(Self(Arc::new(NativeOfferFacts {
             original,
             interface,
             owner: entry.descriptor.owner.clone(),
             body,
-            custody: NativeOfferCustody::from_checked_nodes(custody.lease, reachable),
+            custody,
         })))
     }
 
