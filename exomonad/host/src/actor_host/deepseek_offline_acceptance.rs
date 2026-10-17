@@ -608,6 +608,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
         let root = driver.next(host, root_actor).await;
         display_true(host, &spawn, &root);
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
+        assert!(graph.iter().find(|node| node.actor == root_actor).unwrap().bound_worktree.is_none());
         let children = graph.iter().filter(|node| node.creator == Some(root_actor)).collect::<Vec<_>>();
         assert_eq!(children.len(), 2);
         let actor_named = |label: &str| {
@@ -631,7 +632,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
         let registry = exomonad_worktree::WorktreeRegistry::open(&storage, "registry").unwrap();
         let workspace = registry.get(&exomonad_worktree::WorktreeId::from_raw(workspace_of(editor).clone()))
             .unwrap().expect("the actual SameDir capability retains its workspace owner");
-        assert_eq!(workspace.origin, exomonad_worktree::WorktreeOrigin::CurrentRepository);
+        assert_eq!(workspace.origin, exomonad_worktree::WorktreeOrigin::SourceCheckout);
         assert_eq!(workspace.cwd, std::fs::canonicalize(&host.context.config.workspace).unwrap());
         assert_eq!(workspace.source_repository, workspace.cwd);
         let join = issued_call(&root, "offline-join");
