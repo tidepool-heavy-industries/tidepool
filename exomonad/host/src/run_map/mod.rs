@@ -23,6 +23,7 @@
 mod metadata;
 mod review;
 mod trace;
+mod trace_projection;
 use metadata::{binding_thread, read_root, recorded_link};
 pub use metadata::{
     ArtifactAvailability, ArtifactLayer, ArtifactProvenance, RecordedLink, RootBinding, TimeWindow,
