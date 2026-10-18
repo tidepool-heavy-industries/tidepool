@@ -643,11 +643,19 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
 
             grandchild.call("recursive-leaf-refusal", REFUSAL);
             grandchild = next(host, &mut requests, &mut pending, &grandchild_path).await;
+            let refusal = grandchild.settled_output("recursive-leaf-refusal");
             require_ghc_compile_rejection(
-                &grandchild.settled_output("recursive-leaf-refusal"),
-                &["AgentLaunch"],
+                &refusal,
+                &["ForkAgent OpenAI", "is not a member of the type-level list"],
             )
             .expect("leaf's narrow effect row refuses checkpoint before any launch");
+            assert_eq!(refusal["status"], "rejected", "{refusal}");
+            assert_eq!(
+                refusal["publication"],
+                json!({"status": "notPublished", "reason": "rejected"}),
+                "{refusal}"
+            );
+            assert_eq!(refusal["items"].as_array().unwrap().len(), 1, "{refusal}");
             assert_eq!(
                 host.context
                     .forest
