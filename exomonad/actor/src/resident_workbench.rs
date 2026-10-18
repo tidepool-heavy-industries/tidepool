@@ -7901,16 +7901,12 @@ where
                         &prepared.injected,
                         &source.workspace_modules,
                         usage,
-                        |queries| {
-                            if queries.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                Err(crate::lookup::LookupInspectionError::Compiler(
-                                    CompileError::ExtractFailed(
-                                        "lookup inspection was not admitted".into(),
-                                    ),
-                                ))
-                            }
+                        |_| {
+                            Err(crate::lookup::LookupInspectionError::Compiler(
+                                CompileError::ExtractFailed(
+                                    "lookup inspection was not admitted".into(),
+                                ),
+                            ))
                         },
                     );
                     if !request_pending {
@@ -7983,7 +7979,7 @@ where
                             &workspace_modules,
                             usage,
                             |queries| {
-                                inspect_lookup_queries(
+                                inspect_hosted_lookup(
                                     &inspection_view,
                                     Some(&inspection_values),
                                     &preamble,
@@ -8031,16 +8027,10 @@ where
                 &prepared.injected,
                 &source.workspace_modules,
                 usage,
-                |queries| {
-                    if queries.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        Err(crate::lookup::LookupInspectionError::Compiler(
-                            CompileError::ExtractFailed(
-                                "lookup inspection was not admitted".into(),
-                            ),
-                        ))
-                    }
+                |_| {
+                    Err(crate::lookup::LookupInspectionError::Compiler(
+                        CompileError::ExtractFailed("lookup inspection was not admitted".into()),
+                    ))
                 },
             )
         };
@@ -13629,6 +13619,51 @@ fn structured_introspection_answer(
     }
 }
 
+fn inspect_hosted_lookup(
+    view: &crate::ActorCompileView,
+    values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
+    preamble: &str,
+    imports: &str,
+    include: &[PathBuf],
+    injected: &[String],
+    effects: &tidepool_runtime::session::HaskellTypeSource,
+    batch: &tidepool_runtime::session::inspection::HostedLookupBatch,
+    timing: Option<&crate::call_timing::CallTimingRegistration>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<
+    tidepool_runtime::session::inspection::HostedLookupOutput,
+    crate::lookup::LookupInspectionError,
+> {
+    use tidepool_runtime::session::inspection::{
+        run_admitted_hosted_lookup, run_hosted_lookup, HostedLookupRequest,
+    };
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let mut inspect = || {
+        let request = HostedLookupRequest {
+            exact_context: view.exact_compile_context(),
+            preamble,
+            imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: injected,
+            batch,
+            effects: Some(effects),
+        };
+        match values {
+            Some(inputs) => {
+                run_admitted_hosted_lookup(request, view.session_view(), inputs, settlement)
+            }
+            None => run_hosted_lookup(request, settlement),
+        }
+        .map_err(crate::lookup::LookupInspectionError::Compiler)
+    };
+    match timing {
+        Some(timing) => timing.timed_compile_sync(inspect),
+        None => inspect(),
+    }
+}
+
+#[cfg(test)]
 fn inspect_lookup_queries(
     view: &crate::ActorCompileView,
     values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
@@ -16905,17 +16940,23 @@ pub(crate) mod request_tests {
             r#"{"examples":[{"module":"Tidepool.Effects.Core","name":"lookupRaw","namespace":"value","source":"checks/captured.hs","prerequisites":[],"requirements":"Lookup effect required"}]}"#).unwrap();
         let examples = crate::UsagePointerTable::discover(modules.path()).unwrap();
         let answer = crate::lookup::execute(
-            real_lookup_request(vec![
-                "LookupPlanParent.ModuleOnly".into(),
-                "LookupPlanParent.Choice".into(),
-                "LookupPlanParent.ConstructorOnly".into(),
-                "LookupApi.lookupRaw".into(),
-                "doc workbench".into(),
-                "Fs.writeCheckedIf".into(),
-                "Fs.fileHash".into(),
-                "writeCheckedIf".into(),
-                "lookupRaw".into(),
-            ]),
+            {
+                let mut request = real_lookup_request(vec![
+                    "LookupPlanParent.ModuleOnly".into(),
+                    "LookupPlanParent.Choice".into(),
+                    "LookupPlanParent.ConstructorOnly".into(),
+                    "LookupApi.lookupRaw".into(),
+                    "doc workbench".into(),
+                    "Fs.writeCheckedIf".into(),
+                    "Fs.fileHash".into(),
+                    "writeCheckedIf".into(),
+                    "lookupRaw".into(),
+                ]);
+                request.queries.push("LookupPlanParent.missing".into());
+                request.discover = true;
+                request.candidate_limit = 4;
+                request
+            },
             "view".into(),
             &prepared.imports,
             &prepared.injected,
@@ -16924,7 +16965,7 @@ pub(crate) mod request_tests {
             |queries| {
                 calls.set(calls.get() + 1);
                 let result = tidepool_testing::with_settlement(|settlement| {
-                    inspect_lookup_queries(
+                    inspect_hosted_lookup(
                         &view,
                         Some(&inputs),
                         &prepared.preamble,
@@ -16953,14 +16994,30 @@ pub(crate) mod request_tests {
             "successful module/name/doc batch must execute exactly one real worker request"
         );
         assert!(answer.issue.is_none(), "typed row witness must compile");
+        assert!(answer.candidates.len() <= 4);
+        assert!(
+            !answer.candidates.is_empty(),
+            "mixed native selection must retain actual candidates"
+        );
+
         let inspected = inspected.into_inner().expect("lookup inspections");
+        assert!(
+            matches!(&inspected.discovery, Some(selection) if matches!(&selection.fallback,
+            tidepool_runtime::session::inspection::HostedFallback::Attempted(scopes) if !scopes.is_empty()))
+        );
+
         let lookup = inspected
+            .answers
             .iter()
             .find_map(|result| match result {
-                tidepool_runtime::session::InspectionResult::Lookup {
-                    answer: tidepool_runtime::session::LookupAnswer::Info(entries),
+                tidepool_runtime::session::inspection::HostedLookupAnswer::Name {
+                    answer:
+                        tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches),
                     ..
-                } => entries.iter().find(|entry| entry.name == "lookupRaw"),
+                } => matches
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == "lookupRaw"),
                 _ => None,
             })
             .expect("lookupRaw inspection");
@@ -17177,6 +17234,52 @@ pub(crate) mod request_tests {
                 if entries.iter().any(|entry| entry.name == "checkedLookupValue"))
             );
         }
+        // Qualification selects an already-visible protected nominal name;
+        // it does not grant PublicModule browse authority over that owner.
+        let owner = inputs.view().reachable_values()[0].module_name();
+        let protected_batch = tidepool_runtime::session::inspection::HostedLookupBatch {
+            operations: vec![
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![0],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::Current,
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: format!("{owner}.checkedLookupValue"),
+                    },
+                },
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![1],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::PublicModule(owner.clone()),
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: "checkedLookupValue".into(),
+                    },
+                },
+            ],
+            discovery: None,
+        };
+        let protected = tidepool_testing::with_settlement(|settlement| {
+            inspect_hosted_lookup(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &protected_batch,
+                None,
+                settlement,
+            )
+        })
+        .expect("protected nominal Current address resolves through the existing checked owner");
+        assert!(matches!(&protected.answers[..], [
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches), scopes, .. },
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::ModuleNotFound(refused), scopes: refused_scopes, .. },
+        ] if matches.entries.len() == 1 && matches.entries[0].name == "checkedLookupValue"
+            && scopes == &[tidepool_runtime::session::NameScope::Current] && refused == &owner && refused_scopes.is_empty()));
         let query = tidepool_runtime::session::NameQuery {
             scope: tidepool_runtime::session::NameScope::Current,
             namespace: tidepool_runtime::session::NameNamespace::Value,
