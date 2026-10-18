@@ -8049,30 +8049,29 @@ mod tests {
             unreachable!("fixture source import")
         };
         binder.occurrence.push_str("_different");
-        assert!(
+        assert!(matches!(
+            admitted.clone().bind_target(None, wrong_imports).resolve(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: certified target native membership"
+        ));
+        assert!(matches!(
+            admitted.clone().bind_target(None, vec![]).resolve(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: issued native target roots differ from authenticated target"
+        ));
+        assert!(matches!(
             admitted
                 .clone()
-                .bind_target(None, wrong_imports)
+                .bind_target(None, imports.to_vec())
                 .resolve()
-                .is_err(),
-            "final imports must still authenticate against the issued exact target"
-        );
-        assert!(admitted
-            .clone()
-            .bind_target(None, (&[]).to_vec())
-            .resolve()
-            .map(|resolved| resolved.groups().clone())
-            .is_err());
-        assert!(admitted
-            .clone()
-            .bind_target(None, (&imports).to_vec())
-            .resolve()
-            .and_then(|resolved| {
-                let empty =
-                    crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])?;
-                resolved.ensure_original_execution_custody(&empty)
-            })
-            .is_err());
+                .and_then(|resolved| {
+                    let empty =
+                        crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])?;
+                    resolved.ensure_original_execution_custody(&empty)
+                }),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: issued target group is outside retained custody"
+        ));
         let empty_target = inventory
             .admit_product_artifacts(
                 &inventory.empty_view(),
@@ -8088,7 +8087,11 @@ mod tests {
         let empty = empty_target.resolve().unwrap();
         assert!(empty.groups().is_empty());
         assert_eq!(empty.native_sites().unwrap().ids().count(), 0);
-        assert!(empty.requirements_for_entry().is_err());
+        assert!(matches!(
+            empty.requirements_for_entry(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: ordinary target has no typed entry"
+        ));
         let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
         assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
     }
