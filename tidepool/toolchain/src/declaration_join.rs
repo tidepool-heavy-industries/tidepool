@@ -788,6 +788,19 @@ fn certify_authored_declaration_inner(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclarationJoinSpec {
+    pub expected_public_version: String,
+    pub public_module: Option<ModuleSnapshot>,
+    pub private_base: Option<ModuleSnapshot>,
+    pub private_tip: Option<ModuleSnapshot>,
+    pub writes: Vec<DeclarationWrite>,
+    pub reserved: ReservedJoin,
+    pub family_closure: Vec<ExportIdentity>,
+    pub expected_exports: Vec<DeclarationExport>,
+    pub expected_instances: InstanceInventory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationJoinInput {
     pub expected_public_version: String,
     pub public_module: Option<ModuleSnapshot>,
@@ -854,7 +867,7 @@ pub struct DeclarationJoinOutcome {
     pub expected_public_version: String,
     pub request_sha256: String,
     pub reserved: ReservedJoin,
-    pub implementation_sha256: String,
+    pub interfaces_sha256: String,
     pub exports_sha256: String,
     pub instances_sha256: String,
     pub family_closure_sha256: String,
@@ -1092,15 +1105,28 @@ fn require_owned_artifact_paths(
 /// Validate the exact owned implementation closure and retain a sealed result.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
 pub fn certify_declaration_join(
-    input: DeclarationJoinInput,
-    context: &ExactDeclarationContext,
+    spec: DeclarationJoinSpec,
+    inputs: crate::declaration_context::DeclarationJoinInputs,
     includes: &[PathBuf],
     session_root: &Path,
-    input_directory: Arc<tempfile::TempDir>,
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedDeclarationJoin, CompileError> {
+    inputs.validate()?;
+    let context = inputs.context();
+    let input_directory = inputs.directory();
+    let input = DeclarationJoinInput {
+        expected_public_version: spec.expected_public_version,
+        public_module: spec.public_module,
+        private_base: spec.private_base,
+        private_tip: spec.private_tip,
+        writes: spec.writes,
+        reserved: spec.reserved,
+        artifacts: inputs.artifacts().to_vec(),
+        family_closure: spec.family_closure,
+        expected_exports: spec.expected_exports,
+        expected_instances: spec.expected_instances,
+    };
     require_owned_artifact_paths(&input.artifacts, &input_directory)?;
-    context.validate_artifacts(&input.artifacts)?;
     for (index, write) in input.writes.iter().enumerate() {
         if write.generation == 0
             || SessionModule::lib(tidepool_repr::Generation(write.generation)).module_name()
@@ -1123,7 +1149,7 @@ pub fn certify_declaration_join(
         settlement,
     )?;
     let outcome = decode_declaration_join_outcome(&input, &execution.receipt)?;
-    context.validate_artifacts(&input.artifacts)?;
+    inputs.validate()?;
     match outcome.decision {
         JoinDecision::Accepted => {
             let output = outcome
@@ -1148,7 +1174,7 @@ pub fn certify_declaration_join(
                     packages,
                 )
                 .map_err(|error| contract(format!("joined package witness rejected: {error}")))?;
-            context.validate_artifacts(&input.artifacts)?;
+            inputs.validate()?;
             let validated_inputs = ValidatedJoinInputs {
                 support: context.compiler_source_support().clone(),
                 owners: input
@@ -1209,10 +1235,19 @@ pub fn validate_declaration_join(
 /// ordered writes in this digest fences instance-only changes and retractions.
 pub fn encode_declaration_join(input: &DeclarationJoinInput) -> Result<Vec<u8>, CompileError> {
     validate_instance_inventory(&input.expected_instances)?;
+    if input
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.product.is_some())
+    {
+        return Err(contract(
+            "declaration joins consume interface observations only",
+        ));
+    }
     let mut writer = JoinEncoder(Vec::new());
     writer.array(12);
     writer.text("TPDJOIN");
-    writer.text("3");
+    writer.text("4");
     writer.text(&input.expected_public_version);
     writer.optional(input.public_module.as_ref())?;
     writer.optional(input.private_base.as_ref())?;
@@ -1253,11 +1288,11 @@ pub fn decode_declaration_join_outcome(
     instances.inventory(&input.expected_instances);
     let mut families = JoinEncoder(Vec::new());
     families.identities(&input.family_closure);
-    if outcome.version != 3
+    if outcome.version != 4
         || outcome.expected_public_version != input.expected_public_version
         || outcome.request_sha256 != sha256(&encode_declaration_join(input)?)
         || outcome.reserved != input.reserved
-        || outcome.implementation_sha256 != sha256(&implementation.0)
+        || outcome.interfaces_sha256 != sha256(&implementation.0)
         || outcome.exports_sha256 != sha256(&exports.0)
         || outcome.instances_sha256 != sha256(&instances.0)
         || outcome.family_closure_sha256 != sha256(&families.0)

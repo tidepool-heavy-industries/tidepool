@@ -1082,25 +1082,18 @@ impl DeclarationPublicationBase {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
         let scratch = Arc::new(tempfile::tempdir()?);
-        let materialized = context.materialize_scratch(&scratch)?;
+        let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
-            let module = identity.module.clone();
-            let artifact = materialized
-                .artifacts
-                .iter()
-                .find(|artifact| {
-                    artifact.interface.unit == identity.unit && artifact.interface.module == module
-                })
-                .ok_or_else(|| {
-                    invalid(
-                        &self.public,
-                        "owned context lacks a selected exact interface",
-                    )
-                })?;
+            let artifact = join_inputs.interface(identity).ok_or_else(|| {
+                invalid(
+                    &self.public,
+                    "owned context lacks a selected exact interface",
+                )
+            })?;
             Ok(ModuleSnapshot {
-                module,
-                path: artifact.interface.path.clone(),
-                sha256: artifact.interface.sha256.clone(),
+                module: identity.module.clone(),
+                path: artifact.path.clone(),
+                sha256: artifact.sha256.clone(),
             })
         };
         let mut writes = Vec::new();
@@ -1112,7 +1105,7 @@ impl DeclarationPublicationBase {
                 retractions: write.retractions.clone(),
             });
         }
-        let input = DeclarationJoinInput {
+        let input = tidepool_toolchain::declaration_join::DeclarationJoinSpec {
             expected_public_version: self.expected_public_version.clone(),
             public_module: self
                 .current_public
@@ -1145,17 +1138,15 @@ impl DeclarationPublicationBase {
                 module: SessionModule::lib(self.reservation.generation).module_name(),
                 path: scratch.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
             family_closure: selection.families,
             expected_exports: selection.exports,
             expected_instances: selection.instances,
         };
         match tidepool_toolchain::declaration_join::certify_declaration_join(
             input,
-            &context,
+            join_inputs,
             &self.includes,
             &self.session_root,
-            Arc::clone(&scratch),
             settlement,
         )? {
             CertifiedDeclarationJoin::Accepted(receipt) => Ok(

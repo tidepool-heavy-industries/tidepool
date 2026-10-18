@@ -533,7 +533,7 @@ decodeDeclarationJoin = do
   array 12
   magic <- text
   version <- text
-  unless (magic == "TPDJOIN" && version == "3") (fail "unsupported declaration join")
+  unless (magic == "TPDJOIN" && version == "4") (fail "unsupported declaration join")
   DeclarationJoinInput <$> text <*> optional snapshot <*> optional snapshot
     <*> optional snapshot <*> vector write <*> reservation <*> vector declarationExport
     <*> inventory <*> vector artifact <*> vector identity
@@ -561,7 +561,12 @@ decodeDeclarationJoin = do
       "type" -> pure TypeDeclaration
       "class" -> pure ClassDeclaration
       _ -> fail "invalid declaration export kind"
-    artifact = array 2 >> DeclarationArtifact <$> exact <*> optional snapshot
+    artifact = do
+      array 2
+      iface <- exact
+      product <- optional snapshot
+      unless (isNothing product) (fail "declaration joins consume interface observations only")
+      pure (DeclarationArtifact iface Nothing)
     exact = array 5 >> ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolutePath
       <*> digest <*> vector (array 2 >> (,) <$> nonempty <*> nonempty)
     nonempty = text >>= \value -> if null value then fail "empty declaration identity" else pure value
@@ -585,7 +590,7 @@ optional item = peekTokenType >>= \case
 
 encodeDeclarationJoin :: DeclarationJoinInput -> BS.ByteString
 encodeDeclarationJoin input = toStrictByteString $
-  encodeListLen 12 <> wireText "TPDJOIN" <> wireText "3" <> wireText (expectedPublicVersion input)
+  encodeListLen 12 <> wireText "TPDJOIN" <> wireText "4" <> wireText (expectedPublicVersion input)
   <> wireOptional wireSnapshot (publicModule input) <> wireOptional wireSnapshot (privateBase input)
   <> wireOptional wireSnapshot (privateTip input) <> wireList wireWrite (declarationWrites input)
   <> wireReservation (joinReservation input) <> wireList wireExport (expectedExports input)
@@ -734,11 +739,11 @@ artifactsUnchanged artifacts = and <$> forM artifacts (\artifact -> do
 -- rejection. Runtime alone compares the echoed paired snapshot for staleness.
 renderDeclarationJoinOutcome :: DeclarationJoinOutcome -> String
 renderDeclarationJoinOutcome outcome = object
-  [ ("version", "3"), ("expected_public_version", jsonString (expectedPublicVersion input))
+  [ ("version", "4"), ("expected_public_version", jsonString (expectedPublicVersion input))
   , ("request_sha256", jsonString (sha256 (encodeDeclarationJoin input)))
   , ("reserved", object [("unit", jsonString (reservedUnit reserved)), ("module", jsonString (reservedModule reserved))
       , ("path", jsonString (reservedPath reserved))])
-  , ("implementation_sha256", proof (wireList wireArtifact (implementationArtifacts input)))
+  , ("interfaces_sha256", proof (wireList wireArtifact (implementationArtifacts input)))
   , ("exports_sha256", proof (wireList wireExport (expectedExports input)))
   , ("instances_sha256", proof (wireInventory (expectedInstances input)))
   , ("family_closure_sha256", proof (wireList wireIdentity (retainedFamilyClosure input)))
