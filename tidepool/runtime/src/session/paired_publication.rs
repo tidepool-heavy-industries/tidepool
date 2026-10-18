@@ -1215,6 +1215,7 @@ impl AcceptedDeclarationPublication {
         };
         let binding_custody = receipt.native_binding_custody_requirements()?;
         let error_path = public.path.clone();
+        let mut prepared_context = None;
         if let super::PublicPublicationBaseline::Durable(super::DurableWriteBase {
             owner,
             graph,
@@ -1222,30 +1223,27 @@ impl AcceptedDeclarationPublication {
             ..
         }) = &mut public.target
         {
-            let mut candidate = graph.candidate();
             let root = artifact_root.as_path();
             let previous = graph
                 .surface(owner)
                 .map_err(|error| recovery::graph_error(&error_path, error))?;
-            let mut artifacts = recovery::materialize_missing_context_artifacts(
-                graph,
+            let (admitted, prepared) = graph.stage_compiler_context(
                 root,
-                &context,
+                &recovery::ScopedCompilerContext::new(context.clone()),
                 previous
                     .as_ref()
                     .and_then(|surface| surface.context_root.as_ref()),
             )?;
+            let mut candidate = admitted.candidate();
             let producer = receipt.artifact_id();
-            if !graph.contains_artifact(producer)
-                && !artifacts
-                    .iter()
-                    .any(|artifact| artifact.artifact_id() == producer)
-            {
-                artifacts.push(recovery::RecoveryArtifactClosure::Join(
-                    receipt
-                        .materialize_interface(root)
-                        .map_err(|error| invalid_at(&error_path, error.to_string()))?,
-                ));
+            if !admitted.contains_artifact(producer) {
+                candidate
+                    .insert_artifact(recovery::RecoveryArtifactClosure::Join(
+                        receipt
+                            .materialize_interface(root)
+                            .map_err(|error| invalid_at(&error_path, error.to_string()))?,
+                    ))
+                    .map_err(|error| recovery::graph_error(&error_path, error))?;
             }
             let exports = receipt
                 .exports()
@@ -1271,19 +1269,8 @@ impl AcceptedDeclarationPublication {
             for write in &base.intent.writes {
                 workbench_imports.extend(&write.turn.workbench_imports);
             }
-            let context_root = candidate
-                .insert_context(
-                    &context,
-                    previous
-                        .as_ref()
-                        .and_then(|surface| surface.context_root.as_ref()),
-                )
-                .map_err(|e| recovery::graph_error(&error_path, e))?;
-            for artifact in artifacts {
-                candidate
-                    .insert_artifact(artifact)
-                    .map_err(|error| recovery::graph_error(&error_path, error))?;
-            }
+            let context_root = prepared.root().clone();
+            prepared_context = Some(prepared);
             candidate
                 .insert_node(recovery::RecoveryNode {
                     id: base.reservation.generation,
@@ -1453,7 +1440,7 @@ impl AcceptedDeclarationPublication {
         public
             .final_bindings
             .retain(|(name, _)| !declaration.declared_names.contains(name));
-        let mut ticket = public.stage_materialized()?;
+        let mut ticket = public.stage_materialized(prepared_context)?;
         ticket.declaration = Some(declaration);
         Ok(ticket)
     }
@@ -1494,7 +1481,9 @@ impl SessionLib {
             .cloned()
             .ok_or(SessionError::StaleStagedDeclaration)?;
         tip.tip = declaration.generation;
-        tip.exact_context = Some(declaration.joined.context.clone());
+        tip.exact_context = Some(recovery::ScopedCompilerContext::new(
+            declaration.joined.context.clone(),
+        ));
         let log = self
             .log
             .prepare_joined_commit(declaration.generation, declaration.joined)?;

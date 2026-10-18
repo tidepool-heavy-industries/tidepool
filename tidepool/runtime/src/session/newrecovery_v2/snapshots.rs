@@ -269,10 +269,6 @@ impl CompilerContextInstallation {
         &self.installation.state
     }
 
-    pub(crate) fn exact(&self) -> Option<&Arc<ExactDeclarationContext>> {
-        self.context.as_ref().map(PreparedCompilerContext::exact)
-    }
-
     pub(crate) fn installed_blocking(self) -> Result<Option<ScopedCompilerContext>, StoreError> {
         self.installation.installed_blocking()?;
         Ok(self.context.map(|context| {
@@ -286,6 +282,14 @@ impl CompilerContextInstallation {
 }
 
 impl StagedCompilerContextPublication {
+    pub(crate) fn graph(&self) -> &RecoveryGraph {
+        &self.staged.graph
+    }
+
+    pub(crate) fn expected_revision(&self) -> StoreRevision {
+        self.staged.prepared.expected_revision
+    }
+
     pub(crate) fn work(&self) -> crate::session::RecoveryPublicationWork {
         self.staged.work
     }
@@ -598,26 +602,48 @@ impl RecoveryGraph {
         if let Some(context) = self.materialized_contexts.get(root) {
             return Ok(context.clone());
         }
+        self.acquire_context(root)
+    }
+
+    /// Acquired receipts have actual store block custody. Candidate packets
+    /// cannot enter this owner, even when their root matches a requested CID.
+    pub(crate) fn acquire_context(
+        &self,
+        root: &ContextRoot,
+    ) -> Result<Arc<MaterializedContext>, RecoveryError> {
+        self.store.ensure_ready()?;
         if let Some(context) = self.acquired.lock().contexts.get(root).cloned() {
             return Ok(context);
         }
-        let context = Arc::new(hydrate_context(self, root)?);
+        let context = Arc::new(hydrate_context(self.store.as_ref(), root)?);
         self.acquired
             .lock()
             .contexts
             .insert(root.clone(), context.clone());
         Ok(context)
     }
-    pub(crate) fn remember_context(
+
+    pub(crate) fn recover_compiler_context(
         &self,
-        context: Arc<MaterializedContext>,
-    ) -> Result<(), RecoveryError> {
-        self.store.ensure_ready()?;
-        self.acquired
-            .lock()
-            .contexts
-            .insert(context.root().clone(), context);
-        Ok(())
+        inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
+        root: &ContextRoot,
+    ) -> Result<ScopedCompilerContext, crate::session::SessionError> {
+        let receipt = self
+            .acquire_context(root)
+            .map_err(|error| crate::session::recovery::graph_error(self.store.path(), error))?;
+        let snapshot = receipt.snapshot();
+        let mut exact = inventory.context_with_snapshot(snapshot)?;
+        if exact.toolchain_identity_sha256() != snapshot.producer_sha256() {
+            return Err(crate::session::SessionError::WrongPublicManifestTicket);
+        }
+        exact.bind_snapshot_baseline(&receipt)?;
+        Ok(ScopedCompilerContext::Stored(Arc::new(
+            StoredCompilerContext {
+                exact: Arc::new(exact),
+                materialized: receipt,
+                origin: self.context_origin(),
+            },
+        )))
     }
     pub(crate) fn surface(
         &self,
@@ -850,15 +876,6 @@ impl RecoveryGraphCandidate {
             .insert((id, cid), Arc::new(artifact));
         Ok(())
     }
-    pub(crate) fn insert_context(
-        &mut self,
-        context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
-        previous: Option<&ContextRoot>,
-    ) -> Result<ContextRoot, RecoveryError> {
-        self.materialize_compiler_context(context, previous)
-            .map(|context| context.root().clone())
-    }
-
     fn materialize_compiler_context(
         &mut self,
         context: &ExactDeclarationContext,
@@ -1084,7 +1101,11 @@ mod tests {
         let context =
             tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap();
-        candidate.insert_context(&context, None).unwrap()
+        candidate
+            .materialize_compiler_context(&context, None)
+            .unwrap()
+            .root()
+            .clone()
     }
     fn node(id: u64, parent: Option<u64>, context_root: ContextRoot, label: &str) -> RecoveryNode {
         RecoveryNode {
