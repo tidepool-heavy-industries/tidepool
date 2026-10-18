@@ -1614,7 +1614,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         expected_descriptors,
         "the joint request projection retains exactly the sealed response interface closure"
     );
-    assert!(retained_context.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(&retained_context);
     assert!(retained_context.lexical_graph().is_empty());
     let producer = compiler_context.toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
@@ -3194,10 +3194,7 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         original.producer_sha256,
         "type context retains the canonical interface's authenticated producer"
     );
-    assert!(
-        retained.declarations().recovery_products().is_empty(),
-        "type custody grants no original native products"
-    );
+    assert_interface_only_roles_without_native_selection(retained.declarations());
     assert!(
         retained.declarations().lexical_graph().is_empty(),
         "type custody grants no source names"
@@ -3460,6 +3457,23 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     );
 }
 
+fn assert_interface_only_roles_without_native_selection(
+    context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+) {
+    let roles = context.compiler_input_roles();
+    assert!(!roles.is_empty());
+    assert!(roles.iter().all(|role| matches!(
+        role,
+        tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
+    )));
+    assert!(context.artifact_view().selected_native_groups().is_empty());
+    eprintln!(
+        "type interface selection roles={} selected_native_groups=0 held_originals={}",
+        roles.len(),
+        context.recovery_products().len()
+    );
+}
+
 #[test]
 fn activation_preview_executes_original_ordinary_home_custom_display_after_readers_drop() {
     use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
@@ -3472,7 +3486,36 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .descriptors()
         .iter()
         .any(|descriptor| descriptor.owner.module == "ActivationDisplayOriginal"));
-    assert!(input_types.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(input_types);
+    let expected = input_types
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.owner.unit == "main"
+                && descriptor.owner.module == "ActivationDisplayOriginal"
+                && descriptor.kind
+                    == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+                && input_types
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| role.interface() == descriptor.id)
+        })
+        .expect("the input type selects its original canonical interface");
+    assert_eq!(expected.producer_sha256, interface.prototype().producer());
+    let expected_seal = expected
+        .interface_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(interface
+        .prototype()
+        .original_input_type()
+        .expect("the actual input retains its issued type witness")
+        .interface_seals()
+        .any(|(unit, module, seal)| {
+            unit == expected.owner.unit && module == expected.owner.module && seal == expected_seal
+        }));
     assert!(input_types.lexical_graph().is_empty());
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
@@ -4308,7 +4351,7 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
     let type_only = mounted.interface().prototype().context().clone();
-    assert!(type_only.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(&type_only);
     assert!(type_only.lexical_graph().is_empty());
     assert_eq!(
         type_only.toolchain_identity_sha256(),
