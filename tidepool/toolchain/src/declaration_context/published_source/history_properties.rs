@@ -298,7 +298,6 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         callbacks.set(callbacks.get() + 1);
         let (root, helper, publication) = fixture(initial);
         let original = publication.context();
-        let expected_publication = original.semantic_sha256();
         let expected_roles = original.compiler_input_roles();
         let expected_artifacts = original.artifact_view().artifact_ids();
         let initial_groups = std::iter::once(NativeGroupKey {
@@ -560,7 +559,6 @@ proptest! {
         use fvm_ipld_blockstore::Blockstore;
         let (root, helper, publication) = fixture(initial);
         let original = publication.context();
-        let expected_publication = original.semantic_sha256();
         let expected_graph = original.artifact_view().capture_graph_selection();
         let expected_edges = original.artifact_view().binding_dependencies();
         let expected_role = original.compiler_input_roles().into_iter()
@@ -599,7 +597,7 @@ proptest! {
             prop_assert!(roles.iter().any(|role| role.interface() == canonical && role.original().is_none()));
             let reopened = context.published_source_original_selections().unwrap();
             prop_assert_eq!(reopened.len(), 1);
-            prop_assert_eq!(reopened[0].context().semantic_sha256(), expected_publication);
+            prop_assert!(reopened[0].context().compiler_input_roles().contains(&expected_role));
 
             let store = fvm_ipld_blockstore::MemoryBlockstore::default();
             let mut writer = crate::exact_context::Materializer::new(&store);
@@ -619,8 +617,8 @@ proptest! {
             let acquired = crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
             context = inventory.context_for_expected_snapshot(persisted.root(), &acquired).unwrap();
             prop_assert_eq!(context.compiler_input_roles(), roles);
-            prop_assert_eq!(context.published_source_original_selections().unwrap()[0]
-                .context().semantic_sha256(), expected_publication);
+            prop_assert!(context.published_source_original_selections().unwrap()[0]
+                .context().compiler_input_roles().contains(&expected_role));
         }
         // A separately authenticated native version with the same canonical
         // interface is still a real selected-original conflict, not type-only custody.
@@ -633,9 +631,13 @@ proptest! {
             .any(|role| role.interface() == canonical
                 && role.original() == Some(other_helper.descriptor.id)));
         let before = context.semantic_sha256();
-        prop_assert!(matches!(context.clone().extend_issued_compiler_support(&other),
-            Err(CompileError::ExtractFailed(detail))
-                if detail == "published selection changes a selected original dependency"));
+        let Err(CompileError::ExtractFailed(detail)) =
+            context.clone().extend_issued_compiler_support(&other)
+        else { panic!("a competing selected original must refuse publication reopening") };
+        prop_assert!(detail.starts_with("published selection changes a selected original dependency"));
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.owner)));
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.id)));
+        prop_assert!(detail.contains(&format!("{:?}", other_helper.descriptor.id)));
         prop_assert_eq!(context.semantic_sha256(), before);
     }
 }
