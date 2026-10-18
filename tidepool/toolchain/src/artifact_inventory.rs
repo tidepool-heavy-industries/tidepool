@@ -7198,7 +7198,7 @@ impl ArtifactView {
         timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
         timing.advance("merge_namespace");
-        let joined = self.merge_validated_namespace(other, namespace.clone())?;
+        let issuing_payloads = self.merge_payload_custody(other, &namespace)?;
         timing.advance("select_roots_and_custody");
         let roots = if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
             let previous = self.namespace();
@@ -7220,23 +7220,31 @@ impl ArtifactView {
                 .chain(groups.values().copied().map(InventoryNodeKey::Group))
                 .collect::<BTreeSet<_>>()
         };
-        let custody = joined
+        let custody = self
             .roots()
             .iter()
+            .chain(self.custody_roots())
+            .chain(other.roots())
+            .chain(other.custody_roots())
             .copied()
-            .chain(joined.custody_roots().iter().copied())
             .filter(|node| !roots.contains(node))
             .collect::<BTreeSet<_>>();
         timing.advance("retain_selection");
-        let retained = joined.inventory().retain(
+        let mut retained = self.retain_merged_selection(
+            other,
+            &namespace,
             roots.into_iter().collect(),
             custody.into_iter().collect(),
-            Vec::new(),
-            Vec::new(),
-        );
+            issuing_payloads,
+        )?;
         timing.advance("retain_materializations_and_namespace");
-        let mut retained = joined.retain_projected_materializations(retained)?;
-        retained.replace_namespace(&namespace);
+        if retained.has_retained_nodes() {
+            let mut materializations = Vec::new();
+            let mut visited = BTreeSet::new();
+            self.collect_materializations(&mut materializations, &mut visited)?;
+            other.collect_materializations(&mut materializations, &mut visited)?;
+            retained.attach_projected_materializations(&materializations);
+        }
         timing.finish(true);
         Ok((retained, selected, input_decisions))
     }
@@ -7321,6 +7329,29 @@ impl ArtifactView {
         other: &Self,
         namespace: BTreeMap<ArtifactId, ArtifactBinding>,
     ) -> Result<Self, CompileError> {
+        let issuing_payloads = self.merge_payload_custody(other, &namespace)?;
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        drop(state);
+        Ok(ArtifactView::new(ViewDraft {
+            roots: vec![],
+            selection,
+            inventory: self.lease.inventory.clone(),
+            parents,
+            issuing_payloads,
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    /// Merge actual acquisitions before checking the selected namespace. Equal
+    /// payload IDs can carry independent file owners, including in hidden custody.
+    fn merge_payload_custody(
+        &self,
+        other: &Self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+    ) -> Result<BTreeMap<ArtifactId, Arc<ArtifactEntry>>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let mut issuing_payloads = BTreeMap::new();
         for (id, incoming) in &other.lease.payloads {
@@ -7347,20 +7378,67 @@ impl ArtifactView {
             })
             .collect();
         SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
-        let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
-        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        Ok(issuing_payloads)
+    }
+
+    /// Publish the final compiler selection directly from its issued operands.
+    /// Physical materializations are projected separately, in operand order.
+    fn retain_merged_selection(
+        &self,
+        other: &Self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        roots: Vec<InventoryNodeKey>,
+        custody: Vec<ArtifactBindingNode>,
+        issuing_payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<Self, CompileError> {
+        let mut state = self.lease.inventory.0.lock().expect("inventory lock");
+        if !Arc::ptr_eq(&self.lease.inventory.0, &other.lease.inventory.0) {
+            let proofs = scope_proof::prepare_install(
+                &state,
+                other
+                    .lease
+                    .selection
+                    .scopes
+                    .iter()
+                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
+                    .map(|(_, proof)| Arc::clone(proof.proof())),
+            )?;
+            scope_proof::install(&mut state, proofs);
+        }
+        // Namespace bindings were resolved in the operands' retained closures.
+        // Preserving both seed frontiers keeps every binding in this final closure.
+        let selection = selection_snapshot_for_lease(&state, namespace, &roots, &custody, &[]);
+        let ids = selection
+            .retained_nodes()
+            .expect("issued merged selection")
+            .into_iter()
+            .map(InventoryNodeKey::artifact)
+            .collect::<BTreeSet<_>>();
         drop(state);
-        Ok(ArtifactView::new(ViewDraft {
-            roots: vec![],
-            selection,
-
-            inventory: self.lease.inventory.clone(),
-
-            parents,
-            issuing_payloads,
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        }))
+        let payloads = ids
+            .iter()
+            .map(|id| {
+                let entry = issuing_payloads
+                    .get(id)
+                    .or_else(|| self.lease.payloads.get(id))
+                    .or_else(|| other.lease.payloads.get(id))
+                    .expect("selected payload owner");
+                (*id, Arc::clone(entry))
+            })
+            .collect();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection,
+                inventory: self.lease.inventory.clone(),
+                parents: vec![],
+                issuing_payloads: payloads,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            ids,
+        );
+        Ok(Self::from_custody(lease))
     }
 
     /// Retain issued private offers in order. A validated prefix can defer a
@@ -9131,8 +9209,14 @@ mod tests {
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionClose,
         };
-        for inherited in [false, true] {
-            let producer = ArtifactInventory::default().empty_view();
+        for (inherited, compiler_merge) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let inventory = ArtifactInventory::default();
+            let producer = inventory
+                .admit(&inventory.empty_view(), vec![entry("BusyProducer", &[])])
+                .unwrap();
+            let roles = CompilerInputProjection::from_issued_entries(&producer.entries()).unwrap();
             let receiver = if inherited {
                 producer.inventory().retain(
                     vec![],
@@ -9160,9 +9244,21 @@ mod tests {
                         worker_cancellation,
                         |_| {},
                         || {
-                            receiver.retain_materialization(metadata, |_| {
-                                panic!("cancelled waiter cannot prepare")
-                            })
+                            if compiler_merge {
+                                receiver
+                                    .merge_compiler_inputs(
+                                        &roles,
+                                        receiver,
+                                        &CompilerInputProjection::default(),
+                                    )
+                                    .map(|_| ())
+                            } else {
+                                receiver
+                                    .retain_materialization(metadata, |_| {
+                                        panic!("cancelled waiter cannot prepare")
+                                    })
+                                    .map(|_| ())
+                            }
                         },
                     );
                     finished.send(result).unwrap();
@@ -9275,11 +9371,17 @@ mod tests {
         let (finished, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let mut parents = Vec::new();
-                let result = receiver
-                    .lease
-                    .collect_inherited_materializations(&mut parents, &mut BTreeSet::new());
-                finished.send(result.map(|()| parents)).unwrap();
+                let result = (|| {
+                    let (merged, _, _) = receiver.merge_compiler_inputs(
+                        descendant.compiler_input_projection(),
+                        &receiver,
+                        &CompilerInputProjection::default(),
+                    )?;
+                    let mut parents = Vec::new();
+                    merged.collect_materializations(&mut parents, &mut BTreeSet::new())?;
+                    Ok::<_, CompileError>(parents)
+                })();
+                finished.send(result).unwrap();
             });
             let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
             assert!(held.is_empty());
@@ -10310,6 +10412,223 @@ mod tests {
             name,
             requirements,
         ))
+    }
+
+    // Frozen f866 constructor sequence: the policy solver is deliberately not
+    // duplicated. Its output roots/namespace feed both construction paths.
+    pub(super) fn reference_compiler_selection(
+        left: &ArtifactView,
+        right: &ArtifactView,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        roots: &[InventoryNodeKey],
+    ) -> ArtifactView {
+        left.validate_issued_merge(right).unwrap();
+        let joined = left
+            .merge_validated_namespace(right, namespace.clone())
+            .unwrap();
+        let custody = joined
+            .roots()
+            .iter()
+            .chain(joined.custody_roots())
+            .copied()
+            .filter(|node| !roots.contains(node))
+            .collect::<BTreeSet<_>>();
+        let retained = joined.inventory().retain(
+            roots.to_vec(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = joined.retain_projected_materializations(retained).unwrap();
+        retained.replace_namespace(namespace);
+        retained
+    }
+
+    fn check_direct_compiler_selection(
+        count: usize,
+        cross_inventory: bool,
+        reverse: bool,
+        extend: bool,
+        same_view: bool,
+    ) {
+        let first = ArtifactInventory::default();
+        let second = if cross_inventory {
+            ArtifactInventory::default()
+        } else {
+            first.clone()
+        };
+        let shared = Arc::new(entry("SharedMergeLeaf", &[]));
+        let issue =
+            |inventory: &ArtifactInventory, prefix: &str| {
+                let mut entries = vec![shared.clone()];
+                entries.extend((0..count).map(|index| {
+                    Arc::new(entry(&format!("{prefix}{index}"), &["SharedMergeLeaf"]))
+                }));
+                let roles = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+                entries.push(Arc::new(entry(&format!("{prefix}Custody"), &[])));
+                let roots = entries.iter().map(|entry| entry.descriptor.id).collect();
+                let excluded = Arc::new(entry(&format!("{prefix}ProofOnly"), &[]));
+                let excluded_id = excluded.descriptor.id;
+                entries.push(excluded);
+                let broad = inventory
+                    .admit_shared(&inventory.empty_view(), entries)
+                    .unwrap();
+                let excluded = Arc::downgrade(&broad.lease.payloads[&excluded_id]);
+                let view = broad.select_roots(roots).unwrap();
+                assert!(view.selection_snapshot().scopes.values().any(|scope| scope
+                    .proof()
+                    .nodes
+                    .iter()
+                    .any(|node| node.artifact() == excluded_id)));
+                drop(broad);
+                assert!(
+                    excluded.upgrade().is_none(),
+                    "proof-only ancestors retain no payload"
+                );
+                view.entries();
+                (view, roles, excluded)
+            };
+        let (left, left_roles, left_excluded) = issue(&first, "LeftMerge");
+        let (right, right_roles, right_excluded) = issue(&second, "RightMerge");
+        let (left, left_roles, right, right_roles) = if reverse {
+            (right, right_roles, left, left_roles)
+        } else {
+            (left, left_roles, right, right_roles)
+        };
+        let (right, right_roles) = if same_view {
+            (left.clone(), left_roles.clone())
+        } else {
+            (right, right_roles)
+        };
+        let inventory = left.inventory().clone();
+        let before = inventory.metrics();
+        let (actual, roles, _) = left
+            .merge_compiler_inputs_with_demand(
+                &left_roles,
+                &right,
+                &right_roles,
+                if extend {
+                    CompilerNativeDemand::ExtendInterfaces
+                } else {
+                    CompilerNativeDemand::RoleIssuer
+                },
+                CompilerInputValidation::Closed,
+            )
+            .unwrap();
+        let actual_work = inventory.metrics().graph_visits - before.graph_visits;
+        let before = inventory.metrics();
+        let expected =
+            reference_compiler_selection(&left, &right, &actual.namespace(), actual.roots());
+        let reference_work = inventory.metrics().graph_visits - before.graph_visits;
+        assert_eq!(
+            actual_work, 0,
+            "warm operands need no inventory closure rewalk"
+        );
+        assert!(reference_work >= expected.lease.payloads.len() as u64);
+        assert_eq!(roles, left_roles.merge(&right_roles).unwrap());
+        assert_eq!(
+            actual.capture_graph_selection(),
+            expected.capture_graph_selection()
+        );
+        assert_eq!(
+            actual.binding_dependencies(),
+            expected.binding_dependencies()
+        );
+        assert_eq!(actual.selection_snapshot(), expected.selection_snapshot());
+        let actual_metadata = actual.metadata_snapshot();
+        let expected_metadata = expected.metadata_snapshot();
+        assert_eq!(actual_metadata.entries, expected_metadata.entries);
+        assert_eq!(actual_metadata.artifacts, expected_metadata.artifacts);
+        assert_eq!(
+            actual_metadata.dependencies(),
+            expected_metadata.dependencies()
+        );
+        assert_eq!(
+            actual_metadata.selected_native_groups,
+            expected_metadata.selected_native_groups
+        );
+        assert_eq!(
+            actual_metadata.ambiguous_native_owners,
+            expected_metadata.ambiguous_native_owners
+        );
+        if extend {
+            assert!(left
+                .roots()
+                .iter()
+                .all(|root| actual.roots().contains(root)));
+        } else {
+            assert!(actual.roots().iter().all(|root| actual
+                .namespace()
+                .values()
+                .any(|binding| *root == InventoryNodeKey::Artifact(*binding))));
+        }
+        for id in actual.artifact_ids() {
+            assert!(Arc::ptr_eq(
+                &actual.lease.payloads[&id],
+                &expected.lease.payloads[&id]
+            ));
+        }
+        let selected = actual.namespace()[&shared.descriptor.id];
+        assert_eq!(selected, left.namespace()[&shared.descriptor.id]);
+        if same_view {
+            assert_eq!(selected, right.namespace()[&shared.descriptor.id]);
+        } else {
+            assert_ne!(selected, right.namespace()[&shared.descriptor.id]);
+        }
+        let packet = actual.capture_graph_selection();
+        let edges = actual.binding_dependencies();
+        let entries = actual.entries();
+        drop(expected);
+        drop(left);
+        drop(right);
+        drop(first);
+        drop(second);
+        assert_eq!(actual.capture_graph_selection(), packet);
+        let fresh = ArtifactInventory::default();
+        let recovered = fresh
+            .recover_selection(&fresh.empty_view(), entries, &packet, &edges)
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), packet);
+        assert!(left_excluded.upgrade().is_none() && right_excluded.upgrade().is_none());
+        assert!(actual.lease.materialization_sources.is_empty());
+        assert!(actual.lease.materialization.parents.is_empty());
+    }
+
+    #[test]
+    fn direct_compiler_selection_matches_prior_constructor_without_inventory_closure_rewalk() {
+        for count in [1, 8, 64] {
+            for cross_inventory in [false, true] {
+                for reverse in [false, true] {
+                    for extend in [false, true] {
+                        check_direct_compiler_selection(
+                            count,
+                            cross_inventory,
+                            reverse,
+                            extend,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        for count in [1, 8, 64] {
+            for extend in [false, true] {
+                check_direct_compiler_selection(count, false, false, extend, true);
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn direct_compiler_selection_recovers_exact_issued_owners(
+            count in 1usize..12,
+            cross_inventory in proptest::bool::ANY,
+            reverse in proptest::bool::ANY,
+            extend in proptest::bool::ANY,
+            same_view in proptest::bool::ANY,
+        ) {
+            check_direct_compiler_selection(count, cross_inventory, reverse, extend, same_view);
+        }
     }
 
     #[test]
