@@ -78,11 +78,11 @@ fn constructor_valid(name: &str) -> bool {
                 | "LT"
                 | "EQ"
                 | "GT"
-                | "ModelSelection"
+                | "ModelSelectionEnvelope"
                 | "ArgonOptions"
                 | "DeepSeekOptions"
                 | "OpenAIOptions"
-                | "ArgonLow"
+                | "EffortLow"
                 | "ArgonMedium"
                 | "ArgonHigh"
                 | "DeepSeekNone"
@@ -322,7 +322,7 @@ impl ResolvedCatalog {
             let shape = option_shape(model.model.backend());
             declarations.push(format!("{} {}", model.constructor, shape.options));
             cases.push(format!(
-                "  modelSelection ({} options) = ModelSelection {} {} (Core.{} ({} options))",
+                "  modelSelection ({} options) = ModelSelectionEnvelope {} {} (Core.{} ({} options))",
                 model.constructor,
                 haskell_literal(&self.identity),
                 haskell_literal(key),
@@ -395,7 +395,7 @@ fn option_shape(backend: Backend) -> OptionShape {
             effort: "ArgonEffort",
             field: "argonEffort",
             reasoning: "ArgonReasoning",
-            prefix: "Argon",
+            prefix: "Effort",
         },
         Backend::DeepSeek => OptionShape {
             options: "DeepSeekOptions",
@@ -598,10 +598,10 @@ mod tests {
         assert!(source.contains("(Core.DeepSeekReasoning (deepSeekEffort options))"));
         assert!(source.contains("(Core.OpenAIReasoning (openAIEffort options))"));
         assert!(source.contains("primaryModel = Flash (DeepSeekOptions DeepSeekHigh)"));
-        assert!(source.contains("(\"argon\", Argon (ArgonOptions ArgonMedium))"));
+        assert!(source.contains("(\"argon\", Argon (ArgonOptions EffortMedium))"));
         assert!(source.contains("(\"openai\", Sol (OpenAIOptions OpenAILow))"));
         assert!(source.contains(&format!(
-            "ModelSelection \"{}\" \"argon\"",
+            "ModelSelectionEnvelope \"{}\" \"argon\"",
             catalog.identity
         )));
         assert!(source.contains("setNextEffort :: Member Context.ContextReadWrite effects => DeepSeekReasoning -> Eff effects ()"));
@@ -626,8 +626,8 @@ mod tests {
             "ArgonOptions",
             "DeepSeekOptions",
             "OpenAIOptions",
-            "ArgonLow",
-            "ModelSelection",
+            "EffortLow",
+            "ModelSelectionEnvelope",
         ] {
             let mut config = config();
             config.models.get_mut("flash").unwrap().constructor = constructor.into();

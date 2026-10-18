@@ -1,7 +1,7 @@
 -- | Provider-specific options shared by frozen workspace model choices.
 module Tidepool.Model.Selection
   ( ModelChoice (..)
-  , ModelSelection (..)
+  , ModelSelectionEnvelope (..)
   , ArgonOptions (..)
   , DeepSeekOptions (..)
   , OpenAIOptions (..)
@@ -12,15 +12,15 @@ module Tidepool.Model.Selection
 
 import Prelude
 import Tidepool.Effects.Core
-  ( ModelSelection (..)
-  , ArgonEffort (..)
+  ( ArgonEffort (..)
   , DeepSeekReasoning (..)
   , OpenAIReasoning (..)
   )
+import Tidepool.Internal.ModelControl (ModelSelectionEnvelope (..))
 
 -- | A selection is checked against the actor's admitted catalog by the host.
 class ModelChoice a where
-  modelSelection :: a -> ModelSelection
+  modelSelection :: a -> ModelSelectionEnvelope
 
 data ArgonOptions = ArgonOptions
   { argonEffort :: ArgonEffort
