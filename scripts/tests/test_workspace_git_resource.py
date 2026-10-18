@@ -111,6 +111,11 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         resource.provision(source, output, str(self.git))
         for path, expected in selected.items():
             self.assertEqual((output / "source" / path).read_bytes(), expected)
+        self.assertEqual(
+            {path.relative_to(output / "source").as_posix()
+             for path in (output / "source").rglob("*") if path.is_file()},
+            set(resource.PROJECTED_SOURCES),
+        )
 
     def test_provision_refuses_missing_selected_source_before_output(self):
         source, workspace = self.source()
