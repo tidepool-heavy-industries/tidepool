@@ -7170,6 +7170,11 @@ tidepool-reuse-error: witness failed\n";
             "queued transaction has submitted no request"
         );
         cancellation.cancel();
+        // Cancellation synchronously attempts this edge; the oracle also
+        // checks successful half-close before allowing the slot to dequeue.
+        queued.stream.shutdown(Shutdown::Write).expect(
+            "accepted transaction write-half must close before releasing the worker barrier",
+        );
         let cancelled = std::thread::spawn(move || end_transaction(&mut queued));
         std::fs::write(directory.path().join("release"), b"release first END").unwrap();
         assert_eq!(first.join().unwrap().unwrap().stdout, b"1");
