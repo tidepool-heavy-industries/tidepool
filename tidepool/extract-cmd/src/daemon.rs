@@ -6340,11 +6340,7 @@ tidepool-reuse-error: witness failed\n";
                 termination: Ok(()),
                 worker: crate::CompilerWorkerRetirement::Reaped(ExitStatus::from_raw(9)),
             },
-            failure: crate::CompilerIoCause {
-                raw_os_error: Some(libc::ECANCELED),
-                kind: io::ErrorKind::Interrupted,
-                message: "cancelled protocol fixture".into(),
-            },
+            failure: crate::CompilerIoCause::from(&io::Error::from_raw_os_error(libc::ECANCELED)),
         }
     }
 

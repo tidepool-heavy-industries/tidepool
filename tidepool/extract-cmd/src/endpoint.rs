@@ -414,8 +414,9 @@ pub enum CompilerTransactionRetirement {
     DaemonObserved(DaemonCompilerRetirement),
 }
 
-/// The old worker was reaped. Its warm namespace remains with the exact daemon
-/// slot at settlement; this is neither scratch deletion nor future liveness.
+/// The exact worker's retirement observation. When reaping is confirmed, its
+/// warm namespace remains with the issuing daemon slot at settlement; this is
+/// neither scratch deletion nor future liveness. A wait error is not confirmation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonCompilerRetirement {
     pub(crate) epoch: [u8; 32],
