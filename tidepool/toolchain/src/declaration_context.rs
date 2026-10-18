@@ -13969,6 +13969,87 @@ mod tests {
                     .artifacts()
                     .descriptors();
                 let retained = issued.owner.facts.template_imports.clone();
+                let issuer = issued.artifact_view().capture_graph_selection();
+                let entries = issued
+                    .artifact_view()
+                    .entries()
+                    .into_iter()
+                    .map(|entry| (entry.descriptor.id, entry))
+                    .collect::<BTreeMap<_, _>>();
+                let expected_namespace = issuer
+                    .namespace
+                    .iter()
+                    .copied()
+                    .filter(|binding| {
+                        entries[&binding.artifact].descriptor.owner == owners[root_index]
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(expected_namespace.len(), 2);
+                let expected_original = entries
+                    .values()
+                    .find(|entry| {
+                        entry.descriptor.owner == owners[root_index]
+                            && matches!(entry.payload, ArtifactPayload::Original(_))
+                    })
+                    .unwrap()
+                    .descriptor
+                    .id;
+                let mut expected_bindings = expected_namespace.clone();
+                let mut expected_edges = BTreeSet::new();
+                assert_eq!(issued.compiler_source_support().native_offers().len(), 2);
+                assert_eq!(
+                    issued
+                        .compiler_source_support()
+                        .native_offers()
+                        .iter()
+                        .map(|offer| offer.snapshot_facts().owner)
+                        .collect::<BTreeSet<_>>(),
+                    owners.iter().cloned().collect(),
+                );
+                // Empty input offers retain their own carrier/interface pair as
+                // custody, independently of publication's narrower namespace.
+                for offer in issued.compiler_source_support().native_offers() {
+                    let facts = offer.snapshot_facts();
+                    let graph = offer.custody_snapshot().graph_selection().unwrap();
+                    assert!(offer.proof().is_none());
+                    assert!(graph.native_groups.is_empty());
+                    assert_eq!(graph.bindings.len(), 2);
+                    assert!(graph.bindings.iter().all(|binding| {
+                        entries[&binding.artifact].descriptor.owner == facts.owner
+                    }));
+                    let edge = (
+                        ArtifactBindingNode::Artifact(
+                            *graph
+                                .bindings
+                                .iter()
+                                .find(|binding| binding.artifact == facts.original)
+                                .unwrap(),
+                        ),
+                        ArtifactBindingNode::Artifact(
+                            *graph
+                                .bindings
+                                .iter()
+                                .find(|binding| binding.artifact == facts.interface)
+                                .unwrap(),
+                        ),
+                        ArtifactDependency::Interface,
+                    );
+                    assert!(offer
+                        .custody_snapshot()
+                        .binding_dependencies()
+                        .unwrap()
+                        .contains(&edge));
+                    expected_edges.insert(edge);
+                    expected_bindings.extend(graph.bindings);
+                }
+                assert!(
+                    custody.iter().any(|entry| {
+                        !expected_bindings
+                            .iter()
+                            .any(|binding| binding.artifact == entry.id)
+                    }),
+                    "the issuer also owns unrelated payloads which publication must release"
+                );
                 let selection = issued
                     .issue_published_source_original("revision", "input", &owners[root_index])
                     .unwrap();
@@ -13982,14 +14063,35 @@ mod tests {
                         imports: vec![],
                     }]
                 );
-                assert!(selected
-                    .owner
-                    .facts
-                    .compiler_support
-                    .artifacts()
-                    .descriptors()
+                let selected_graph = selected.artifact_view().capture_graph_selection();
+                assert_eq!(
+                    selected_graph
+                        .namespace
+                        .into_iter()
+                        .collect::<BTreeSet<_>>(),
+                    expected_namespace,
+                );
+                assert_eq!(
+                    selected_graph.bindings.into_iter().collect::<BTreeSet<_>>(),
+                    expected_bindings,
+                    "only the selected root and exact checked offer carriers survive",
+                );
+                assert!(selected.artifact_view().selected_native_groups().is_empty());
+                assert_eq!(selected.compiler_input_roles().len(), 1);
+                let selected_rows = selected
+                    .compiler_source_support()
+                    .native_availability()
+                    .rows()
+                    .collect::<Vec<_>>();
+                assert_eq!(selected_rows.len(), 1);
+                assert_eq!(selected_rows[0].original.descriptor.id, expected_original);
+                assert_eq!(selected_rows[0].mode, NativeTransportMode::IssuedGroups);
+                assert!(!selected_rows[0].permits(0));
+                assert!(!selected_rows[0].permits(9001));
+                let selected_edges = selected.artifact_view().binding_dependencies();
+                assert!(expected_edges
                     .iter()
-                    .all(|entry| entry.owner == owners[root_index]));
+                    .all(|edge| selected_edges.contains(edge)));
                 assert_eq!(
                     selected
                         .selected_template_imports(&[template.clone()])
@@ -14037,9 +14139,19 @@ mod tests {
                 }
                 if template_mask & (1 << (1 - root_index)) != 0 {
                     let mut missing = issued.clone();
-                    missing = missing.rebuild(|facts| {
-                        facts.compiler_support = selected.compiler_source_support().clone()
-                    });
+                    let type_only_root = selected
+                        .compiler_source_support()
+                        .selected_interfaces()
+                        .unwrap()
+                        .support_for_owners(vec![owners[root_index].clone()])
+                        .unwrap();
+                    let excluded =
+                        retained.as_ref().unwrap().graph[&owners[1 - root_index]].canonical;
+                    assert!(!type_only_root
+                        .artifacts()
+                        .artifact_ids()
+                        .contains(&excluded));
+                    missing = missing.rebuild(|facts| facts.compiler_support = type_only_root);
                     {
                         let updated = selected.owner.facts.lexical.clone();
                         missing = missing.rebuild(|facts| facts.lexical = updated);
