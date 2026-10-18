@@ -2074,18 +2074,20 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         .iter()
         .find(|child| child.label == "producer")
         .unwrap();
-    campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
-    campaign.drive_native_admission(dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput")).await;
+    let consumer_reply = campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
+    assert_eq!(consumer_reply["status"], "replied", "{consumer_reply}");
+    let producer_reply = campaign.drive_native_admission(dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput")).await;
+    assert_eq!(producer_reply["status"], "replied", "{producer_reply}");
     let reviewer = {
         enum ReviewArrival {
             Child(Box<exomonad_actor::LocalResidentInstallation>),
-            Ready { message: String },
+            Ready { actor: exomonad_actor::ActorRef },
             RouteFailure { detail: String },
         }
         let owner = campaign.actor.identity();
         let mut reviewer = None;
         let mut forwarded = false;
-        let mut review_ready = false;
+        let mut review_ready = None;
         let mut failure_notified = false;
         loop {
             let arrival = campaign
@@ -2098,7 +2100,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                         }
                         LocalResidentDeployment::SessionReady { activation } => {
                             Ok(ReviewArrival::Ready {
-                                message: activation.message,
+                                actor: activation.id.actor(),
                             })
                         }
                         LocalResidentDeployment::WatchChanged { notification }
@@ -2120,14 +2122,21 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                     campaign.acknowledge_native_spawn(&child);
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model, Some(exomonad_actor::Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Sol)));
+                    if let Some(ready_actor) = review_ready {
+                        assert_eq!(ready_actor, child.actor.identity());
+                    }
                     bindings.push(open_test_workspace(campaign, &child));
                     reviewer = Some(child);
                 }
-                ReviewArrival::Ready { message } => {
-                    if message.contains("review-candidate") {
+                ReviewArrival::Ready { actor } => {
+                    if actor == consumer.actor.identity() {
+                        assert!(!forwarded, "consumer activated twice");
                         forwarded = true;
                     } else {
-                        review_ready = true;
+                        assert!(review_ready.replace(actor).is_none(), "reviewer activated twice");
+                        if let Some(child) = &reviewer {
+                            assert_eq!(actor, child.actor.identity());
+                        }
                     }
                 }
                 ReviewArrival::RouteFailure { detail } => {
@@ -2136,9 +2145,9 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                     failure_notified = true;
                 }
             }
-            if forwarded && review_ready && failure_notified {
-                if let Some(reviewer) = reviewer.take() {
-                    break reviewer;
+            if forwarded && failure_notified {
+                if reviewer.as_ref().is_some_and(|child| review_ready == Some(child.actor.identity())) {
+                    break reviewer.take().unwrap();
                 }
             }
         }

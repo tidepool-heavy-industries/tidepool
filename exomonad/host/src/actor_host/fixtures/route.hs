@@ -7,7 +7,7 @@ Right captured <- checkpoint currentModel "route workers"
 Right producerActor <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead)
   ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "producer" })
 Right consumerActor <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "consumer" })
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Watches, Console])) { spawnLabel = Just "consumer" })
 Right producer <- request @Text producerActor ("candidate" :: Text) defaultRequestOptions
 Right consumer <- request @Text consumerActor ("reviewer ready" :: Text) defaultRequestOptions
 forwarding <- route (settlement producer) (\settled -> case settled of { Right answer -> do { Right _ <- request @Text consumerActor answer defaultRequestOptions; pure () }; Left failure -> error (T.pack (show failure)) })
