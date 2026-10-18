@@ -1640,6 +1640,21 @@ fn read_owned_slice(slice: &crate::owned_input_arena::OwnedInputSlice) -> Vec<u8
     bytes
 }
 
+/// The ordinary candidate branch owns real mutable compiler-input files. It
+/// cannot inherit an acquired catalog's nonphysical receiving aliases.
+fn use_physical_candidate(fixture: &Fixture, bundle: &mut super::super::super::CandidateBundle) {
+    let directory = fixture._root.path().join("ordinary-inputs");
+    fs::create_dir_all(&directory).unwrap();
+    let interface = directory.join(format!("{}-{}.hi", bundle.owner.unit, bundle.owner.module));
+    let packages = interface.with_extension("hi.packages");
+    fs::write(&interface, &bundle.product.interface).unwrap();
+    fs::write(&packages, &bundle.package_imports_bytes).unwrap();
+    bundle.product =
+        super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+    bundle.iface_path = interface;
+    bundle.package_imports_path = packages;
+}
+
 /// Compiler-shaped receipts enter the same source and product admission as a
 /// completed ordinary request; catalog bytes still come through export/load.
 fn admit_borrowed_catalog(
@@ -1779,8 +1794,7 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
             .by_owner
             .get_mut(&("u".into(), "Library".into()))
             .unwrap();
-        bundle.product =
-            super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+        use_physical_candidate(&fixture, bundle);
         let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
         assert_eq!(accepted, &issued.recovery_products[0]);
         assert!(!Arc::ptr_eq(
@@ -1856,8 +1870,7 @@ fn cached_catalog_admission_reissues_a_changed_recipe_and_refuses_stale_source()
         .get_mut(&("u".into(), "Library".into()))
         .unwrap();
     bundle.original_execution = None;
-    bundle.product =
-        super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+    use_physical_candidate(&fixture, bundle);
     let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
     assert_eq!(rebound, &issued.recovery_products[0]);
 
@@ -2044,8 +2057,7 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
         .by_owner
         .get_mut(&("u".into(), "Library".into()))
         .unwrap();
-    bundle.product =
-        super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+    use_physical_candidate(&fixture, bundle);
     let issued = admit_borrowed_catalog_receipt(&fixture, &ordinary, &packages, |_| {}).unwrap();
     assert_eq!(admitted.recovery_products, issued.recovery_products);
     assert!(!Arc::ptr_eq(
@@ -2100,4 +2112,88 @@ fn cached_catalog_admission_refuses_conflicting_and_unoffered_receipts_before_re
             "selected candidate"
         ))
     ));
+}
+
+#[test]
+fn cached_catalog_metadata_uses_captured_owner_and_owned_physical_files() {
+    use crate::certified_products::{
+        CertificationError, EvidenceReadFailure, EvidenceReadOperation,
+    };
+    let fixture = Fixture::new();
+    let package = Arc::new(fixture.load().unwrap());
+    let mut selected = borrow_catalog(&package).unwrap();
+    let key = ("u".into(), "Library".into());
+    let bundle = &selected.by_owner[&key];
+    assert!(!bundle.iface_path.exists());
+    assert!(!bundle.package_imports_path.exists());
+    let first = admit_borrowed_catalog(&fixture, &selected).unwrap();
+    let bundle = selected.by_owner.get_mut(&key).unwrap();
+    bundle.iface_path = fixture._root.path().join("relocated/nonphysical.hi");
+    bundle.package_imports_path = fixture
+        ._root
+        .path()
+        .join("relocated/nonphysical.hi.packages");
+    let relocated = admit_borrowed_catalog(&fixture, &selected).unwrap();
+    assert_eq!(first.recovery_products, relocated.recovery_products);
+    assert!(Arc::ptr_eq(
+        first.recovery_products[0].facts().unwrap(),
+        relocated.recovery_products[0].facts().unwrap()
+    ));
+
+    let mut ordinary = borrow_catalog(&package).unwrap();
+    use_physical_candidate(&fixture, ordinary.by_owner.get_mut(&key).unwrap());
+    let physical = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
+    assert_eq!(first.recovery_products, physical.recovery_products);
+    let bundle = &ordinary.by_owner[&key];
+    for path in [&bundle.iface_path, &bundle.package_imports_path] {
+        let bytes = fs::read(path).unwrap();
+        fs::write(path, b"changed ordinary metadata").unwrap();
+        let error = admit_borrowed_catalog(&fixture, &ordinary).err().unwrap();
+        assert!(matches!(
+            error.downcast_ref::<CertificationError>(),
+            Some(CertificationError::StaleEvidence)
+        ));
+        fs::write(path, &bytes).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len((32 << 20) + 1)
+            .unwrap();
+        let error = admit_borrowed_catalog(&fixture, &ordinary).err().unwrap();
+        assert!(
+            matches!(error.downcast_ref::<CertificationError>(), Some(CertificationError::EvidenceRead {
+            path: actual, failure: EvidenceReadFailure::SizeLimit { actual: size, limit }
+        }) if actual == path && *size == (32 << 20) + 1 && *limit == 32 << 20)
+        );
+        fs::write(path, &bytes).unwrap();
+        fs::remove_file(path).unwrap();
+        let error = admit_borrowed_catalog(&fixture, &ordinary).err().unwrap();
+        assert!(
+            matches!(error.downcast_ref::<CertificationError>(), Some(CertificationError::EvidenceRead {
+            path: actual, failure: EvidenceReadFailure::Io { operation: EvidenceReadOperation::Metadata, error }
+        }) if actual == path && error.kind() == std::io::ErrorKind::NotFound)
+        );
+        fs::write(path, &bytes).unwrap();
+    }
+    assert!(admit_borrowed_catalog(&fixture, &ordinary).is_ok());
+    let incomplete = Arc::new(
+        DecodedDeploymentRecord::decode(
+            package.records[0].record().clone(),
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap(),
+    );
+    ordinary.by_owner.get_mut(&key).unwrap().product.bytes =
+        super::super::super::CandidateProductBytes::Deployment(incomplete);
+    let error = admit_borrowed_catalog(&fixture, &ordinary).err().unwrap();
+    assert!(
+        matches!(
+            error.downcast_ref::<CertificationError>(),
+            Some(CertificationError::Mismatch(
+                "candidate metadata acquisition"
+            ))
+        ),
+        "an incomplete deployment cannot borrow the ordinary physical files"
+    );
 }

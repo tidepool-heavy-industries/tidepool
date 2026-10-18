@@ -352,6 +352,13 @@ impl CandidateProductBytes {
     }
 }
 
+/// Metadata storage follows the product's actual acquisition owner. Logical
+/// receiving aliases of captured originals do not promise physical files.
+pub(crate) enum CandidateMetadataInput<'a> {
+    Physical,
+    Captured(&'a crate::recovery_artifacts::CertifiedRecoveryProduct),
+}
+
 impl CandidateProduct {
     #[cfg(test)]
     fn decode_product(
@@ -394,6 +401,20 @@ impl CandidateProduct {
     pub(crate) fn bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
+    pub(crate) fn metadata_input(&self) -> Option<CandidateMetadataInput<'_>> {
+        match &self.bytes {
+            CandidateProductBytes::Owned(_) => Some(CandidateMetadataInput::Physical),
+            CandidateProductBytes::Deployment(record) => {
+                // Acquisition installs custody before issuing the original. An
+                // incomplete deployment never becomes a physical-file fallback.
+                record.artifacts()?;
+                Some(CandidateMetadataInput::Captured(
+                    record.certified_original()?,
+                ))
+            }
+        }
+    }
+
     /// Borrow immutable native facts from the same acquired record as the bytes.
     pub(crate) fn deployment_original(
         &self,
