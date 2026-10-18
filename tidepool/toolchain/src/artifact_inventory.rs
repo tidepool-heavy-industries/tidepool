@@ -1017,7 +1017,7 @@ impl ArtifactRootIntent<'_> {
             Self::PrivateAvailability { .. } | Self::Offered(..) => Vec::new(),
             Self::Certified(selection) => {
                 let mut requirements = Vec::new();
-                for proof in selection.native_original_requirements() {
+                for proof in selection.new_product_native_requirements() {
                     if !requirements.contains(proof) {
                         requirements.push(proof.clone());
                     }
@@ -1718,7 +1718,7 @@ impl ArtifactEntry {
             }
     }
 
-    fn merge_catalog_input_custody(
+    pub(crate) fn merge_catalog_input_custody(
         previous: &Arc<Self>,
         entry: &Arc<Self>,
     ) -> Result<Arc<Self>, CompileError> {
@@ -2598,6 +2598,37 @@ enum BoundNativeGroup {
 }
 
 impl BoundArtifactSelection {
+    #[cfg(test)]
+    pub(crate) fn observed_binding_state(
+        &self,
+    ) -> (
+        ArtifactGraphSelection,
+        BTreeSet<ArtifactId>,
+        BTreeMap<NativeGroupKey, NativeGroupBinding>,
+    ) {
+        (
+            self.view.capture_graph_selection(),
+            self.entries.keys().copied().collect(),
+            self.groups
+                .iter()
+                .map(|(key, BoundNativeGroup::Issued(group))| (*key, *group))
+                .collect(),
+        )
+    }
+
+    fn demanded_entry<'a>(
+        &'a self,
+        incoming: &'a BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        id: ArtifactId,
+    ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        incoming
+            .get(&id)
+            .or_else(|| self.entries.get(&id))
+            .ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
+            })
+    }
+
     #[track_caller]
     fn resolve_binding(
         &self,
@@ -2611,6 +2642,7 @@ impl BoundArtifactSelection {
     fn target_groups(
         &self,
         imports: &[crate::certified_products::PendingImportOwner],
+        incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     ) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
         let mut groups = BTreeSet::new();
         for import in imports {
@@ -2626,8 +2658,16 @@ impl BoundArtifactSelection {
                 .owners
                 .native
                 .get(&NativeOwnerKey::from_owner(owner))
-                .ok_or_else(|| failure("certified target native membership"))?;
-            let entry = &self.entries[id];
+                .copied();
+            let entry = match id {
+                Some(id) => Arc::clone(&self.entries[&id]),
+                None => self
+                    .native_source
+                    .target_original(owner)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                    .ok_or_else(|| failure("certified target native membership"))?,
+            };
+            let id = entry.descriptor.id;
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(failure("certified target native membership"));
             };
@@ -2640,8 +2680,19 @@ impl BoundArtifactSelection {
             {
                 return Err(failure("certified target native membership"));
             }
+            if !self
+                .owners
+                .native
+                .contains_key(&NativeOwnerKey::from_owner(owner))
+            {
+                let retained = match incoming.get(&id).or_else(|| self.entries.get(&id)) {
+                    Some(previous) => ArtifactEntry::merge_catalog_input_custody(previous, &entry)?,
+                    None => entry,
+                };
+                incoming.insert(id, retained);
+            }
             groups.insert(NativeGroupKey {
-                artifact: *id,
+                artifact: id,
                 original_ordinal: *original_ordinal,
             });
         }
@@ -2866,6 +2917,7 @@ impl ArtifactInventory {
             }
             allowed_values.insert(entry.descriptor.id);
         }
+        let mut incoming = BTreeMap::new();
         let demanded = match demand {
             NativeArtifactDemand::ScopeInterfaces => BTreeSet::new(),
             NativeArtifactDemand::AllGroups => fixed
@@ -2882,12 +2934,12 @@ impl ArtifactInventory {
                 })
                 .collect(),
             NativeArtifactDemand::VerifiedTarget { entry, imports } => {
-                let mut groups = fixed.target_groups(imports)?;
+                let mut groups = fixed.target_groups(imports, &mut incoming)?;
                 groups.insert(entry.native_group_key());
                 groups
             }
             NativeArtifactDemand::CertifiedTargetImports(imports) => {
-                fixed.target_groups(imports)?
+                fixed.target_groups(imports, &mut incoming)?
             }
         };
         let namespace_ids = selection
@@ -2901,6 +2953,38 @@ impl ArtifactInventory {
         let mut materialization_parents = fixed.materializations.clone();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
+        let unbound = demanded
+            .iter()
+            .filter(|key| !fixed.groups.contains_key(key))
+            .copied()
+            .collect();
+        let acquisition = native_availability::bind_certified_input_demand(
+            &mut state,
+            &fixed.view,
+            &fixed.entries,
+            incoming,
+            &unbound,
+            &fixed.native_source,
+        )?;
+        let native_availability::CertifiedNativeDemandAcquisition {
+            entries: incoming,
+            bindings: bound_inputs,
+            offers: demanded_offers,
+        } = acquisition;
+        for (key, group) in &bound_inputs {
+            if fixed
+                .groups
+                .get(key)
+                .is_some_and(|previous| *previous != BoundNativeGroup::Issued(*group))
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupSelectionConflict {
+                        artifact: key.artifact,
+                        original_ordinal: key.original_ordinal,
+                    },
+                ));
+            }
+        }
         let cursor_projection = cursor.read_projection(&state);
         let cursor_nodes = &cursor_projection.nodes;
         let mut planned =
@@ -2912,25 +2996,29 @@ impl ArtifactInventory {
             if resolved_groups.contains_key(&group) || planned.contains_key(&group) {
                 continue;
             }
-            if let Some(entry) = fixed.entries.get(&group.artifact) {
-                if let ArtifactPayload::Original(product) = &entry.payload {
-                    if !selection.permits_native_group(
-                        group.artifact,
-                        product.owner(),
-                        group.original_ordinal,
-                    ) {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::NativeGroupUnavailable {
-                                artifact: group.artifact,
-                                original_ordinal: group.original_ordinal,
-                            },
-                        ));
-                    }
-                }
+            let entry = fixed.demanded_entry(&incoming, group.artifact)?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("native demand lacks checked original payload"));
+            };
+            if !selection.permits_native_group(
+                group.artifact,
+                product.owner(),
+                group.original_ordinal,
+            ) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: group.artifact,
+                        original_ordinal: group.original_ordinal,
+                    },
+                ));
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let resolution = match fixed.groups.get(&group) {
+            let pending_binding = bound_inputs
+                .get(&group)
+                .copied()
+                .map(BoundNativeGroup::Issued);
+            let resolution = match fixed.groups.get(&group).or(pending_binding.as_ref()) {
                 Some(BoundNativeGroup::Issued(binding)) => {
                     crate::certified_products::NativeGroupCandidates::IssuedAvailability(
                         BTreeSet::from([*binding]),
@@ -2940,9 +3028,11 @@ impl ArtifactInventory {
                     .native_source
                     .native_group_candidates(
                         group,
-                        match &fixed.entries[&group.artifact].payload {
+                        match &fixed.demanded_entry(&incoming, group.artifact)?.payload {
                             ArtifactPayload::Original(product) => product.owner(),
-                            _ => unreachable!("native demand has checked original payload"),
+                            _ => {
+                                return Err(failure("native demand lacks checked original payload"))
+                            }
                         },
                     )
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
@@ -3028,11 +3118,14 @@ impl ArtifactInventory {
                     },
                 ));
             }
-            let entry = fixed.entries.get(&group.artifact).ok_or_else(|| {
-                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
-                    artifact: group.artifact,
-                })
-            })?;
+            let entry = incoming
+                .get(&group.artifact)
+                .or_else(|| fixed.entries.get(&group.artifact))
+                .ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: group.artifact,
+                    })
+                })?;
             if !entry
                 .native_group_ordinals
                 .contains(&group.original_ordinal)
@@ -3197,7 +3290,11 @@ impl ArtifactInventory {
                 continue;
             }
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            if fixed.entries[&node.artifact()].descriptor.kind == ArtifactKind::ValueInterface
+            if fixed
+                .demanded_entry(&incoming, node.artifact())?
+                .descriptor
+                .kind
+                == ArtifactKind::ValueInterface
                 && !allowed_values.contains(&node.artifact())
                 && !cursor.contains_namespace_artifact(node.artifact())
             {
@@ -3221,8 +3318,8 @@ impl ArtifactInventory {
             .collect::<Vec<_>>();
         let mut issuing_payloads = BTreeMap::new();
         for id in artifact_ids(&reachable_new) {
-            let incoming = &fixed.entries[&id];
-            issuing_payloads.insert(id, Arc::clone(incoming));
+            let entry = fixed.demanded_entry(&incoming, id)?;
+            issuing_payloads.insert(id, Arc::clone(entry));
         }
         let issued_count = bound
             .keys()
@@ -3278,23 +3375,6 @@ impl ArtifactInventory {
             &[],
             &hidden_parents,
         );
-        let hidden_projection = if issued_groups.is_empty() {
-            None
-        } else {
-            let previous = fixed.view.read_projection(&state);
-            let mut nodes = previous.nodes.clone();
-            // The committed group rows resolve every artifact and existing group
-            // through fixed custody; their new group edges form the only delta.
-            nodes.extend(bound.keys().copied());
-            Some(ViewReadProjection {
-                nodes,
-                entries: previous.entries.clone(),
-
-                dependencies: OnceLock::new(),
-                native_selection: OnceLock::new(),
-                metadata: OnceLock::new(),
-            })
-        };
         let totals = (
             state.canonical_hits.load(Ordering::Relaxed),
             state.canonical_comparisons.load(Ordering::Relaxed),
@@ -3304,6 +3384,12 @@ impl ArtifactInventory {
             state.entry_handle_copies.load(Ordering::Relaxed),
         );
         drop(state);
+        let mut demanded_materializations = Vec::new();
+        for offer in demanded_offers {
+            offer
+                .custody_lease()
+                .collect_materializations(&mut demanded_materializations, &mut BTreeSet::new())?;
+        }
         if !issued_groups.is_empty() {
             fixed.view = ArtifactView::new(ViewDraft {
                 roots: hidden_roots,
@@ -3312,17 +3398,13 @@ impl ArtifactInventory {
                 inventory: self.clone(),
 
                 parents: hidden_parents,
-                issuing_payloads: BTreeMap::new(),
+                issuing_payloads: incoming.clone(),
                 materialization_parents: vec![],
                 materialization: Mutex::new(BTreeMap::new()),
             });
             fixed
                 .view
-                .reads
-                .read_projection
-                .set(hidden_projection.expect("issued availability projection"))
-                .ok()
-                .expect("fresh availability projection");
+                .attach_projected_materializations(&demanded_materializations);
             for group in &issued_groups {
                 let key = NativeGroupKey {
                     artifact: group.binding.artifact(),
@@ -3332,8 +3414,14 @@ impl ArtifactInventory {
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
-        let inherited_materializations = materialization_parents.clone();
-        let view = ArtifactView::new(ViewDraft {
+        fixed.entries.extend(incoming);
+        fixed.groups.extend(
+            bound_inputs
+                .into_iter()
+                .map(|(key, group)| (key, BoundNativeGroup::Issued(group))),
+        );
+        let mut inherited_materializations = materialization_parents.clone();
+        let mut view = ArtifactView::new(ViewDraft {
             roots: roots,
             selection: snapshot,
 
@@ -3349,6 +3437,9 @@ impl ArtifactInventory {
             .set(projection)
             .ok()
             .expect("fresh bound projection");
+        if let Some(custody) = view.attach_projected_materializations(&demanded_materializations) {
+            inherited_materializations.push(custody);
+        }
         let _ = view
             .reads
             .inherited_materializations
@@ -3808,6 +3899,24 @@ impl ArtifactInventory {
             )?;
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        let mut demanded_offers = Vec::new();
+        if let ArtifactRootIntent::Certified(selection) = root_intent {
+            let native_availability::CertifiedNativeDemandAcquisition {
+                entries: incoming,
+                bindings,
+                offers,
+            } = native_availability::bind_certified_input_demand(
+                &mut state,
+                parent,
+                &selected,
+                BTreeMap::new(),
+                &groups,
+                selection,
+            )?;
+            selected.extend(incoming);
+            prebound.extend(bindings);
+            demanded_offers = offers;
+        }
         if let Some((roles, catalog)) = root_intent.input_constraints() {
             for (owner, role) in roles.snapshot_roles() {
                 let InputNativeDecision::IssuedChoices(choices) = catalog.decision(owner) else {
@@ -4253,6 +4362,12 @@ impl ArtifactInventory {
         let snapshot =
             selection_snapshot_for_lease(&state, &namespace, &roots, &custody_roots, &parents);
         drop(state);
+        let mut demanded_materializations = Vec::new();
+        for offer in demanded_offers {
+            offer
+                .custody_lease()
+                .collect_materializations(&mut demanded_materializations, &mut BTreeSet::new())?;
+        }
         let introduced = bound
             .keys()
             .filter_map(|node| match node {
@@ -4260,7 +4375,7 @@ impl ArtifactInventory {
                 ArtifactBindingNode::Group(_) => None,
             })
             .collect();
-        let lease = ViewLease::from_issued_draft(
+        let mut lease = ViewLease::from_issued_draft(
             ViewDraft {
                 roots,
                 selection: snapshot,
@@ -4274,6 +4389,11 @@ impl ArtifactInventory {
             },
             introduced,
         );
+        if !demanded_materializations.is_empty() {
+            let mut observation = ArtifactView::from_custody(lease);
+            observation.attach_projected_materializations(&demanded_materializations);
+            lease = observation.lease;
+        }
         Ok(IssuedArtifactCustody {
             lease,
             entries: selected,
@@ -6409,6 +6529,30 @@ impl ArtifactView {
         let mut retained = self.retain_projected_materializations(retained)?;
         retained.replace_namespace(&namespace);
         Ok(retained)
+    }
+
+    /// Transfer physical file owners only for this exact selected closure.
+    fn attach_projected_materializations(
+        &mut self,
+        owners: &[Arc<crate::declaration_context::RetainedArtifactMaterialization>],
+    ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+        if owners.is_empty() {
+            return None;
+        }
+        let custody = crate::declaration_context::RetainedArtifactMaterialization::select_custody(
+            owners,
+            &self.metadata_snapshot(),
+        )?;
+        let lease = Arc::get_mut(&mut self.lease).expect("new demanded selection lease");
+        let mut fixed = lease
+            .materialization
+            .fixed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        fixed.push(Arc::clone(&custody));
+        lease.materialization.fixed = fixed.into();
+        Some(custody)
     }
 
     fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {

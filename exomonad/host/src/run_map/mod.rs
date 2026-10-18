@@ -596,12 +596,18 @@ mod tests {
         fs::create_dir_all(trace_path.parent().unwrap()).unwrap();
         fs::write(
             run.join("status.json"),
-            serde_json::json!({
-                "version": 4, "run_id": "wave", "workspace": workspace,
-                "session": "session", "agent": {"model":"test", "effort":"low"},
-                "phase": {"state":"ready", "root_actor":{"id":1,"incarnation":1}, "root_thread":"thread-1"}
-            }).to_string(),
-        ).unwrap();
+            serde_json::to_vec(&crate::exomonad::run_status_fixture(
+                "wave",
+                &workspace,
+                "session",
+                crate::exomonad::RunPhase::Ready {
+                    root_actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1)),
+                    root_thread: "thread-1".into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         let base = 1_790_157_608_000_u64;
         let records = [
             serde_json::json!({"timestamp":"2026-09-23T10:00:08.500Z","target":"tidepool::host_dynamic_tools","fields":{"message":"close","actor":"1@1","execution":"exec-a","time.busy":"9s","time.idle":"1s"},"span":{"name":"tool_call","call_id":"call-a"}}),

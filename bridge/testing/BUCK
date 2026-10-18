@@ -72,6 +72,7 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge-effects:tidepool_bridge_effects",
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/effect:tidepool_effect",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
         "//tidepool/repr:tidepool_repr",
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",

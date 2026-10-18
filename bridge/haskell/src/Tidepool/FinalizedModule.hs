@@ -1,8 +1,8 @@
 -- | Immutable output shared by interface certification and executable preparation.
-module Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners) where
+module Tidepool.FinalizedModule
+  ( FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
+  , captureFinalizedInterface, homeInterfaceUsageOwners ) where
 
-import GHC.Unit.Home.ModInfo (HomeModInfo)
-import GHC.Unit.Module.ModGuts (CgGuts)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_usages)
 import GHC.Unit.Module (moduleUnit, moduleName, moduleNameString)
 import GHC.Unit.Module.Deps (Usage(..))
@@ -10,13 +10,9 @@ import GHC.Unit.Types (unitIdString, unitString, toUnitId)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import Data.Set qualified as Set
 
--- | The interface and Core have one finalization owner. Retaining this pair
--- permits later preparation from the exact result that supplied its interface,
--- without replaying source or retaining a mutable compiler session.
-data FinalizedModule = FinalizedModule
-  { finalizedHomeModInfo :: HomeModInfo
-  , finalizedTidyGuts :: CgGuts
-  }
+import Tidepool.FinalizedModule.Internal
+  ( FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
+  , captureFinalizedInterface )
 
 -- GHC records indirect home type uses independently of authored imports.
 -- These edges retain interfaces and grant no native execution authority.

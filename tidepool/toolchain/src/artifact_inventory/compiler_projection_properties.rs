@@ -1310,13 +1310,50 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         &projection, &available.metadata_snapshot(),
                         &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                     ).unwrap();
+                    let whole = catalog.closure(
+                        ORDINALS
+                            .into_iter()
+                            .map(|ordinal| (module, version, ordinal)),
+                    );
+                    let external = whole
+                        .iter()
+                        .filter(|group| group.0 != module || group.1 != version)
+                        .copied()
+                        .collect::<BTreeSet<_>>();
+                    let expected_groups = whole
+                        .iter()
+                        .map(|group| catalog.key(*group))
+                        .collect::<BTreeSet<_>>();
+                    let assert_original =
+                        |original: &crate::certified_products::SelectedOriginalClosure| {
+                            assert_eq!(original.products().len(), 1);
+                            let ArtifactPayload::Original(expected) =
+                                &catalog.original(module, version).payload
+                            else {
+                                unreachable!()
+                            };
+                            assert_eq!(original.products()[0].owner(), expected.owner(),
+                                "whole-original consumers preserve issued roles rather than custody variants");
+                            assert_eq!(
+                                original.native_closure().selected_native_groups(),
+                                expected_groups,
+                                "whole-original demand must preserve exact dependency variants and omit unrelated roots"
+                            );
+                        };
+                    // Whole demand includes group 3's exact helper SCC and
+                    // group 11's captured value; group 29 has no source edge.
+                    // A previous demand can already have earned those choices.
+                    let already_earned = published[domain] && external.is_subset(&selected[domain]);
+                    let early = selection.selected_original_closure(available);
+                    if already_earned {
+                        assert_original(&early.unwrap());
+                    } else {
+                        assert!(early.is_err(),
+                            "whole-original demand requires its exact earned helpers and captured values");
+                    }
                     if published[domain] {
-                        assert!(selection.selected_original_closure(available).is_err(),
-                            "available captured values do not issue hidden native dependency bindings");
-                        // Publishing the captured value does not choose the
-                        // original's historical implementation dependencies.
-                        // Carry the exact closure earned by its admission into
-                        // the narrowed compiler selection before consuming it.
+                        // Also consume an explicit whole-original admission,
+                        // independent of any earlier target's partial demand.
                         let custody = available
                             .inventory()
                             .admit_shared(
@@ -1351,19 +1388,8 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             )
                             .unwrap();
                         let original = selection.selected_original_closure(&custody).unwrap();
-                        assert_eq!(original.products().len(), 1);
-                        let ArtifactPayload::Original(expected) =
-                            &catalog.original(module, version).payload
-                        else {
-                            unreachable!()
-                        };
-                        assert_eq!(original.products()[0].owner(), expected.owner(),
-                            "whole-original consumers preserve issued roles rather than custody variants");
+                        assert_original(&original);
                     } else {
-                        assert!(
-                            selection.selected_original_closure(available).is_err(),
-                            "whole-original consumers require unavailable captured groups"
-                        );
                         outcome = Outcome::Refusal;
                     }
                 } else {
@@ -1546,6 +1572,12 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
                     ordinal: 3,
                     whole: false,
                 },
+                // Earned helpers alone cannot supply group 11's captured value.
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                },
                 Op::Demand {
                     domain: 3,
                     module: 0,
@@ -1573,6 +1605,47 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
                 Op::RecoverDemand {
                     domain: 3,
                     mutation: 2,
+                },
+                Op::ReleaseSegment { domain: 3 },
+                // Capture without demand, and then independent group 29, must
+                // not select the hidden helper SCC for a complete original.
+                Op::IssueSegment { domain: 3 },
+                Op::PublishPrefix { domain: 3 },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                },
+                Op::Demand {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                    ordinal: 29,
+                    whole: false,
+                },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                },
+                // An opposite-version helper choice cannot satisfy version 0.
+                // The same earned choice does satisfy its own version 1.
+                Op::Demand {
+                    domain: 3,
+                    module: 0,
+                    version: 1,
+                    ordinal: 3,
+                    whole: false,
+                },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 1,
                 },
                 Op::ReleaseSegment { domain: 3 },
             ];

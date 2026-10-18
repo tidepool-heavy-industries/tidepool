@@ -1062,6 +1062,15 @@ impl NativeTransportAvailability {
         product.owner()
     }
 
+    /// Borrow the checked physical row for one demanded exact owner. This
+    /// supplies payload identity only; target permission remains a per-key query.
+    pub(crate) fn target_original(
+        &self,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Option<&Arc<ArtifactEntry>> {
+        (self.original_owner() == owner).then_some(&self.original)
+    }
+
     /// Resolve one dependency through this physical request's issued row.
     /// A retained parent proof cannot grant another row's or ordinal's rights.
     pub(crate) fn dependency_support(
@@ -1109,7 +1118,22 @@ pub(crate) struct NativeDependencySupport<'a> {
     key: NativeGroupKey,
 }
 
-impl NativeDependencySupport<'_> {
+impl<'a> NativeDependencySupport<'a> {
+    pub(crate) fn offer_for_group(
+        &self,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&'a crate::artifact_inventory::IssuedNativeOffer> {
+        self.availability
+            .contributions
+            .iter()
+            .find_map(|contribution| {
+                contribution
+                    .groups(self.key)
+                    .any(|candidate| candidate == group)
+                    .then(|| contribution.offer())
+            })
+    }
+
     pub(crate) fn groups(
         &self,
     ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
@@ -18763,15 +18787,25 @@ mod tests {
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let output = root.join("consumer-output");
         std::fs::create_dir(&output).unwrap();
+        let inspection_module = |imports: bool| {
+            let target = "result";
+            let import = if imports {
+                "import PrefixSelectedSupport\n"
+            } else {
+                ""
+            };
+            let expression = if imports { "selected" } else { "(0 :: Int)" };
+            (format!("module Consumer where\n{import}{target} :: Int\n{target} = {expression}\n__tidepool_inspect_0 = {target}\n"), target)
+        };
         let source_path = output.join("Consumer.hs");
-        std::fs::write(&source_path,
-            "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n__tidepool_inspect_0 = result\n").unwrap();
+        let (inspection_source, inspection_target) = inspection_module(true);
+        std::fs::write(&source_path, inspection_source).unwrap();
         let inspection_output = output.join("inspection.cbor");
         let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
         command
             .input(&source_path)
             .includes(&includes)
-            .inspect_type("result")
+            .inspect_type(inspection_target)
             .inspect_out(&inspection_output)
             .inspection_strict()
             .output_dir(&output);
@@ -18825,6 +18859,108 @@ mod tests {
                 std::fs::write(path, b"changed after owned capture").unwrap();
             }
         }
+        let trace = PathBuf::from(
+            std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE")
+                .expect("owned resident runner must retain its compiler trace"),
+        );
+        let trace_rows = || {
+            let bytes = std::fs::read(&trace).expect("read owned compiler trace");
+            // The append writer may have only published part of its last row.
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map(|end| {
+                    std::str::from_utf8(&bytes[..end])
+                        .expect("invalid complete compiler trace text")
+                        .lines()
+                        .map(|line| {
+                            serde_json::from_str::<serde_json::Value>(line)
+                                .expect("malformed complete compiler trace row")
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let observations = |cursor: usize, ordinal: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let events = trace_rows();
+                assert!(events.len() >= cursor, "owned compiler trace was truncated");
+                let completed = events[cursor..]
+                    .iter()
+                    .filter(|event| {
+                        event["fields"]["phase"] == "compiler_service"
+                            && event["span"]["request_mode"] == "inspection"
+                            && event["span"]["transaction"] == true
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    completed.len() <= 1,
+                    "ambiguous completed physical inspection request"
+                );
+                if let Some(completed) = completed.first() {
+                    assert_eq!(completed["fields"]["exit_code"].as_i64(), Some(0));
+                    let span = &completed["span"];
+                    let epoch = span["daemon_epoch"]
+                        .as_str()
+                        .expect("physical daemon epoch");
+                    let admission = span["admission_id"].as_u64().expect("physical admission");
+                    let worker = span["worker_pid"].as_u64().expect("physical worker");
+                    let physical = span["physical_execution"]
+                        .as_str()
+                        .expect("physical request");
+                    assert!(!epoch.is_empty() && admission > 0 && worker > 0);
+                    assert_eq!(span["request_ordinal"].as_u64(), Some(ordinal));
+                    let rows = events[cursor..]
+                        .iter()
+                        .filter_map(|event| {
+                            if event["span"]["physical_execution"].as_str() != Some(physical) {
+                                return None;
+                            }
+                            let raw = event["fields"]["line"]
+                                .as_str()?
+                                .strip_prefix("tidepool-validation ")?;
+                            let row: serde_json::Value =
+                                serde_json::from_str(raw).expect("malformed validation summary");
+                            if row["owner"] != "original_inputs"
+                                || row["reason"] != "scope_acquisition"
+                            {
+                                return None;
+                            }
+                            assert_eq!(event["span"]["daemon_epoch"].as_str(), Some(epoch));
+                            assert_eq!(event["span"]["admission_id"].as_u64(), Some(admission));
+                            assert_eq!(event["span"]["request_ordinal"].as_u64(), Some(ordinal));
+                            assert_eq!(event["span"]["worker_pid"].as_u64(), Some(worker));
+                            assert_eq!(row["worker_pid"].as_u64(), Some(worker));
+                            Some(row)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(rows.len() <= 1, "ambiguous scope acquisition summary");
+                    if !rows.is_empty() {
+                        for row in &rows {
+                            assert_eq!(
+                                row["outcome"], "success",
+                                "scope acquisition did not complete"
+                            );
+                            for kind in ["certificate", "packages", "census", "graph"] {
+                                for suffix in ["hits", "misses"] {
+                                    row["counts"][format!("original_inputs.{kind}.{suffix}")]
+                                        .as_u64()
+                                        .expect("required measured counter is absent");
+                                }
+                            }
+                        }
+                        return (rows, (epoch.to_owned(), admission, worker));
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "completed physical request or its scope acquisition summary was not observed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let first_cursor = trace_rows().len();
         let history = tidepool_extract_cmd::with_compiler_transaction(
             |_| {},
             || {
@@ -18855,39 +18991,8 @@ mod tests {
                     compiler_identity.producer_bytes(),
                     "owned input reuse requires the declared resident compiler"
                 );
-                let observations = |stderr: &[u8]| {
-                    let rows = String::from_utf8_lossy(stderr)
-                        .lines()
-                        .filter_map(|line| {
-                            let raw = line.strip_prefix("tidepool-validation ")?;
-                            let row: serde_json::Value = serde_json::from_str(raw).unwrap();
-                            (row["owner"] == "original_inputs"
-                                && row["reason"] == "scope_acquisition")
-                                .then_some(row)
-                        })
-                        .collect::<Vec<_>>();
-                    assert!(
-                        !rows.is_empty(),
-                        "actual scope acquisition summary was not observed"
-                    );
-                    for row in &rows {
-                        assert_eq!(
-                            row["outcome"], "success",
-                            "scope acquisition did not complete"
-                        );
-                        assert!(row["worker_pid"].as_u64().unwrap() > 0);
-                        for kind in ["certificate", "packages", "census", "graph"] {
-                            for suffix in ["hits", "misses"] {
-                                row["counts"][format!("original_inputs.{kind}.{suffix}")]
-                                    .as_u64()
-                                    .expect("required measured counter is absent");
-                            }
-                        }
-                    }
-                    rows
-                };
-                let first_observations = observations(&run.output.stderr);
-                let worker_pid = first_observations[0]["worker_pid"].as_u64().unwrap();
+                let (first_observations, physical_owner) = observations(first_cursor, 1);
+                let worker_pid = physical_owner.2;
                 let count = |rows: &[serde_json::Value], wanted: &str| -> u64 {
                     rows.iter()
                         .map(|row| {
@@ -18910,22 +19015,15 @@ mod tests {
                 assert!(count(&first_observations, "original_inputs.graph.misses") > 0);
                 // The compiler universe owns its retained input reader across A/B/A.
                 // Each request and its backing files remain live until actual close.
-                for (label, context, imports) in [
-                    ("empty", Arc::new(empty.clone()), false),
-                    ("again", persisted.clone(), true),
+                for (label, context, imports, ordinal) in [
+                    ("empty", Arc::new(empty.clone()), false, 2),
+                    ("again", persisted.clone(), true, 3),
                 ] {
                     let next_output = root.join(format!("consumer-{label}"));
                     std::fs::create_dir(&next_output).unwrap();
                     let next_source = next_output.join("Consumer.hs");
-                    std::fs::write(
-                &next_source,
-                if imports {
-                    "module Consumer where\nimport PrefixSelectedSupport\nresult = selected\n"
-                } else {
-                    "module Consumer where\nresult = (0 :: Int)\n"
-                },
-            )
-            .unwrap();
+                    let (inspection_source, inspection_target) = inspection_module(imports);
+                    std::fs::write(&next_source, inspection_source).unwrap();
                     let (next_endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
                     let next_offer = crate::artifacts::ModuleCandidateOffer::select_inspection(
                         compiler_identity.producer_bytes(),
@@ -18940,11 +19038,12 @@ mod tests {
                     command
                         .input(&next_source)
                         .includes(&includes)
-                        .inspect_type("result")
+                        .inspect_type(inspection_target)
                         .inspect_out(next_output.join("inspection.cbor"))
                         .inspection_strict()
                         .output_dir(&next_output);
                     let applied = next_offer.apply_to(command, &next_output).unwrap();
+                    let next_cursor = trace_rows().len();
                     let next_run = crate::CompileError::compiler_invocation_result(
                         next_endpoint.execute_with_input_files(
                             applied.command(),
@@ -18953,15 +19052,25 @@ mod tests {
                         ),
                     )
                     .unwrap();
-                    let next_observations = observations(&next_run.output.stderr);
-                    for row in &next_observations {
-                        assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
-                    }
+                    std::fs::write(
+                        root.join(format!("consumer-{label}.stdout")),
+                        &next_run.output.stdout,
+                    )
+                    .unwrap();
                     std::fs::write(
                         root.join(format!("consumer-{label}.stderr")),
                         &next_run.output.stderr,
                     )
                     .unwrap();
+                    let (next_observations, next_physical_owner) =
+                        observations(next_cursor, ordinal);
+                    assert_eq!(
+                        next_physical_owner, physical_owner,
+                        "history changed physical transaction or worker"
+                    );
+                    for row in &next_observations {
+                        assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
+                    }
                     crate::diag::decode_extract_result(
                         next_run.success(),
                         &next_run.output.stdout,

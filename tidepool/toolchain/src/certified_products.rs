@@ -2599,6 +2599,13 @@ pub(crate) enum NativeGroupCandidates {
     NewProduct(BTreeSet<crate::artifact_inventory::NativeGroupBinding>),
 }
 
+/// Distinct authority owners for an exact historical body. Unfinished product
+/// constraints still require their original receiving-view validation.
+pub(crate) enum CertifiedNativeGroupSupport<'a> {
+    Issued(&'a crate::artifact_inventory::IssuedNativeOffer),
+    NewProductDependency(&'a crate::artifact_inventory::NativeOriginalRequirement),
+}
+
 impl NativeGroupCandidates {
     pub(crate) fn bindings(&self) -> &BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
         match self {
@@ -2789,6 +2796,70 @@ impl CertifiedSourceSelection {
         self.native_selections()
             .flat_map(|native| native.availability.requirements())
             .chain(self.private_native.requirements())
+    }
+
+    /// Only unfinished products carry raw dependency constraints. Issued
+    /// availability is consumed through its exact owner at actual body demand.
+    pub(crate) fn new_product_native_requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.native_selections()
+            .flat_map(|native| match &native.availability {
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies.as_slice(),
+                ReceiptNativeAvailability::Issued(_) => &[],
+            })
+    }
+
+    pub(crate) fn target_original(
+        &self,
+        owner: &CachedHomeOwner,
+    ) -> CertResult<Option<Arc<crate::artifact_inventory::ArtifactEntry>>> {
+        let mut original: Option<Arc<crate::artifact_inventory::ArtifactEntry>> = None;
+        for row in self.issued_native_availability() {
+            let Some(entry) = row.target_original(owner) else {
+                continue;
+            };
+            if original
+                .as_ref()
+                .is_some_and(|previous| previous.descriptor.id != entry.descriptor.id)
+            {
+                return Err(CertificationError::Mismatch(
+                    "competing target original issuers",
+                ));
+            }
+            original = Some(match original {
+                Some(previous) => {
+                    crate::artifact_inventory::ArtifactEntry::merge_catalog_input_custody(
+                        &previous, entry,
+                    )
+                    .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+                }
+                None => Arc::clone(entry),
+            });
+        }
+        Ok(original)
+    }
+
+    pub(crate) fn native_group_support(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        owner: &CachedHomeOwner,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<CertifiedNativeGroupSupport<'_>> {
+        self.issued_native_availability()
+            .find_map(|row| row.dependency_support(key, owner)?.offer_for_group(group))
+            .map(CertifiedNativeGroupSupport::Issued)
+            .or_else(|| {
+                self.new_product_native_requirements()
+                    .find(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .contains(&group)
+                    })
+                    .map(CertifiedNativeGroupSupport::NewProductDependency)
+            })
     }
 
     fn visible_modules(
@@ -8157,11 +8228,6 @@ pub(crate) fn certify_products_with_validation(
                         PACKAGE_INTERFACE_LIMIT,
                         &validation.inventory,
                     )?) != accepted.skinny_iface_sha256
-                    || hex(&sha(&read_bounded_with_operation(
-                        &bundle.package_imports_path,
-                        32 << 20,
-                        &validation.inventory,
-                    )?)) != bundle.package_imports_sha256
                 {
                     return Err(CertificationError::StaleEvidence);
                 }
@@ -8170,7 +8236,9 @@ pub(crate) fn certify_products_with_validation(
                     32 << 20,
                     &validation.inventory,
                 )?;
-                if sidecar != bundle.package_imports_bytes {
+                if hex(&sha(&sidecar)) != bundle.package_imports_sha256
+                    || sidecar != bundle.package_imports_bytes
+                {
                     return Err(CertificationError::StaleEvidence);
                 }
                 crate::recovery_artifacts::validate_package_imports_with_validation(
@@ -16846,70 +16914,58 @@ pub(crate) mod tests {
         )
         .unwrap();
         let empty = ParsedModuleProducts::decode(&empty_bytes, &empty_packages).unwrap();
-        let cached = certify_products(
-            Some(&selected),
-            &cached_receipt,
-            &empty,
-            &match exact.as_ref() {
-                Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
-                    exact
-                        .source
-                        .match_product(
-                            exact.request,
-                            &input,
-                            source,
-                            &evidence_bytes,
-                            empty.operation(),
-                        )
-                        .unwrap(),
-                ),
-                None => crate::artifacts::admit_compiler_source(
-                    empty.operation(),
-                    &evidence_bytes,
-                    &input,
-                    source,
-                )
-                .unwrap(),
-            },
-            input.parent().unwrap(),
-            &producer,
-            &include,
-            None,
-        )
-        .unwrap();
+        let admitted_source = match exact.as_ref() {
+            Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                exact
+                    .source
+                    .match_product(
+                        exact.request,
+                        &input,
+                        source,
+                        &evidence_bytes,
+                        empty.operation(),
+                    )
+                    .unwrap(),
+            ),
+            None => crate::artifacts::admit_compiler_source(
+                empty.operation(),
+                &evidence_bytes,
+                &input,
+                source,
+            )
+            .unwrap(),
+        };
+        let certify_cached = |receipt: &CertifiedReceipt| {
+            certify_products(
+                Some(&selected),
+                receipt,
+                &empty,
+                &admitted_source,
+                input.parent().unwrap(),
+                &producer,
+                &include,
+                None,
+            )
+        };
+        let cached = certify_cached(&cached_receipt).unwrap();
+        // Fresh publication validation must observe drift after candidate
+        // acquisition, independently of its retained package witness bytes.
+        std::fs::write(&bundle.package_imports_path, b"changed package witness").unwrap();
+        let stale_package = certify_cached(&cached_receipt);
+        std::fs::write(&bundle.package_imports_path, &bundle.package_imports_bytes).unwrap();
+        assert!(matches!(
+            stale_package,
+            Err(CertificationError::StaleEvidence)
+        ));
+        let restored_package = certify_cached(&cached_receipt).unwrap();
+        assert_eq!(restored_package.recovery_products[0].owner(), &bundle.owner);
+        assert_eq!(
+            restored_package.recovery_products[0].package_imports_bytes(),
+            bundle.package_imports_bytes
+        );
         let mut stale_cached_receipt = cached_receipt.clone();
         stale_cached_receipt.modules[0].dependency_witness_sha256 = [0; 32];
-        assert!(certify_products(
-            Some(&selected),
-            &stale_cached_receipt,
-            &empty,
-            &match exact.as_ref() {
-                Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
-                    exact
-                        .source
-                        .match_product(
-                            exact.request,
-                            &input,
-                            source,
-                            &evidence_bytes,
-                            empty.operation(),
-                        )
-                        .unwrap()
-                ),
-                None => crate::artifacts::admit_compiler_source(
-                    empty.operation(),
-                    &evidence_bytes,
-                    &input,
-                    source
-                )
-                .unwrap(),
-            },
-            input.parent().unwrap(),
-            &producer,
-            &include,
-            None,
-        )
-        .is_err());
+        assert!(certify_cached(&stale_cached_receipt).is_err());
         let restored = &cached.recovery_products[0];
         assert_eq!(restored.owner(), original.recovery_products[0].owner());
         assert_eq!(

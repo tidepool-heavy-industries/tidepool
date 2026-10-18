@@ -348,11 +348,24 @@ mod tests {
     fn run_map_root_uses_recorded_identity_and_rejects_conflicting_binding() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("7-2")).unwrap();
-        fs::write(dir.path().join("status.json"), json!({
-            "version":4,"run_id":"test","workspace":"/sanitized","session":"test",
-            "agent":{"model":"test","effort":"low"},
-            "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"thread-root"}
-        }).to_string()).unwrap();
+        fs::write(
+            dir.path().join("status.json"),
+            serde_json::to_value(crate::exomonad::run_status_fixture(
+                "test",
+                Path::new("/sanitized"),
+                "test",
+                RunPhase::Ready {
+                    root_actor: ActorRef {
+                        id: exomonad_actor::ActorId(7),
+                        incarnation: exomonad_actor::Incarnation(2),
+                    },
+                    root_thread: "thread-root".into(),
+                },
+            ))
+            .unwrap()
+            .to_string(),
+        )
+        .unwrap();
         fs::write(
             dir.path().join("root-binding.json"),
             json!({"version":4,"thread":"thread-root"}).to_string(),
@@ -360,6 +373,14 @@ mod tests {
         .unwrap();
         let report =
             read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+        assert!(matches!(
+            &report.root.actor,
+            Evidence::Observed { value, .. }
+                if *value == ActorRef {
+                    id: exomonad_actor::ActorId(7),
+                    incarnation: exomonad_actor::Incarnation(2),
+                }
+        ));
         assert!(
             matches!(&report.actors[0].provider_thread, Evidence::Observed { value, .. } if value == "thread-root")
         );
@@ -403,12 +424,25 @@ mod tests {
             json!({"version":4,"thread":"thread-root"}).to_string(),
         )
         .unwrap();
-        let mut status = json!({
-            "version":4,"run_id":"test","workspace":"/sanitized","session":"test",
-            "agent":{"model":"test","effort":"low"},
-            "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"thread-root"}
-        });
-        for version in [0, crate::exomonad::STATUS_VERSION + 1, u32::MAX] {
+        let mut status = serde_json::to_value(crate::exomonad::run_status_fixture(
+            "test",
+            Path::new("/sanitized"),
+            "test",
+            RunPhase::Ready {
+                root_actor: ActorRef {
+                    id: exomonad_actor::ActorId(7),
+                    incarnation: exomonad_actor::Incarnation(2),
+                },
+                root_thread: "thread-root".into(),
+            },
+        ))
+        .unwrap();
+        for version in [
+            0,
+            crate::exomonad::STATUS_VERSION - 1,
+            crate::exomonad::STATUS_VERSION + 1,
+            u32::MAX,
+        ] {
             status["version"] = json!(version);
             // This shape would pass raw serde; only the owning decoder rejects it.
             assert!(serde_json::from_value::<RunStatus>(status.clone()).is_ok());
@@ -432,11 +466,19 @@ mod tests {
         fs::create_dir(dir.path().join("7-2")).unwrap();
         fs::write(
             dir.path().join("status.json"),
-            json!({
-                "version":4,"run_id":"test","workspace":"/sanitized","session":"test",
-                "agent":{"model":"test","effort":"low"},
-                "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"A"}
-            })
+            serde_json::to_value(crate::exomonad::run_status_fixture(
+                "test",
+                Path::new("/sanitized"),
+                "test",
+                RunPhase::Ready {
+                    root_actor: ActorRef {
+                        id: exomonad_actor::ActorId(7),
+                        incarnation: exomonad_actor::Incarnation(2),
+                    },
+                    root_thread: "A".into(),
+                },
+            ))
+            .unwrap()
             .to_string(),
         )
         .unwrap();

@@ -258,6 +258,12 @@ using the compiler request's exact issued availability. Carry that evidence into
 issuance before validation; do not attach it afterward or reconstruct it from
 all retained artifacts. Temporary private issuance must restore the caller's
 namespace and executable roots while retaining the exact dependency bindings.
+Certified admission keeps issued availability attached to its opaque owner;
+only a demanded key may consume its checked exact closure. A carrier-only view
+cannot authenticate that offer's Group proof. Raw inherited constraints of a new
+product still require their original receiving-view validation; an issued input
+miss cannot enter fresh graph issuance. Regressions cross `bind_segment` and
+actual target admission, rather than querying a carrier view as an offer owner.
 Adding issued offer custody preserves the receiving namespace exactly. Historical
 canonical interfaces may coexist in separate authenticated scopes; uniqueness
 applies to selected compiler roles, not every retained payload. Compiler input
@@ -321,6 +327,10 @@ Full with no demand, and divergent carried availability and selected demand.
 Check exact scoped execution and refusal of unqualified ambiguous demand,
 unavailable dependencies and conflicting selected products or interfaces. Run
 the owning toolchain target and a real actor/compiler consumer on the join.
+Histories assert demanded identities and edges, physical work, and lifetime
+through the real owner operation; internal parent counts or diagnostic rendering
+are observations, not the behavioral contract. Investigate a failing oracle
+against that producer-to-consumer contract before changing its expectation.
 
 Fixture imports read exact binder identities from authenticated original-group
 definitions. Ordinals and naming patterns do not issue binder identity.

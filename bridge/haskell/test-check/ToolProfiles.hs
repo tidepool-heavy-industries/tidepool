@@ -88,16 +88,16 @@ narrowTools = Narrow (haskellTool "A pure notebook in a command-capable actor")
 tools :: Tools (AsServerT (Eff '[]))
 tools = Tools
   { ordinary = presentWith id (tool "Echo" pure)
-  , curate = presentWith (const "selected sync call") $ syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
+  , curate = presentWith (const "selected sync call") $ syncTool "Select next model" $ \model -> send (SetNextModelWith (Core.CustomModel Core.OpenAIPlan model)) >> pure model
   , rawCurate = presentWith (const "selected sync raw") (syncRawTool "Echo literal" pure)
-  , notifyCurate = presentWith (const "selected sync notice") $ syncNotify "Select next model" (send . SetNextModelWith)
+  , notifyCurate = presentWith (const "selected sync notice") $ syncNotify "Select next model" (send . SetNextModelWith . Core.CustomModel Core.OpenAIPlan)
   , notebook = haskellTools
   }
 
 require :: String -> Bool -> IO ()
 require label observed = unless observed (error label) >> putStrLn ("passed: " ++ label)
 
-context :: ContextReadWrite a -> Eff '[State [Text], Reload] a
+context :: ContextReadWrite a -> Eff '[State [Core.Model], Reload] a
 context (SetNextModelWith model) = modify (++ [model])
 context _ = error "unexpected context request"
 
@@ -163,11 +163,11 @@ installedToolContracts = do
       , object ["status" .= ("success" :: Text), "output" .= ("updated" :: Text)]
       ])
   require "sync compiled handler emits context effect in shared dispatcher"
-    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "selected sync call"), ["executor"]))
+    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "selected sync call"), [Core.CustomModel Core.OpenAIPlan "executor"]))
   require "sync raw handler reuses compiled function"
     (runTool "raw_curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "selected sync raw"), []))
   require "sync notification preserves selected presentation and context effect"
-    (runTool "notify_curate" == (Right (ToolDispatchSuccess (toJSON ()) "selected sync notice"), ["executor"]))
+    (runTool "notify_curate" == (Right (ToolDispatchSuccess (toJSON ()) "selected sync notice"), [Core.CustomModel Core.OpenAIPlan "executor"]))
   asyncDefault <- either (error . show) pure (compileInstalledTools (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[])))
   require "host without context support declares only the async notebook"
     (map (\entry -> (dtdName entry, dtdSchedule entry, dtdImplementation entry, dtdEffectKeys entry)) (declarations asyncDefault)

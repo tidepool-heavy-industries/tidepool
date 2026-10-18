@@ -923,10 +923,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     };
     let left_proof = proof(&left);
     let right_proof = proof(&right);
-    let dependency = |proof: &NativeOriginalRequirement, view: &ArtifactView| {
+    let dependency = |proof: &NativeOriginalRequirement, view: &ArtifactView, stage| {
         proof
             .issued_groups(view)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{stage}: {error}"))
             .into_iter()
             .find(|group| {
                 group.binding.artifact() == native_entry.descriptor.id
@@ -934,8 +934,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             })
             .unwrap()
     };
-    let left_group = dependency(&left_proof, &left);
-    let right_group = dependency(&right_proof, &right);
+    let left_group = dependency(&left_proof, &left, "left issuer");
+    let right_group = dependency(&right_proof, &right, "right issuer");
     assert_ne!(left_group, right_group);
     assert_eq!(
         left_proof.selection.graph_selection().namespace,
@@ -980,7 +980,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert!(retained.is_full());
     assert_eq!(retained.original(), native_entry.descriptor.id);
     assert_eq!(retained.proof(), Some(&left_proof));
-    assert_eq!(dependency(retained.proof().unwrap(), &view), left_group);
+    assert_eq!(
+        dependency(retained.proof().unwrap(), &view, "merged issuer custody"),
+        left_group
+    );
     let partial_views = [7, 9001].map(|ordinal| {
         make(
             &format!("PartialIssuance{ordinal}"),
@@ -1174,6 +1177,50 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         });
         ProtectedScaffoldRequirements::default().compiler_inputs(&source_context, None)
     };
+    let scoped_execution_roots = |view: &ArtifactView| {
+        view.capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let opaque_dependency = |offer: &crate::artifact_inventory::IssuedNativeOffer,
+                             proof: &NativeOriginalRequirement| {
+        assert_eq!(offer.original(), consumer_entry.descriptor.id);
+        assert!(offer.is_full());
+        assert_eq!(offer.proof(), Some(proof));
+        let groups = offer.issued_group_carriers().unwrap();
+        let dependency = *groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == native_entry.descriptor.id
+                    && group.original_ordinal == 7
+            })
+            .unwrap();
+        let consumer = *groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == consumer_entry.descriptor.id
+                    && group.original_ordinal == 7
+            })
+            .unwrap();
+        assert!(offer
+            .custody_snapshot()
+            .binding_dependencies()
+            .unwrap()
+            .contains(&(
+                ArtifactBindingNode::Group(consumer),
+                ArtifactBindingNode::Group(dependency),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 7,
+                },
+            )));
+        dependency
+    };
     for (index, supplied, expected) in [
         (0, vec![left_proof.clone()], left_group),
         (1, vec![left_proof.clone(), left_proof.clone()], left_group),
@@ -1181,20 +1228,43 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     ] {
         let source =
             close_source(if supplied.is_empty() { &right } else { &left }, &supplied).unwrap();
+        let expected_roots =
+            scoped_execution_roots(if supplied.is_empty() { &right } else { &left });
+        assert_eq!(scoped_execution_roots(source.artifacts()), expected_roots);
         let input = OriginalCompilerInputs::from_checked_support_products(
             source.compiler_source_support(),
             producer.sha256(),
             std::slice::from_ref(consumer),
         )
         .unwrap();
+        assert_eq!(
+            scoped_execution_roots(input.issued_artifacts()),
+            expected_roots,
+            "private complete issuance preserves the caller's exact chosen execution roots"
+        );
         let issued = input
             .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .cloned()
             .unwrap();
+        assert!(
+            issued.issued_groups(input.issued_artifacts()).is_err(),
+            "carrier-only custody cannot authenticate the opaque consumer Group proof"
+        );
+        assert!(!input
+            .issued_artifacts()
+            .selected_native_groups()
+            .iter()
+            .any(|key| key.artifact == consumer_entry.descriptor.id));
+        let consumer_offer = input
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .unwrap()
+            .clone();
         assert_eq!(
-            dependency(&issued, &input.artifacts),
+            opaque_dependency(&consumer_offer, &issued),
             expected,
             "carried availability chooses the private dependency before selected-state fallback"
         );
@@ -1218,10 +1288,15 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .cloned()
             .unwrap();
-        assert_eq!(
-            dependency(&retained, request.compiler_inputs().artifacts()),
-            expected
-        );
+        let retained_offer = request
+            .compiler_inputs()
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .unwrap();
+        assert!(retained_offer.same_issuance(&consumer_offer));
+        assert_eq!(opaque_dependency(retained_offer, &retained), expected);
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
         assert_eq!(wire_mode(&request, "CarriedDependency"), issued_mode(&[7]));
     }
@@ -1398,12 +1473,12 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let unrelated_offer = complete(2);
     let dependency_offer = IssuedNativeOffer::issue(entries[1].descriptor.id, &base, None).unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-    let metadata = projection
+    let transport_metadata = projection
         .project_metadata(base.metadata_snapshot())
         .unwrap();
     let transport = NativeCompilerTransport::issue(
         &projection,
-        &metadata,
+        &transport_metadata,
         &full,
         &[
             ancestor_offer.clone(),
@@ -1434,6 +1509,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let b_id = entries[1].descriptor.id;
     let a_id = entries[0].descriptor.id;
     let demand = source_import(&recovered[1].product, 7);
+    let denied_demand = source_import(&recovered[1].product, 9001);
     // A different selected A is unrelated to the proof that supplied B. Both
     // alternatives deliberately share canonical interfaces with their peers.
     let replacement_a = product("ReceiptAncestor", 94);
@@ -1554,6 +1630,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     drop(b_context);
     drop(dependency_offer);
     drop(transport);
+    drop(transport_metadata);
     drop(metadata);
     drop(unrelated_offer);
     drop(ancestor_offer);
@@ -1588,9 +1665,73 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .roots
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
-    let groups = admitted
-        .native_groups_for_target(None, std::slice::from_ref(&demand))
+    assert!(matches!(
+        admitted.native_groups_for_target(None, std::slice::from_ref(&demand)),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 7,
+            } if artifact == b_id)
+    ));
+    let consume = |view: &ArtifactView,
+                   selection: &crate::certified_products::CertifiedSourceSelection,
+                   imports: &[crate::certified_products::PendingImportOwner]| {
+        let mut fixed = view
+            .inventory()
+            .bind_segment(view, vec![], selection)
+            .expect("bind the actual receipt owner before body demand");
+        let demanded = view.inventory().admit_bound_target(
+            &mut fixed,
+            view,
+            NativeArtifactDemand::CertifiedTargetImports(imports),
+            vec![],
+            selection,
+        )?;
+        drop(fixed);
+        demanded
+            .selection
+            .groups_for_target(&demanded.artifacts, None, imports)
+    };
+    let mut failed_then_retried = admitted
+        .inventory()
+        .bind_segment(&admitted, vec![], &selected)
         .unwrap();
+    let fixed_before = failed_then_retried.observed_binding_state();
+    let cursor_before = admitted.capture_graph_selection();
+    let mixed = [demand.clone(), denied_demand.clone()];
+    assert!(matches!(admitted.inventory().admit_bound_target(
+        &mut failed_then_retried, &admitted,
+        NativeArtifactDemand::CertifiedTargetImports(&mixed), vec![], &selected,
+    ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+            artifact, original_ordinal: 9001,
+        } if artifact == b_id)));
+    assert_eq!(
+        failed_then_retried.observed_binding_state(),
+        fixed_before,
+        "a valid staged B7 followed by denied B9001 publishes no payload or choice"
+    );
+    assert_eq!(admitted.capture_graph_selection(), cursor_before);
+    let retried = admitted
+        .inventory()
+        .admit_bound_target(
+            &mut failed_then_retried,
+            &admitted,
+            NativeArtifactDemand::CertifiedTargetImports(std::slice::from_ref(&demand)),
+            vec![],
+            &selected,
+        )
+        .unwrap();
+    drop(failed_then_retried);
+    assert_eq!(
+        retried
+            .selection
+            .groups_for_target(&retried.artifacts, None, std::slice::from_ref(&demand))
+            .unwrap(),
+        exact
+    );
+    let groups = consume(&admitted, &selected, std::slice::from_ref(&demand))
+        .expect("the issued B receipt authorizes its exact group7");
+    assert_eq!(groups, exact);
     assert_eq!(
         groups
             .iter()
@@ -1604,6 +1745,14 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             original_ordinal: 9001
         }])
         .is_err());
+
+    assert!(matches!(
+        consume(&admitted, &selected, std::slice::from_ref(&denied_demand)),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 9001,
+            } if artifact == b_id)
+    ));
 
     let context = |view, projection| {
         ExactDeclarationContext::from_facts(DeclarationContextFacts {
@@ -1643,11 +1792,18 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         request.compiler_source_support(),
     )
     .unwrap();
-    let selected = request
+    let request_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &request,
+            &request.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+    let selected_view = request
         .projection()
         .admit_interfaces_with_native_offers(&request.artifacts(), vec![], &offers, &catalog)
         .unwrap();
-    let graph = selected.capture_graph_selection();
+    let graph = selected_view.capture_graph_selection();
     assert!(graph
         .namespace
         .iter()
@@ -1660,16 +1816,28 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .roots
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
+    let requested_groups = consume(
+        &selected_view,
+        &request_selection,
+        std::slice::from_ref(&demand),
+    )
+    .unwrap();
+    assert_eq!(requested_groups, exact);
     assert_eq!(
-        selected
-            .native_groups_for_target(None, &[demand])
-            .unwrap()
+        requested_groups
             .iter()
             .map(|group| (group.binding.artifact(), group.original_ordinal))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(b_id, 7)])
     );
     assert!(!request.native_transport.availability[&b_id].permits(9001));
+    assert!(matches!(
+        consume(&selected_view, &request_selection, &[denied_demand]),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 9001,
+            } if artifact == b_id)
+    ));
 
     let conflicting = inventory
         .admit_shared_with_demand(
@@ -4931,7 +5099,9 @@ fn replay_native_transport_history(
     history: &NativeTransportHistory,
     coverage: &mut NativeTransportCoverage,
 ) {
-    use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
     let NativeTransportHistory {
         same_root,
         overlap,
@@ -5460,10 +5630,54 @@ fn replay_native_transport_history(
     assert!(dependent_expected
         .insert(*dependent_group, dependent_carrier)
         .is_none());
-    assert_eq!(
-        proof.issued_group_carriers(&produced.artifacts).unwrap(),
-        dependent_expected
+    let dependent_offer = produced
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == dependent_entry.descriptor.id)
+        .unwrap()
+        .clone();
+    assert!(dependent_offer.is_full());
+    assert_eq!(dependent_offer.proof(), Some(&proof));
+    assert!(
+        proof
+            .issued_group_carriers(produced.issued_artifacts())
+            .is_err(),
+        "carrier-only output cannot authenticate the opaque dependent Group proof"
     );
+    let expected_child = *expected[0]
+        .keys()
+        .find(|group| {
+            group.binding.artifact() == entries[1].descriptor.id && group.original_ordinal == 7
+        })
+        .unwrap();
+    let expected_dependency = (
+        ArtifactBindingNode::Group(*dependent_group),
+        ArtifactBindingNode::Group(expected_child),
+        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+            dependent_ordinal: 7,
+            required_ordinal: 7,
+        },
+    );
+    let assert_dependent_offer = |offers: &[IssuedNativeOffer]| {
+        let retained = offers
+            .iter()
+            .find(|offer| offer.same_issuance(&dependent_offer))
+            .expect("the exact dependent issuance retains its historical child");
+        assert!(retained.is_full());
+        assert_eq!(retained.proof(), Some(&proof));
+        assert_eq!(
+            retained.issued_group_carriers().unwrap(),
+            dependent_expected
+        );
+        let edges = retained.custody_snapshot().binding_dependencies().unwrap();
+        assert!(edges.contains(&(
+            ArtifactBindingNode::Group(*dependent_group),
+            ArtifactBindingNode::Artifact(dependent_carrier),
+            crate::artifact_inventory::ArtifactDependency::Interface,
+        )));
+        assert!(edges.contains(&expected_dependency));
+    };
+    assert_dependent_offer(produced.native_offers());
     let (admission, source) =
         generated_source_admission_fixture(&root.path().join("receipt"), &request);
     let continued = produced
@@ -5478,10 +5692,10 @@ fn replay_native_transport_history(
         continued.artifacts.capture_graph_selection().namespace,
         support.capture_graph_selection().namespace
     );
-    assert_eq!(
-        proof.issued_group_carriers(&continued.artifacts).unwrap(),
-        dependent_expected
-    );
+    assert!(proof
+        .issued_group_carriers(continued.issued_artifacts())
+        .is_err());
+    assert_dependent_offer(continued.native_offers());
     let continued_request = ExactCompileContext::new(base_context)
         .prepare_compilation_with_private_input(
             &root.path().join("continued"),
@@ -5523,10 +5737,11 @@ fn replay_native_transport_history(
         )
         .unwrap();
     coverage.recoveries += 1;
+    assert_dependent_offer(continued_inputs.compiler_source_support().native_offers());
     for view in [continued_inputs.artifacts(), &reopened] {
-        assert_eq!(
-            proof.issued_group_carriers(view).unwrap(),
-            dependent_expected
+        assert!(
+            proof.issued_group_carriers(view).is_err(),
+            "selected carrier snapshots do not reconstruct opaque Group availability"
         );
         let mut fixed = view
             .inventory()

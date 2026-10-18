@@ -9,7 +9,7 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact
@@ -19,7 +19,7 @@ module Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
-  , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
+  , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
   , ExactCompilationPublication(..)
   , writeExactCompilation, writeCheckedExactCompilation
   , writeRetainedExactCompilation
@@ -837,11 +837,14 @@ admittedInterfaceCore (LocalInterfaceAdmission proof) = localFinalizedCore proof
 -- An uncaptured descriptor can be inspected but cannot reach an executable
 -- consumer. Every executable entry point requires explicitly acquired custody.
 admittedInterfaceCoreBytes :: CanonicalInterfaceAdmission -> IO BS.ByteString
-admittedInterfaceCoreBytes (ModuleInterfaceAdmission proof) = do
+admittedInterfaceCoreBytes = fmap artifactBytes . admittedInterfaceCoreBody
+
+admittedInterfaceCoreBody :: CanonicalInterfaceAdmission -> IO ArtifactBytes
+admittedInterfaceCoreBody (ModuleInterfaceAdmission proof) = do
   (path,sha) <- maybe (fail "admitted interface has no defining Core") pure (admittedInterfaceCore (ModuleInterfaceAdmission proof))
-  canonicalProofOriginalBytes proof path sha
-admittedInterfaceCoreBytes (LocalInterfaceAdmission proof) =
-  maybe (fail "local defining Core has not been captured for execution") (pure . artifactBytes) (localFinalizedCoreBody proof)
+  canonicalProofOriginalBody proof path sha
+admittedInterfaceCoreBody (LocalInterfaceAdmission proof) =
+  maybe (fail "local defining Core has not been captured for execution") pure (localFinalizedCoreBody proof)
 
 -- Already captured canonical proofs cannot regain filesystem authority when
 -- promoted or transferred. Descriptor proofs retain explicit fresh admission.
@@ -896,9 +899,12 @@ canonicalProofInterfaceBody proof iface = do
     DescriptorInputs -> fail "canonical interface has not been captured for consumption"
 
 canonicalProofOriginalBytes :: CanonicalInterfaceProof -> FilePath -> String -> IO BS.ByteString
-canonicalProofOriginalBytes proof path sha = case proofInputCustody proof of
+canonicalProofOriginalBytes proof path sha = artifactBytes <$> canonicalProofOriginalBody proof path sha
+
+canonicalProofOriginalBody :: CanonicalInterfaceProof -> FilePath -> String -> IO ArtifactBytes
+canonicalProofOriginalBody proof path sha = case proofInputCustody proof of
   CapturedCanonicalInputs bodies -> case Map.lookup path bodies of
-    Just body | artifactSha256 body == sha -> pure (artifactBytes body)
+    Just body | artifactSha256 body == sha -> pure body
     _ -> fail "canonical original is absent or differs from its selected seal"
   DescriptorInputs -> fail "canonical originals have not been captured for consumption"
 

@@ -21,7 +21,7 @@ import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Unit.Module.ModIface (mi_extra_decls)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Home.ModInfo (lookupHpt)
-import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModule (newFinalizedModule)
 import GHC.Core (Bind(..), bindersOfBinds, maybeUnfoldingTemplate)
 import GHC.Core.Opt.Arity (manifestArity)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
@@ -105,7 +105,7 @@ assertRecoveredBaseBody = do
     (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
     home <- maybe (fail "base fixture lacks its finalized home interface") pure
       (lookupHpt (hsc_HPT env) (ms_mod_name summary))
-    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    prepared <- liftIO $ newFinalizedModule env home guts >>= prepareModule env (ms_location summary) mempty
     let context = ProjectionContext
           { projectionProfile = Text.pack "recovered-base-body"
           , projectionToolchain = Text.pack "ghc-9.12.2"
@@ -245,7 +245,7 @@ assertRecoveredDictionaryBody = do
     (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
     home <- maybe (fail "dictionary fixture has no finalized home interface") pure
       (lookupHpt (hsc_HPT env) (ms_mod_name summary))
-    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    prepared <- liftIO $ newFinalizedModule env home guts >>= prepareModule env (ms_location summary) mempty
     let context = ProjectionContext
           { projectionProfile = Text.pack "recovered-dictionary-order"
           , projectionToolchain = Text.pack "ghc-9.12.2"
@@ -366,7 +366,7 @@ assertRecoveredEntryContracts = do
     (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
     home <- maybe (fail "entry fixture has no finalized home interface") pure
       (lookupHpt (hsc_HPT env) (ms_mod_name summary))
-    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    prepared <- liftIO $ newFinalizedModule env home guts >>= prepareModule env (ms_location summary) mempty
     let context = ProjectionContext
           { projectionProfile = Text.pack "recovered-entry-contracts"
           , projectionToolchain = Text.pack "ghc-9.12.2"
@@ -477,8 +477,7 @@ assertAllRecoveredBodies = do
     (callerGuts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
     home <- maybe (fail "loaded caller has no finalized home interface") pure
       (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
-    caller <- liftIO $ prepareModule hsc (ms_location summary) mempty
-      (FinalizedModule home callerGuts)
+    caller <- liftIO $ newFinalizedModule hsc home callerGuts >>= prepareModule hsc (ms_location summary) mempty
     let entry = callerEntry caller
         context = ProjectionContext
           { projectionProfile = Text.pack "w5-b2-recovered-body"
@@ -606,8 +605,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   (guts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
   home <- maybe (fail "loaded module has no finalized home interface") pure
     (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
-  prepared <- liftIO $ prepareModule hsc (ms_location summary) mempty
-      (FinalizedModule home guts)
+  prepared <- liftIO $ newFinalizedModule hsc home guts >>= prepareModule hsc (ms_location summary) mempty
   let context = ProjectionContext
         { projectionProfile = Text.pack "w5-b2-recovered-same-owner"
         , projectionToolchain = Text.pack "ghc-9.12.2"
