@@ -24,7 +24,6 @@ use crate::CompileError;
 pub struct SealedOriginalCompileInput {
     identity: String,
     source: Arc<str>,
-    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<PreparedProgram>,
     groups: Arc<[PendingCertifiedGroup]>,
@@ -90,10 +89,9 @@ impl SealedOriginalCompileInput {
         &self.identity
     }
 
-    /// Original interface custody is available only for the complete output
-    /// bundle sealed by this compiler transaction.
+    /// Validate the complete compiler output before lending its requested type source.
     #[allow(clippy::too_many_arguments)]
-    pub fn original_interface_context(
+    pub fn original_source(
         &self,
         prepared: &PreparedProgram,
         groups: &[PendingCertifiedGroup],
@@ -101,7 +99,7 @@ impl SealedOriginalCompileInput {
         package_interfaces: &CertifiedTargetPackageInterfaces,
         table: &DataConTable,
         yield_sites: &[YieldSite],
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+    ) -> Result<crate::declaration_context::ValidatedOriginalSource<'_>, CompileError> {
         if !self.matches_bundle(
             prepared,
             groups,
@@ -111,10 +109,14 @@ impl SealedOriginalCompileInput {
             yield_sites,
         ) {
             return Err(CompileError::ExtractFailed(
-                "original interface context belongs to another compiler output bundle".into(),
+                "original source belongs to another compiler output bundle".into(),
             ));
         }
-        Ok(self.original_interfaces.clone())
+        Ok(
+            crate::declaration_context::ValidatedOriginalSource::inputs_from(
+                &self.original_execution,
+            ),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -127,43 +129,16 @@ impl SealedOriginalCompileInput {
         table: &DataConTable,
         yield_sites: &[YieldSite],
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        self.original_interface_context(
-            prepared,
-            groups,
-            target_owners,
-            package_interfaces,
-            table,
-            yield_sites,
-        )?;
-        Ok(self.original_execution.clone())
-    }
-
-    /// Validate the exact output once before transferring both original contexts.
-    #[allow(clippy::too_many_arguments)]
-    pub fn original_contexts(
-        &self,
-        prepared: &PreparedProgram,
-        groups: &[PendingCertifiedGroup],
-        target_owners: &[PendingImportOwner],
-        package_interfaces: &CertifiedTargetPackageInterfaces,
-        table: &DataConTable,
-        yield_sites: &[YieldSite],
-    ) -> Result<
-        (
-            Arc<crate::declaration_context::ExactDeclarationContext>,
-            Arc<crate::declaration_context::ExactDeclarationContext>,
-        ),
-        CompileError,
-    > {
-        let interfaces = self.original_interface_context(
-            prepared,
-            groups,
-            target_owners,
-            package_interfaces,
-            table,
-            yield_sites,
-        )?;
-        Ok((interfaces, self.original_execution.clone()))
+        Ok(self
+            .original_source(
+                prepared,
+                groups,
+                target_owners,
+                package_interfaces,
+                table,
+                yield_sites,
+            )?
+            .execution_context())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -831,7 +806,6 @@ pub(crate) fn seal(
     Ok(Some(SealedOriginalCompileInput {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         source: source.into(),
-        original_interfaces: Arc::new(original_execution.original_interface_context()?),
         original_execution,
         target: prepared.clone(),
         groups: groups.clone(),
@@ -936,7 +910,7 @@ mod tests {
         proof: &SealedOriginalCompileInput,
     ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
         proof
-            .original_interface_context(
+            .original_source(
                 &proof.target,
                 &proof.groups,
                 &proof.target_owners,
@@ -944,6 +918,9 @@ mod tests {
                 &proof.table,
                 &proof.sites,
             )
+            .unwrap()
+            .project_type_interfaces(&[], &[])
+            .map(Arc::new)
             .unwrap()
     }
 
@@ -1022,14 +999,14 @@ mod tests {
     }
 
     #[test]
-    fn paired_original_contexts_preserve_issuer_and_individual_observations() {
+    fn validated_original_source_preserves_issuer_and_individual_observations() {
         for producer in [
             b"first compiler producer".as_slice(),
             b"second compiler producer".as_slice(),
         ] {
             let proof = package_context_proof(producer);
-            let (interfaces, execution) = proof
-                .original_contexts(
+            let source = proof
+                .original_source(
                     &proof.target,
                     &proof.groups,
                     &proof.target_owners,
@@ -1038,6 +1015,8 @@ mod tests {
                     &proof.sites,
                 )
                 .unwrap();
+            let interfaces = Arc::new(source.project_type_interfaces(&[], &[]).unwrap());
+            let execution = source.execution_context();
             assert_eq!(interfaces, original_context(&proof));
             assert_eq!(
                 execution,
@@ -1080,8 +1059,12 @@ mod tests {
     }
 
     #[test]
-    fn sealed_package_context_refuses_different_producer_and_edited_output() {
+    fn sealed_zero_input_source_refuses_different_producer_and_edited_output() {
         let first_proof = package_context_proof(b"first compiler producer");
+        assert!(
+            first_proof.sites.is_empty(),
+            "the output gate must run without input demand"
+        );
         let second_proof = package_context_proof(b"second compiler producer");
         let first = original_context(&first_proof)
             .select_original_type_interfaces(&[], &[])
@@ -1113,7 +1096,7 @@ mod tests {
             });
         let changed = tidepool_repr::execution_schema::testing::prepare(changed).unwrap();
         assert!(first_proof
-            .original_contexts(
+            .original_source(
                 &changed,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1143,7 +1126,7 @@ mod tests {
             })
             .expect("valid fixture metadata");
         assert!(first_proof
-            .original_contexts(
+            .original_source(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1165,7 +1148,7 @@ mod tests {
             request_type_signatures: None,
         }];
         assert!(first_proof
-            .original_contexts(
+            .original_source(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,

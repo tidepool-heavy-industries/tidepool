@@ -150,10 +150,10 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                 .collect::<Vec<_>>(),
             vec![observation.as_str()]
         );
-        let original_interfaces = first
+        let original_execution = first
             .native()
             .unwrap()
-            .original_interface_context(compiled.prepared(), compiled.table(), compiled.sites())
+            .original_execution_context(compiled.prepared(), compiled.table(), compiled.sites())
             .unwrap();
         let products = &sealed.recovery_products;
         let originals = products
@@ -195,7 +195,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             products,
         )
         .unwrap();
-        let module_interfaces = original_interfaces
+        let module_interfaces = original_execution
             .materialize_module_interfaces(durable.path())
             .unwrap();
         assert_original_durability(

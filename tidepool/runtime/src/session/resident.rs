@@ -109,18 +109,18 @@ impl CompiledProvenancePlan {
                 provenance.source_originals = execution.selected_source_originals().to_vec();
             }
         }
-        let original_contexts = if let Some(certification) = certification {
+        let original_source = if let Some(certification) = certification {
             let original = match certification.purpose() {
                 TurnPurpose::Execution { execution, .. }
                 | TurnPurpose::HostPrototype(execution) => {
-                    Some(execution.original_contexts(code.prepared(), code.table(), &code.sites))
+                    Some(execution.original_source(code.prepared(), code.table(), &code.sites))
                 }
                 TurnPurpose::ActivationPreview(proof) => {
-                    Some(proof.original_contexts(code.prepared(), code.table(), &code.sites))
+                    Some(proof.original_source(code.prepared(), code.table(), &code.sites))
                 }
                 TurnPurpose::Ordinary => {
                     certification.original_compile_input.as_ref().map(|proof| {
-                        proof.original_contexts(
+                        proof.original_source(
                             code.prepared(),
                             &certification.groups,
                             &certification.target_owners,
@@ -135,11 +135,7 @@ impl CompiledProvenancePlan {
         } else {
             None
         };
-        let (original_interfaces, original_execution) = match original_contexts {
-            Some((interfaces, execution)) => (Some(interfaces), Some(execution)),
-            None => (None, None),
-        };
-        if let Some(original_interfaces) = original_interfaces {
+        if let Some(original_source) = original_source {
             provenance.fresh_completion_sites.extend(
                 code.prepared()
                     .sites()
@@ -154,8 +150,7 @@ impl CompiledProvenancePlan {
                     })
                     .map(|site| site.site),
             );
-            let original_execution =
-                original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
+            let original_execution = original_source.execution_context();
             let execution_identity = original_execution.semantic_sha256();
             provenance.original_execution = Some((original_execution, execution_identity));
             // Site observations and installed native custody can include
@@ -211,8 +206,8 @@ impl CompiledProvenancePlan {
                         std::iter::once(signatures.reply()).chain(signatures.progress())
                     })
                     .collect::<Vec<_>>();
-                let interfaces = original_interfaces
-                    .select_original_type_interfaces(&witnesses, &signatures)
+                let interfaces = original_source
+                    .project_type_interfaces(&witnesses, &signatures)
                     .map_err(SessionError::Compile)?;
                 let identity = interfaces.semantic_sha256();
                 provenance

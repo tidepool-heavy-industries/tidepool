@@ -48,6 +48,54 @@ pub struct ExactDeclarationContext {
     owner: Arc<DeclarationContextOwner>,
 }
 
+/// Requested type evidence and execution custody from one validated compiler output.
+/// The borrowed source cannot outlive its issuing output proof.
+pub struct ValidatedOriginalSource<'a> {
+    types: OriginalTypeSource<'a>,
+    execution: &'a Arc<ExactDeclarationContext>,
+}
+
+enum OriginalTypeSource<'a> {
+    InputsFrom(&'a ExactDeclarationContext),
+    PurePreview,
+}
+
+impl<'a> ValidatedOriginalSource<'a> {
+    pub(crate) fn inputs_from(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            types: OriginalTypeSource::InputsFrom(execution),
+            execution,
+        }
+    }
+
+    pub(crate) fn pure_preview(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            types: OriginalTypeSource::PurePreview,
+            execution,
+        }
+    }
+
+    pub fn project_type_interfaces(
+        &self,
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        match self.types {
+            OriginalTypeSource::InputsFrom(context) => {
+                context.select_original_type_interfaces(witnesses, signatures)
+            }
+            OriginalTypeSource::PurePreview => Err(failure(
+                "pure activation preview cannot supply original input type evidence",
+            )),
+        }
+    }
+
+    /// Execution custody remains separate from the interface-only projection.
+    pub fn execution_context(&self) -> Arc<ExactDeclarationContext> {
+        self.execution.clone()
+    }
+}
+
 struct DeclarationContextOwner {
     facts: DeclarationContextFacts,
     observations: OnceLock<ContextObservation>,
@@ -7512,30 +7560,6 @@ impl ExactDeclarationContext {
         let support = self.owner.facts.compiler_support.merge(support)?;
         self = self.rebuild(|facts| facts.compiler_support = support);
         self.finish()
-    }
-
-    /// Retain the interface evidence admitted by an original compiler proof.
-    /// Only compiler-owned issuers may supply the producer identity.
-    pub(crate) fn original_interface_context(&self) -> Result<Self, CompileError> {
-        let support = self
-            .owner
-            .facts
-            .compiler_support
-            .selected_interfaces()?
-            .support_for_owners(
-                self.compiler_input_projection()
-                    .snapshot_roles()
-                    .keys()
-                    .cloned()
-                    .collect(),
-            )?;
-        Ok(Self::from_facts(DeclarationContextFacts {
-            compiler_support: support,
-            producer: self.owner.facts.producer,
-            lexical: Default::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-            template_imports: None,
-        }))
     }
 
     #[cfg(test)]
@@ -21490,7 +21514,13 @@ mod tests {
         // The recipe keeps its certificate while the declaration baseline is
         // narrowed to types. Its original arrives through the private issuer,
         // after baseline native choices have been captured independently.
-        let type_baseline = context.original_interface_context().unwrap();
+        let type_baseline =
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                context.toolchain_identity_sha256(),
+                context.artifact_view(),
+                context.compiler_input_projection().clone(),
+            )
+            .unwrap();
         type_baseline.normalize().unwrap();
         assert!(!type_baseline
             .artifact_view()

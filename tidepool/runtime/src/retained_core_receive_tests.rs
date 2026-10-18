@@ -68,11 +68,11 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     })
     .expect("production entry issuer seals the original consumed homes");
     let products = original.products();
-    let (interfaces, execution) = products
+    let execution = products
         .original_compile_input
         .as_ref()
         .expect("original entry retains its consumed input proof")
-        .original_contexts(
+        .original_execution_context(
             &original.target_owned(),
             &products.certified_groups,
             products.pending_imports(),
@@ -81,7 +81,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
             original.yield_sites(),
         )
         .unwrap();
-    let original_producer = interfaces.toolchain_identity_sha256();
+    let original_producer = execution.toolchain_identity_sha256();
     assert_ne!(original_producer, [0; 32]);
 
     // Retain the original consumed home-import graph. A lexical selection is
@@ -105,7 +105,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     // The complete entry may retain native originals. Recover the consumer
     // independently from only its sealed canonical interfaces and Core.
     let durable = tempfile::tempdir().unwrap();
-    let canonical_interfaces = interfaces
+    let canonical_interfaces = execution
         .materialize_module_interfaces(durable.path())
         .unwrap()
         .into_iter()

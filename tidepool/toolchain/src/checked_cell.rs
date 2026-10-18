@@ -2535,7 +2535,6 @@ enum CheckedExecutionAdmission {
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
 pub struct ExactCompiledItem {
-    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
@@ -2889,48 +2888,37 @@ impl ExactCompiledItem {
         self.typed_entry.as_ref().map(|issued| &issued.native_sites)
     }
 
-    /// Admit original type-interface custody only after validating the target,
-    /// constructor table and complete compiler-authenticated site metadata.
+    /// Execution custody is available only for this exact validated output.
     pub fn original_execution_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
         table: &tidepool_repr::DataConTable,
         sites: &[crate::YieldSite],
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        self.original_interface_context(target, table, sites)?;
-        Ok(self.original_execution.clone())
+        Ok(self
+            .original_source(target, table, sites)?
+            .execution_context())
     }
 
-    /// Validate the exact output once before transferring both original contexts.
-    pub fn original_contexts(
+    /// Validate the complete output before lending its requested type source.
+    pub fn original_source(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
         table: &tidepool_repr::DataConTable,
         sites: &[crate::YieldSite],
-    ) -> Result<
-        (
-            Arc<crate::declaration_context::ExactDeclarationContext>,
-            Arc<crate::declaration_context::ExactDeclarationContext>,
-        ),
-        CompileError,
-    > {
-        let interfaces = self.original_interface_context(target, table, sites)?;
-        Ok((interfaces, self.original_execution.clone()))
-    }
-    pub fn original_interface_context(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-        table: &tidepool_repr::DataConTable,
-        sites: &[crate::YieldSite],
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+    ) -> Result<crate::declaration_context::ValidatedOriginalSource<'_>, CompileError> {
         if !self.matches_target(target) {
             return Err(failure(
-                "original interface context belongs to another prepared target",
+                "original source belongs to another prepared target",
             ));
         }
         self.validate_table(table)?;
         self.validate_yield_sites(sites)?;
-        Ok(self.original_interfaces.clone())
+        Ok(
+            crate::declaration_context::ValidatedOriginalSource::inputs_from(
+                &self.original_execution,
+            ),
+        )
     }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
@@ -3604,11 +3592,8 @@ impl CheckedItemOffer {
         } else {
             None
         };
-        timing.advance("original_interface_context");
-        let original_interfaces = Arc::new(original_execution.original_interface_context()?);
         timing.advance("assemble_item");
         let item = Arc::new(ExactCompiledItem {
-            original_interfaces,
             original_execution,
             item: self.item.clone(),
             target,
