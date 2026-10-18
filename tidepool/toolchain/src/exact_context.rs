@@ -184,6 +184,8 @@ impl StagedBlocks {
 }
 
 /// FVM HAMTs and their unsynchronized child caches never leave this owner.
+/// The caller retains immutable CID storage for this operation. Another store
+/// or publication attempt requires a fresh materializer and authentication.
 pub struct Materializer<'a, BS: Blockstore> {
     base: &'a BS,
     pending: MemoryBlockstore,
@@ -192,6 +194,13 @@ pub struct Materializer<'a, BS: Blockstore> {
     serialized_bytes: Cell<u64>,
     cid_validation_bytes: Cell<u64>,
     selection_base: Option<MaterializedSelection>,
+    scopes: std::collections::BTreeMap<ArtifactSelectionId, MaterializedScope>,
+    selections: std::collections::BTreeMap<usize, MaterializedSelection>,
+}
+
+struct MaterializedScope {
+    cid: Cid,
+    owners: std::collections::BTreeMap<usize, ImmutableScopeProofRef>,
 }
 
 impl<'a, BS: Blockstore> Materializer<'a, BS> {
@@ -204,6 +213,8 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             serialized_bytes: Cell::new(0),
             cid_validation_bytes: Cell::new(0),
             selection_base: None,
+            scopes: Default::default(),
+            selections: Default::default(),
         }
     }
 
@@ -775,9 +786,7 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         store: &mut Materializer<'_, BS>,
         value: &ImmutableScopeProofRef,
     ) -> Result<Cid, SnapshotError> {
-        let (cid, bytes) = value.encoded()?;
-        store.put_keyed(cid, bytes).map_err(storage_error)?;
-        Ok(*cid)
+        store.materialize_scope(value)
     }
     fn decode<BS: Blockstore>(
         store: &SnapshotHydrator<'_, BS>,
@@ -821,11 +830,50 @@ impl MaterializedSelection {
     }
 }
 impl<BS: Blockstore> Materializer<'_, BS> {
-    pub fn materialize_selection(
+    fn materialize_scope(&mut self, value: &ImmutableScopeProofRef) -> Result<Cid, SnapshotError> {
+        let selection = value.proof().selection;
+        let identity = Arc::as_ptr(&value.0) as usize;
+        if let Some(receipt) = self.scopes.get_mut(&selection) {
+            if receipt.owners.contains_key(&identity) {
+                return Ok(receipt.cid);
+            }
+            // A different incoming owner must establish its own exact bytes.
+            // A claimed scope identity alone cannot borrow another proof.
+            let (cid, bytes) = value.encoded()?;
+            add_bytes(&self.cid_validation_bytes, bytes.len());
+            verify_block(cid, bytes)?;
+            let original = receipt.owners.values().next().expect("issued scope owner");
+            let (_, original_bytes) = original.encoded()?;
+            if *cid != receipt.cid
+                || value.proof() != original.proof()
+                || bytes.as_ref() != original_bytes.as_ref()
+            {
+                return Err(malformed("conflicting immutable scope proof"));
+            }
+            receipt.owners.insert(identity, value.clone());
+            return Ok(receipt.cid);
+        }
+        let (cid, bytes) = value.encoded()?;
+        self.put_keyed(cid, bytes).map_err(storage_error)?;
+        self.scopes.insert(
+            selection,
+            MaterializedScope {
+                cid: *cid,
+                owners: [(identity, value.clone())].into(),
+            },
+        );
+        Ok(*cid)
+    }
+
+    pub(crate) fn materialize_selection(
         &mut self,
         base: Option<&MaterializedSelection>,
-        next: &ExactSelectionSnapshot,
+        next: &Arc<ExactSelectionSnapshot>,
     ) -> Result<MaterializedSelection, SnapshotError> {
+        let identity = Arc::as_ptr(next) as usize;
+        if let Some(receipt) = self.selections.get(&identity) {
+            return Ok(receipt.clone());
+        }
         let scopes = self
             .materialize_map_with::<_, _, ScopeProofCodec>(base.map(|b| &b.scopes), &next.scopes)?;
         let roots = self.materialize_map(base.map(|b| &b.roots), &next.roots)?;
@@ -849,14 +897,18 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         } else {
             SelectionRoot(self.materialize_value(&descriptor)?)
         };
-        Ok(MaterializedSelection {
+        let receipt = MaterializedSelection {
             root,
-            snapshot: Arc::new(next.clone()),
+            snapshot: Arc::clone(next),
             scopes,
             roots,
             namespace,
             custody_roots,
-        })
+        };
+        // Retaining the original immutable snapshot prevents allocation-address
+        // reuse. This lookup table lasts only for this materialization operation.
+        self.selections.insert(identity, receipt.clone());
+        Ok(receipt)
     }
 }
 pub fn hydrate_selection<BS: Blockstore>(
