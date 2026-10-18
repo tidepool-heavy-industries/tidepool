@@ -233,19 +233,13 @@ pub(super) fn bind_certified_input_demand(
                 let payload = payloads
                     .get(&binding.artifact)
                     .ok_or_else(|| failure("issued native dependency payload missing"))?;
-                if entries
-                    .get(&binding.artifact)
-                    .is_some_and(|entry| entry != payload)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::MetadataConflict {
-                            artifact: binding.artifact,
-                        },
-                    ));
-                }
-                entries
-                    .entry(binding.artifact)
-                    .or_insert_with(|| Arc::clone(payload));
+                let retained = match entries.get(&binding.artifact) {
+                    Some(previous) => {
+                        ArtifactEntry::merge_catalog_input_custody(previous, payload)?
+                    }
+                    None => Arc::clone(payload),
+                };
+                entries.insert(binding.artifact, retained);
             }
         }
         prebound.insert(*key, group);
