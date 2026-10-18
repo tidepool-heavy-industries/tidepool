@@ -417,17 +417,25 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                     Some("parked-call".into()),
                     None,
                 );
-                let task = tokio::spawn(endpoint.dispatch_boxed(ToolInvocation {
+                let mut task = tokio::spawn(endpoint.dispatch_boxed(ToolInvocation {
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw("ModelFixture.nestedCell".into()),
                     context: Some(context.clone()),
                 }));
                 tokio::time::timeout(
                     std::time::Duration::from_secs(180),
-                    script.parked.notified(),
+                    async {
+                        tokio::select! {
+                            biased;
+                            result = &mut task => panic!(
+                                "model dispatch terminated before the provider parked: {result:?}"
+                            ),
+                            _ = script.parked.notified() => {}
+                        }
+                    },
                 )
                 .await
-                .unwrap();
+                .expect("model provider did not park before the progress deadline");
                 let receipt = tokio::time::timeout(
                     std::time::Duration::from_secs(180),
                     displayed(campaign, endpoint.as_ref(), "display (42 :: Int)"),
