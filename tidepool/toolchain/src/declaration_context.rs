@@ -1049,8 +1049,8 @@ enum NativeInputClassification {
     PrivateInput,
 }
 
-#[derive(Clone, Debug)]
-enum NativeTransportMode {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NativeTransportMode {
     Full,
     IssuedGroups,
 }
@@ -1213,6 +1213,37 @@ impl<'a> NativeDependencySupport<'a> {
             .iter()
             .flat_map(|contribution| contribution.groups(self.key))
     }
+}
+
+/// Durable membership in one already issued native contribution. Proof graph
+/// custody stays in the existing offer map, referenced by its stable identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeContributionSnapshotFacts {
+    pub(crate) offer: [u8; 32],
+    pub(crate) reachable: imbl::OrdSet<crate::artifact_inventory::ArtifactBindingNode>,
+}
+
+impl NativeContributionSnapshotFacts {
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        use sha2::{Digest, Sha256};
+        let nodes = self.reachable.iter().copied().collect::<Vec<_>>();
+        let bytes = fvm_ipld_encoding::to_vec(&(self.offer, nodes))
+            .map_err(|error| failure(format!("native contribution identity: {error}")))?;
+        let mut digest = Sha256::new();
+        digest.update(b"Tidepool native availability contribution v1\0");
+        digest.update(bytes);
+        Ok(digest.finalize().into())
+    }
+}
+
+/// Available permissions for one exact payload. Carrier and canonical binding
+/// alternatives remain attached to each contribution's authenticated graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeAvailabilitySnapshotFacts {
+    pub(crate) original: ArtifactId,
+    pub(crate) owner: tidepool_repr::execution_schema::CachedHomeOwner,
+    pub(crate) mode: NativeTransportMode,
+    pub(crate) contributions: imbl::OrdMap<[u8; 32], NativeContributionSnapshotFacts>,
 }
 
 /// Issuer-bound input availability, independent of output visibility and roles.
