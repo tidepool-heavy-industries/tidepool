@@ -2905,7 +2905,28 @@ impl CertifiedSourceSelection {
         owner: &CachedHomeOwner,
     ) -> CertResult<Option<Arc<crate::artifact_inventory::ArtifactEntry>>> {
         let mut original: Option<Arc<crate::artifact_inventory::ArtifactEntry>> = None;
-        for row in self.issued_native_availability() {
+        let direct_private = if self
+            .native_selections()
+            .any(|native| &native.owner == owner)
+        {
+            None
+        } else {
+            self.private_advertised
+                .receipt_original(
+                    &self.private_native,
+                    &owner.unit,
+                    &owner.module,
+                    &owner.module_version,
+                )
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+        };
+        let selected = self
+            .native_selections()
+            .filter_map(|native| match &native.availability {
+                ReceiptNativeAvailability::Issued(issued) => Some(issued.as_ref()),
+                ReceiptNativeAvailability::NewProduct { .. } => None,
+            });
+        for row in selected.chain(direct_private) {
             let Some(entry) = row.target_original(owner) else {
                 continue;
             };
