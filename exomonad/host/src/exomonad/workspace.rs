@@ -1513,7 +1513,7 @@ fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
     }
     // Inspect before hashing so source aliases cannot enter a retained selection.
     timing.advance("inspect_sources");
-    inspect_sources(&selection.sources.snapshot_root)?;
+    validate_sources(&selection.sources.snapshot_root)?;
     timing.advance("source_manifest");
     if NativeCatalogSourceSelection::source_manifest(&selection.sources.snapshot_root)?
         != selection.sources.source_files
@@ -1529,9 +1529,57 @@ fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
 pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>> {
     let mut timing = InvocationTiming::start_scoped("workspace.source", "inspect");
     let mut files = BTreeMap::new();
-    inspect_source_tree(source, Path::new(""), None, &mut files, false, &mut timing)?;
+    inspect_source_tree(
+        source,
+        Path::new(""),
+        None,
+        &mut SourceInventory::Record(&mut files),
+        false,
+        &mut timing,
+    )?;
     timing.finish(true);
     Ok(files)
+}
+
+/// Enforce the inspection policy and readability without producing unused digests.
+fn validate_sources(source: &Path) -> Result<()> {
+    let mut timing = InvocationTiming::start_scoped("workspace.source", "validate");
+    inspect_source_tree(
+        source,
+        Path::new(""),
+        None,
+        &mut SourceInventory::Validate,
+        false,
+        &mut timing,
+    )?;
+    timing.finish(true);
+    Ok(())
+}
+
+enum SourceInventory<'a> {
+    Validate,
+    Record(&'a mut BTreeMap<PathBuf, String>),
+}
+
+impl SourceInventory<'_> {
+    fn observe(&mut self, path: PathBuf, bytes: &[u8]) {
+        if let Self::Record(files) = self {
+            #[cfg(test)]
+            SOURCE_INSPECTION_WORK.with(|work| {
+                let (reads, bytes_read, digests) = work.get();
+                work.set((reads, bytes_read, digests + 1));
+            });
+            files.insert(path, blake3::hash(bytes).to_hex().to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    // Successful payload reads, their bytes, and produced digest/map entries.
+    static SOURCE_INSPECTION_WORK: std::cell::Cell<(usize, usize, usize)> = const {
+        std::cell::Cell::new((0, 0, 0))
+    };
 }
 
 pub(super) fn is_haskell_source(path: &Path) -> bool {
@@ -1583,7 +1631,7 @@ fn capture_tree(
         source,
         relative,
         Some(destination),
-        files,
+        &mut SourceInventory::Record(files),
         all_authored,
         &mut timing,
     )?;
@@ -1608,7 +1656,7 @@ fn inspect_source_tree(
     source: &Path,
     relative: &Path,
     destination: Option<&Path>,
-    files: &mut BTreeMap<PathBuf, String>,
+    inventory: &mut SourceInventory<'_>,
     all_authored: bool,
     timing: &mut InvocationTiming,
 ) -> Result<()> {
@@ -1646,17 +1694,22 @@ fn inspect_source_tree(
                 &entry.path(),
                 &path,
                 destination,
-                files,
+                inventory,
                 all_authored,
                 timing,
             )?;
         } else if all_authored || is_haskell_source(&entry.path()) {
             let bytes = std::fs::read(entry.path())?;
             timing.file_read(bytes.len());
+            #[cfg(test)]
+            SOURCE_INSPECTION_WORK.with(|work| {
+                let (reads, bytes_read, digests) = work.get();
+                work.set((reads + 1, bytes_read + bytes.len(), digests));
+            });
             if let Some(destination) = destination {
                 tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
             }
-            files.insert(path, blake3::hash(&bytes).to_hex().to_string());
+            inventory.observe(path, &bytes);
         }
     }
     Ok(())
@@ -1669,6 +1722,105 @@ mod tests {
         reason = "test: launches short-lived git one-shots to build fixture repositories"
     )]
     use super::*;
+
+    #[test]
+    fn source_validation_preserves_payload_reads_without_unused_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join(".exomonad");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let payloads: &[(&str, &[u8])] = &[
+            ("A.hs", b"module A where\n"),
+            ("nested/B.lhs", b"> module B where\n"),
+            ("A.hs-boot", b"module A where\n"),
+            ("nested/B.lhs-boot", b"> module B where\n"),
+            ("Include.h", b"#define VALUE 7\n"),
+        ];
+        for (path, bytes) in payloads {
+            std::fs::write(root.join(path), bytes).unwrap();
+        }
+        std::fs::write(root.join("ignored.txt"), b"not a source").unwrap();
+        for excluded in [
+            "state",
+            "logs",
+            "sessions",
+            "runtime",
+            "build",
+            ".git",
+            "dist-newstyle",
+            "target",
+        ] {
+            std::fs::create_dir(root.join(excluded)).unwrap();
+            std::os::unix::fs::symlink("missing", root.join(excluded).join("Bad.hs")).unwrap();
+        }
+        SOURCE_INSPECTION_WORK.with(|work| work.set((0, 0, 0)));
+        let inventory = inspect_sources(&root).unwrap();
+        let full_work = SOURCE_INSPECTION_WORK.with(|work| work.replace((0, 0, 0)));
+        let expected: BTreeMap<_, _> = payloads
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    PathBuf::from(*path),
+                    blake3::hash(bytes).to_hex().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(inventory, expected);
+        let expected_bytes = payloads.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
+        assert_eq!(full_work, (payloads.len(), expected_bytes, payloads.len()));
+        validate_sources(&root).unwrap();
+        assert_eq!(
+            SOURCE_INSPECTION_WORK.with(|work| work.replace((0, 0, 0))),
+            (payloads.len(), expected_bytes, 0)
+        );
+
+        let captured = tempfile::tempdir().unwrap();
+        let mut captured_files = BTreeMap::new();
+        capture_sources(&root, Path::new(""), captured.path(), &mut captured_files).unwrap();
+        assert_eq!(captured_files, expected);
+        for (path, bytes) in payloads {
+            assert_eq!(std::fs::read(captured.path().join(path)).unwrap(), *bytes);
+        }
+        // An ordinary authored directory named state remains an input.
+        let ordinary = temporary.path().join("ordinary/state");
+        std::fs::create_dir_all(&ordinary).unwrap();
+        std::os::unix::fs::symlink("missing", ordinary.join("Bad.hs")).unwrap();
+        assert!(validate_sources(&temporary.path().join("ordinary")).is_err());
+        assert!(inspect_sources(&temporary.path().join("ordinary")).is_err());
+    }
+
+    #[test]
+    fn source_validation_preserves_policy_and_io_refusals() {
+        let temporary = tempfile::tempdir().unwrap();
+        let check = |root: &Path| {
+            let inventory = inspect_sources(root).unwrap_err();
+            let validation = validate_sources(root).unwrap_err();
+            assert_eq!(inventory.to_string(), validation.to_string());
+            assert_eq!(
+                inventory
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                validation
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind)
+            );
+        };
+        check(&temporary.path().join("missing"));
+        let file = temporary.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        check(&file);
+        let aliases = temporary.path().join("aliases");
+        std::fs::create_dir(&aliases).unwrap();
+        std::os::unix::fs::symlink("missing", aliases.join("Bad.h")).unwrap();
+        check(&aliases);
+        let unreadable = temporary.path().join("unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+        // A socket is unreadable as a regular payload even for privileged test users.
+        let _socket =
+            std::os::unix::net::UnixListener::bind(unreadable.join("Unreadable.h")).unwrap();
+        check(&unreadable);
+        let error = validate_sources(&unreadable).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+    }
 
     // Workspace tests supply a private selection mirror. Production constructs
     // that mirror only from the toolchain's admitted immutable module package.
