@@ -15290,9 +15290,28 @@ mod tests {
             demands_epoch
         );
         let attached = child
-            .artifact_view()
-            .merge_fixture_selections(&surface.compiler_support.artifacts());
+            .owner
+            .facts
+            .compiler_support
+            .merge(&surface.compiler_support);
         assert_eq!(attached.is_ok(), !demands_epoch || old_epoch == new_epoch);
+        match attached {
+            Ok(joined) => assert_eq!(
+                joined.projection().snapshot_roles()[&epoch_owner].original(),
+                Some(current_original),
+            ),
+            Err(CompileError::ArtifactInventory(error)) => assert!(matches!(
+                error.failure,
+                ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                    owner,
+                    existing,
+                    incoming,
+                } if owner == epoch_owner
+                    && existing == current_original
+                    && incoming == old_original
+            )),
+            Err(error) => panic!("expected the compiler's typed original conflict: {error}"),
+        }
         assert_eq!(
             surface
                 .compiler_support
