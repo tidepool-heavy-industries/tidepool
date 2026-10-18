@@ -348,9 +348,9 @@ runDeclarationOperation bound manifest out = do
         ValidateJoin input -> renderDeclarationJoinOutcome
           <$> validateDeclarationJoin operations input >>= writeFile out
         EmitHostBindingInterface input -> do
-          (binder, issuedPurpose) <- emitHostBindingInterface operations (hostInterfaceProducer input)
-            (hostInterfaceGeneration input) (hostInterfaceBinder input) (hostInterfaceSignature input)
-            (hostInterfaceScope input) (hostInterfaceRoot input) (hostInterfacePurpose input)
+          scope <- maybe (fail "host interface requires a bound exact scope") pure
+            (boundRequestExactScope bound)
+          (binder, issuedPurpose) <- emitHostBindingInterface operations scope input
           let generation = hostInterfaceGeneration input
               owner = SessionModule ValMod (Generation generation)
           interface <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner)
