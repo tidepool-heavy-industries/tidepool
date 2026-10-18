@@ -8,9 +8,7 @@ mod qualified_name;
 pub(crate) use qualified_name::qualifier_and_identifier;
 
 use serde::{Deserialize, Serialize};
-use tidepool_runtime::session::{
-    InspectionAvailability, InspectionResult, LookupAnswer, TypeMatchQuality,
-};
+use tidepool_runtime::session::{InspectionAvailability, TypeMatchQuality};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +229,7 @@ pub(crate) enum MatchQuality {
     Usable,
 }
 
+#[cfg(test)]
 impl MatchQuality {
     fn rank(self) -> u8 {
         match self {
@@ -259,6 +258,7 @@ pub(crate) struct LookupEntry {
     pub(crate) contract: Option<String>,
 }
 
+#[cfg(test)]
 fn availability_rank(availability: InspectionAvailability) -> u8 {
     match availability {
         InspectionAvailability::Available => 0,
@@ -416,6 +416,32 @@ pub(crate) struct LookupResponse {
 }
 
 impl LookupResult {
+    /// Preserve the prefix and complete count issued by the hosted compiler owner.
+    fn selected(
+        query: String,
+        matches: tidepool_runtime::session::inspection::SelectedMatches<LookupEntry>,
+        ambiguous: bool,
+    ) -> Self {
+        let truncated = matches.truncated();
+        let outcome = if ambiguous {
+            LookupOutcome::Ambiguous {
+                matches: matches.entries,
+                truncated,
+                total_matches: matches.observed,
+                match_limit: matches.limit,
+            }
+        } else {
+            LookupOutcome::Found {
+                matches: matches.entries,
+                truncated,
+                total_matches: matches.observed,
+                match_limit: matches.limit,
+            }
+        };
+        Self { query, outcome }
+    }
+
+    #[cfg(test)]
     pub(crate) fn found(query: String, matches: Vec<LookupEntry>, limit: usize) -> Self {
         let total_matches = matches.len();
         Self {
@@ -429,6 +455,7 @@ impl LookupResult {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn ambiguous(query: String, matches: Vec<LookupEntry>, limit: usize) -> Self {
         let total_matches = matches.len();
         Self {
@@ -445,6 +472,8 @@ impl LookupResult {
     }
 }
 
+// Frozen presentation-rank oracle for the compiler-owned hosted migration.
+#[cfg(test)]
 fn bounded_matches(
     mut matches: Vec<LookupEntry>,
     limit: usize,
@@ -549,180 +578,167 @@ fn resolved_contract(module: Option<&str>, name: &str, live_modules: &[String]) 
 
 pub(crate) fn resolve(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
-    inspected: Vec<InspectionResult>,
+    mut inspected: std::collections::BTreeMap<
+        usize,
+        tidepool_runtime::session::inspection::HostedLookupAnswer,
+    >,
     live_modules: &[String],
     workspace_modules: &[String],
     usage_pointers: crate::UsagePointerTable,
 ) -> crate::lookup_tool::LookupResponse {
-    const MATCH_LIMIT: usize = 20;
-    let mut inspected = inspected.into_iter();
+    use tidepool_runtime::session::inspection::{
+        HostedLookupAnswer, SelectedLookupAnswer, SelectedMatches,
+    };
+    fn map_selected<A, B>(
+        selected: SelectedMatches<A>,
+        map: impl FnMut(A) -> B,
+    ) -> SelectedMatches<B> {
+        SelectedMatches {
+            entries: selected.entries.into_iter().map(map).collect(),
+            observed: selected.observed,
+            limit: selected.limit,
+        }
+    }
     let results = prepared
         .into_iter()
-        .map(|prepared| match prepared.kind {
-            PreparedLookupKind::Rejected(diagnostic) => LookupResult {
-                query: prepared.query,
+        .enumerate()
+        .map(|(ordinal, prepared)| {
+            let rejected = |diagnostic| LookupResult {
+                query: prepared.query.clone(),
                 outcome: LookupOutcome::Rejected { diagnostic },
-            },
-            PreparedLookupKind::Doc(topic) => {
-                match crate::prompt_catalog::workbench_doc(&topic, workspace_modules) {
-                    Ok(body) => LookupResult::found(
-                        prepared.query,
-                        vec![LookupEntry {
-                            name: topic,
-                            defining_module: None,
-                            kind: LookupEntryKind::Documentation,
-                            signature_or_declaration: body.into(),
-                            origin: LookupOrigin::Documentation,
-                            quality: MatchQuality::Exact,
-                            availability:
-                                tidepool_runtime::session::InspectionAvailability::Unknown,
-                            usage_pointer: None,
-                            contract: None,
-                        }],
-                        MATCH_LIMIT,
-                    ),
-                    Err(diagnostic) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
+            };
+            match prepared.kind {
+                PreparedLookupKind::Rejected(diagnostic) => rejected(diagnostic),
+                PreparedLookupKind::Doc(topic) => {
+                    match crate::prompt_catalog::workbench_doc(&topic, workspace_modules) {
+                        Ok(body) => LookupResult::selected(
+                            prepared.query,
+                            SelectedMatches {
+                                observed: 1,
+                                limit: 20,
+                                entries: vec![LookupEntry {
+                                    name: topic,
+                                    defining_module: None,
+                                    kind: LookupEntryKind::Documentation,
+                                    signature_or_declaration: body.into(),
+                                    origin: LookupOrigin::Documentation,
+                                    quality: MatchQuality::Exact,
+                                    availability:
+                                        tidepool_runtime::session::InspectionAvailability::Unknown,
+                                    usage_pointer: None,
+                                    contract: None,
+                                }],
+                            },
+                            false,
+                        ),
+                        Err(diagnostic) => rejected(diagnostic),
+                    }
                 }
-            }
-            PreparedLookupKind::Name(_) | PreparedLookupKind::Qualified(_) => {
-                let module_interpretation =
-                    matches!(prepared.kind, PreparedLookupKind::Qualified(_));
-                match inspected.next() {
-                    Some(InspectionResult::Lookup {
-                        answer: LookupAnswer::Info(entries) | LookupAnswer::Module { entries, .. },
-                        ..
-                    }) => LookupResult::found(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::Lookup {
-                        answer: LookupAnswer::Ambiguous(entries),
-                        ..
-                    }) => LookupResult::ambiguous(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::Lookup {
-                        answer: LookupAnswer::Missing { export_names },
-                        ..
-                    }) => {
-                        let leaf = prepared.query.rsplit('.').next().unwrap_or(&prepared.query);
-                        let suggestions = near_matches(leaf, &export_names, 5);
-                        LookupResult {
-                            query: prepared.query,
-                            outcome: LookupOutcome::NotFound {
-                                attempted: if module_interpretation {
-                                    vec![LookupInterpretation::Name, LookupInterpretation::Module]
-                                } else {
-                                    vec![LookupInterpretation::Name]
+                PreparedLookupKind::Name(_)
+                | PreparedLookupKind::Qualified(_)
+                | PreparedLookupKind::Type(_) => {
+                    let module_interpretation =
+                        matches!(prepared.kind, PreparedLookupKind::Qualified(_));
+                    match inspected.remove(&ordinal) {
+                        Some(
+                            HostedLookupAnswer::Name { answer, .. }
+                            | HostedLookupAnswer::Reference { answer, .. },
+                        ) => match answer {
+                            SelectedLookupAnswer::Info(entries)
+                            | SelectedLookupAnswer::Module {
+                                matches: entries, ..
+                            } => LookupResult::selected(
+                                prepared.query,
+                                map_selected(entries, |entry| {
+                                    info_lookup_entry(entry, live_modules, &usage_pointers)
+                                }),
+                                false,
+                            ),
+                            SelectedLookupAnswer::Ambiguous(entries) => LookupResult::selected(
+                                prepared.query,
+                                map_selected(entries, |entry| {
+                                    info_lookup_entry(entry, live_modules, &usage_pointers)
+                                }),
+                                true,
+                            ),
+                            SelectedLookupAnswer::Missing { export_names } => {
+                                let leaf =
+                                    prepared.query.rsplit('.').next().unwrap_or(&prepared.query);
+                                let suggestions = near_matches(leaf, &export_names, 5);
+                                LookupResult {
+                                    query: prepared.query,
+                                    outcome: LookupOutcome::NotFound {
+                                        attempted: if module_interpretation {
+                                            vec![
+                                                LookupInterpretation::Name,
+                                                LookupInterpretation::Module,
+                                            ]
+                                        } else {
+                                            vec![LookupInterpretation::Name]
+                                        },
+                                        suggestions,
+                                    },
+                                }
+                            }
+                            SelectedLookupAnswer::ModuleNotFound(_) => LookupResult {
+                                query: prepared.query,
+                                outcome: LookupOutcome::NotFound {
+                                    attempted: if module_interpretation {
+                                        vec![
+                                            LookupInterpretation::Name,
+                                            LookupInterpretation::Module,
+                                        ]
+                                    } else {
+                                        vec![LookupInterpretation::Name]
+                                    },
+                                    suggestions: vec![],
                                 },
-                                suggestions,
                             },
+                        },
+                        Some(HostedLookupAnswer::Type { matches, .. }) if matches.observed == 0 => {
+                            LookupResult {
+                                query: prepared.query,
+                                outcome: LookupOutcome::NotFound {
+                                    attempted: vec![LookupInterpretation::TypeSearch],
+                                    suggestions: vec![],
+                                },
+                            }
                         }
+                        Some(HostedLookupAnswer::Type { matches, .. }) => LookupResult::selected(
+                            prepared.query,
+                            map_selected(matches, |entry| LookupEntry {
+                                contract: resolved_contract(
+                                    entry.module.as_deref(),
+                                    &entry.name,
+                                    live_modules,
+                                ),
+                                name: entry.name.clone(),
+                                defining_module: entry.module.clone(),
+                                kind: LookupEntryKind::Value,
+                                signature_or_declaration: format!(
+                                    "{} :: {}",
+                                    entry.name, entry.signature
+                                ),
+                                origin: lookup_origin(entry.module.as_deref(), live_modules),
+                                quality: match entry.quality {
+                                    TypeMatchQuality::Exact => MatchQuality::Exact,
+                                    TypeMatchQuality::Usable => MatchQuality::Usable,
+                                },
+                                availability: entry.availability,
+                                usage_pointer: crate::usage_pointer::pointer_for(
+                                    &usage_pointers,
+                                    &entry.name,
+                                ),
+                            }),
+                            false,
+                        ),
+                        Some(HostedLookupAnswer::Rejected { diagnostic, .. }) => {
+                            rejected(diagnostic)
+                        }
+                        None => rejected("lookup worker omitted a result".into()),
                     }
-                    Some(InspectionResult::Lookup {
-                        answer: LookupAnswer::ModuleNotFound(_),
-                        ..
-                    }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: if module_interpretation {
-                                vec![LookupInterpretation::Name, LookupInterpretation::Module]
-                            } else {
-                                vec![LookupInterpretation::Name]
-                            },
-                            suggestions: vec![],
-                        },
-                    },
-                    Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
-                    Some(other) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: format!(
-                                "lookup worker returned unexpected result: {other:?}"
-                            ),
-                        },
-                    },
-                    None => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: "lookup worker omitted a result".into(),
-                        },
-                    },
                 }
             }
-            PreparedLookupKind::Type(_) => match inspected.next() {
-                Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
-                    LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::TypeSearch],
-                            suggestions: Vec::new(),
-                        },
-                    }
-                }
-                Some(InspectionResult::TypeMatches { matches, .. }) => LookupResult::found(
-                    prepared.query,
-                    matches
-                        .into_iter()
-                        .map(|entry| LookupEntry {
-                            contract: resolved_contract(
-                                entry.module.as_deref(),
-                                &entry.name,
-                                live_modules,
-                            ),
-                            name: entry.name.clone(),
-                            defining_module: entry.module.clone(),
-                            kind: LookupEntryKind::Value,
-                            signature_or_declaration: format!(
-                                "{} :: {}",
-                                entry.name, entry.signature
-                            ),
-                            origin: lookup_origin(entry.module.as_deref(), live_modules),
-                            quality: match entry.quality {
-                                TypeMatchQuality::Exact => MatchQuality::Exact,
-                                TypeMatchQuality::Usable => MatchQuality::Usable,
-                            },
-                            availability: entry.availability,
-                            usage_pointer: crate::usage_pointer::pointer_for(
-                                &usage_pointers,
-                                &entry.name,
-                            ),
-                        })
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-                Some(other) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
-                    },
-                },
-                None => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: "lookup worker omitted a result".into(),
-                    },
-                },
-            },
         })
         .collect();
     fn info_lookup_entry(

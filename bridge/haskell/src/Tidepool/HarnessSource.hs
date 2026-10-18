@@ -14,7 +14,7 @@ import System.IO (IOMode(ReadMode), hGetContents, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (FileStatus, deviceID, fileID, getFileStatus)
 import System.Posix.Types (DeviceID, FileID)
-import Tidepool.ExtractRequest (WorkerRequest(..))
+import Tidepool.ExtractRequest (WorkerRequest(..), RequestOperation(..), admitRequestOperation)
 
 -- | Prepend the harness language profile to scratch input copies. Inspection
 -- requests profile every singleton fallback and their optional batch source;
@@ -37,7 +37,7 @@ spliceHarnessProfilePragma args = case requestFiles args of
           createDirectoryIfMissing True directory
           writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ source)
           pure scratchPath
-    if null (requestInspections args)
+    if admitRequestOperation args /= Right InspectionOperation
       then do
         scratchPath <- profileCopy outDir file
         pure args { requestFiles = scratchPath : rest }
