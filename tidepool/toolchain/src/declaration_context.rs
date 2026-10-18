@@ -20402,10 +20402,16 @@ mod tests {
                 .rebuild(|facts| facts.compiler_support = support),
         );
         drop(hidden_output);
+        let lowerings = NATIVE_TRANSPORT_LOWERINGS.with(|count| count.get());
         let continued = physical
             .program_admission()
             .in_program_context(context.clone())
             .unwrap();
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(|count| count.get()),
+            lowerings,
+            "host continuation must not lower physical compiler transport"
+        );
         assert!(continued
             .compiler_inputs()
             .metadata
