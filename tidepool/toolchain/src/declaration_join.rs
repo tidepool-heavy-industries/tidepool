@@ -1102,7 +1102,8 @@ fn require_owned_artifact_paths(
     Ok(())
 }
 
-/// Validate the exact owned implementation closure and retain a sealed result.
+/// Certify the owner's exact interface observation and retain its native context.
+/// The worker attests interface semantics, not unconsumed native bodies or scopes.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
 pub fn certify_declaration_join(
     spec: DeclarationJoinSpec,
@@ -2659,6 +2660,163 @@ mod authored_tests {
         )
         .unwrap();
         let producer = context.toolchain_identity_sha256();
+        // Independent issuances can have the same GHC interface observation
+        // while retaining different exact native carrier and Group bindings.
+        let mut branch_groups = Vec::new();
+        let mut branch_joins = Vec::new();
+        let mut interface_observation = None;
+        for marker in ["JoinScopeLeft", "JoinScopeRight"] {
+            let inventory = ArtifactInventory::default();
+            let mut entries = context.artifact_view().entries();
+            entries.push(Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    "fixture",
+                    marker,
+                    BTreeMap::new(),
+                ),
+            )));
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .expect("independent join scope requires the complete native input closure");
+            let branch = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                context.compiler_input_projection().clone(),
+                context.lexical_graph().to_vec(),
+                owner.clone(),
+                &[],
+            )
+            .unwrap();
+            let graph = branch.artifact_view().capture_graph_selection();
+            let original_id = branch.authored_native_root(1).unwrap();
+            let carrier = *graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == original_id)
+                .unwrap();
+            let groups = graph
+                .native_groups
+                .iter()
+                .filter(|group| group.binding.artifact() == original_id)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            assert!(!groups.is_empty());
+            if let Some((previous_carrier, previous_groups)) = branch_groups.first() {
+                assert_ne!(
+                    &carrier, previous_carrier,
+                    "independent scopes must differ before the second compiler operation"
+                );
+                assert!(
+                    groups.is_disjoint(previous_groups),
+                    "same-key Group issuers must differ before testing their retention"
+                );
+            }
+            let scratch = Arc::new(tempfile::tempdir().unwrap());
+            let join_inputs = branch.declaration_join_inputs(scratch.clone()).unwrap();
+            let observation = join_inputs
+                .artifacts()
+                .iter()
+                .map(|row| {
+                    (
+                        row.interface.unit.clone(),
+                        row.interface.module.clone(),
+                        row.interface.sha256.clone(),
+                        row.interface.requirements.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(observation.iter().all(|(_, module, _, _)| module != marker));
+            match &interface_observation {
+                Some(previous) => assert_eq!(&observation, previous),
+                None => interface_observation = Some(observation),
+            }
+            let anchor = join_inputs.interface(&owner).unwrap();
+            let spec = DeclarationJoinSpec {
+                expected_public_version: "same-interface-observation".into(),
+                public_module: None,
+                private_base: None,
+                private_tip: Some(ModuleSnapshot {
+                    module: owner.module.clone(),
+                    path: anchor.path.clone(),
+                    sha256: anchor.sha256.clone(),
+                }),
+                writes: vec![],
+                reserved: ReservedJoin {
+                    unit: "main".into(),
+                    module: "SameInterfaceJoin".into(),
+                    path: scratch.path().join("joined.hi"),
+                },
+                expected_exports: certificate.lexical_exports().to_vec(),
+                expected_instances: certificate.instances().clone(),
+                family_closure: certificate.family_closure().to_vec(),
+            };
+            let CertifiedDeclarationJoin::Accepted(joined) =
+                crate::artifacts::test_support::with_settlement(|settlement| {
+                    certify_declaration_join(
+                        spec,
+                        join_inputs,
+                        &[source_root.path().to_path_buf()],
+                        source_root.path(),
+                        settlement,
+                    )
+                })
+                .unwrap()
+            else {
+                panic!("same interface observation must pass its actual owner operation")
+            };
+            drop(branch);
+            drop(view);
+            drop(inventory);
+            let scratch_path = scratch.path().to_path_buf();
+            drop(scratch);
+            assert!(
+                !scratch_path.try_exists().unwrap(),
+                "the actual branch request directory must be released"
+            );
+            let retained = joined.context().artifact_view().capture_graph_selection();
+            assert!(retained.namespace.contains(&carrier));
+            assert_eq!(
+                retained
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact() == original_id)
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                groups
+            );
+            assert_eq!(
+                joined.context().authored_native_root(1).unwrap(),
+                original_id
+            );
+            joined.native_binding_custody_requirements().unwrap();
+            branch_groups.push((carrier, groups));
+            branch_joins.push(joined);
+        }
+        // Both accepted owners stay live: issuing the second cannot replace
+        // the first one's equal-payload carrier or exact native Group choices.
+        for (joined, (carrier, groups)) in branch_joins.iter().zip(&branch_groups) {
+            let retained = joined.context().artifact_view().capture_graph_selection();
+            assert!(retained.namespace.contains(carrier));
+            assert_eq!(
+                retained
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact() == carrier.artifact)
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                *groups
+            );
+        }
+        assert_ne!(
+            branch_groups[0].0, branch_groups[1].0,
+            "equal interface and native bytes must exercise distinct actual carrier scopes"
+        );
+        assert!(
+            branch_groups[0].1.is_disjoint(&branch_groups[1].1),
+            "the two actual joins must retain their independently issued native Groups"
+        );
+
         let hidden = ["Expr", owner.module.as_str()].map(|module| {
             Arc::new(ArtifactEntry::canonical(
                 crate::certified_products::fixture_module_interface(
