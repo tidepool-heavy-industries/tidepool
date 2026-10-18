@@ -1762,10 +1762,6 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
         );
         let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
         let accepted = &admitted.recovery_products[0];
-        assert!(Arc::ptr_eq(
-            original.facts().unwrap(),
-            accepted.facts().unwrap()
-        ));
         assert_eq!(
             accepted.source_sha256(),
             Some(super::super::super::parse_sha(&bundle.source_sha256).unwrap())
@@ -1791,6 +1787,12 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
             accepted.facts().unwrap(),
             issued.recovery_products[0].facts().unwrap()
         ));
+        // Keep semantic comparison before the reuse assertion so a no-reuse
+        // sensitivity mutant distinguishes lost sharing from changed output.
+        assert!(
+            Arc::ptr_eq(original.facts().unwrap(), accepted.facts().unwrap()),
+            "exact catalog admission must retain its issued facts"
+        );
 
         let durable = tempfile::tempdir().unwrap();
         let producer = accepted.module_interface().unwrap().producer_sha256();
