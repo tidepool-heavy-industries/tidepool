@@ -1,0 +1,47 @@
+# Merge these tables into the operator's workspace config.toml before launch.
+# Retain existing launch/browser/storage settings. References name external secrets.
+[inference]
+profile = "argon"
+
+[inference.providers.gemini]
+backend = "gemini_interactions"
+credential_env = "GEMINI_API_KEY"
+
+[inference.providers.deepseek]
+backend = "deepseek"
+credential_env = "DEEPSEEK_API_KEY"
+
+[inference.models.argon]
+provider = "gemini"
+model = "gemini-4-argon"
+constructor = "Argon"
+effort = "high"
+
+[inference.models.flash]
+provider = "deepseek"
+model = "deepseek-flash"
+constructor = "Flash"
+effort = "high"
+
+[inference.models.pro]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+constructor = "Pro"
+effort = "high"
+
+[inference.profiles.argon]
+default = "argon"
+allowed = ["argon", "flash", "pro"]
+
+[haskell]
+source_roots = [".", "workspace"]
+modules = ["Persona.Memory", "Persona.Web", "Persona.Context", "Persona.Orientation"]
+spec = "AgentSpec.agentSpec"
+
+[haskell.flake_sources]
+jev-dsl = ["core"]
+
+[prompts]
+base = "prompts/base.md"
+agent = "prompts/agent.md"
+api_guide = "prompts/api-guide.md"

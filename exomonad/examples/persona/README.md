@@ -3,12 +3,10 @@
 An open-ended companion and peer, authored in Haskell on Exomonad's existing
 conversation and browser. Its character and ways of working emerge through
 shared history, curiosity and human steering. The seed supplies no name, voice,
-interests or activity program. The operator has selected `gpt-6-astra` with
-`medium` effort; changing the root model/effort remains outside the companion's autonomy.
-Helpers preferentially use the configured `Luna`/`Sol` selectors; `Astra` context forks
-remain available. The prompt states the root-model boundary; the existing context effect also contains
-model-selection operations, so this is an instruction, not a new per-operation
-runtime restriction. Haskell is an expressive medium it can use to develop
+interests or activity program. The operator selects the conversational model and
+allowed helpers through a launch profile. The conversational model stays fixed;
+the companion can choose its next reasoning effort and use admitted helpers for
+individual calls. Haskell is an expressive medium it can use to develop
 its own tools, context, interfaces and methods. The seed invites an embodied
 understanding of the whole system: tools supply perception and action; memory,
 context, profile and harness shape what it can notice and do. Technical work has
@@ -17,8 +15,12 @@ from conversation, use and curiosity.
 
 Start with a normal `exomonad new` workspace using this Tidepool build's pinned
 shared-source workspace. Copy this seed's `.exomonad/Persona`, `AgentSpec.hs`,
-and `prompts` into that workspace. Merge the seed `config.toml`'s Haskell and
-prompt settings with the operator's existing launch/provider settings. Keep the
+and `prompts` into that workspace. Merge the seed’s Haskell and prompt settings
+with the operator’s existing launch settings. For an Argon conversation with DeepSeek Flash and Pro helpers, use
+[config.argon.toml](.exomonad/config.argon.toml) as the inference/Haskell/prompt
+fragment; replace old `[defaults]` and `[models]` selections when adopting its
+`[inference]` catalog. The host reads the merged `.exomonad/config.toml`; the
+alternative filename supplies a sample for that merge. Keep the
 live workspace's configuration separate while preparing this alternative.
 The seed supplies both `prompts/base.md` and `prompts/agent.md`. The workspace
 base override carries composition and lifecycle guidance for an open-ended
@@ -30,6 +32,27 @@ ancestor suggestions remain optional ordinary files under
 Keep the shared workspace at `.exomonad/workspace`; it supplies the pinned Jev facade.
 Do not copy run history or another companion's `.exomonad/state` accidentally.
 Run the normal workspace check and frozen-bundle qualification before launching.
+
+The Argon sample names `GEMINI_API_KEY` and `DEEPSEEK_API_KEY` in the host launch
+environment. A provider may instead select one absolute `credential_file` path;
+select exactly one credential reference per provider and keep secret values out
+of source. Omitting `endpoint` uses the provider’s official endpoint. The Gemini
+route admits only `gemini-4-argon`, with `low`, `medium`, or `high` effort.
+
+The selected profile freezes the model catalog for the run. Its generated
+`Exomonad.Models` module exposes the closed `Model` choices, `primaryModel`, and
+`allowedModels`. Each constructor takes its provider’s typed options, such as
+`ArgonOptions` or `DeepSeekOptions`. `Model.withModel` selects that coupled model
+and effort for a helper call. `setNextEffort` accepts the conversational model’s
+effort type; it cannot switch that model. Source reload cannot add providers or
+models to the frozen catalog. Change launch configuration for a new run.
+The persona can still author its Haskell policies after arriving.
+
+Gemini uses the native Interactions API with stateless requests (`store=false`)
+and locally retained history. Google documents [stateless Interactions](https://ai.google.dev/gemini-api/docs/interactions-overview)
+and [thought blocks and signatures](https://ai.google.dev/gemini-api/docs/thinking).
+Thought summaries and opaque signatures remain distinct; the transport preserves
+the provider continuation data through tool continuations and transcript replay.
 
 Set `TAVILY_API_KEY` in the host launch environment. The host forwards it using
 its existing environment owner; it is never passed as a Haskell argument.
@@ -63,6 +86,8 @@ separators and traversal names refuse; filesystem authority remains with File.
 `Persona.Context.refresh` explicitly reads the current files and replaces that
 authored block using its issued context reference. A missing or unpublished
 block refuses; writing memory does not automatically refresh the current view.
+Observe the refresh’s settled context in the next notebook cell. `getContext`
+text lengths measure characters, not exact provider token usage.
 The renderer is a small Haskell function the companion can edit and reload.
 There is no memory graph, selection planner or attention actor to maintain.
 
@@ -94,7 +119,9 @@ relative to the original site; this is not a browser or JavaScript executor.
 retrieval. The result retains the original page, selected and omitted passages,
 uncertain passages, judgment evidence, model, usage, diagnostics, and context used.
 A failed Jev call marks all passages uncertain. It never reports a false empty
-selection as if it were a successful judgment. Notebook values last for the
+selection as if it were a successful judgment. Model receipts retain optional
+provider token counts; missing counts remain unknown. Reported output includes
+reasoning tokens, so do not add reasoning counts to output again. Notebook values last for the
 machine session; save useful excerpts in notes for continuity across runs.
 
 Exploration runs during human interactions and their ongoing work. No autonomous
@@ -112,7 +139,8 @@ The focused native Haskell suite compiles the actual seed and exercises memory
 initialisation, form decoding, sliders, and retained page windows. Native handler
 tests cover retrieval configuration and content identity. Harness tests cover
 local interaction, selected drafts, and wire refusal. A live companion session requires a qualified matched bundle and provider credentials; unit tests
-do not establish persona quality or semantic relevance.
+do not establish persona quality or semantic relevance. Live Gemini and DeepSeek
+checks are deferred until operator credentials are available.
 
 Observe what develops across conversations and how earlier experience changes
 later attention, authored code, context or interaction. Compare prompting
