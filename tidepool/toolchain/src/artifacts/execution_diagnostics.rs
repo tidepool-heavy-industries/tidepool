@@ -108,8 +108,12 @@ fn diagnostic_root() -> io::Result<Option<PathBuf>> {
     if std::env::var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref() != Ok("1") {
         return Ok(None);
     }
-    if !compiler_capture_enabled(std::env::var_os("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref())?
-    {
+    let capture = compiler_capture_enabled(
+        std::env::var_os("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref(),
+    )?;
+    tracing::debug!(target: "exomonad_harness::timing", capture,
+        "compiler diagnostic capture policy applied");
+    if !capture {
         return Ok(None);
     }
     let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
