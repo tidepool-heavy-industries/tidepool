@@ -5253,6 +5253,14 @@ mod tests {
             .as_ref()
             .expect("required original has native bytes");
         assert_eq!(std::fs::read(&body.path).unwrap(), expected_native);
+        let owned_path = body.path.clone();
+        drop(request);
+        drop(receiving);
+        drop(captured);
+        assert!(
+            !owned_path.try_exists().unwrap(),
+            "the last selected value/request owner releases its private materialization"
+        );
     }
 
     #[test]
