@@ -38,6 +38,17 @@ fn fixture(
     Arc<ArtifactEntry>,
     Arc<PublishedSourceOriginalSelection>,
 ) {
+    fixture_with_helper_version(initial, 1)
+}
+
+fn fixture_with_helper_version(
+    initial: usize,
+    helper_version: u8,
+) -> (
+    Arc<ArtifactEntry>,
+    Arc<ArtifactEntry>,
+    Arc<PublishedSourceOriginalSelection>,
+) {
     let producer = [2; 32];
     let helper = Arc::new(
         ArtifactEntry::original(
@@ -47,7 +58,7 @@ fn fixture(
                     crate::certified_products::tests::original_groups_fixture_with_interface(
                         "HistoryHelper",
                         vec![(7, vec![])],
-                        1,
+                        helper_version,
                         &BTreeMap::new(),
                         b"HistoryHelper interface".to_vec(),
                     ),
@@ -538,4 +549,96 @@ fn published_role_refuses_missing_issuer_selection() {
         serde_json::from_value::<Vec<CompilerInputRole>>(roles).is_err(),
         "legacy publication facts cannot reconstruct the issuer's selection from broader custody"
     );
+}
+
+proptest! {
+    #![proptest_config(property_config())]
+    #[test]
+    fn published_source_narrowing_preserves_native_dependency_custody(
+        initial in 1usize..ORDINALS.len(), rounds in 1usize..5,
+    ) {
+        use fvm_ipld_blockstore::Blockstore;
+        let (root, helper, publication) = fixture(initial);
+        let original = publication.context();
+        let expected_graph = original.artifact_view().capture_graph_selection();
+        let expected_edges = original.artifact_view().binding_dependencies();
+        let expected_role = original.compiler_input_roles().into_iter()
+            .find(|role| role.is_published_source_original()).unwrap();
+        let helper_role = original.compiler_input_roles().into_iter()
+            .find(|role| role.original() == Some(helper.descriptor.id)).unwrap();
+        let canonical = helper_role.interface();
+        let canonical_binding = *expected_graph.namespace.iter()
+            .find(|binding| binding.artifact == canonical).unwrap();
+        prop_assert!(expected_graph.native_groups.iter()
+            .any(|group| group.binding.artifact() == helper.descriptor.id));
+        let owners = BTreeSet::from([root.descriptor.owner.clone()]);
+        let mut context = original.as_ref().clone();
+        for _ in 0..rounds {
+            // Narrow through the owning source operation, preserving its rows,
+            // offers and exact graph rather than reconstructing fixture roles.
+            let support = context.compiler_source_support().source_support(&owners).unwrap();
+            let role = support.projection().roles().into_iter()
+                .find(|role| role.interface() == canonical).unwrap();
+            prop_assert_eq!(role.original(), None);
+            let graph = support.artifacts().capture_graph_selection();
+            prop_assert!(graph.namespace.contains(&canonical_binding));
+            for binding in &expected_graph.bindings {
+                prop_assert!(graph.bindings.contains(binding));
+            }
+            for group in &expected_graph.native_groups {
+                prop_assert!(graph.native_groups.contains(group));
+            }
+            let edges = support.artifacts().binding_dependencies();
+            for edge in &expected_edges {
+                prop_assert!(edges.contains(edge));
+            }
+            context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
+            let roles = context.compiler_input_roles();
+            prop_assert!(roles.contains(&expected_role));
+            prop_assert!(roles.iter().any(|role| role.interface() == canonical && role.original().is_none()));
+            let reopened = context.published_source_original_selections().unwrap();
+            prop_assert_eq!(reopened.len(), 1);
+            prop_assert!(reopened[0].context().compiler_input_roles().contains(&expected_role));
+
+            let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+            let mut writer = crate::exact_context::Materializer::new(&store);
+            let persisted = writer.materialize_context(None, &context.snapshot()).unwrap();
+            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+            let view = context.artifact_view();
+            let graph = view.capture_graph_selection();
+            let scratch = tempfile::tempdir().unwrap();
+            let (products, interfaces) = context
+                .materialize_recovery_products_and_interfaces(scratch.path()).unwrap();
+            let inventory = RecoveredArtifactInventory::capture_bound(
+                scratch.path(), &products, &interfaces, &[], &[],
+                &view.descriptors(), &graph.bindings, &view.binding_dependencies(),
+            ).unwrap();
+            let acquired = crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
+            context = inventory.context_for_expected_snapshot(persisted.root(), &acquired).unwrap();
+            prop_assert_eq!(context.compiler_input_roles(), roles);
+            prop_assert!(context.published_source_original_selections().unwrap()[0]
+                .context().compiler_input_roles().contains(&expected_role));
+        }
+        // A separately authenticated native version with the same canonical
+        // interface is still a real selected-original conflict, not type-only custody.
+        let (_, other_helper, other_publication) = fixture_with_helper_version(initial, 2);
+        prop_assert_eq!(other_helper.descriptor.interface_sha256, helper.descriptor.interface_sha256);
+        prop_assert_ne!(other_helper.descriptor.id, helper.descriptor.id);
+        let other = other_publication.context().compiler_source_support()
+            .source_support(&BTreeSet::from([helper.descriptor.owner.clone()])).unwrap();
+        prop_assert!(other.projection().roles().iter()
+            .any(|role| role.interface() == canonical
+                && role.original() == Some(other_helper.descriptor.id)));
+        let before = context.semantic_sha256();
+        let Err(CompileError::ExtractFailed(detail)) =
+            context.clone().extend_issued_compiler_support(&other)
+        else { panic!("a competing selected original must refuse publication reopening") };
+        prop_assert!(detail.starts_with("exact declaration context: published selection changes a selected original dependency"));
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.owner)));
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.id)));
+        prop_assert!(detail.contains(&format!("{:?}", other_helper.descriptor.id)));
+        prop_assert_eq!(context.semantic_sha256(), before);
+    }
 }
