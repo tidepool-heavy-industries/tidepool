@@ -6074,13 +6074,17 @@ impl ArtifactView {
                 }
             }
         }
-        let mut custody = retained_ids
-            .difference(&initial)
-            .map(|id| {
-                self.resolve_binding(*id, owned)
-                    .map(InventoryNodeKey::Artifact)
+        // Hidden native dependencies preserve every owned issuer as custody;
+        // the explicit publication namespace remains the source choice.
+        let mut custody = owned
+            .iter()
+            .copied()
+            .filter(|node| {
+                matches!(node, InventoryNodeKey::Artifact(binding)
+                if retained_ids.contains(&binding.artifact)
+                    && !initial.contains(&binding.artifact))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
             InventoryNodeKey::Group(group) if group.binding.artifact() != original && ids.contains(&group.binding.artifact()))));
         if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact() == original)) {
@@ -6375,15 +6379,14 @@ impl ArtifactView {
             .into_iter()
             .filter(|node| !selected_nodes.contains(node))
             .collect::<Vec<_>>();
-        custody_roots.extend(
-            retained_ids
-                .difference(&initial)
-                .map(|id| {
-                    self.resolve_binding(*id, owned)
-                        .map(InventoryNodeKey::Artifact)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        // These dependencies retain bytes, not a compiler or execution choice.
+        // Every required id came from native_owners built from this owned graph.
+        // Preserve each exact issuer instead of resolving its shared payload id.
+        custody_roots.extend(owned.iter().copied().filter(|node| {
+            matches!(node, InventoryNodeKey::Artifact(binding)
+                if retained_ids.contains(&binding.artifact)
+                    && !initial.contains(&binding.artifact))
+        }));
         let retained_nodes =
             admitted_closure(&state, selected.iter().chain(custody_roots.iter()).copied());
         custody_roots.extend(owned.iter().copied().filter(|node| {
@@ -14892,6 +14895,185 @@ mod tests {
         drop(restored);
         drop(restored_old);
         assert_eq!(recovery.node_count(), 0);
+    }
+
+    fn check_hidden_native_custody_bindings(branches: usize, reverse: bool, publication: bool) {
+        let inventory = ArtifactInventory::default();
+        let hidden = Arc::new(issued_native_groups(
+            "HiddenCustody",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let root = Arc::new(issued_native_groups(
+            "CustodyRoot",
+            if publication {
+                vec![(0, vec![]), (9, vec![issued_source(&hidden, 7)])]
+            } else {
+                vec![(0, vec![issued_source(&hidden, 7)])]
+            },
+            &[],
+            &BTreeMap::new(),
+        ));
+        let ArtifactPayload::Original(product) = &root.payload else {
+            unreachable!()
+        };
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            product.module_interface().unwrap().clone(),
+        ));
+        let mut issuers = (0..branches)
+            .map(|index| {
+                inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        vec![
+                            root.clone(),
+                            hidden.clone(),
+                            Arc::new(entry(&format!("CustodyBranch{index}"), &[])),
+                        ],
+                        &BTreeSet::from([
+                            NativeGroupKey {
+                                artifact: root.descriptor.id,
+                                original_ordinal: 0,
+                            },
+                            NativeGroupKey {
+                                artifact: hidden.descriptor.id,
+                                original_ordinal: 7,
+                            },
+                        ]),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        if reverse {
+            issuers.reverse();
+        }
+        let roles = CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap();
+        let mut broad = if publication {
+            issuers[0]
+                .with_compiler_projection(&roles)
+                .unwrap()
+                .select_publication_roots(
+                    root.descriptor.id,
+                    vec![root.descriptor.id, canonical.descriptor.id],
+                )
+                .unwrap()
+        } else {
+            issuers[0]
+                .select_roots(vec![canonical.descriptor.id])
+                .unwrap()
+                .with_compiler_projection(&roles.interface_only())
+                .unwrap()
+        };
+        for issued in &issuers {
+            broad = broad.retain_custody(issued).unwrap();
+        }
+        assert!(!broad.contains_namespace_artifact(hidden.descriptor.id));
+        let before = broad.capture_graph_selection();
+        let expected_hidden = before
+            .bindings
+            .iter()
+            .copied()
+            .filter(|binding| binding.artifact == hidden.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_hidden.len(), branches);
+        let canonical_binding = before
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == canonical.descriptor.id)
+            .copied()
+            .unwrap();
+        assert!(before.selections.iter().flat_map(|scope| &scope.dependencies)
+            .any(|(source, target, edge)| matches!((source, target, edge),
+                (ArtifactBindingNode::Artifact(binding), ArtifactBindingNode::Artifact(carrier), ArtifactDependency::Interface)
+                if binding.artifact == root.descriptor.id && *carrier == canonical_binding)));
+        let expected_groups = broad.selected_native_groups();
+        assert_eq!(
+            expected_groups,
+            if publication {
+                BTreeSet::from([NativeGroupKey {
+                    artifact: root.descriptor.id,
+                    original_ordinal: 0,
+                }])
+            } else {
+                BTreeSet::new()
+            }
+        );
+        let selected = if publication {
+            broad
+                .select_publication_roots(
+                    root.descriptor.id,
+                    vec![root.descriptor.id, canonical.descriptor.id],
+                )
+                .unwrap()
+        } else {
+            broad.select_roots(vec![canonical.descriptor.id]).unwrap()
+        };
+        let graph = selected.capture_graph_selection();
+        assert_eq!(
+            graph
+                .bindings
+                .iter()
+                .copied()
+                .filter(|binding| binding.artifact == hidden.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            expected_hidden,
+        );
+        assert_eq!(graph.namespace, broad.capture_graph_selection().namespace);
+        assert_eq!(selected.selected_native_groups(), expected_groups);
+        assert_eq!(graph.roots, before.roots);
+        assert!(graph
+            .selections
+            .iter()
+            .all(|scope| before.selections.contains(scope)));
+        assert!(matches!(selected.select_roots(vec![hidden.descriptor.id]),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == hidden.descriptor.id)));
+        assert!(
+            matches!(selected.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: hidden.descriptor.id, original_ordinal: 7,
+        }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            ArtifactInventoryFailure::NativeRootOutsideView { artifact } if artifact == hidden.descriptor.id))
+        );
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                selected.entries(),
+                &graph,
+                &selected.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        drop(selected);
+        drop(broad);
+        drop(issuers);
+        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        drop(recovered);
+        assert_eq!(recovered_inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn hidden_native_custody_preserves_independent_bindings_without_selection() {
+        check_hidden_native_custody_bindings(2, false, false);
+    }
+
+    #[test]
+    fn publication_custody_preserves_hidden_bindings_of_undemanded_bodies() {
+        check_hidden_native_custody_bindings(2, false, true);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn hidden_native_custody_histories_preserve_exact_graphs(
+            branches in 2usize..6,
+            reverse in proptest::bool::ANY,
+            publication in proptest::bool::ANY,
+        ) {
+            check_hidden_native_custody_bindings(branches, reverse, publication);
+        }
     }
 
     #[test]

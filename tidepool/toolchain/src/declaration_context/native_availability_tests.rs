@@ -3913,8 +3913,46 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
             &[],
         )
         .expect("the inventory issuer selects the explicit original and canonical pair");
+    let first_id = entries[0].descriptor.id;
+    let second_id = entries[1].descriptor.id;
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        selected
+            .selected_native_groups()
+            .iter()
+            .map(|group| group.artifact)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id, second_id]),
+        "the broad fixture selected both complete native censuses"
+    );
+    let selected = selected.select_roots(vec![first_id]).unwrap();
+    assert_eq!(
+        selected
+            .selected_native_groups()
+            .iter()
+            .map(|group| group.artifact)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id]),
+        "the explicit winner alone supplies executable demand"
+    );
+    let retained_originals = selected
+        .entries()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(_)
+            )
+        })
+        .map(|entry| entry.descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(retained_originals, BTreeSet::from([first_id, second_id]));
+    assert!(selected
+        .metadata_snapshot()
+        .ambiguous_native_owners
+        .contains(&identity("fixture", "AmbiguousNative")));
     let support = recover_fixture_compiler_support(
-        projection,
+        projection.clone(),
         selected,
         ambiguous
             .compiler_source_support()
@@ -3924,12 +3962,13 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .unwrap();
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert_eq!(ambiguous.compiler_input_projection(), &projection);
+    OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
     )
-    .is_ok());
+    .expect("explicit issued original remains usable beside historical custody");
     assert!(OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -5665,23 +5704,10 @@ fn replay_native_transport_history(
     let actual_request = ProtectedScaffoldRequirements::default()
         .compiler_inputs(&actual_context, Some(&private[0]))
         .unwrap();
-    let operation = PackageInterfaceValidation::default();
-    let actual_selection =
-        crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            &actual_request,
-            &actual_request.metadata,
-            &operation.inventory,
-        )
-        .unwrap();
-    let continuation =
-        ContinuationNativeInputs::from_selection(&actual_selection, actual_request.projection())
-            .unwrap();
-    let produced = OriginalCompilerInputs::issue_complete_native_availability_with_source(
-        &support,
-        actual_request.projection(),
+    let produced = OriginalCompilerInputs::from_checked_support_products(
+        &actual_request.shared_compiler_source_support(),
         producer.sha256(),
         std::slice::from_ref(&dependent),
-        CompleteAvailabilitySource::Request(&continuation),
     )
     .unwrap();
     coverage.dependent_issuances += 1;
@@ -8468,9 +8494,9 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .iter()
         .any(|offer| offer.is_full() && offer.original() == fresh_id));
 
-    // Exercise the continuation ingress with the actual physical request's
-    // opaque row owners, separately from candidate source-support issuance.
-    let issue_from_request = |context: &ExactDeclarationContext| {
+    // A continued input carries its issued row permissions. It has no new
+    // product receipt and cannot authorize a fresh body alongside those rows.
+    let continue_request = |context: &ExactDeclarationContext| -> Result<_, CompileError> {
         let request = ProtectedScaffoldRequirements::default().compiler_inputs(context, None)?;
         let validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -8479,15 +8505,25 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let continuation =
-            ContinuationNativeInputs::from_selection(&selection, request.projection())?;
-        OriginalCompilerInputs::issue_complete_native_availability_with_source(
-            &request.artifacts(),
-            &request.projection(),
-            producer.sha256(),
-            &candidates.native_availability,
-            CompleteAvailabilitySource::Request(&continuation),
-        )
+        assert!(selection
+            .complete_native_products(request.artifacts())
+            .map_err(compiler_evidence_failure)?
+            .is_empty());
+        let continued = OriginalCompilerInputs::from_selection(&selection, request.artifacts())?;
+        assert!(!continued
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == fresh_id));
+        let choices = selection
+            .native_group_candidates(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: 3,
+                },
+                dependency.owner(),
+            )
+            .map_err(compiler_evidence_failure)?;
+        Ok((continued, choices.bindings().clone()))
     };
     let mut carrier_graph = issued.capture_graph_selection();
     carrier_graph
@@ -8530,8 +8566,9 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .clone()
         .rebuild(|facts| facts.compiler_support = carrier_support);
     let before_carriers = carrier_context.artifact_view().capture_graph_selection();
-    let continued = issue_from_request(&carrier_context)
+    let (continued, choices) = continue_request(&carrier_context)
         .expect("the same request-owned Full remains valid beside carrier-only selection");
+    assert!(!choices.is_empty());
     assert!(continued
         .issued_artifacts()
         .selected_native_groups()
@@ -8543,10 +8580,11 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     assert!(continued
         .native_offers()
         .iter()
-        .any(|offer| offer.original() == fresh_id && offer.is_full()));
+        .any(|offer| offer.same_issuance(&full)));
 
-    let continued =
-        issue_from_request(&context).expect("request-owned Full supports fresh dependent body");
+    let (continued, choices) =
+        continue_request(&context).expect("request-owned Full keeps its exact available groups");
+    assert!(!choices.is_empty());
     assert!(continued
         .issued_artifacts()
         .selected_native_groups()
@@ -8554,7 +8592,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     assert!(continued
         .native_offers()
         .iter()
-        .any(|offer| offer.original() == fresh_id && offer.is_full()));
+        .any(|offer| offer.same_issuance(&full)));
 
     for (ordinals, expected) in [(vec![3], true), (vec![7], false), (vec![], false)] {
         let selected = ordinals
@@ -8631,22 +8669,20 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             BTreeSet::from([3, 7]),
             "physical body census stays complete even when issued availability is bounded"
         );
-        let continued = issue_from_request(&bounded_context);
+        let (continued, choices) = continue_request(&bounded_context).unwrap();
         assert_eq!(
-            continued.is_ok(),
+            !choices.is_empty(),
             expected,
-            "request-owned exact group3 is required independently of physical census"
+            "the actual request row independently permits group3, never its full physical census"
         );
-        if let Ok(continued) = continued {
-            assert!(continued
-                .issued_artifacts()
-                .selected_native_groups()
-                .is_empty());
-            assert!(continued
-                .native_offers()
-                .iter()
-                .any(|offer| offer.original() == fresh_id && offer.is_full()));
-        }
+        assert!(continued
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert!(continued
+            .native_offers()
+            .iter()
+            .any(|retained| retained.same_issuance(&offer)));
         let result =
             OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
         assert_eq!(
