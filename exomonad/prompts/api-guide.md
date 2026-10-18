@@ -102,7 +102,9 @@ both can reuse the same data, functions and judgments. See `exomonad-workbench`,
 Where the actor admits `ModelCall modelFamily`, `Tidepool.Model` provides
 `invokeModel turn input` with `textTurn model` or `typedTurn @Reply model` and supplied
 `AgentSpec` tools. Callbacks use your available effects; ambient tools and hooks
-are not inherited. Calls in one cell share its model budget. Match `modelOutcome`,
+are not inherited. Calls in one notebook cell or native actor request share a model budget.
+Later native requests receive a fresh allowance; retained continuations keep
+their original allowance. Match `modelOutcome`,
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 

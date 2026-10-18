@@ -34,8 +34,10 @@ receipt can accompany budget exhaustion, provider failure or a malformed final
 answer. Preserve the typed failure for control flow, including
 `ModelBudgetExceeded`, `ModelBoundary` and `ModelCleanupFailed`.
 
-The cell's host limits still bound this narrower turn and aggregate nested
-invocations. Reported token usage is observed after a response, and missing
+The owning notebook cell or native actor request's host limits bound this
+narrower turn and aggregate nested invocations. A persistent Record actor gets
+a fresh allowance for its next native request; existing model continuations
+retain their original allowance. Reported token usage is observed after a response, and missing
 usage is counted separately; a token breaker is not a precharged cost ceiling.
 NoTools exposes zero callbacks. A refusal or exhausted budget is an outcome to
 inspect, not permission to retry repeatedly or widen the actor's authority.
