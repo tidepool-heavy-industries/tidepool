@@ -13,25 +13,22 @@ fn fixture_compiler_support(
     crate::declaration_context::issue_fixture_compiler_support(projection, artifacts).unwrap()
 }
 
-// A changed fixture view receives all authority from one already issued owner.
-// Raw recorded roles remain a separate recovery/refusal fixture path.
-fn retain_fixture_support_in_view(
-    issued: &crate::artifact_inventory::CompilerSourceSupport,
+// Fixture view changes reopen one complete issued packet through production
+// recovery; rows and native decisions cannot be supplied independently.
+fn restore_fixture_support_in_view(
+    issued: &ExactDeclarationContext,
     view: ArtifactView,
 ) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
     issued
+        .compiler_source_support()
         .native_availability()
-        .validate_role_coverage(issued.projection())?;
-    let retained = recover_fixture_compiler_support(
-        issued.projection().clone(),
-        view,
-        issued.native_offers().iter().cloned(),
-    )?
-    .retain_normalized_availability(issued.native_availability())?;
-    retained
-        .native_availability()
-        .validate_role_coverage(retained.projection())?;
-    Ok(retained)
+        .validate_role_coverage(issued.compiler_input_projection())?;
+    let recovered = recover_fixture_compiler_support(
+        issued.compiler_input_projection().clone(),
+        view.retain_custody(issued.artifact_view())?,
+        [],
+    )?;
+    recovered.restore_snapshot_evidence(&issued.snapshot())
 }
 
 const PRODUCER: &[u8] = b"protected-native-availability-fixture";
@@ -8614,8 +8611,11 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         [full.clone()],
     )
     .unwrap();
-    let missing_rows = retain_fixture_support_in_view(
-        &incomplete_recorded_support,
+    let incomplete_recorded_context = context.clone().rebuild(|facts| {
+        facts.compiler_support = incomplete_recorded_support;
+    });
+    let missing_rows = restore_fixture_support_in_view(
+        &incomplete_recorded_context,
         context.artifact_view().clone(),
     );
     assert!(
@@ -8709,8 +8709,18 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             .is_err(),
         "the selected carrier view cannot reissue the historical Full proof"
     );
-    let carrier_support =
-        retain_fixture_support_in_view(context.compiler_source_support(), carriers).unwrap();
+    let carrier_support = restore_fixture_support_in_view(&context, carriers).unwrap();
+    assert_eq!(
+        carrier_support.recorded_input_decisions(),
+        context.compiler_source_support().recorded_input_decisions()
+    );
+    let carried_full = carrier_support
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == entry.descriptor.id)
+        .unwrap()
+        .clone();
+    assert_eq!(carried_full.snapshot_facts(), full.snapshot_facts());
     let carrier_context = context
         .clone()
         .rebuild(|facts| facts.compiler_support = carrier_support);
@@ -8729,7 +8739,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     assert!(continued
         .native_offers()
         .iter()
-        .any(|offer| offer.same_issuance(&full)));
+        .any(|offer| offer.same_issuance(&carried_full)));
 
     let (continued, choices) =
         continue_request(&context).expect("request-owned Full keeps its exact available groups");
@@ -8797,10 +8807,25 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
                 &ExactArtifactSelection::from_recovered_graph_selection(graph),
             )
             .unwrap();
-        let support = retain_fixture_support_in_view(&bounded_support, withdrawn).unwrap();
-        let bounded_context = context
-            .clone()
-            .rebuild(|facts| facts.compiler_support = support);
+        let bounded_issuer = context.clone().rebuild(|facts| {
+            facts.compiler_support = bounded_support;
+        });
+        let support = restore_fixture_support_in_view(&bounded_issuer, withdrawn).unwrap();
+        assert_eq!(
+            support.recorded_input_decisions(),
+            bounded_issuer
+                .compiler_source_support()
+                .recorded_input_decisions(),
+            "Partial and explicit Empty keep their exact issued decision domain"
+        );
+        let restored_offer = support
+            .native_offers()
+            .iter()
+            .find(|candidate| candidate.original() == entry.descriptor.id)
+            .unwrap()
+            .clone();
+        assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
+        let bounded_context = bounded_issuer.rebuild(|facts| facts.compiler_support = support);
         assert!(bounded_context
             .artifact_view()
             .selected_native_groups()
@@ -8831,7 +8856,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         assert!(continued
             .native_offers()
             .iter()
-            .any(|retained| retained.same_issuance(&offer)));
+            .any(|retained| retained.same_issuance(&restored_offer)));
         let result =
             OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
         assert_eq!(
