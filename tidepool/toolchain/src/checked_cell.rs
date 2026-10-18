@@ -4930,6 +4930,16 @@ mod tests {
         reuse: bool,
         generation: u64,
     ) -> Arc<super::CheckedValueArtifact> {
+        capture_test_value_with_template(original, demands_epoch, reuse, generation, "")
+    }
+
+    fn capture_test_value_with_template(
+        original: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        demands_epoch: bool,
+        reuse: bool,
+        generation: u64,
+        template: &str,
+    ) -> Arc<super::CheckedValueArtifact> {
         use super::*;
         let producer = [2; 32];
         let (inputs, owner, path) = prepare_test_value_interface_files(generation, demands_epoch);
@@ -4937,7 +4947,7 @@ mod tests {
             specification: CheckedCellSpecification {
                 admission_digest: [3; 32],
                 cell_source: String::new(),
-                template_source: String::new(),
+                template_source: template.into(),
                 turn_templates: vec![],
                 injected_modules: vec![],
                 reserved_declaration_modules: vec![],
@@ -6104,6 +6114,185 @@ mod tests {
             "full capture rejected issuer-preserving histories"
         );
         assert_eq!(completed, 16);
+    }
+
+    #[test]
+    fn repeated_template_values_keep_exact_custody_and_private_permissions() {
+        use super::*;
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
+        };
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::ExactLexicalNode;
+
+        for ordinals in [vec![7, 9001], vec![7], vec![]] {
+            let producer = [2; 32];
+            let child = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    "fixture",
+                    "Child",
+                    BTreeMap::new(),
+                ),
+            ));
+            let template_only = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    "fixture",
+                    "TemplateOnly",
+                    BTreeMap::new(),
+                ),
+            ));
+            let product = crate::certified_products::fixture_finalized_product_with_requirements(
+                crate::certified_products::tests::original_groups_fixture(
+                    "Epoch",
+                    vec![(7, vec![]), (9001, vec![])],
+                    1,
+                    &BTreeMap::new(),
+                ),
+                producer,
+                Some(BTreeMap::from([(
+                    ("fixture".into(), "Child".into()),
+                    child.descriptor.interface_sha256,
+                )])),
+            );
+            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                .remove(0)
+                .product;
+            let native = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+            let native_id = native.descriptor.id;
+            let crate::artifact_inventory::ArtifactPayload::Original(product) = &native.payload
+            else {
+                unreachable!()
+            };
+            let native_owner = product.owner().clone();
+            let owner = native.descriptor.owner.clone();
+            let entries = vec![native.clone(), child, template_only.clone()];
+            let inventory = ArtifactInventory::default();
+            let full = inventory
+                .admit_shared(&inventory.empty_view(), entries.clone())
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let full_support = crate::declaration_context::issue_fixture_compiler_support(
+                projection.clone(),
+                full,
+            )
+            .unwrap();
+            let groups = ordinals
+                .iter()
+                .map(|ordinal| NativeGroupKey {
+                    artifact: native.descriptor.id,
+                    original_ordinal: *ordinal,
+                })
+                .collect();
+            let selected = inventory
+                .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &groups)
+                .unwrap();
+            let support = crate::declaration_context::issue_fixture_compiler_support(
+                projection.clone(),
+                selected,
+            )
+            .unwrap()
+            .retain_offers(full_support.native_offers().iter().cloned())
+            .unwrap();
+            let original = Arc::new(
+                ExactDeclarationContext::from_authenticated_execution_support(
+                    producer,
+                    support,
+                    vec![
+                        ExactLexicalNode {
+                            owner: owner.clone(),
+                            imports: vec![],
+                        },
+                        ExactLexicalNode {
+                            owner: template_only.descriptor.owner.clone(),
+                            imports: vec![],
+                        },
+                    ],
+                    owner.clone(),
+                    std::slice::from_ref(&owner),
+                )
+                .unwrap(),
+            );
+            let first =
+                capture_test_value_with_template(&original, false, false, 1, "import Epoch\n");
+            let second = capture_test_value_with_template(
+                &original,
+                false,
+                false,
+                2,
+                "import TemplateOnly\n",
+            );
+            let values = [first, second];
+            let mut bindings = BTreeSet::new();
+            let mut edges = BTreeSet::new();
+            let mut directories = Vec::new();
+            for value in &values {
+                let template = value.template_imports().expect("actual template capture");
+                let support = value.compiler_source_support();
+                let template_view = template.compiler_source_support().artifacts();
+                let graph = template_view.capture_graph_selection();
+                assert!(!graph.bindings.is_empty());
+                assert!(graph.bindings.iter().all(|binding| support
+                    .artifacts()
+                    .capture_graph_selection()
+                    .bindings
+                    .contains(binding)));
+                bindings.extend(graph.bindings);
+                edges.extend(template_view.binding_dependencies());
+                directories.push(value.directory.0.path().to_owned());
+            }
+            assert!(
+                !edges.is_empty(),
+                "the template retains actual canonical dependency edges"
+            );
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_retained_value_artifacts(&[
+                    values[0].clone(),
+                    values[1].clone(),
+                    values[0].clone(),
+                ])
+                .unwrap();
+            drop(values);
+            drop(original);
+            drop(full_support);
+            drop(projection);
+            drop(entries);
+            drop(template_only);
+            drop(native);
+            drop(inventory);
+            assert!(
+                directories.iter().all(|path| !path.exists()),
+                "captured input directories release independently"
+            );
+            let view = context.artifact_view();
+            let graph = view.capture_graph_selection();
+            assert!(bindings
+                .iter()
+                .all(|binding| graph.bindings.contains(binding)));
+            assert!(edges
+                .iter()
+                .all(|edge| view.binding_dependencies().contains(edge)));
+            assert!(view.selected_native_groups().is_empty());
+            assert!(context.lexical_graph().is_empty());
+            assert!(context
+                .compiler_input_projection()
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            let row = context
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| {
+                    row.target_original(&native_owner)
+                        .is_some_and(|entry| entry.descriptor.id == native_id)
+                })
+                .expect("private native row survives without an Original role");
+            assert_eq!(row.permits(7), ordinals.contains(&7));
+            assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        }
     }
 
     #[test]
