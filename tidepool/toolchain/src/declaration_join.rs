@@ -2595,7 +2595,52 @@ mod authored_tests {
         let merged =
             ExactDeclarationContext::new(&[std::sync::Arc::new(result.clone())], &[], Vec::new())
                 .expect("the authored certificate retains its complete original home closure");
-        assert_eq!(merged.recovery_products().len(), 2);
+        let expected_owners = [first, second]
+            .map(|module| ExactModuleIdentity {
+                unit: "main".into(),
+                module: module.module_name(),
+            })
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let selected = merged.compiler_input_projection().snapshot_roles();
+        assert_eq!(
+            selected
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_owners
+        );
+        let retained = merged.recovery_products();
+        for product in result.recovery_products() {
+            let owner = ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            };
+            if !expected_owners.contains(&owner) {
+                continue;
+            }
+            let matching = retained
+                .iter()
+                .filter(|retained| {
+                    retained.owner().unit == owner.unit && retained.owner().module == owner.module
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "one exact issued native owner must survive for {owner:?}"
+            );
+            assert_eq!(matching[0].owner(), product.owner());
+            assert_eq!(matching[0].module_interface(), product.module_interface());
+            assert_eq!(
+                selected[&owner].interface(),
+                crate::artifact_inventory::ArtifactEntry::canonical(
+                    product.module_interface().unwrap().clone()
+                )
+                .descriptor
+                .id
+            );
+        }
         assert!(result
             .introduced_exports()
             .iter()
