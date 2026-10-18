@@ -20,7 +20,7 @@ use std::{
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
     },
 };
 use tidepool_handlers::handlers::model::{ModelBoundaryError, ModelService};
@@ -90,8 +90,9 @@ pub fn retained_model_result(
     }
     Ok(payload.get("output").cloned().map(Item))
 }
-/// Construct once for each admitted cell. Clones must share this value through
-/// an Arc, so nested and concurrent calls share budget and authority.
+/// One admitted execution or persistent native actor retains this service.
+/// Clones share invocation identities and cancellation through an Arc. Native
+/// Record request ingress explicitly refreshes the shared model allowance.
 pub struct CellModelService<A, C> {
     runtime: Handle,
     principal: PrincipalId,
@@ -100,7 +101,7 @@ pub struct CellModelService<A, C> {
     scheduler: Arc<JobScheduler>,
     policy: ModelPolicy,
     selection: Arc<SelectedTransport<C>>,
-    budget: OnceLock<CellBudget>,
+    budget: Mutex<Option<CellBudget>>,
     accepting: AtomicBool,
     registry: Mutex<HashMap<String, Registered>>,
     auth: PhantomData<fn() -> A>,
@@ -166,12 +167,18 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             scheduler,
             policy,
             selection,
-            budget: OnceLock::new(),
+            budget: Mutex::new(None),
             accepting: AtomicBool::new(true),
             registry: Mutex::new(HashMap::new()),
             auth: PhantomData,
         }
     }
+    /// Native Record RPC ingress refreshes only the next request's allowance.
+    /// Existing invocations retain their original budget through Harness.
+    pub fn begin_request_budget(&self) {
+        *self.budget.lock().unwrap() = None;
+    }
+
     /// Called by the admitted execution owner on cancellation or disposal.
     /// Stops admission and signals every invocation without waiting for callbacks.
     /// Already admitted callbacks may still submit their actual outcomes.
@@ -400,7 +407,9 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         )];
         let budget = self
             .budget
-            .get_or_init(|| CellBudget::new(self.policy.limits))
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| CellBudget::new(self.policy.limits))
             .narrow(limits);
         // Admission and cancellation share this short lock; cancellation cannot
         // miss an invocation between its creation and registry publication.
@@ -992,7 +1001,7 @@ mod tests {
         let mut invalid = request(false);
         invalid["limits"]["requests"] = json!(-1);
         assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
-        assert!(service.budget.get().is_none());
+        assert!(service.budget.lock().unwrap().is_none());
         assert!(service.registry.lock().unwrap().is_empty());
         let mut invalid = request(false);
         for kind in ["raw", "update", "finish"] {
@@ -1016,7 +1025,7 @@ mod tests {
         let mut invalid = request(false);
         invalid["tools"][0]["inputSchema"] = json!({"type":"string"});
         assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
-        assert!(service.budget.get().is_none());
+        assert!(service.budget.lock().unwrap().is_none());
     }
     #[test]
     fn nested_calls_share_budget_and_reject_foreign_and_duplicate_callbacks() {
@@ -1394,6 +1403,59 @@ mod tests {
         ));
     }
     #[test]
+    fn new_request_allowance_preserves_tokens_and_original_invocation_limits() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = service(
+            &runtime,
+            vec![
+                vec![callback(), final_turn()],
+                vec![final_turn()],
+                vec![final_turn()],
+                vec![final_turn()],
+            ],
+            Limits {
+                requests: 1,
+                ..Limits::default()
+            },
+        );
+        let caller = PrincipalId::new(1, 2);
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        service.begin_request_budget();
+        let next = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        assert_eq!(next["receipt"]["outcome"]["kind"], "text");
+        let original = service
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                first["call_id"].as_str().unwrap(),
+                callback_reply(json!("original")),
+            )
+            .unwrap();
+        assert_eq!(original["receipt"]["outcome"]["kind"], "exhausted");
+        let same_request = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        assert_eq!(same_request["receipt"]["outcome"]["kind"], "exhausted");
+        service.begin_request_budget();
+        let refreshed = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        assert_eq!(refreshed["receipt"]["outcome"]["kind"], "text");
+        service.cancel();
+        service.begin_request_budget();
+        assert!(service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .is_err());
+        assert!(service.registry.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn family_checks_and_close_do_not_wait_for_provider_execution() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let service = Arc::new(service(
@@ -1530,7 +1592,7 @@ mod tests {
             Err(ModelBoundaryError::ModelRejected(_))
         ));
         assert!(foreign.registry.lock().unwrap().is_empty());
-        assert!(foreign.budget.get().is_none());
+        assert!(foreign.budget.lock().unwrap().is_none());
         let finished = owner
             .resume(
                 caller,

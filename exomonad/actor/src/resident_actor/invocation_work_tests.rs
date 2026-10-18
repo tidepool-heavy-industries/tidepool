@@ -3014,6 +3014,8 @@ struct InvocationModel {
 }
 
 impl crate::CellModelBinding for InvocationModel {
+    fn begin_request_budget(&self) {}
+
     fn prepare(
         &self,
         request: crate::ModelReq,

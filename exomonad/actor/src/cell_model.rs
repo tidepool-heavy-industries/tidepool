@@ -21,7 +21,7 @@ pub trait CellModelFactory: Send + Sync {
     ) -> Arc<dyn CellModelBinding>;
 }
 
-/// Shared by every item, callback and after-tool slot in the same execution.
+/// Shared by every continuation of an execution or persistent native actor.
 /// `cancel` must be idempotent and nonblocking: it signals the provider owner,
 /// while the actor still joins work that has already started.
 pub trait CellModelBinding: Send + Sync {
@@ -31,6 +31,11 @@ pub trait CellModelBinding: Send + Sync {
         principal: PrincipalId,
         table: DataConTable,
     ) -> DeferredEffect;
+
+    /// Called once by native Record RPC ingress before its handler runs.
+    /// Refresh the allowance for new model invocations without discarding
+    /// existing invocation tokens or reopening cancelled admission.
+    fn begin_request_budget(&self);
 
     fn cancel(&self);
 

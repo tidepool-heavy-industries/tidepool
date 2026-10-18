@@ -138,6 +138,10 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelBinding
         })
     }
 
+    fn begin_request_budget(&self) {
+        self.0.begin_request_budget();
+    }
+
     fn cancel(&self) {
         self.0.cancel();
     }
@@ -171,6 +175,7 @@ impl CellModelBinding for RefusedCellModelBinding {
             })
         })
     }
+    fn begin_request_budget(&self) {}
     fn cancel(&self) {}
     fn settle(
         &self,

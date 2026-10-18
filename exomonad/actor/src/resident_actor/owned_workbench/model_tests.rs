@@ -14,6 +14,8 @@ struct ModelOwner {
 }
 
 impl crate::CellModelBinding for ModelOwner {
+    fn begin_request_budget(&self) {}
+
     fn prepare(
         &self,
         request: crate::ModelReq,

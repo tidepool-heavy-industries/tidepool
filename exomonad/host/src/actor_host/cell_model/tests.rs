@@ -985,12 +985,13 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
         vec![choice.reasoning],
     )
     .unwrap();
-    let excluded_effort = exomonad_actor::ConversationPermission::new(
-        permission.model().clone(),
-        vec![Reasoning::ArgonReasoning(ArgonEffort::EffortMedium)],
-    )
-    .unwrap();
-    assert!(runtime.conversation_auth(&excluded_effort).is_err());
+    let medium = Reasoning::ArgonReasoning(ArgonEffort::EffortMedium);
+    for efforts in [vec![medium], vec![choice.reasoning, medium]] {
+        let excluded_effort =
+            exomonad_actor::ConversationPermission::new(permission.model().clone(), efforts)
+                .unwrap();
+        assert!(runtime.conversation_auth(&excluded_effort).is_err());
+    }
     let actor_auth = runtime.conversation_auth(&permission).unwrap();
     assert_eq!(
         harness::transport::ResponsesClient::new(actor_auth)
