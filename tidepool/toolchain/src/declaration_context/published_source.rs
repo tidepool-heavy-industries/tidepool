@@ -1689,17 +1689,38 @@ mod tests {
                     },
                 ])
             );
-            // A later exact output retains the original compiler roles while
-            // selecting a previously unused body of the published module.
-            let continued = ExactDeclarationContext::from_authenticated_execution(
-                producer,
-                &admitted,
-                published.owner.facts.compiler_support.projection().clone(),
-                published.owner.facts.lexical.to_vec(),
-                root.descriptor.owner.clone(),
-                &[root.descriptor.owner.clone()],
-            )
-            .expect("later native demand preserves the issued published selection");
+            // Reopen the already admitted execution graph with its recorded source
+            // decisions. This does not issue a new compiler output or demand receipt.
+            let reopen_view =
+                |view: &ArtifactView| -> Result<ExactDeclarationContext, CompileError> {
+                    let support = recover_fixture_compiler_support(
+                        published.compiler_input_projection().clone(),
+                        view.clone(),
+                        published
+                            .compiler_source_support()
+                            .native_offers()
+                            .iter()
+                            .cloned(),
+                    )?
+                    .restore_snapshot_evidence(&published.snapshot())?;
+                    published
+                        .as_ref()
+                        .clone()
+                        .rebuild(|facts| facts.compiler_support = support)
+                        .finish()
+                };
+            let continued = reopen_view(&admitted).unwrap();
+            assert_eq!(
+                continued.artifact_view().selected_native_groups(),
+                admitted.selected_native_groups()
+            );
+            assert_eq!(
+                continued
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .native_groups,
+                admitted.capture_graph_selection().native_groups
+            );
             let reopened_after_demand = continued.published_source_original_selections().unwrap();
             assert_eq!(
                 reopened_after_demand[0].context().semantic_sha256(),
@@ -1713,15 +1734,11 @@ mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let with_ambient = ExactDeclarationContext::from_authenticated_execution(
-                producer,
-                &ambient,
-                published.owner.facts.compiler_support.projection().clone(),
-                published.owner.facts.lexical.to_vec(),
-                root.descriptor.owner.clone(),
-                &[root.descriptor.owner.clone()],
-            )
-            .unwrap();
+            let with_ambient = reopen_view(&ambient).unwrap();
+            assert_eq!(
+                with_ambient.artifact_view().selected_native_groups(),
+                ambient.selected_native_groups()
+            );
             let frozen = with_ambient.published_source_original_selections().unwrap();
             assert_eq!(
                 frozen[0].context().semantic_sha256(),
@@ -1732,46 +1749,146 @@ mod tests {
                 .artifact_view()
                 .artifact_ids()
                 .contains(&future.descriptor.id));
-            let mut replaced = published.compiler_input_roles();
-            let future_role = CompilerInputProjection::from_issued_entries(&[future.clone()])
-                .unwrap()
-                .roles()
-                .remove(0);
-            let position = replaced
-                .iter()
-                .position(|role| role.interface() == helper_interface.descriptor.id)
+            let published_role = published
+                .compiler_input_roles()
+                .into_iter()
+                .find(CompilerInputRole::is_published_source_original)
                 .unwrap();
-            replaced[position] = future_role;
-            let replacement =
-                CompilerInputProjection::restore(&ambient, &replaced).and_then(|projection| {
-                    ExactDeclarationContext::from_authenticated_execution(
-                        producer,
-                        &ambient,
-                        projection,
-                        published.owner.facts.lexical.to_vec(),
-                        root.descriptor.owner.clone(),
-                        &[root.descriptor.owner.clone()],
-                    )
-                });
+            let canonical_binding = *published
+                .artifact_view()
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == helper_interface.descriptor.id)
+                .unwrap();
+            // The competing original earns its own ordinary checked owner using
+            // the same issued type support, not merely equal interface bytes.
+            let types = published
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(vec![old.descriptor.owner.clone()])
+                .unwrap();
+            assert!(types.artifacts().selected_native_groups().is_empty());
+            let future_view = types
+                .artifacts()
+                .inventory()
+                .admit_shared(types.artifacts(), vec![future.clone(), leaf.clone()])
+                .unwrap();
+            let future_context = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &future_view,
+                CompilerInputProjection::from_issued_entries(&[
+                    future.clone(),
+                    leaf_interface.clone(),
+                ])
+                .unwrap(),
+                vec![
+                    ExactLexicalNode {
+                        owner: future.descriptor.owner.clone(),
+                        imports: vec![leaf.descriptor.owner.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: leaf.descriptor.owner.clone(),
+                        imports: vec![],
+                    },
+                ],
+                future.descriptor.owner.clone(),
+                &[
+                    future.descriptor.owner.clone(),
+                    leaf.descriptor.owner.clone(),
+                ],
+            )
+            .expect("ordinary Future issuer must complete before composition");
+            assert!(future_context
+                .compiler_input_roles()
+                .iter()
+                .any(|role| role.original() == Some(future.descriptor.id)));
+            let future_offer = future_context
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .find(|offer| offer.original() == future.descriptor.id && offer.is_full())
+                .expect("the ordinary Future issuer supplies its own checked Full offer")
+                .clone();
+            assert!(
+                future_context
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .namespace
+                    .contains(&canonical_binding),
+                "the Future issuer must share the publication's exact canonical binding"
+            );
+            assert_ne!(future.descriptor.id, current.descriptor.id);
+            let replacement = future_context.with_published_source_originals(&publication);
             if current_original_role {
-                assert!(
-                    replacement.is_err(),
-                    "later compiler namespace replacement cannot rewrite the publication issuer"
-                );
+                let Err(CompileError::ArtifactInventory(error)) = replacement else {
+                    panic!("competing selected originals must refuse during actual composition")
+                };
+                assert!(matches!(error.failure,
+                    crate::artifact_inventory::ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                        owner, existing, incoming,
+                    } if owner == current.descriptor.owner
+                        && existing == future.descriptor.id && incoming == current.descriptor.id));
             } else {
-                let reopened = replacement
-                    .unwrap()
-                    .published_source_original_selections()
-                    .unwrap();
+                let replacement = replacement.unwrap();
+                assert!(replacement
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| role.original() == Some(future.descriptor.id)));
+                let reopened = replacement.published_source_original_selections().unwrap();
+                let frozen = reopened[0].context();
+                assert!(frozen.compiler_input_roles().contains(&published_role));
                 assert_eq!(
-                    reopened[0].context().semantic_sha256(),
-                    published.semantic_sha256()
+                    frozen.artifact_view().selected_native_groups(),
+                    BTreeSet::from([early])
                 );
-                assert!(!reopened[0]
-                    .context()
+                assert!(frozen
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .namespace
+                    .contains(&canonical_binding));
+                assert!(!frozen
+                    .artifact_view()
+                    .contains_namespace_artifact(future.descriptor.id));
+                assert!(!frozen
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| role.original() == Some(future.descriptor.id)));
+                let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &published_role
+                else {
+                    unreachable!()
+                };
+                assert!(!selection
+                    .graph_selection()
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.artifact == future.descriptor.id));
+                let frozen_graph = frozen.artifact_view().capture_graph_selection();
+                assert_eq!(frozen_graph.roots, selection.graph_selection().roots);
+                assert_eq!(
+                    frozen_graph.namespace,
+                    selection.graph_selection().namespace
+                );
+                for edge in published.artifact_view().binding_dependencies() {
+                    assert!(frozen
+                        .artifact_view()
+                        .binding_dependencies()
+                        .contains(&edge));
+                }
+                if frozen
                     .artifact_view()
                     .artifact_ids()
-                    .contains(&future.descriptor.id));
+                    .contains(&future.descriptor.id)
+                {
+                    assert!(frozen
+                        .compiler_source_support()
+                        .native_offers()
+                        .iter()
+                        .any(|offer| offer.same_issuance(&future_offer)));
+                }
+                // The genuine Future offer may retain private payload custody;
+                // it does not change the frozen publication's namespace or roots.
             }
             let recovery_scratch = tempfile::tempdir().unwrap();
             let (published_products, published_interfaces) = published
@@ -1819,6 +1936,14 @@ mod tests {
                     &published.compiler_input_roles(),
                     published.owner.facts.lexical.to_vec(),
                 )
+                .unwrap();
+            let support = recovered
+                .compiler_source_support()
+                .restore_snapshot_evidence(&published.snapshot())
+                .unwrap();
+            let recovered = recovered
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
             for snapshot in [published.as_ref(), &continued] {
@@ -1885,6 +2010,14 @@ mod tests {
                     snapshot.owner.facts.lexical.to_vec(),
                 )
                 .unwrap();
+                let support = durable
+                    .compiler_source_support()
+                    .restore_snapshot_evidence(&snapshot.snapshot())
+                    .unwrap();
+                let durable = durable
+                    .rebuild(|facts| facts.compiler_support = support)
+                    .finish()
+                    .unwrap();
                 assert_eq!(durable.artifact_view(), snapshot.artifact_view());
                 assert_eq!(
                     durable.compiler_input_roles(),
