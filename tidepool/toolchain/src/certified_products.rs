@@ -2,7 +2,7 @@
 //! Worker receipts describe GHC's selected owners; stored product bytes and
 //! dependency witnesses remain independent inputs to this check.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8416,21 +8416,45 @@ pub(crate) fn certify_products_with_validation(
                     SOURCE_LIMIT,
                     &validation.inventory,
                 )?) != accepted.source_sha256
-                    || sha(&read_bounded_with_operation(
-                        &bundle.iface_path,
-                        PACKAGE_INTERFACE_LIMIT,
-                        &validation.inventory,
-                    )?) != accepted.skinny_iface_sha256
                 {
                     return Err(CertificationError::StaleEvidence);
                 }
-                let sidecar = read_bounded_with_operation(
-                    &bundle.package_imports_path,
-                    32 << 20,
-                    &validation.inventory,
-                )?;
+                let metadata =
+                    bundle
+                        .product
+                        .metadata_input()
+                        .ok_or(CertificationError::Mismatch(
+                            "candidate metadata acquisition",
+                        ))?;
+                use crate::module_candidates::CandidateMetadataInput;
+                let interface = match &metadata {
+                    CandidateMetadataInput::Captured(original) => {
+                        if original.owner() != &bundle.owner {
+                            return Err(CertificationError::Mismatch("candidate metadata owner"));
+                        }
+                        Cow::Borrowed(original.interface_bytes())
+                    }
+                    CandidateMetadataInput::Physical => Cow::Owned(read_bounded_with_operation(
+                        &bundle.iface_path,
+                        PACKAGE_INTERFACE_LIMIT,
+                        &validation.inventory,
+                    )?),
+                };
+                if sha(&interface) != accepted.skinny_iface_sha256 {
+                    return Err(CertificationError::StaleEvidence);
+                }
+                let sidecar = match metadata {
+                    CandidateMetadataInput::Captured(original) => {
+                        Cow::Borrowed(original.package_imports_bytes())
+                    }
+                    CandidateMetadataInput::Physical => Cow::Owned(read_bounded_with_operation(
+                        &bundle.package_imports_path,
+                        32 << 20,
+                        &validation.inventory,
+                    )?),
+                };
                 if hex(&sha(&sidecar)) != bundle.package_imports_sha256
-                    || sidecar != bundle.package_imports_bytes
+                    || sidecar.as_ref() != bundle.package_imports_bytes.as_slice()
                 {
                     return Err(CertificationError::StaleEvidence);
                 }
