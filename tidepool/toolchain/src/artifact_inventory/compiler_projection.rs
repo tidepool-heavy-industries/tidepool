@@ -1559,12 +1559,12 @@ impl CompilerSourceSupport {
                 .cloned(),
         )?;
         timing.advance("retain_normalized_availability");
-        let result = support
-            .retain_normalized_availability(other.native_availability())
-            .map(|mut support| {
-                support.input_decisions = decisions;
-                support
-            });
+        let result = support.retain_normalized_availability(other.native_availability());
+        drop(support);
+        let result = result.map(|mut support| {
+            support.input_decisions = decisions;
+            support
+        });
         timing.finish(result.is_ok());
         result
     }
