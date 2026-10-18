@@ -12359,8 +12359,11 @@ pub(crate) mod tests {
                         .find(|row| row.original_owner() == dependency.owner())
                         .unwrap();
                     assert!(dependency_row.permits(7));
-                    assert_eq!(dependency_row.permits(9001), consumer == "request" && ordinals.contains(&9001),
-                        "fresh source rows contain B7 only; request rows preserve actual input grants");
+                    assert_eq!(
+                        dependency_row.permits(9001),
+                        consumer == "request" && ordinals.contains(&9001),
+                        "fresh source rows contain B7 only; request rows preserve actual input grants"
+                    );
                     assert!(completed
                         .issued_artifacts()
                         .selected_native_groups()
