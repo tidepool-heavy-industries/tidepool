@@ -32,6 +32,10 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   retain artifact or group nodes through snapshots and recovery;
   only issued roots and their closure select executable groups. Later requests can
   select another body without recreating its issuing dependency versions.
+  Closed compiler namespace and native issuance obligations are distinct.
+  Fresh output validates its own body and dependency obligations; inherited
+  selected groups remain with their input issuer. Test native dependency edges
+  that overlap an older selection, not only canonical interface requirements.
   Complete authored group custody can issue private native availability only
   through one recorded original carrier paired to the selected canonical binding.
   Artifact-only custody and unions across carriers cannot supply that proof.

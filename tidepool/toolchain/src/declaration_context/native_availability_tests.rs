@@ -9368,3 +9368,295 @@ fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
         assert_eq!(inherited.permits(9001), ordinals.contains(&9001));
     }
 }
+
+// Replay the two existing producer front doors with the same normalized input
+// permission and a fresh native edge. Extra selected roots are prior work, not
+// obligations of the fresh fragment.
+fn replay_fresh_fragment_obligations(
+    permitted: &[u32],
+    inherited: &[u32],
+    siblings: usize,
+    grant_full: bool,
+) -> BTreeMap<&'static str, BTreeSet<u32>> {
+    use crate::artifact_inventory::NativeArtifactDemand;
+    use crate::certified_products::{CertifiedSourceSelection, ProductOrigin};
+    use tidepool_repr::execution_schema::InventoryOperation;
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let dependency = dependent_product(
+        "ObligationBaseline",
+        95,
+        vec![(7, vec![]), (9001, vec![]), (42, vec![]), (43, vec![])],
+    );
+    let fresh = dependent_product(
+        "ObligationFresh",
+        96,
+        vec![(3, vec![source_import(&dependency, 7)])],
+    );
+    let mut products = vec![dependency, fresh];
+    products.extend((0..siblings).map(|index| product(&format!("ObligationSibling{index}"), 97)));
+    let products = recovered_witness_fixtures(&products);
+    let dependency = &products[0].product;
+    let fresh = &products[1].product;
+    let input = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+    let fresh_entry = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+    let mut entries = vec![input.clone()];
+    entries.extend(products[2..].iter().map(|row| {
+        Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+    }));
+    let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    let full_support = fixture_compiler_support(projection.clone(), full);
+    let selected = inherited
+        .iter()
+        .map(|ordinal| NativeGroupKey {
+            artifact: input.descriptor.id,
+            original_ordinal: *ordinal,
+        })
+        .chain(entries[1..].iter().map(|entry| NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: 9001,
+        }))
+        .collect::<BTreeSet<_>>();
+    let chosen = inventory
+        .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
+        .unwrap();
+    let mut support = fixture_compiler_support(projection, chosen)
+        .retain_offers(full_support.native_offers().iter().cloned())
+        .unwrap();
+    if grant_full {
+        support = support
+            .retain_normalized_availability(full_support.native_availability())
+            .unwrap();
+    }
+    let input_row = support
+        .native_availability()
+        .rows()
+        .find(|row| row.original.descriptor.id == input.descriptor.id)
+        .unwrap();
+    assert!(
+        support
+            .native_offers()
+            .iter()
+            .any(|offer| { offer.original() == input.descriptor.id && offer.is_full() }),
+        "all cases retain genuine broader Full proof custody"
+    );
+    assert_eq!(input_row.mode == NativeTransportMode::Full, grant_full);
+    for ordinal in [7, 9001, 42, 43] {
+        assert_eq!(input_row.permits(ordinal), permitted.contains(&ordinal));
+    }
+    let owner = input.descriptor.owner.clone();
+    let context = Arc::new(
+        ExactDeclarationContext::from_authenticated_execution_support(
+            producer.sha256(),
+            support,
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }],
+            owner,
+            &[],
+        )
+        .unwrap(),
+    );
+    let source_before = context.artifact_view().capture_graph_selection();
+    let candidate = OriginalCompilerInputs::from_native_availability(
+        &context,
+        producer,
+        std::slice::from_ref(fresh),
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let prepared = ExactCompileContext::new(context.clone())
+        .prepare_compilation(scratch.path(), PRODUCER)
+        .unwrap();
+    let request = prepared.compiler_inputs();
+    let operation = InventoryOperation::new(Default::default());
+    let mut selection =
+        CertifiedSourceSelection::from_compiler_inputs(request, &request.metadata, &operation)
+            .unwrap();
+    selection
+        .admit_current(
+            fresh.owner(),
+            ProductOrigin::RetainedCore,
+            fresh.module_interface().unwrap(),
+            &operation,
+        )
+        .unwrap();
+    let physical = request
+        .artifacts()
+        .inventory()
+        .admit_shared_with_demand(
+            request.artifacts(),
+            vec![fresh_entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
+    let allowed = permitted.contains(&7);
+    let mut observations = BTreeMap::new();
+    for (consumer, result) in [("candidate", candidate), ("request", completed)] {
+        if !allowed {
+            assert!(
+                matches!(result, Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact, original_ordinal: 7,
+                } if artifact == input.descriptor.id)),
+                "{consumer}: broader proof cannot grant unavailable B7"
+            );
+            continue;
+        }
+        let fragment = result.unwrap_or_else(|error| {
+            panic!("{consumer}: inherited={inherited:?} siblings={siblings}: {error:?}")
+        });
+        let fresh_row = fragment
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == fresh_entry.descriptor.id)
+            .unwrap();
+        assert_eq!(fresh_row.mode, NativeTransportMode::Full);
+        let fresh_groups = fresh_row.issued_ordinals();
+        assert_eq!(fresh_groups, BTreeSet::from([3]));
+        assert!(
+            !fragment
+                .issued_artifacts()
+                .selected_native_groups()
+                .iter()
+                .any(|group| { group.artifact == fresh_entry.descriptor.id }),
+            "fresh availability does not select fresh execution"
+        );
+        let dependency_row = fragment
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == input.descriptor.id)
+            .unwrap();
+        let expected: BTreeSet<u32> = if consumer == "candidate" {
+            assert_eq!(dependency_row.mode, NativeTransportMode::IssuedGroups);
+            assert_eq!(
+                fragment
+                    .native_availability()
+                    .rows()
+                    .map(|row| { row.original.descriptor.id })
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([fresh_entry.descriptor.id, input.descriptor.id,])
+            );
+            BTreeSet::from([7])
+        } else {
+            permitted.iter().copied().collect()
+        };
+        let actual = [7, 9001, 42, 43]
+            .into_iter()
+            .filter(|ordinal| dependency_row.permits(*ordinal))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "{consumer} exact dependency permissions");
+        observations.insert(consumer, actual);
+    }
+    assert_eq!(
+        context.artifact_view().capture_graph_selection(),
+        source_before
+    );
+    observations
+}
+
+#[test]
+fn fresh_native_dependency_obligations_exclude_inherited_selected_groups() {
+    for permitted in [vec![7, 9001, 42, 43], vec![7], vec![9001], vec![]] {
+        replay_fresh_fragment_obligations(&permitted, &permitted, 0, permitted.len() == 4);
+    }
+}
+
+#[test]
+fn whole_selected_input_still_refuses_group_outside_its_issued_availability() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry = Arc::new(
+        ArtifactEntry::original(producer.sha256(), product("SelectedObligation", 98)).unwrap(),
+    );
+    let inventory = ArtifactInventory::default();
+    let selected = BTreeSet::from([NativeGroupKey {
+        artifact: entry.descriptor.id,
+        original_ordinal: 7,
+    }]);
+    let view = inventory
+        .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let support = fixture_compiler_support(projection.clone(), view.clone());
+    let mut metadata = projection
+        .project_metadata(view.metadata_snapshot())
+        .unwrap();
+    let unsupported = NativeGroupKey {
+        artifact: entry.descriptor.id,
+        original_ordinal: 9001,
+    };
+    Arc::make_mut(&mut metadata.retained)
+        .selected_native_groups
+        .insert(unsupported);
+    let error = NativeCompilerTransport::issue_checked(
+        &projection,
+        &metadata,
+        &view,
+        support.native_offers(),
+    )
+    .err()
+    .expect("whole selected ingress must validate all its own selected obligations");
+    assert!(matches!(error, CompileError::ExtractFailed(message)
+    if message == format!(
+        "exact declaration context: selected native group is outside issued availability: stage=whole-selected owner={:?} group={unsupported:?}",
+        entry.descriptor.owner,
+    )));
+}
+
+#[test]
+fn generated_fresh_native_obligations_ignore_unrelated_selected_history() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{contextualize_config, Config, TestCaseError, TestRunner};
+    let config = Config {
+        cases: 24,
+        source_file: Some(file!()),
+        test_name: Some(concat!(
+            module_path!(),
+            "::generated_fresh_native_obligations_ignore_unrelated_selected_history"
+        )),
+        ..Config::default()
+    };
+    TestRunner::new(contextualize_config(config))
+        .run(
+            &(any::<[bool; 3]>(), 0usize..4),
+            |(extra_groups, siblings)| {
+                let mut inherited = vec![7];
+                inherited.extend(
+                    [9001, 42, 43]
+                        .into_iter()
+                        .zip(extra_groups)
+                        .filter_map(|(ordinal, selected)| selected.then_some(ordinal)),
+                );
+                std::panic::catch_unwind(|| {
+                    let allowed = [7, 9001, 42, 43];
+                    let baseline = replay_fresh_fragment_obligations(&allowed, &[7], 0, true);
+                    let varied =
+                        replay_fresh_fragment_obligations(&allowed, &inherited, siblings, true);
+                    assert_eq!(
+                        varied, baseline,
+                        "fresh permission must ignore unrelated inherited demand"
+                    );
+                })
+                .map_err(|panic| {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            panic
+                                .downcast_ref::<&str>()
+                                .map(|value| (*value).to_owned())
+                        })
+                        .unwrap_or_else(|| "non-string panic".into());
+                    TestCaseError::fail(format!(
+                        "extra_groups={extra_groups:?} siblings={siblings}: {message}"
+                    ))
+                })
+            },
+        )
+        .unwrap();
+}
