@@ -2910,8 +2910,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           [ms_mod summary | ModuleNode _ summary <- mgModSummaries' loadGraph
             , ms_hsc_src summary == HsSrcFile]
     candidateViews <- fmap Map.fromList $ forM
-      [(index,name,candidate) | (index,(name,candidate)) <- zip [0..] (Map.toAscList acceptedCandidates)
-        , ms_mod (admittedCandidateSummary candidate) `Set.member` loadedCandidateOwners] $ \(index,name,candidate) -> do
+      [(index,candidate) | (index,(_,candidate)) <- zip [0..] (Map.toAscList acceptedCandidates)
+        , ms_mod (admittedCandidateSummary candidate) `Set.member` loadedCandidateOwners] $ \(index,candidate) -> do
           let summary = admittedCandidateSummary candidate
               originalFlags = ms_hspp_opts summary
               canonicalSummary = summary {ms_hspp_opts =
@@ -2923,13 +2923,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           liftIO (emitCount timing "candidate_compiler_view_complete" 1)
           when (admittedCandidateLoading candidate == CandidateLoadForExecution) $ liftIO $
             emitCount timing "candidate_finalized_core_make_view" 1
-          pure (name,view)
+          pure (ms_mod summary,view)
     let canonicalizeLoadSummary summary =
           let original = ms_hspp_opts summary
               selected
                 | ms_hsc_src summary == HsSrcFile
-                , Map.member (ms_mod_name summary) acceptedCandidates =
-                    candidateViews Map.! ms_mod_name summary
+                , Just candidate <- Map.lookup (ms_mod_name summary) acceptedCandidates
+                , ms_mod summary == ms_mod (admittedCandidateSummary candidate) =
+                    candidateViews Map.! ms_mod summary
                 | otherwise = summary
               flags = (canonicalizeDFlags original)
                 { backend = backend original, ghcLink = ghcLink original }
