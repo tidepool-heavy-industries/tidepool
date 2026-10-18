@@ -491,39 +491,22 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
                     let support = context.compiler_source_support().admit_checked_products([2; 32], &[product]).unwrap();
                     context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
-                    let edges = context.artifact_view().binding_dependencies();
-                    prop_assert!(edges.iter().any(|(dependent, required, edge)| {
-                        matches!((dependent, required), (
-                            crate::artifact_inventory::ArtifactBindingNode::Group(dependent),
-                            crate::artifact_inventory::ArtifactBindingNode::Group(required),
-                        ) if dependent.binding.artifact() == output.descriptor.id
-                            && dependent.original_ordinal == 0
-                            && permitted_carriers.get(required).is_some_and(|carrier| edges.iter().any(|(source, target, edge)| {
-                                source == &crate::artifact_inventory::ArtifactBindingNode::Group(*required)
-                                    && target == &crate::artifact_inventory::ArtifactBindingNode::Artifact(*carrier)
-                                    && matches!(edge, crate::artifact_inventory::ArtifactDependency::Interface)
-                            })))
-                            && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                                dependent_ordinal: 0, required_ordinal,
-                            } if *required_ordinal == ordinal)
-                    }), "the issued output requires a previously permitted Root group with its issuing carrier edge: expected={:?}, actual={:?}", permitted_carriers, edges);
-                    if outputs.insert(ordinal, output.descriptor.id).is_none() {
+                    let definitions = crate::certified_products::original_native_group_definitions(
+                        match &output.payload { ArtifactPayload::Original(product) => product, _ => unreachable!() }, 0,
+                    ).unwrap();
+                    let binding = match &definitions.bindings()[0] {
+                        tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                        tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+                    };
+                    let output_import = PendingImportOwner::Source {
+                        owner: match &output.payload { ArtifactPayload::Original(product) => product.owner().clone(), _ => unreachable!() },
+                        original_ordinal: 0,
+                        binder: binding.identity.clone(),
+                    };
+                    if outputs.insert(ordinal, (output.clone(), output_import, permitted_carriers)).is_none() {
                         expected_roles.extend(output_role);
                         expected_artifacts.extend([output.descriptor.id, canonical.descriptor.id]);
                     }
-                    let imports = [import];
-                    let target = context.artifact_view().inventory()
-                        .admit_product_artifacts(context.artifact_view(), vec![root.clone()],
-                            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports), None)
-                        .unwrap().into_target().unwrap().bind_target(None, imports.to_vec());
-                    let groups = target.resolve().unwrap().groups().clone();
-                    let issuer_originals = original.compiler_input_roles().iter()
-                        .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
-                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
-                        .all(|group| original.artifact_view().contains_issued_native_group(*group));
-                    let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
-                    prop_assert_eq!(selected.len(), usize::from(issued_groups),
-                        "later ordinal {} preserves policy only for exact issuer-owned groups: {:?}", ordinal, groups);
                     demanded.insert(ordinal);
                 }
                 Operation::Compose => {
@@ -641,28 +624,70 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             let mut expected_artifacts_sorted = expected_artifacts.clone();
             expected_artifacts_sorted.sort_unstable();
             prop_assert_eq!(actual_artifacts, expected_artifacts_sorted);
-            prop_assert_eq!(
-                context.artifact_view().selected_native_groups(),
-                demanded
-                    .iter()
-                    .map(|ordinal| NativeGroupKey {
-                        artifact: root.descriptor.id,
-                        original_ordinal: *ordinal,
-                    })
-                    .chain(
-                        demanded
-                            .iter()
-                            .any(|ordinal| *ordinal != 3)
-                            .then_some(NativeGroupKey {
-                                artifact: helper.descriptor.id,
-                                original_ordinal: 7
-                            })
-                    )
-                    .chain(outputs.values().map(|artifact| NativeGroupKey {
-                        artifact: *artifact, original_ordinal: 0,
-                    }))
-                    .collect::<BTreeSet<_>>()
-            );
+            // Recorded source choices are independent of later executable demand.
+            prop_assert_eq!(context.artifact_view().selected_native_groups(), initial_groups.clone());
+            if !outputs.is_empty() {
+                // Continue the complete owner, then consume actual exported binders
+                // through the same bound-target solver used by compiled targets.
+                let request = ProtectedScaffoldRequirements::default().compiler_inputs(&context, None).unwrap();
+                let validation = PackageInterfaceValidation::default();
+                let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &request, &request.metadata, &validation.inventory,
+                ).unwrap();
+                let entries = outputs.values().map(|(entry, _, _)| entry.clone()).collect();
+                let imports = outputs.values().map(|(_, import, _)| import.clone()).collect::<Vec<_>>();
+                let inventory = request.artifacts().inventory();
+                let mut fixed = inventory.bind_segment(request.artifacts(), entries, &selection).unwrap();
+                let target = inventory.admit_bound_target(
+                    &mut fixed, request.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![], &selection,
+                ).unwrap().bind_target(None, imports.clone());
+                let groups = target.resolve().unwrap().groups().clone();
+                let edges = target.artifacts().binding_dependencies();
+                for (ordinal, (output, _, permitted_carriers)) in &outputs {
+                    prop_assert!(edges.iter().any(|(dependent, required, edge)| {
+                        matches!((dependent, required), (
+                            crate::artifact_inventory::ArtifactBindingNode::Group(dependent),
+                            crate::artifact_inventory::ArtifactBindingNode::Group(required),
+                        ) if dependent.binding.artifact() == output.descriptor.id
+                            && dependent.original_ordinal == 0
+                            && permitted_carriers.get(required).is_some_and(|carrier| edges.iter().any(|(source, target, edge)| {
+                                source == &crate::artifact_inventory::ArtifactBindingNode::Group(*required)
+                                    && target == &crate::artifact_inventory::ArtifactBindingNode::Artifact(*carrier)
+                                    && matches!(edge, crate::artifact_inventory::ArtifactDependency::Interface)
+                            })))
+                            && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                                dependent_ordinal: 0, required_ordinal,
+                            } if required_ordinal == ordinal)
+                    }), "target output requires the previously permitted Root group with its issuing carrier edge: expected={:?}, actual={:?}", permitted_carriers, edges);
+                }
+                let expected = demanded.iter().map(|ordinal| NativeGroupKey {
+                    artifact: root.descriptor.id, original_ordinal: *ordinal,
+                }).chain(demanded.iter().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
+                    artifact: helper.descriptor.id, original_ordinal: 7,
+                })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
+                    artifact: entry.descriptor.id, original_ordinal: 0,
+                })).collect::<BTreeSet<_>>();
+                prop_assert_eq!(target.artifacts().selected_native_groups(), expected);
+                let expected_target = outputs.keys().map(|ordinal| NativeGroupKey {
+                    artifact: root.descriptor.id, original_ordinal: *ordinal,
+                }).chain(outputs.keys().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
+                    artifact: helper.descriptor.id, original_ordinal: 7,
+                })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
+                    artifact: entry.descriptor.id, original_ordinal: 0,
+                })).collect::<BTreeSet<_>>();
+                prop_assert_eq!(groups.iter().map(|group| NativeGroupKey {
+                    artifact: group.binding.artifact(), original_ordinal: group.original_ordinal,
+                }).collect::<BTreeSet<_>>(), expected_target);
+                let issuer_originals = original.compiler_input_roles().iter()
+                    .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
+                let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
+                    .all(|group| original.artifact_view().contains_issued_native_group(*group));
+                let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
+                prop_assert_eq!(selected.len(), usize::from(issued_groups),
+                    "target policy follows exact issuer-owned dependency groups: {:?}", groups);
+            }
             let Value::Array(rows) = context.published_scope_value().unwrap() else {
                 unreachable!()
             };
