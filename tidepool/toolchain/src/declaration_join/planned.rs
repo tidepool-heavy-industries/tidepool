@@ -34,7 +34,6 @@ pub(super) fn authored_interface_context(
 /// temporary files exist only if the raw inventory consumer requests them.
 pub(super) struct ValidatedAuthoredClosure<'a, 'validation> {
     originals: &'a crate::certified_products::SelectedOriginalClosure,
-    _context: Option<&'a Arc<ExactDeclarationContext>>,
     checked: crate::recovery_artifacts::ValidatedCertifiedProducts<'a, 'validation>,
     pub(super) interfaces: Vec<ExactInterfaceOwner>,
     pub(super) original_imports: Vec<ExactInterfaceOwner>,
@@ -56,7 +55,7 @@ impl<'a, 'validation> ValidatedAuthoredClosure<'a, 'validation> {
         evidence: &[crate::cache::ModuleEvidence],
         source_admission: Option<&ExactSourceAdmission>,
         source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
-        context: Option<&'a Arc<ExactDeclarationContext>>,
+        context: Option<&Arc<ExactDeclarationContext>>,
         program_source_lexical: &[ExactLexicalNode],
         includes: &[PathBuf],
         validation: &'validation mut crate::recovery_artifacts::PackageInterfaceValidation,
@@ -376,7 +375,6 @@ impl<'a, 'validation> ValidatedAuthoredClosure<'a, 'validation> {
         );
         Ok(Self {
             originals,
-            _context: context,
             checked,
             interfaces,
             original_imports,
