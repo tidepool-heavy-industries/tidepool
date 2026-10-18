@@ -688,12 +688,10 @@ impl RecoveryGraph {
         let receipt = self
             .acquire_context(root)
             .map_err(|error| crate::session::recovery::graph_error(self.store.path(), error))?;
-        let snapshot = receipt.snapshot();
-        let mut exact = inventory.context_with_snapshot(snapshot)?;
-        if exact.toolchain_identity_sha256() != snapshot.producer_sha256() {
+        let exact = inventory.context_for_expected_snapshot(root, &receipt)?;
+        if exact.toolchain_identity_sha256() != receipt.snapshot().producer_sha256() {
             return Err(crate::session::SessionError::WrongPublicManifestTicket);
         }
-        exact.bind_snapshot_baseline(&receipt)?;
         Ok(ScopedCompilerContext::Stored(Arc::new(
             StoredCompilerContext {
                 exact: Arc::new(exact),
