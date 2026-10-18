@@ -995,7 +995,7 @@ impl TestCampaign {
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
-        configure_campaign_model_catalog(&mut config);
+        configure_scripted_model_catalog(&mut config);
         let super::model_free::ModelFreeSession {
             session_root,
             host_incarnation,
@@ -1662,7 +1662,7 @@ pub(super) fn scaffold_workspace(workspace: &Path) {
 
 /// Admit the exact model choices used by the model-free hosted fixtures.
 /// Provider attachment remains scripted; these credentials are never opened.
-fn configure_campaign_model_catalog(config: &mut ActorHostConfig) {
+pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
     use crate::exomonad::model_catalog::{
         InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
     };
