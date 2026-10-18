@@ -9219,8 +9219,14 @@ mod tests {
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionClose,
         };
-        for inherited in [false, true] {
-            let producer = ArtifactInventory::default().empty_view();
+        for (inherited, compiler_merge) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let inventory = ArtifactInventory::default();
+            let producer = inventory
+                .admit(&inventory.empty_view(), vec![entry("BusyProducer", &[])])
+                .unwrap();
+            let roles = CompilerInputProjection::from_issued_entries(&producer.entries()).unwrap();
             let receiver = if inherited {
                 producer.inventory().retain(
                     vec![],
@@ -9248,9 +9254,21 @@ mod tests {
                         worker_cancellation,
                         |_| {},
                         || {
-                            receiver.retain_materialization(metadata, |_| {
-                                panic!("cancelled waiter cannot prepare")
-                            })
+                            if compiler_merge {
+                                receiver
+                                    .merge_compiler_inputs(
+                                        &roles,
+                                        receiver,
+                                        &CompilerInputProjection::default(),
+                                    )
+                                    .map(|_| ())
+                            } else {
+                                receiver
+                                    .retain_materialization(metadata, |_| {
+                                        panic!("cancelled waiter cannot prepare")
+                                    })
+                                    .map(|_| ())
+                            }
                         },
                     );
                     finished.send(result).unwrap();
@@ -9363,11 +9381,17 @@ mod tests {
         let (finished, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let mut parents = Vec::new();
-                let result = receiver
-                    .lease
-                    .collect_inherited_materializations(&mut parents, &mut BTreeSet::new());
-                finished.send(result.map(|()| parents)).unwrap();
+                let result = (|| {
+                    let (merged, _, _) = receiver.merge_compiler_inputs(
+                        descendant.compiler_input_projection(),
+                        &receiver,
+                        &CompilerInputProjection::default(),
+                    )?;
+                    let mut parents = Vec::new();
+                    merged.collect_materializations(&mut parents, &mut BTreeSet::new())?;
+                    Ok::<_, CompileError>(parents)
+                })();
+                finished.send(result).unwrap();
             });
             let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
             assert!(held.is_empty());
@@ -10451,11 +10475,27 @@ mod tests {
                 }));
                 let roles = CompilerInputProjection::from_issued_entries(&entries).unwrap();
                 entries.push(Arc::new(entry(&format!("{prefix}Custody"), &[])));
-                let view = inventory
+                let roots = entries.iter().map(|entry| entry.descriptor.id).collect();
+                let excluded = Arc::new(entry(&format!("{prefix}ProofOnly"), &[]));
+                let excluded_id = excluded.descriptor.id;
+                entries.push(excluded);
+                let broad = inventory
                     .admit_shared(&inventory.empty_view(), entries)
                     .unwrap();
+                let excluded = Arc::downgrade(&broad.lease.payloads[&excluded_id]);
+                let view = broad.select_roots(roots).unwrap();
+                assert!(view.selection_snapshot().scopes.values().any(|scope| scope
+                    .proof()
+                    .nodes
+                    .iter()
+                    .any(|node| node.artifact() == excluded_id)));
+                drop(broad);
+                assert!(
+                    excluded.upgrade().is_none(),
+                    "proof-only ancestors retain no payload"
+                );
                 view.entries();
-                (view, roles)
+                (view, roles, excluded)
             };
         let (left, left_roles, left_excluded) = issue(&first, "LeftMerge");
         let (right, right_roles, right_excluded) = issue(&second, "RightMerge");
@@ -10555,7 +10595,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_compiler_selection_matches_prior_constructor_without_closure_rewalk() {
+    fn direct_compiler_selection_matches_prior_constructor_without_inventory_closure_rewalk() {
         for count in [1, 8, 64] {
             for cross_inventory in [false, true] {
                 for reverse in [false, true] {

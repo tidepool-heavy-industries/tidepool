@@ -2909,7 +2909,7 @@ mod tests {
             let joined = winner
                 .merge(&historical)
                 .expect("a losing historical issuer does not replace the selected input choice");
-            let prior_constructor = super::tests::reference_compiler_selection(
+            let prior_constructor = crate::artifact_inventory::tests::reference_compiler_selection(
                 &winner.artifacts,
                 &historical.artifacts,
                 &joined.artifacts.namespace(),
