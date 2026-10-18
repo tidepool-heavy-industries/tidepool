@@ -86,6 +86,9 @@ use std::time::{Duration, Instant};
 /// Sequential diagnostic intervals within one synchronous owning scope.
 /// Parent and child sequences are inclusive and must not be summed together.
 /// Existing tracing spans retain the output/cell/request correlation.
+/// File/byte/entry counters describe only explicit observations in that phase;
+/// they do not include child sequences or uninstrumented I/O. A zero counter
+/// alone is not evidence that an arbitrary owner performed no filesystem work.
 #[doc(hidden)]
 pub struct InvocationTiming {
     current: Option<InvocationInterval>,
@@ -106,6 +109,9 @@ struct InvocationSummary {
 struct InvocationInterval {
     sequence: &'static str,
     phase: &'static str,
+    entries_visited: u64,
+    files_read: u64,
+    bytes_read: u64,
     wall: Instant,
     monotonic_ns: Option<u64>,
     thread_cpu_ns: Option<u64>,
@@ -133,6 +139,23 @@ impl InvocationTiming {
             current,
             summary,
             _same_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Count entries yielded by an existing source traversal, including entries
+    /// rejected by its selection policy. No additional inspection is performed.
+    pub fn entry_visited(&mut self) {
+        if let Some(interval) = &mut self.current {
+            interval.entries_visited += 1;
+        }
+    }
+
+    /// Count a successful payload read, using its already available length.
+    /// Failed reads do not publish a byte count; the interval retains early_exit.
+    pub fn file_read(&mut self, bytes: usize) {
+        if let Some(interval) = &mut self.current {
+            interval.files_read += 1;
+            interval.bytes_read += bytes as u64;
         }
     }
 
@@ -214,6 +237,9 @@ impl InvocationInterval {
         Self {
             sequence,
             phase,
+            entries_visited: 0,
+            files_read: 0,
+            bytes_read: 0,
             wall: Instant::now(),
             monotonic_ns: observed_clock_ns(libc::CLOCK_MONOTONIC),
             thread_cpu_ns: observed_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID),
@@ -233,6 +259,9 @@ impl InvocationInterval {
             .and_then(|(start, end)| end.checked_sub(start));
         tracing::debug!(target: "exomonad_harness::timing",
             schema = 1, sequence = self.sequence, phase = self.phase, outcome,
+            entries_visited = self.entries_visited,
+            files_read = self.files_read,
+            bytes_read = self.bytes_read,
             clock_domain = "CLOCK_MONOTONIC", inclusive = true,
             sequential_within_sequence = true,
             sequential_within_invocation = self.sequence == "compile.invocation",
@@ -792,41 +821,41 @@ pub fn log_compile_summary(summary: &CompileSummary) {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    type Rows = Arc<Mutex<Vec<BTreeMap<String, String>>>>;
+    struct Capture(Rows);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
     #[test]
     fn invocation_intervals_retain_success_refusal_retry_and_unwind() {
-        use std::collections::BTreeMap;
-        use std::sync::{Arc, Mutex};
-
-        type Rows = Arc<Mutex<Vec<BTreeMap<String, String>>>>;
-        struct Capture(Rows);
-        impl tracing::Subscriber for Capture {
-            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-            fn enter(&self, _: &tracing::span::Id) {}
-            fn exit(&self, _: &tracing::span::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                struct Fields(BTreeMap<String, String>);
-                impl tracing::field::Visit for Fields {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        self.0.insert(field.name().to_owned(), format!("{value:?}"));
-                    }
-                }
-                let mut fields = Fields(BTreeMap::new());
-                event.record(&mut fields);
-                self.0.lock().unwrap().push(fields.0);
-            }
-        }
-
         let rows = Rows::default();
         tracing::subscriber::with_default(Capture(Arc::clone(&rows)), || {
             let mut success = InvocationTiming::start("prepare");
@@ -909,6 +938,86 @@ mod tests {
             assert!(disabled.current.is_none());
             assert!(disabled.summary.is_none());
         });
+    }
+
+    #[test]
+    fn source_observations_count_actual_reads_without_disabled_observer_work() {
+        use crate::cache::source_inspection_work;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        let first = b"module A where\n";
+        let second = b"> module B where\n";
+        std::fs::write(root.join("A.hs"), first).unwrap();
+        std::fs::write(root.join("nested/B.lhs"), second).unwrap();
+        std::fs::write(root.join("ignored.txt"), b"not source").unwrap();
+        let rows = Rows::default();
+        source_inspection_work::take();
+        let observed = tracing::subscriber::with_default(Capture(Arc::clone(&rows)), || {
+            crate::cache::source_root_manifest(root).unwrap()
+        });
+        let enabled_work = source_inspection_work::take();
+        let captured = rows.lock().unwrap();
+        let phase = captured
+            .iter()
+            .find(|row| row["message"] == "compile invocation phase")
+            .unwrap();
+        assert_eq!(phase["sequence"], "\"source.inspect\"");
+        assert_eq!(phase["phase"], "\"blake3_manifest\"");
+        assert_eq!(phase["outcome"], "\"complete\"");
+        assert_eq!(phase["files_read"], "2");
+        assert_eq!(
+            phase["bytes_read"].parse::<usize>().unwrap(),
+            first.len() + second.len()
+        );
+        // Three root entries and one nested source, including the ignored entry.
+        assert_eq!(phase["entries_visited"], "4");
+        drop(captured);
+        let disabled_result =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                let mut disabled = InvocationTiming::start_scoped("source.inspect", "disabled");
+                disabled.entry_visited();
+                disabled.file_read(17);
+                assert!(disabled.current.is_none());
+                assert!(disabled.summary.is_none());
+                crate::cache::source_root_manifest(root).unwrap()
+            });
+        let disabled_work = source_inspection_work::take();
+        assert_eq!(disabled_result, observed);
+        assert_eq!(disabled_work, enabled_work);
+        assert_eq!(enabled_work.content_read_attempts, 2);
+        assert_eq!(enabled_work.hashes, 2);
+        // No source observer calls paths, serialization or an independent scan.
+        assert_eq!(rows.lock().unwrap().len(), 2);
+
+        let failures = Rows::default();
+        tracing::subscriber::with_default(Capture(Arc::clone(&failures)), || {
+            assert!(crate::cache::source_root_manifest(&root.join("missing")).is_err());
+        });
+        let failures = failures.lock().unwrap();
+        let phase = failures
+            .iter()
+            .find(|row| row["message"] == "compile invocation phase")
+            .unwrap();
+        assert_eq!(phase["outcome"], "\"early_exit\"");
+        assert_eq!(phase["files_read"], "0");
+        assert_eq!(phase["bytes_read"], "0");
+        drop(failures);
+
+        // A later failed observation retains only successfully read bytes.
+        std::os::unix::fs::symlink(root.join("absent"), root.join("Z.hs")).unwrap();
+        let partial = Rows::default();
+        tracing::subscriber::with_default(Capture(Arc::clone(&partial)), || {
+            assert!(crate::cache::source_root_manifest(root).is_err());
+        });
+        let partial = partial.lock().unwrap();
+        let phase = partial
+            .iter()
+            .find(|row| row["message"] == "compile invocation phase")
+            .unwrap();
+        assert_eq!(phase["outcome"], "\"early_exit\"");
+        assert_eq!(phase["files_read"], "1");
+        assert_eq!(phase["bytes_read"].parse::<usize>().unwrap(), first.len());
     }
 
     #[test]

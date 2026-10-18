@@ -33,6 +33,10 @@ pub(crate) fn runtime_source_roots(
     deployment: Option<&tidepool_toolchain::toolchain::NativeCatalogSourceSelection>,
 ) -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
     use tidepool_toolchain::toolchain::NativeSourceRole;
+    let mut timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
+        "workspace.runtime_sources",
+        "resolve",
+    );
     let roots = match deployment {
         Some(selection) => [
             selection.root(NativeSourceRole::Stdlib),
@@ -43,8 +47,11 @@ pub(crate) fn runtime_source_roots(
             ensure_builtin_exomonad_haskell()?,
         ],
     };
+    timing.advance("build_identity");
     let expected = runtime_capture_identity(&roots)?;
+    timing.advance("verify_build_identity");
     verify_runtime_capture(&roots, &expected)?;
+    timing.finish(true);
     Ok(roots)
 }
 
@@ -70,8 +77,14 @@ pub(crate) fn verify_runtime_capture(
     roots: &[PathBuf; 2],
     expected_identity: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
+        "workspace.runtime_sources",
+        "verify_capture",
+    );
     if DEV_SOURCE_IDENTITY.is_some() {
-        return verify_dev_source_roots(roots, expected_identity);
+        let result = verify_dev_source_roots(roots, expected_identity);
+        timing.finish(result.is_ok());
+        return result;
     }
     for (root, entries) in roots
         .iter()
@@ -79,6 +92,7 @@ pub(crate) fn verify_runtime_capture(
     {
         tidepool_toolchain::source_bundle::verify_embedded(root, entries)?;
     }
+    timing.finish(true);
     Ok(())
 }
 

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tidepool_toolchain::timing::InvocationTiming;
 use tidepool_toolchain::toolchain::{NativeCatalogSourceSelection, NativeSourceRole};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -847,8 +848,8 @@ impl FrozenWorkspace {
 
     fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
         coverage_entries(coverage)?;
-        let capabilities = crate::actor_host::admitted_capabilities(Some(self))
-            .map_err(std::io::Error::other)?;
+        let capabilities =
+            crate::actor_host::admitted_capabilities(Some(self)).map_err(std::io::Error::other)?;
         let expected = capabilities.effect_keys();
         if coverage[0].requested_effects != expected {
             return Err(
@@ -1052,23 +1053,26 @@ impl FrozenWorkspace {
 }
 
 fn deployment_files(directory: &Path) -> Result<BTreeMap<PathBuf, String>> {
-    fn walk(root: &Path, relative: &Path, files: &mut BTreeMap<PathBuf, String>) -> Result<()> {
+    fn walk(
+        root: &Path,
+        relative: &Path,
+        files: &mut BTreeMap<PathBuf, String>,
+        timing: &mut InvocationTiming,
+    ) -> Result<()> {
         for entry in std::fs::read_dir(root.join(relative))? {
             let entry = entry?;
+            timing.entry_visited();
             let path = relative.join(entry.file_name());
             if path == Path::new("selection.json") {
                 continue;
             }
             let metadata = entry.file_type()?;
             if metadata.is_dir() {
-                walk(root, &path, files)?;
+                walk(root, &path, files, timing)?;
             } else if metadata.is_file() {
-                files.insert(
-                    path,
-                    blake3::hash(&std::fs::read(entry.path())?)
-                        .to_hex()
-                        .to_string(),
-                );
+                let bytes = std::fs::read(entry.path())?;
+                timing.file_read(bytes.len());
+                files.insert(path, blake3::hash(&bytes).to_hex().to_string());
             } else if metadata.is_symlink() {
                 // Active source publication is a pointer, never copied compiler bytes.
                 let target = std::fs::read_link(entry.path())?;
@@ -1089,7 +1093,9 @@ fn deployment_files(directory: &Path) -> Result<BTreeMap<PathBuf, String>> {
         Ok(())
     }
     let mut files = BTreeMap::new();
-    walk(directory, Path::new(""), &mut files)?;
+    let mut timing = InvocationTiming::start_scoped("workspace.deployment", "inventory");
+    walk(directory, Path::new(""), &mut files, &mut timing)?;
+    timing.finish(true);
     Ok(files)
 }
 
@@ -1493,6 +1499,7 @@ fn capture_selected_runtime_libraries(
 }
 
 fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
+    let mut timing = InvocationTiming::start_scoped("workspace.deployment", "source_paths");
     if selection.version != 1
         || selection.sources.roles != NativeSourceRole::ORDERED
         || selection.sources.snapshot_root.canonicalize()? != selection.sources.snapshot_root
@@ -1505,20 +1512,25 @@ fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
         }
     }
     // Inspect before hashing so source aliases cannot enter a retained selection.
+    timing.advance("inspect_sources");
     inspect_sources(&selection.sources.snapshot_root)?;
+    timing.advance("source_manifest");
     if NativeCatalogSourceSelection::source_manifest(&selection.sources.snapshot_root)?
         != selection.sources.source_files
     {
         return Err("runtime library deployment source changed".into());
     }
+    timing.finish(true);
     Ok(())
 }
 
 /// Inspect the same files and enforce the same source-tree policy as capture,
 /// without publishing or writing any source bytes.
 pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    let mut timing = InvocationTiming::start_scoped("workspace.source", "inspect");
     let mut files = BTreeMap::new();
-    inspect_source_tree(source, Path::new(""), None, &mut files, false)?;
+    inspect_source_tree(source, Path::new(""), None, &mut files, false, &mut timing)?;
+    timing.finish(true);
     Ok(files)
 }
 
@@ -1566,7 +1578,17 @@ fn capture_tree(
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
 ) -> Result<()> {
-    inspect_source_tree(source, relative, Some(destination), files, all_authored)
+    let mut timing = InvocationTiming::start_scoped("workspace.source", "capture");
+    inspect_source_tree(
+        source,
+        relative,
+        Some(destination),
+        files,
+        all_authored,
+        &mut timing,
+    )?;
+    timing.finish(true);
+    Ok(())
 }
 
 /// Durable memory is not authored source, even when `.exomonad` is a source root.
@@ -1588,6 +1610,7 @@ fn inspect_source_tree(
     destination: Option<&Path>,
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
+    timing: &mut InvocationTiming,
 ) -> Result<()> {
     if let Some(destination) = destination {
         std::fs::create_dir_all(destination.join(relative))?;
@@ -1597,6 +1620,7 @@ fn inspect_source_tree(
     }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        timing.entry_visited();
         if is_runtime_state_tree(&entry.path()) {
             continue;
         }
@@ -1618,9 +1642,17 @@ fn inspect_source_tree(
         }
         let path = relative.join(&name);
         if kind.is_dir() {
-            inspect_source_tree(&entry.path(), &path, destination, files, all_authored)?;
+            inspect_source_tree(
+                &entry.path(),
+                &path,
+                destination,
+                files,
+                all_authored,
+                timing,
+            )?;
         } else if all_authored || is_haskell_source(&entry.path()) {
             let bytes = std::fs::read(entry.path())?;
+            timing.file_read(bytes.len());
             if let Some(destination) = destination {
                 tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
             }
@@ -2605,12 +2637,9 @@ mod tests {
         let project = catalog_project();
         let (_libraries, selection) = deployment_fixture();
         let run = tempfile::tempdir().unwrap();
-        let frozen = FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection),
-        )
-        .unwrap();
+        let frozen =
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .unwrap();
         let requested = crate::actor_host::admitted_capabilities(Some(&frozen))
             .unwrap()
             .effect_keys()

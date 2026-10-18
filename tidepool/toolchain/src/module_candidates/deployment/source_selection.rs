@@ -64,7 +64,7 @@ impl<'de> Deserialize<'de> for NativeCatalogSourceFile {
                             return Err(serde::de::Error::unknown_field(
                                 &field,
                                 &["path", "sha256"],
-                            ))
+                            ));
                         }
                     }
                 }
@@ -244,11 +244,15 @@ impl NativeCatalogSourceSelection {
         snapshot_root: &Path,
         policy: RootPolicy,
     ) -> Result<Self, ModulePackageError> {
+        let mut timing =
+            crate::timing::InvocationTiming::start_scoped("catalog.source", "root_policy");
         require_immutable_roots(policy, snapshot_root)?;
         if !snapshot_root.is_dir() || absolute(snapshot_root).as_deref() != Some(snapshot_root) {
             return Err(ModulePackageError::RootMoved);
         }
+        timing.advance("reject_aliases");
         reject_source_aliases(snapshot_root)?;
+        timing.advance("role_roots");
         for role in NativeSourceRole::ORDERED {
             let root = snapshot_root.join(role.relative_root());
             if !root.is_dir() || absolute(&root).as_ref() != Some(&root) {
@@ -258,11 +262,14 @@ impl NativeCatalogSourceSelection {
         if !snapshot_root.join("TidepoolCatalog.hs").is_file() {
             return Err(ModulePackageError::Format("native catalog probe"));
         }
+        timing.advance("source_manifest");
+        let source_files =
+            Self::source_manifest(snapshot_root).map_err(|error| io(&error.path, error.source))?;
+        timing.finish(true);
         Ok(Self {
             snapshot_root: snapshot_root.to_owned(),
             roles: NativeSourceRole::ORDERED,
-            source_files: Self::source_manifest(snapshot_root)
-                .map_err(|error| io(&error.path, error.source))?,
+            source_files,
         })
     }
 

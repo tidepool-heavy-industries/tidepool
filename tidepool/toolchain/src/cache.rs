@@ -181,18 +181,21 @@ fn selected_source_paths(
     root: &Path,
     selection: SourceSelection,
 ) -> Result<ObservedSourcePaths, SourceManifestError> {
+    let mut timing = crate::timing::InvocationTiming::start_scoped("source.inspect", "paths");
     let mut relative = Vec::new();
     visit_dependency_sources(
         root,
         root,
         &mut std::collections::HashSet::new(),
         selection,
-        &mut |path, _| {
+        &mut timing,
+        &mut |path, _, _| {
             relative.push(path.to_path_buf());
             Ok(())
         },
     )?;
     relative.sort();
+    timing.finish(true);
     Ok(ObservedSourcePaths {
         root: root.to_path_buf(),
         relative,
@@ -210,15 +213,17 @@ fn selected_source_manifest(
     selection: SourceSelection,
 ) -> Result<SourceRootManifest, SourceManifestError> {
     Ok(SourceRootManifest {
-        files: selected_source_files(root, selection, blake3::hash)?,
+        files: selected_source_files(root, selection, "blake3_manifest", blake3::hash)?,
     })
 }
 
 fn selected_source_files<D>(
     root: &Path,
     selection: SourceSelection,
+    phase: &'static str,
     digest: impl Fn(&[u8]) -> D,
 ) -> Result<Vec<(PathBuf, D)>, SourceManifestError> {
+    let mut timing = crate::timing::InvocationTiming::start_scoped("source.inspect", phase);
     let mut files = Vec::new();
     let mut ancestors = std::collections::HashSet::new();
     visit_dependency_sources(
@@ -226,10 +231,12 @@ fn selected_source_files<D>(
         root,
         &mut ancestors,
         selection,
-        &mut |relative, path| {
+        &mut timing,
+        &mut |relative, path, timing| {
             #[cfg(test)]
             source_inspection_work::read();
             let bytes = crate::host_work::read(path).map_err(|error| source_error(path, error))?;
+            timing.file_read(bytes.len());
             #[cfg(test)]
             source_inspection_work::hash();
             files.push((relative.to_path_buf(), digest(&bytes)));
@@ -237,6 +244,7 @@ fn selected_source_files<D>(
         },
     )?;
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    timing.finish(true);
     Ok(files)
 }
 
@@ -255,9 +263,12 @@ pub fn source_root_manifest(root: &Path) -> Result<Vec<(PathBuf, String)>, Sourc
 pub(crate) fn catalog_source_sha256_manifest(
     root: &Path,
 ) -> Result<Vec<(PathBuf, String)>, SourceManifestError> {
-    selected_source_files(root, SourceSelection::Dependencies, |bytes| {
-        hex_digest(&Sha256::digest(bytes))
-    })
+    selected_source_files(
+        root,
+        SourceSelection::Dependencies,
+        "sha256_manifest",
+        |bytes| hex_digest(&Sha256::digest(bytes)),
+    )
 }
 
 /// Content identity for ordered source roots. Root order determines module
@@ -304,7 +315,12 @@ fn visit_dependency_sources(
     dir: &Path,
     ancestors: &mut std::collections::HashSet<PathBuf>,
     selection: SourceSelection,
-    visit: &mut impl FnMut(&Path, &Path) -> Result<(), SourceManifestError>,
+    timing: &mut crate::timing::InvocationTiming,
+    visit: &mut impl FnMut(
+        &Path,
+        &Path,
+        &mut crate::timing::InvocationTiming,
+    ) -> Result<(), SourceManifestError>,
 ) -> Result<(), SourceManifestError> {
     crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
@@ -322,6 +338,7 @@ fn visit_dependency_sources(
     for entry in entries {
         crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
         let path = entry.path();
+        timing.entry_visited();
         #[cfg(test)]
         source_inspection_work::entry();
         if !selection.includes_directory(&path) {
@@ -329,7 +346,7 @@ fn visit_dependency_sources(
         }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            visit_dependency_sources(root, &path, ancestors, selection, visit)?;
+            visit_dependency_sources(root, &path, ancestors, selection, timing, visit)?;
         } else if selection.includes_file(&path) {
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
@@ -337,7 +354,7 @@ fn visit_dependency_sources(
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-            visit(rel, &path)?;
+            visit(rel, &path, timing)?;
         }
     }
     ancestors.remove(&canonical);
@@ -777,7 +794,7 @@ impl DependencyEvidence {
                         return Err(DependencyEvidenceFailure::Source {
                             index,
                             reason: SourceWitnessFailure::Unavailable,
-                        })
+                        });
                     }
                 };
                 work.source_read_bytes += bytes.len() as u64;
@@ -875,7 +892,7 @@ impl DependencyEvidence {
                             reason: ResolutionWitnessFailure::NegativeCandidateUnavailable {
                                 index: candidate_index,
                             },
-                        })
+                        });
                     }
                 }
             }

@@ -125,9 +125,13 @@ pub fn configured_module_package(
     let CompilerDeploymentConfiguration::Configured(authority) = configuration else {
         return Err(ModulePackageError::UnknownCompiler);
     };
-    DeploymentModulePackage::load(&PathBuf::from(path), &authority)
+    let timing =
+        crate::timing::InvocationTiming::start_scoped("workspace.catalog", "acquire_package");
+    let result = DeploymentModulePackage::load(&PathBuf::from(path), &authority)
         .map(std::sync::Arc::new)
-        .map(Some)
+        .map(Some);
+    timing.finish(result.is_ok());
+    result
 }
 
 /// Validate configured source provenance without hydrating native products.
