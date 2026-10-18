@@ -66,7 +66,7 @@ import Tidepool.ExactScope
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeInterfaceToken, scopeOriginalBytes
-  , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , canonicalProofInterfaceBody, canonicalProofOriginalBytes
   , CanonicalInterfaceProof, CanonicalInterfaceAdmission, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
@@ -1062,7 +1062,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
   selected <- either fail pure (extendSourceSelectedOriginals
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
-  (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached outputWrites) finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
+  (cached,additions,pendingProducts,pendingLexical) <- foldM retainCached finalized (pprCandidateAdmissions prepared)
   admitted <- extendExactScopeGeneration cached additions (map CompilerOriginal pendingProducts) pendingLexical >>= either fail pure
   promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
@@ -1124,7 +1124,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
           , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
           , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions,stagedProducts,stagedLexical)
         _ -> fail "fresh finalization conflicts with an admitted original owner"
-    retainCached outputWrites (scope,additions,stagedProducts,stagedLexical) (index, admission) = do
+    retainCached (scope,additions,stagedProducts,stagedLexical) admission = do
       let candidate = preparedCandidateOriginal admission
           proof = preparedCandidateProof admission
           unit = candidateUnit candidate
@@ -1143,23 +1143,15 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
             , (originalUnit original,originalModule original) == key]
       case (existingInterfaces,existingProducts) of
         ([],[]) -> do
-          let stem = directory </> "retained-cached-original-" ++ show index
-              interfacePath = stem ++ ".hi"
-              packagesPath = stem ++ ".hi.packages"
-              productPath = stem ++ ".product.cbor"
-              interface = ExactIfaceArtifact unit owner interfacePath
+          let interface = ExactIfaceArtifact unit owner (candidateInterface candidate)
                 (candidateInterfaceSha256 candidate) requirements
               original = ExactProduct unit owner (candidateModuleVersion candidate)
-                (candidateInterfaceSha256 candidate) (candidateProductSha256 candidate) productPath groups
-          -- Keep the producer's original framing and module version. This
-          -- private support entry cannot become a replacement source owner.
-          writeFresh outputWrites interfacePath interfaceBytes
-          writeFresh outputWrites packagesPath packageBytes
-          writeFresh outputWrites productPath productBytes
-          relocated <- either fail pure (relocateCanonicalInterfaceProof proof
-            (interface,packagesPath,candidatePackageImportsSha256 candidate)
-            (Just (productPath,candidateProductSha256 candidate)))
-          pure (scope,additions ++ [((interface,packagesPath,candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence relocated)],
+                (candidateInterfaceSha256 candidate) (candidateProductSha256 candidate)
+                (candidateProductPath candidate) groups
+          -- Scope extension transfers the canonical proof's captured bodies.
+          -- Their original paths remain locators, never fresh output claims.
+          pure (scope,additions ++ [((interface,candidatePackageImports candidate,
+              candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence proof)],
             stagedProducts ++ [original],stagedLexical ++ [(key,lexicalRequirements)])
         ([(interface,packagesPath,packagesSha)],[original])
           | lookup key (scopeLexical scope ++ stagedLexical) == Just lexicalRequirements
