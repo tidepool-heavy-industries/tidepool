@@ -187,11 +187,14 @@ data PackageRootObservations = PackageRootObservations HscEnv FileObservations
 
 withPackageRootObservations :: HscEnv -> (PackageRootObservations -> IO a) -> IO a
 withPackageRootObservations env action = withFileObservations $ \observations -> do
-  result <- action (PackageRootObservations env observations)
   timing <- readTimingEnabled
-  (reads,bytes) <- fileObservationTotals observations
-  emitCount timing "package_preflight.physical_reads" (fromIntegral reads)
-  emitCount timing "package_preflight.physical_bytes" bytes
+  result <- timeDetailPhase timing "package_preflight" "read_only" $
+    action (PackageRootObservations env observations)
+  when timing $ do
+    -- These totals count successful physical observations, not failed IO attempts.
+    (reads,bytes) <- fileObservationTotals observations
+    emitCount timing "package_preflight.physical_reads" (fromIntegral reads)
+    emitCount timing "package_preflight.physical_bytes" bytes
   pure result
 
 packageImportRootWithin :: PackageRootObservations -> Module -> IO (Either String PackageImportRoot)
