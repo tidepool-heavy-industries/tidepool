@@ -51,10 +51,11 @@ impl<'a> NativeDependencyCatalog<'a> {
 
     /// Borrow historical qualifications only when this request's actual rows
     /// permit every exact binding. A retained Full offer alone grants nothing.
-    pub(crate) fn qualified_availability(
+    fn qualified_availability(
         &self,
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
+        advertised: &BTreeSet<NativeGroupKey>,
     ) -> Result<Vec<QualifiedNativeAvailability>, CompileError> {
         let DependencyGrantSource::Request(inputs) = &self.0 else {
             return Err(failure("request qualifications require a request catalog"));
@@ -67,6 +68,12 @@ impl<'a> NativeDependencyCatalog<'a> {
                 else {
                     continue;
                 };
+                if !advertised
+                    .iter()
+                    .any(|key| key.artifact == qualification.original())
+                {
+                    continue;
+                }
                 let mut permitted = true;
                 for group in qualification.groups() {
                     let key = NativeGroupKey {
@@ -789,6 +796,54 @@ impl CheckedNativeAvailability {
         preferred: &[QualifiedNativeAvailability],
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+        let advertised = self.advertised_groups(baseline_groups)?;
+        self.validate_advertised(advertised, preferred, validation)
+    }
+
+    pub(crate) fn validate_request(
+        self,
+        baseline_groups: &BTreeSet<NativeGroupKey>,
+        catalog: &NativeDependencyCatalog<'_>,
+        projection: &CompilerInputProjection,
+        namespace: &ArtifactView,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+        let advertised = self.advertised_groups(baseline_groups)?;
+        let preferred = catalog.qualified_availability(projection, namespace, &advertised)?;
+        self.validate_advertised(advertised, &preferred, validation)
+    }
+
+    fn advertised_groups(
+        &self,
+        baseline: &BTreeSet<NativeGroupKey>,
+    ) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
+        let mut advertised = baseline.clone();
+        for offer in &self.offers {
+            let entry = self
+                .entries
+                .get(&offer.original())
+                .ok_or_else(|| failure("private original is outside retained custody"))?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("private original lacks original payload"));
+            };
+            advertised.extend(
+                crate::certified_products::original_available_groups(product)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                    .map(|group| NativeGroupKey {
+                        artifact: offer.original(),
+                        original_ordinal: group.original_ordinal(),
+                    }),
+            );
+        }
+        Ok(advertised)
+    }
+
+    fn validate_advertised(
+        self,
+        advertised: BTreeSet<NativeGroupKey>,
+        preferred: &[QualifiedNativeAvailability],
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
         let originals = self
             .entries
             .iter()
@@ -797,7 +852,6 @@ impl CheckedNativeAvailability {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let mut advertised = baseline_groups.clone();
         let mut qualifications = BTreeMap::new();
         for qualification in preferred {
             if qualifications
@@ -812,17 +866,6 @@ impl CheckedNativeAvailability {
             }
         }
         for offer in &self.offers {
-            let product = originals
-                .get(&offer.original())
-                .ok_or_else(|| failure("private original is outside retained custody"))?;
-            advertised.extend(
-                crate::certified_products::original_available_groups(product)
-                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                    .map(|group| NativeGroupKey {
-                        artifact: offer.original(),
-                        original_ordinal: group.original_ordinal(),
-                    }),
-            );
             if let Some(qualification) = offer.full_qualification() {
                 if qualifications
                     .insert(qualification.original(), qualification.clone())

@@ -868,30 +868,35 @@ impl OriginalCompilerInputs {
             namespace_offers,
             &dependencies,
         )?;
-        let qualifications = match source {
-            CompleteAvailabilitySource::Candidate(_) => native_original_requirements
-                .iter()
-                .map(|proof| proof.qualify_availability(&artifacts))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect(),
-            CompleteAvailabilitySource::Request(_) => {
-                dependencies.qualified_availability(&effective, &artifacts)?
+        let checked = effective.issue_complete_native_availability(
+            &artifacts,
+            entries,
+            namespace_offers,
+            &dependencies,
+        )?;
+        let native_offers = match source {
+            CompleteAvailabilitySource::Candidate(_) => {
+                let qualifications = native_original_requirements
+                    .iter()
+                    .map(|proof| proof.qualify_availability(&artifacts))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                checked.validate(
+                    &selected.retained.selected_native_groups,
+                    &qualifications,
+                    &mut validation,
+                )?
             }
-        };
-        let native_offers = effective
-            .issue_complete_native_availability(
-                &artifacts,
-                entries,
-                namespace_offers,
-                &dependencies,
-            )?
-            .validate(
+            CompleteAvailabilitySource::Request(_) => checked.validate_request(
                 &selected.retained.selected_native_groups,
-                &qualifications,
+                &dependencies,
+                &effective,
+                &artifacts,
                 &mut validation,
-            )?;
+            )?,
+        };
         artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
         Ok(Self {
             demand: OriginalInputDemand::RolePolicy,
