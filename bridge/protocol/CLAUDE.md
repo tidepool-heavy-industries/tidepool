@@ -12,6 +12,14 @@ changes. Source refreshes and committed snapshots do not authorize native builds
 The production MCP composer exports Core/Authored/Effects through
 `//bridge/mcp:effects_generated`; reuse it for Haskell consumers.
 
+After changing schemas or generator projections, check tracked mirrors with
+`just build //bridge/protocol:snapshots_check`. It compares the exact declared
+generator output against separate tracked source inputs; `just verify` and
+catalog-source preparation require the same check. Refresh is an explicit writer:
+`scripts/protocol-snapshots.py --generator EXACT_BUILT_GENERATOR --refresh`.
+Commit the resulting mirrors with their schema change. Never edit generated
+snapshots by hand or weaken the frozen source comparison.
+
 Validation includes schema checks, compiled Rust codecs, and the three real GHC
 consumer/codec tests in `bridge/mcp/tests/generated_surface_contracts.rs`.
 A refusal first establishes a valid compiled or decoded control.

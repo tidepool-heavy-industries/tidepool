@@ -3,7 +3,9 @@ load("//build/rust:defs.bzl", "tidepool_rust_binary", "tidepool_rust_library", "
 load("@prelude//:rules.bzl", "cxx_library", "export_file", "filegroup")
 load("@prelude//rust:sources.bzl", "rust_filegroup")
 
-load("//build/protocol:defs.bzl", "protocol_generated")
+load("//build/protocol:defs.bzl", "protocol_generated", "protocol_snapshots_check")
+
+load("//build/rust:source_snapshot.bzl", "native_source_snapshot")
 
 load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 
@@ -244,6 +246,28 @@ protocol_generated(
         "exomonad/host/src/generated/recipe_check.rs",
         "exomonad/host/src/generated/mod.rs",
     ],
+    visibility = ["PUBLIC"],
+)
+native_source_snapshot(
+    name = "snapshot_sources",
+    trees = [
+        ("//build/protocol:snapshot_roster", ""),
+        ("//bridge/handlers:protocol_snapshot_sources", ""),
+        ("//bridge/haskell:protocol_snapshot_sources", ""),
+        ("//bridge/mcp:protocol_snapshot_sources", ""),
+        ("//exomonad/actor:protocol_snapshot_sources", ""),
+        ("//exomonad/host:protocol_snapshot_sources", ""),
+        ("//exomonad/tool:protocol_snapshot_sources", ""),
+        ("//tidepool/bridge-effects:protocol_snapshot_sources", ""),
+        ("//tidepool/runtime:protocol_snapshot_sources", ""),
+    ],
+    visibility = ["PUBLIC"],
+)
+
+protocol_snapshots_check(
+    name = "snapshots_check",
+    generated = ":generated",
+    snapshots = ":snapshot_sources",
     visibility = ["PUBLIC"],
 )
 

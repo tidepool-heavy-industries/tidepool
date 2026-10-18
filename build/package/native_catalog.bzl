@@ -48,7 +48,7 @@ def _catalog_sources_impl(ctx):
             "--workbench-entry-source", builtin_entries["workbench"],
             "--async-workbench-entry-source", builtin_entries["async_workbench"],
             "--output", output.as_output(),
-        ]),
+        ], hidden = [ctx.attrs.protocol_snapshots]),
         category = "native_catalog_sources",
     )
     return [DefaultInfo(default_output = output)]
@@ -59,6 +59,7 @@ _catalog_sources = rule(
         "components": attrs.list(attrs.string()),
         "modules": attrs.dict(attrs.string(), attrs.string()),
         "sources": attrs.source(),
+        "protocol_snapshots": attrs.source(default = "//bridge/protocol:snapshots_check"),
         "effects": attrs.source(),
         "jev_sources": attrs.source(),
         "entry_source": attrs.exec_dep(default = "//tidepool/runtime:tidepool-entry-source", providers = [RunInfo]),

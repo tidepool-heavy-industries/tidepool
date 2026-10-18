@@ -1344,6 +1344,12 @@ export_file(
 )
 
 filegroup(
+    name = "protocol_snapshot_sources",
+    srcs = {"tidepool/runtime/" + source: source for source in glob(["src/generated/*"])},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "native_qualification_inputs",
     srcs = {
         "tidepool/runtime/BUCK": "BUCK",

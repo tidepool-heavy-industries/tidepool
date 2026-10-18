@@ -1,6 +1,12 @@
 load("@prelude//:rules.bzl", "filegroup")
 
 filegroup(
+    name = "snapshot_roster",
+    srcs = {"build/protocol/outputs.txt": "outputs.txt"},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "qualification_inputs",
     srcs = {"build/protocol/" + source: source for source in glob(["BUCK", "*.bzl", "*.txt"])},
     visibility = ["PUBLIC"],

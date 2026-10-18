@@ -212,6 +212,9 @@ def main(argv=None):
                 if "test" in target and (label := ordinary_test_label(target)) is not None:
                     test_labels.add(label)
     if options.command == "verify":
+        snapshot_status = execute("build", ["//bridge/protocol:snapshots_check"])
+        if snapshot_status:
+            return snapshot_status
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update((
             "//tidepool/toolchain:compile_fail_native_group_issuer_is_not_artifact",

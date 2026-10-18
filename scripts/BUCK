@@ -9,6 +9,23 @@ filegroup(
 
 export_file(name = "embedded_web_provenance_script", src = "embedded_web_provenance.py", visibility = ["PUBLIC"])
 export_file(name = "directory_copier", src = "copy-directory.py", visibility = ["PUBLIC"])
+export_file(name = "protocol_snapshots_script", src = "protocol-snapshots.py", visibility = ["PUBLIC"])
+
+sh_test(
+    name = "protocol_snapshots_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_protocol_snapshots"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "TIDEPOOL_PROTOCOL_GENERATED_ROOT": "$(location //bridge/protocol:generated)",
+        "TIDEPOOL_PROTOCOL_SNAPSHOT_ROOT": "$(location //bridge/protocol:snapshot_sources)",
+        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "TIDEPOOL_PROTOCOL_GENERATED_ROOT TIDEPOOL_PROTOCOL_SNAPSHOT_ROOT",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "//bridge/protocol:generated", "//bridge/protocol:snapshot_sources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
+)
 
 sh_test(
     name = "directory_copy_tests",

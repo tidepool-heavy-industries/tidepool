@@ -370,6 +370,29 @@ def generated_protocol_label(path):
     return "//bridge/protocol:generated[" + path.replace("/", "_").replace(".", "_") + "]"
 
 
+def protocol_snapshot_owner(path):
+    if path.startswith("bridge/haskell/lib/"):
+        return "bridge/haskell"
+    owner, separator, _ = path.partition("/src/")
+    if not separator:
+        raise SystemExit(f"protocol snapshot has no owning source package: {path}")
+    return owner
+
+
+def protocol_snapshot_rules(directory):
+    paths = [path for path in protocol_output_paths()
+             if protocol_snapshot_owner(path) == directory]
+    if not paths:
+        return ""
+    patterns = sorted({pathlib.PurePosixPath(path).parent.relative_to(directory).as_posix() + "/*"
+                       for path in paths})
+    return "\n".join([
+        "filegroup(", '    name = "protocol_snapshot_sources",',
+        "    srcs = {" + json.dumps(directory + "/") + " + source: source for source in glob(" + json.dumps(patterns) + ")},",
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def generated_producer_rules(package_name):
     if package_name == "tidepool-protocol":
         paths = protocol_output_paths()
@@ -379,11 +402,24 @@ def generated_producer_rules(package_name):
         name, generator = "effects_generated", ":tidepool_effects_gen"
     else:
         return ""
-    return "\n".join([
+    rules = "\n".join([
         "protocol_generated(", f"    name = {json.dumps(name)},",
         f"    generator = {json.dumps(generator)},", "    outputs = [",
         render_strings(paths, 8), "    ],", '    visibility = ["PUBLIC"],', ")", "",
     ])
+    if package_name == "tidepool-protocol":
+        owners = sorted({protocol_snapshot_owner(path) for path in paths})
+        rules += "\n".join([
+            "native_source_snapshot(", '    name = "snapshot_sources",',
+            "    trees = [",
+            '        ("//build/protocol:snapshot_roster", ""),',
+            *[f'        ("//{owner}:protocol_snapshot_sources", ""),' for owner in owners],
+            "    ],", '    visibility = ["PUBLIC"],', ")", "",
+            "protocol_snapshots_check(", '    name = "snapshots_check",',
+            '    generated = ":generated",', '    snapshots = ":snapshot_sources",',
+            '    visibility = ["PUBLIC"],', ")", "",
+        ])
+    return rules
 
 
 def register_test_fixture(included, external_labels):
@@ -1494,7 +1530,10 @@ for package_name, package in local.items():
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
     if package_name in {"tidepool-protocol", "tidepool-mcp"}:
-        rules.append('load("//build/protocol:defs.bzl", "protocol_generated")\n')
+        rules.append('load("//build/protocol:defs.bzl", "protocol_generated"' +
+                     (', "protocol_snapshots_check"' if package_name == "tidepool-protocol" else "") + ')\n')
+    if package_name == "tidepool-protocol":
+        rules.append('load("//build/rust:source_snapshot.bzl", "native_source_snapshot")\n')
     if package_name == "tidepool-codegen":
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
@@ -1881,6 +1920,9 @@ cxx_library(
     visibility = ["PUBLIC"],
 )
 ''')
+    snapshot_rules = protocol_snapshot_rules(CURRENT_DIR)
+    if snapshot_rules:
+        rules.append(snapshot_rules)
     rules.append("\n".join([
         "filegroup(", '    name = "native_qualification_inputs",', "    srcs = {",
         *("        " + json.dumps(CURRENT_DIR + "/" + source) + ": " + json.dumps(source) + "," for source in sorted(CURRENT_QUALIFICATION_SOURCES)),
