@@ -112,15 +112,26 @@ exactScopeChecksFor kind manifest = do
     refuse manifest "" (evidence invalid)
   -- The source-original fixture must retain its executable product. Its role
   -- cannot be downgraded to metadata without breaking the native owner closure.
-  -- Native declarations retain their separate type-only original interface.
+  -- Native declarations preserve body availability independently of selected execution.
   case canonicalOrigin proof of
     SourceOriginal _ -> do
       unless (any (\product' -> (originalUnit product',originalModule product') == key)
           (scopeProducts scope)) (fail "source-original fixture lost its native product")
       forM_ [TList [TString "join"],TList [TString "value"]] $ \invalid ->
         refuse manifest "incomplete or conflicting exact owner closure" (evidence invalid)
-    NativeAuthoredDeclaration _ ->
-      unless (null (scopeProducts scope)) (fail "type-only declaration fixture acquired native products")
+    NativeAuthoredDeclaration _ -> do
+      let ownedByKey product' = (originalUnit product',originalModule product') == key
+      selectedProduct <- case filter ownedByKey (scopeProducts scope) of
+        [product'] -> pure product'
+        _ -> fail "native declaration fixture lost its exact selected product owner"
+      unless (null (originalGroups selectedProduct))
+        (fail "native declaration fixture selected execution groups")
+      availableProduct <- case filter ownedByKey (scopeAvailableOriginalProducts scope) of
+        [product'] -> pure product'
+        _ -> fail "native declaration fixture lost its exact available product owner"
+      unless (availableProduct {originalGroups=[]} == selectedProduct
+          && not (null (originalGroups availableProduct)))
+        (fail "native declaration fixture lost its matching available native body")
   refuse manifest "" (evidence (TList (replace 3 TNull role)))
   refuse manifest "" (evidence (TList (replace 4 TNull role)))
   refuse manifest "exact input differs from its selected seal"
