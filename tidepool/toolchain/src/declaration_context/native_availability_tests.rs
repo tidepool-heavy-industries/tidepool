@@ -2181,10 +2181,15 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
+    let marker = |module, version| {
+        Arc::new(ArtifactEntry::canonical(
+            product(module, version).module_interface().unwrap().clone(),
+        ))
+    };
     let historical = inventory
         .admit_recovery_selection(
             &base,
-            vec![entries[0].clone()],
+            vec![entries[0].clone(), marker("ScopedHistoricalMarker", 173)],
             &BTreeSet::from([NativeGroupKey {
                 artifact: a_id,
                 original_ordinal: 9001,
@@ -2197,35 +2202,88 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .into_iter()
         .find(|group| group.binding.artifact() == a_id && group.original_ordinal == 9001)
         .unwrap();
-    let b_issued = inventory
-        .admit_recovery_selection(
-            &historical,
-            vec![entries[1].clone()],
-            &BTreeSet::from([NativeGroupKey {
-                artifact: b_id,
-                original_ordinal: 7,
-            }]),
-        )
-        .unwrap();
     let current = inventory
         .admit_recovery_selection(
-            &b_issued,
-            vec![entries[0].clone()],
+            &base,
+            vec![
+                entries[0].clone(),
+                entries[1].clone(),
+                marker("ScopedCurrentMarker", 174),
+            ],
             &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
                 artifact: a_id,
                 original_ordinal,
             })),
         )
         .unwrap();
-    let canonical =
-        ArtifactEntry::canonical(recovered[0].product.module_interface().unwrap().clone())
-            .descriptor
-            .id;
-    let proof = NativeOriginalRequirement::from_issued_group_custody(a_id, canonical, &current)
+    let current_group = current
+        .capture_graph_selection()
+        .native_groups
+        .into_iter()
+        .find(|group| group.binding.artifact() == a_id && group.original_ordinal == 9001)
+        .unwrap();
+    let carrier = |view: &ArtifactView| {
+        view.capture_graph_selection()
+            .namespace
+            .into_iter()
+            .find(|binding| binding.artifact == a_id)
+            .unwrap()
+    };
+    assert_eq!(carrier(&historical), carrier(&current));
+    let group_carrier = |view: &ArtifactView, group| {
+        view.binding_dependencies()
+            .into_iter()
+            .filter_map(|(from, to, label)| {
+                if from != ArtifactBindingNode::Group(group)
+                    || label != crate::artifact_inventory::ArtifactDependency::Interface
+                {
+                    return None;
+                }
+                match to {
+                    ArtifactBindingNode::Artifact(binding) if binding.artifact == a_id => {
+                        Some(binding)
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        group_carrier(&historical, historical_group),
+        BTreeSet::from([carrier(&historical)])
+    );
+    assert_eq!(
+        group_carrier(&current, current_group),
+        BTreeSet::from([carrier(&historical)])
+    );
+    assert_ne!(
+        historical_group, current_group,
+        "independent marker scopes issue distinct groups on the same carrier"
+    );
+    let b_group = current
+        .capture_graph_selection()
+        .native_groups
+        .into_iter()
+        .find(|group| group.binding.artifact() == b_id && group.original_ordinal == 7)
+        .unwrap();
+    let expected_edge = (
+        ArtifactBindingNode::Group(b_group),
+        ArtifactBindingNode::Group(current_group),
+        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+            dependent_ordinal: 7,
+            required_ordinal: 9001,
+        },
+    );
+    assert!(current.binding_dependencies().contains(&expected_edge));
+    let current = current.merge_fixture_selections(&historical).unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(a_id, &current)
         .unwrap()
         .unwrap();
     let offer = IssuedNativeOffer::issue(a_id, &current, Some(proof)).unwrap();
-    assert!(offer.is_full());
+    assert!(
+        !offer.is_full(),
+        "competing same-carrier groups cannot issue Full"
+    );
     let parent_groups = offer
         .proof()
         .unwrap()
@@ -2236,11 +2294,15 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .filter(|group| group.binding.artifact() == a_id && group.original_ordinal == 9001)
         .copied()
         .collect::<BTreeSet<_>>();
-    assert!(parent_groups.contains(&historical_group));
-    assert!(
-        parent_groups.iter().any(|group| *group != historical_group),
-        "fixture must retain a distinct current A9001 beside B's historical backedge"
+    assert_eq!(
+        parent_groups,
+        BTreeSet::from([historical_group, current_group])
     );
+    assert!(offer
+        .custody_snapshot()
+        .binding_dependencies()
+        .unwrap()
+        .contains(&expected_edge));
     let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let metadata = projection
         .project_metadata(current.metadata_snapshot())
@@ -2258,7 +2320,7 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .unwrap();
     assert_eq!(
         support.groups().collect::<BTreeSet<_>>(),
-        BTreeSet::from([historical_group]),
+        BTreeSet::from([current_group]),
         "ordinal permission cannot resurrect the unconsumed parent-root binding"
     );
 }
