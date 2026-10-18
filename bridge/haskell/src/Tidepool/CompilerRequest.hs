@@ -64,7 +64,9 @@ import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites)
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
-import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, emitCount)
+import Tidepool.Metadata (metadataForConstructors)
+import Tidepool.CborEncode (encodeMetadata)
 import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
 import Tidepool.HarnessSource (spliceHarnessProfilePragma)
@@ -412,6 +414,14 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
             when (preparedRootIdentity identifier /= identity) $
               ioError (userError "package recovery root differs from canonical original global")
             pure identifier
+    when timing $ do
+      -- Diagnostic encoding measures the common framed payload; it is not a
+      -- publication and grants no constructor or executable authority.
+      common <- either (fail . show) pure (metadataForConstructors originalConstructors)
+      let commonBytes = encodeMetadata common False Nothing []
+      emitCount timing "prepared_metadata.batch_targets" (fromIntegral (length targets))
+      emitCount timing "prepared_metadata.common_rows" (fromIntegral (length common))
+      emitCount timing "prepared_metadata.common_framed_bytes" (fromIntegral (BS.length commonBytes))
     recover <- newPreparedRecoveryWithDemandAndReuse (Just (pprReuseContext prepared)) (Just executor) demandPackages
       hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
       (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []

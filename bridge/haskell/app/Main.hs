@@ -534,6 +534,10 @@ writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
   let hasIO = any (targetBindingHasIO binds . paTarget) artifacts
       metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes
+  timing <- readTimingEnabled
+  when timing $ do
+    emitCount timing "prepared_metadata.emitted_rows" (fromIntegral (length metadata))
+    emitCount timing "prepared_metadata.emitted_bytes" (fromIntegral (BS.length metaBytes))
   case delivery of
     InlineYieldSites -> pure () -- TurnOut carries the same typed sites.
     SeparateYieldSites -> do
