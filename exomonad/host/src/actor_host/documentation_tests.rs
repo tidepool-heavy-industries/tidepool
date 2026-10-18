@@ -306,6 +306,16 @@ async fn committed(
     result
 }
 
+async fn native_setup(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    campaign
+        .drive_native_admission(committed(policy, source))
+        .await
+}
+
 async fn displayed(
     campaign: &mut TestCampaign,
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
@@ -830,7 +840,7 @@ async fn notebook_cell_infers_response_results() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let response = displayed(
+                let response = native_setup(
                     campaign,
                     root.as_ref(),
                     &tidepool_testing::fixture_source(
@@ -853,7 +863,8 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
             "import qualified Tidepool.Agent.Contract as A\n",
@@ -1605,7 +1616,8 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
                 let mut child = None;
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
             "import qualified Tidepool.Agent.Contract as A\n",
@@ -1765,7 +1777,8 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     &tidepool_testing::fixture_source(
                         "exomonad/host/src/actor_host/quiet_observation_setup.hs",
@@ -1876,7 +1889,8 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
                     .unwrap()
                     .unwrap()
                     .len();
-                let spawned = committed(
+                let spawned = native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
                         "import qualified Tidepool.Agent.Contract as A\n",
@@ -1926,8 +1940,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                 let source = tidepool_testing::fixture_source(
                     "exomonad/host/src/actor_host/fixtures/model_context.hs",
                 );
-                let setup = committed(root.as_ref(), &source);
-                tokio::pin!(setup);
+                native_setup(campaign, root.as_ref(), &source).await;
                 let mut children = Vec::new();
                 let mut bindings = Vec::new();
                 {
@@ -1936,16 +1949,11 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                         Ready,
                     }
                     let mut ready = 0;
-                    let mut setup_finished = false;
-                    while !setup_finished || ready != 2 {
-                        let arrival = tokio::select! {
-                            _ = &mut setup, if !setup_finished => {
-                                setup_finished = true;
-                                continue;
-                            }
-                            arrival = campaign.next_deployment(
+                    while ready != 2 {
+                        let arrival = campaign
+                            .next_deployment(
                                 "model-context child admission",
-                                super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                                Duration::from_secs(120),
                                 |event| match event {
                                     LocalResidentDeployment::PolicyInstalled(child) => {
                                         Ok(Arrival::Child(child))
@@ -1955,11 +1963,10 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                                     }
                                     other => Err(other),
                                 },
-                            ) => arrival,
-                        };
+                            )
+                            .await;
                         match arrival {
                             Arrival::Child(child) => {
-                                campaign.acknowledge_native_spawn(&child);
                                 bindings.push(open_test_workspace(campaign, &child));
                                 children.push(child);
                             }
@@ -2011,7 +2018,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    displayed(
+    native_setup(
         campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source("exomonad/host/src/actor_host/fixtures/route.hs"),
@@ -2054,8 +2061,8 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         .iter()
         .find(|child| child.label == "producer")
         .unwrap();
-    dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
-    dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput").await;
+    campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
+    campaign.drive_native_admission(dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput")).await;
     let reviewer = {
         enum ReviewArrival {
             Child(Box<exomonad_actor::LocalResidentInstallation>),
@@ -2097,6 +2104,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 .await;
             match arrival {
                 ReviewArrival::Child(child) => {
+                    campaign.acknowledge_native_spawn(&child);
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model, Some(exomonad_actor::Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Sol)));
                     bindings.push(open_test_workspace(campaign, &child));
@@ -2148,7 +2156,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     )
     .await;
     assert_eq!(explicit_display_texts(&foreign)[0], "0", "{foreign}");
-    let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
+    let reply = campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
     assert_eq!(reply["status"], "replied", "{reply}");
     displayed(
         campaign,
@@ -2526,7 +2534,7 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         matches!(event, LocalResidentDeployment::PolicyInstalled(_))
     });
 
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         concat!(
             "let parentOnly = 41 :: Int\n",
@@ -2607,7 +2615,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source(
             "exomonad/host/src/actor_host/fixtures/independent_worker_setup.hs",
@@ -2624,7 +2632,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let result =
         dispatch_haskell_script(worker.policy.as_ref(), "respond (\"ready\" :: Text)").await;
     assert_eq!(result["status"], "replied", "{result}");
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source(
             "exomonad/host/src/actor_host/fixtures/independent_peer_setup.hs",
