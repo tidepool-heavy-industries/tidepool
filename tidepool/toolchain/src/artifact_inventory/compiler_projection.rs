@@ -2708,6 +2708,7 @@ mod tests {
                 reverse.input_decisions.facts[owner].groups,
                 historical_choices
             );
+            drop(reverse);
             drop(winner);
             drop(historical);
             assert!(joined
