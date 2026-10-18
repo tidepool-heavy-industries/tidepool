@@ -1166,7 +1166,10 @@ mod tests {
         reverse_names: bool,
         split_last: bool,
         value_offset: u32,
-    ) -> (CachedHomeOwner, ProjectedGroup, Vec<ImportOwner>) {
+    ) -> Result<
+        (CachedHomeOwner, ProjectedGroup, Vec<ImportOwner>),
+        tidepool_repr::execution_schema::ParseError,
+    > {
         use tidepool_repr::execution_schema::{
             parse_projected_group, DecodeLimits, HeapRhs, ProgramRequirements,
         };
@@ -1250,7 +1253,7 @@ mod tests {
             execution_abi_version: envelope.execution_abi_version,
             target: envelope.target,
         };
-        let all = testing::projected_group(wire, 11).unwrap();
+        let all = testing::projected_group(wire, 11)?;
         let bytes = tidepool_test_data::prepared_encode::encode_projected_group(&all);
         let mut value: ciborium::value::Value =
             ciborium::de::from_reader(bytes.as_slice()).unwrap();
@@ -1265,9 +1268,8 @@ mod tests {
         binders.drain(..helpers);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-        let projected =
-            parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
-        (
+        let projected = parse_projected_group(&bytes, &requirements, DecodeLimits::default())?;
+        Ok((
             CachedHomeOwner {
                 unit: "fixture".into(),
                 module: "Fixture".into(),
@@ -1277,7 +1279,7 @@ mod tests {
             },
             projected,
             imports,
-        )
+        ))
     }
 
     #[test]
@@ -1287,7 +1289,7 @@ mod tests {
 
         let check = |helpers, exports, imports, reverse, split, offset| {
             let (owner, projected, owners) =
-                outlined_fixture(helpers, exports, imports, reverse, split, offset);
+                outlined_fixture(helpers, exports, imports, reverse, split, offset).unwrap();
             let group = CertifiedGroup::admit(owner, projected, owners).unwrap();
             OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
             let actual = SourceGroupOutline::from_certified(&group);
@@ -1358,13 +1360,35 @@ mod tests {
             }
             Ok(())
         };
-        // Fixed large-helper/single-export and zero-export controls ensure the
-        // budget is exercised independently of generated coverage.
+        // Fixed large-helper/single-export and zero-export controls exercise
+        // admitted work and raw-format refusal independently of generation.
         check(512, 1, 12, true, false, 3).unwrap();
-        check(8, 0, 0, false, true, 0).unwrap();
+        assert!(matches!(
+            outlined_fixture(8, 0, 0, false, true, 0),
+            Err(tidepool_repr::execution_schema::ParseError::Malformed(reason))
+                if reason == "projected group has no binders"
+        ));
+        // Serialized groups require an exported binder, while the structural
+        // in-memory issuer also admits an empty group and certified outline.
+        let mut empty_wire = testing::wire_program();
+        empty_wire.bindings.clear();
+        empty_wire.expressions.nodes.clear();
+        let empty_owner = group("empty", 11, &[]).owner().clone();
+        let empty = CertifiedGroup::admit(
+            empty_owner.clone(),
+            testing::projected_group(empty_wire, 11).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
+        let empty_outline = SourceGroupOutline::from_certified(&empty);
+        assert_eq!(empty_outline.owner, empty_owner);
+        assert_eq!(empty_outline.original_ordinal, 11);
+        assert!(empty_outline.tops.is_empty() && empty_outline.imports.is_empty());
+        assert_eq!(OUTLINE_ROWS.with(|rows| rows.get()), [0; 4]);
         let strategy = (
             1usize..65,
-            0usize..13,
+            1usize..13,
             0usize..13,
             any::<bool>(),
             any::<bool>(),
@@ -1383,7 +1407,7 @@ mod tests {
 
     #[test]
     fn certified_outline_admission_preserves_owner_import_and_inventory_refusals() {
-        let (owner, projected, imports) = outlined_fixture(2, 2, 4, true, true, 1);
+        let (owner, projected, imports) = outlined_fixture(2, 2, 4, true, true, 1).unwrap();
         let mut bad_source = imports.clone();
         let ImportOwner::Source { binder, .. } = &mut bad_source[0] else {
             unreachable!()
