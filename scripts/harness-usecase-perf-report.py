@@ -43,7 +43,7 @@ def claim_assessment(report, requested):
     return {"kind": requested.value, "status": AssessmentStatus.NOT_APPLICABLE.value}
 
 
-def require_claim(report, requested):
+def require_claim(report, requested, *, scope):
     requested = ClaimKind(requested)
     assessment = claim_assessment(report, requested)
     accepted = (AssessmentStatus.VALID if requested == ClaimKind.WORKLOAD_TIMING
@@ -51,9 +51,13 @@ def require_claim(report, requested):
     if assessment["status"] != accepted.value:
         raise ValueError(f"{requested.value}: {assessment['status']}")
     prerequisites = assessment.get("prerequisites")
+    coverage = report.get("phase_coverage") or {}
     if (not isinstance(prerequisites, dict) or not prerequisites
             or not all(value is True for value in prerequisites.values())
-            or assessment.get("scope") not in KNOWN_ROSTERS):
+            or scope not in KNOWN_ROSTERS or assessment.get("scope") != scope
+            or coverage.get("cohort") != scope
+            or coverage.get("expected_order") != list(KNOWN_ROSTERS[scope])
+            or coverage.get("complete") is not True):
         raise ValueError(f"{requested.value}: inconsistent assessment")
     return assessment
 
@@ -89,8 +93,12 @@ def workload_assessment(report, record):
             ("observed", "native_only_no_compiler_requests"),
     }
     disposal = execution.get("disposal") or {}
-    known_failure = (record.get("passed") is False and disposal.get("status") != "pending"
-                     and type(execution.get("executed_test_count")) is int)
+    known_failure = (
+        type(execution.get("exit_code")) is int and execution["exit_code"] != 0
+        or execution.get("status") in ("timeout", "interrupted", "spawn_failed", "launch_identity_failed", "runner_failed")
+        or disposal.get("status") == "failed"
+        or record.get("passed") is False and disposal.get("status") != "pending"
+           and type(execution.get("executed_test_count")) is int)
     status = (AssessmentStatus.DIAGNOSTICS if known_failure else AssessmentStatus.VALID
               if all(prerequisites.values()) else AssessmentStatus.INSUFFICIENT)
     return {"kind": ClaimKind.WORKLOAD_TIMING.value, "status": status.value,
@@ -1656,6 +1664,8 @@ def main(argv=None):
                         help="retained <sha256(test-name)>.json from isolated-libtest --output-dir")
     parser.add_argument("--require-claim", choices=[kind.value for kind in ClaimKind],
                         help="require this explicit claim after emitting the observations")
+    parser.add_argument("--workload-scope", choices=sorted(KNOWN_ROSTERS),
+                        help="the owning workload scope required by the claim consumer")
     options = parser.parse_args(argv)
     try:
         report = analyze(options.runner_record)
@@ -1671,7 +1681,7 @@ def main(argv=None):
     sys.stdout.write("\n")
     if options.require_claim:
         try:
-            require_claim(report, options.require_claim)
+            require_claim(report, options.require_claim, scope=options.workload_scope)
         except ValueError as error:
             print(f"measurement claim refused: {error}", file=sys.stderr)
             return 1

@@ -419,14 +419,16 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         phases[0]["prepared_root_entry_supplied"] = False
         self.write_jsonl(path, phases)
         report = reporter.analyze(record)
-        assessment = reporter.require_claim(report, "workload_timing")
+        assessment = reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
         self.assertEqual(assessment["status"], "valid_workload_timing")
+        with self.assertRaises(ValueError):
+            reporter.require_claim(report, "workload_timing", scope="persona-workbench")
         self.assertEqual(report["environment"]["frozen_catalog_qualification"], "not-established-by-this-counted-test")
         with self.assertRaises(ValueError):
-            reporter.require_claim(report, "frozen_workload_timing")
+            reporter.require_claim(report, "frozen_workload_timing", scope="harness-eight-phase")
 
     def test_claims_distinguish_failed_body_missing_observations_and_empty_phases(self):
-        for mutation in ("failed_body", "failed_disposal", "unknown_cleanup", "no_phases"):
+        for mutation in ("failed_body", "failed_disposal", "failed_timeout", "unknown_cleanup", "no_phases"):
             with self.subTest(mutation=mutation):
                 record = self.make_complete_case(trace_profile="minimal")
                 self.add_owner_summaries()
@@ -437,6 +439,9 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 elif mutation == "failed_disposal":
                     payload.update(passed=False)
                     payload["execution"]["disposal"] = {"status": "failed"}
+                elif mutation == "failed_timeout":
+                    payload.update(passed=False)
+                    payload["execution"].update(status="timeout", executed_test_count=None)
                 elif mutation == "unknown_cleanup":
                     payload["execution"]["hosted_cleanup_status"] = "unknown"
                 else:
@@ -450,21 +455,21 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                     self.assertEqual(report["phase_measurements"]["status"], "partial_or_unknown")
                     self.assertIsNone(report["workload_request_service_joins"]["logical_request_count"])
                 with self.assertRaises(ValueError):
-                    reporter.require_claim(report, "workload_timing")
+                    reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
 
     def test_claim_consumption_never_promotes_historical_or_missing_assessment(self):
         for report in ({"schema": 1, "completed": True}, {"schema": True, "completed": True},
                        {"schema": 2, "completed": True},
                        {"schema": 2, "assessment": {"kind": "workload_timing", "status": "valid_workload_timing"}}):
             with self.subTest(report=report), self.assertRaises(ValueError):
-                reporter.require_claim(report, "workload_timing")
+                reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
         self.assertEqual(reporter.claim_assessment({"schema": 1}, "workload_timing")["status"], "unassessed")
         with self.assertRaises(ValueError):
-            reporter.require_claim({"schema": 2}, "unknown-kind")
+            reporter.require_claim({"schema": 2}, "unknown-kind", scope="harness-eight-phase")
 
     def test_report_cli_serialization_and_requested_claim_have_distinct_outcomes(self):
         record = self.make_case()
-        for options, expected in (([], 0), (["--require-claim", "workload_timing"], 1)):
+        for options, expected in (([], 0), (["--require-claim", "workload_timing", "--workload-scope", "harness-eight-phase"], 1)):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(reporter.main([str(record), *options]), expected)

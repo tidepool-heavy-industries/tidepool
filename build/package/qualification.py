@@ -2248,7 +2248,8 @@ def _run_cohort(args) -> int:
     exact = {record["test"] for record in records} == set(cohort["tests"])
     def case_confirmed(record):
         execution = record["execution"]
-        return (record["passed"] and execution["executed_test_count"] == 1
+        return (record["passed"] and type(execution.get("executed_test_count")) is int
+                and execution["executed_test_count"] == 1
                 and execution["exit_code"] == 0
                 and execution.get("startup_diagnostic_seconds") is None
                 and (not cohort.get("require_confirmed_cleanup", False)
@@ -2280,11 +2281,20 @@ def _run_cohort(args) -> int:
             compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed,
             requested_trace_profile=trace_profile)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
-        write_json(output / "harness-usecase-perf-report.json", measurement)
+        measurement_path = output / "harness-usecase-perf-report.json"
+        write_json(measurement_path, measurement)
+        measurement = {key: measurement[key] for key in
+                       ("schema", "assessment", "workload_assessment", "reporter") if key in measurement}
+        measurement["observation_report"] = {
+            "path": measurement_path.name, "bytes": measurement_path.stat().st_size,
+            "sha256": sha256(measurement_path)}
     trace_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
         compiler_trace_selection(record.get("execution") or {}, trace_profile) for record in records)
     completed = behavioral_completed and compiler_allowance_selection_confirmed and trace_selection_confirmed
     code = result.returncode if result.returncode else int(not completed)
+    execution_counts = [(record.get("execution") or {}).get("executed_test_count") for record in records]
+    observed_counts = [value for value in execution_counts if type(value) is int and value >= 0]
+    unknown_counts = len(execution_counts) - len(observed_counts) + max(cohort["expected_count"] - len(records), 0)
     report = {"schema": 2, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
@@ -2298,8 +2308,9 @@ def _run_cohort(args) -> int:
                                                      "worker_processes": selected_workers},
                              "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
-              "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
-              "unknown_execution_count": sum((record.get("execution") or {}).get("executed_test_count") is None for record in records),
+              "executed_test_count": sum(observed_counts) if exact and len(records) == cohort["expected_count"] and not unknown_counts else None,
+              "observed_executed_test_subtotal": sum(observed_counts),
+              "unknown_execution_count": unknown_counts,
               "behavioral_completed": behavioral_completed,
               "case_premises": case_premises,
               "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
@@ -2384,11 +2395,39 @@ def _run_cohort(args) -> int:
     return code
 
 
+def read_measurement(report_path: Path) -> dict:
+    """Read the exact owner-issued sidecar; schema1 is not a measurement claim."""
+    report_path = Path(report_path)
+    report = json.loads(report_path.read_bytes())
+    if type(report.get("schema")) is not int or report["schema"] != 2:
+        raise ValueError("historical cohort schema is unassessed")
+    measurement = report["measurement"]
+    reference = measurement.get("observation_report")
+    if reference is None:
+        if measurement.get("assessment", {}).get("status") == "not_applicable":
+            return measurement
+        raise ValueError("measurement has no observation reference")
+    path = report_path.parent / reference["path"]
+    data = path.read_bytes()
+    if len(data) != reference["bytes"] or hashlib.sha256(data).hexdigest() != reference["sha256"]:
+        raise ValueError("measurement observation identity mismatch")
+    observation = json.loads(data)
+    if type(observation.get("schema")) is not int or observation["schema"] != 2:
+        raise ValueError("historical observation schema is unassessed")
+    for key in ("assessment", "workload_assessment"):
+        if observation.get(key) != measurement.get(key):
+            raise ValueError(f"measurement {key} differs from its observation")
+    return observation
+
+
 def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path,
                                 compiler_allowance_selection_confirmed=True, requested_trace_profile=None):
     def unavailable(reason, **facts):
-        failed = (len(records) == 1 and records[0].get("passed") is False
-                  and type((records[0].get("execution") or {}).get("executed_test_count")) is int)
+        execution = (records[0].get("execution") or {}) if len(records) == 1 else {}
+        failed = (type(execution.get("exit_code")) is int and execution["exit_code"] != 0
+                  or execution.get("status") in ("timeout", "interrupted", "spawn_failed", "launch_identity_failed", "runner_failed")
+                  or len(records) == 1 and records[0].get("passed") is False
+                     and type(execution.get("executed_test_count")) is int)
         status = "failed_workload_diagnostics" if failed else "insufficient_observations"
         return {"schema": 2, "assessment": {
             "kind": "frozen_workload_timing",
@@ -2447,6 +2486,8 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
             and (report.get("workspace_route") or {}).get("verified") is True)),
         "whole_case_wall_complete": (cohort.get("required_workspace_route") is None
                                     or (report.get("whole_case_wall") or {}).get("status") == "complete"),
+        "resident_compiler_mode_matches_cohort": source_assessment["prerequisites"]["resident_compiler_mode_matches_cohort"]
+                                                 and execution.get("compiler_mode") == cohort.get("compiler_mode"),
         "counted_behavior_passed": source_assessment["prerequisites"]["counted_behavior_passed"]
                                   and behavioral_completed,
         "prepared_frozen_root_entry_matches_descriptor": prepared_match,
