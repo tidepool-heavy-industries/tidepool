@@ -1846,6 +1846,36 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
 }
 
 impl CompiledTurn {
+    /// Consume the target and metadata admitted together by the checked output
+    /// owner. Raw program/table pairs still enter through `from_prepared`.
+    fn from_checked_item(
+        item: &tidepool_toolchain::checked_cell::CellProgramItem,
+        admission: &Arc<super::RuntimeCheckedItemAdmission>,
+    ) -> Result<Self, CompileError> {
+        let missing = || {
+            CompileError::ExtractFailed("complete cell lacks its sealed output observations".into())
+        };
+        let products = item.native_products().ok_or_else(missing)?;
+        let execution = item.native().ok_or_else(missing)?;
+        let certification = TurnCertification {
+            artifact_view: products.artifact_view.clone(),
+            original_compile_input: None,
+            groups: products.certified_groups.clone(),
+            target_owners: products.pending_imports.clone(),
+            package_interfaces: products.package_interfaces.clone(),
+            recovery_products: products.recovery_products.clone(),
+            purpose: TurnPurpose::execution(execution.clone(), admission)?,
+        };
+        Ok(Self {
+            prepared: execution.target_owned(),
+            table: execution.table().clone(),
+            warnings: execution.warnings().clone(),
+            asks: Vec::new(),
+            certification: Some(certification),
+            provenance: Arc::default(),
+        })
+    }
+
     /// Admit ordinary prepared code and its complete nominal metadata together.
     /// Checked execution authority is attached only by the native output owner.
     pub fn from_prepared(
@@ -2487,14 +2517,8 @@ fn missing_template_error(selector: TemplateSelector) -> CompileError {
 /// misconfigured `$TIDEPOOL_EXTRACT` is an environment problem, reported the
 /// same way a failed spawn is (`Io`, never a user-Haskell variant).
 ///
-/// Also carries the default build-products dir
-/// (`crate::paths::apply_build_products_dir`) — this module's spawns bypass
-/// `crate::artifacts::compile_invocation`'s memo (see the module doc: a
-/// session turn has on-disk side effects and mutable-session dependencies a
-/// content-addressed cache would get wrong), but the module-granular GHC
-/// recompilation win the build-products dir gives is an orthogonal, additive
-/// concern, and this crate's OTHER (turn/eval) spawns get it too — this is
-/// what makes it on-by-default here rather than only through that one lane.
+/// Carries the default build-products directory through the shared path owner,
+/// preserving module-granular GHC recompilation state for direct session spawns.
 fn extract_cmd() -> Result<ExtractCmd, CompileError> {
     ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))
 }
@@ -3405,34 +3429,10 @@ fn decode_cell_program_turn(
     item: &tidepool_toolchain::checked_cell::CellProgramItem,
     admission: &Arc<super::RuntimeCheckedItemAdmission>,
 ) -> Result<TurnResult, CompileError> {
-    let (turn_bytes, metadata_bytes, products, prepared) = (
-        item.native_turn_bytes(),
-        item.native_metadata_bytes(),
-        item.native_products(),
-        item.native().map(|proof| proof.target_owned()),
-    );
     let missing =
         || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
-    let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
-    let products = products.ok_or_else(missing)?;
-    let prepared = prepared.ok_or_else(missing)?;
-    let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(
-        metadata_bytes.ok_or_else(missing)?,
-        &prepared,
-    )?;
-    let certification = TurnCertification {
-        artifact_view: products.artifact_view.clone(),
-        original_compile_input: None,
-        groups: products.certified_groups.clone(),
-        target_owners: products.pending_imports.clone(),
-        package_interfaces: products.package_interfaces.clone(),
-        recovery_products: products.recovery_products.clone(),
-        purpose: TurnPurpose::execution(
-            item.native().expect("native products preflighted").clone(),
-            admission,
-        )?,
-    };
-    certification.validate_checked_table(&table)?;
+    let turn = decode_turn_out(item.native_turn_bytes().ok_or_else(missing)?)?;
+    let mut compiled = CompiledTurn::from_checked_item(item, admission)?;
     match turn {
         DecodedTurnOut::Bind {
             binders,
@@ -3446,8 +3446,7 @@ fn decode_cell_program_turn(
             bound,
             wrapped_source,
             compiled: {
-                let mut compiled = CompiledTurn::from_prepared(prepared, table, warnings, asks)?;
-                compiled.certification = Some(certification);
+                compiled.asks = asks;
                 compiled
             },
         }),
@@ -3459,8 +3458,7 @@ fn decode_cell_program_turn(
             variant,
             wrapped_source,
             compiled: {
-                let mut compiled = CompiledTurn::from_prepared(prepared, table, warnings, asks)?;
-                compiled.certification = Some(certification);
+                compiled.asks = asks;
                 compiled
             },
         }),
@@ -3722,7 +3720,7 @@ fn audit_compiler_issued_item_receipts(
                     let item = native[item_index];
                     let (ordinal, module) = captures[capture_index];
                     let selected = item.native_products().unwrap().artifact_view.descriptors();
-                    let (table, _) = read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+                    let table = item.native().unwrap().table();
                     let sites = match decode_turn_out(item.native_turn_bytes().unwrap()).unwrap() {
                         DecodedTurnOut::Bind { asks, .. } | DecodedTurnOut::Expr { asks, .. } => {
                             asks
@@ -3734,7 +3732,7 @@ fn audit_compiler_issued_item_receipts(
                         .unwrap()
                         .original_execution_context(
                             &item.native().unwrap().target_owned(),
-                            &table,
+                            table,
                             &sites,
                         )
                         .unwrap()
@@ -7151,6 +7149,213 @@ mod tests {
             1,
             "a malformed native receipt refuses before existing declaration projections"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checked_metadata_observation_survives_physical_drift_and_runtime_conversion() {
+        #[derive(Clone)]
+        struct Trace(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Trace {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let trace = Trace(Default::default());
+        let writer = trace.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_env_filter("exomonad_harness::timing=debug")
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let counts = || {
+            let text = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+            (
+                text.lines()
+                    .filter(|line| line.contains("native.metadata_read"))
+                    .count(),
+                text.lines()
+                    .filter(|line| line.contains("native.checked_metadata_decode"))
+                    .count(),
+            )
+        };
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "let first = (41 :: Int)\nlet second = (42 :: Int)",
+            &[],
+            None,
+        )
+        .unwrap();
+        // Fixture bootstrap has its own real checked compilation; exclude it.
+        let baseline = counts();
+        let outcome = crate::settle_compiler_transaction_cancellable(
+            crate::CompilerTransactionCancellation::new(),
+            |_| {},
+            || prepare_cell_program_admitted(admission.clone(), &mut |_| {}),
+        );
+        let prepared = outcome.action().as_ref().unwrap();
+        let absolute_before = counts();
+        let before = (
+            absolute_before.0 - baseline.0,
+            absolute_before.1 - baseline.1,
+        );
+        assert!(before.0 >= 2, "actual multi-item output must be observed");
+        assert_eq!(before.0, before.1, "one decode per captured item");
+        let mut originals = std::collections::BTreeMap::new();
+        let mut changed = 0;
+        for entry in std::fs::read_dir(prepared.root.path()).unwrap() {
+            let directory = entry.unwrap().path();
+            let path = directory.join("meta.cbor");
+            if path.is_file() {
+                let ordinal: usize = directory
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("item-")
+                    .expect("actual item output directory")
+                    .parse()
+                    .unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(originals.insert(ordinal, bytes.clone()).is_none());
+                let (table, mut warnings) = tidepool_repr::serial::read_metadata(&bytes).unwrap();
+                warnings.captured_type = Some("later file observation".into());
+                let replacement = tidepool_repr::serial::write_metadata(&table, &warnings).unwrap();
+                assert_ne!(bytes, replacement);
+                std::fs::write(&path, replacement).unwrap();
+                changed += 1;
+            }
+        }
+        assert!(
+            changed >= 2,
+            "mutate actual item files after capture, before seal"
+        );
+        let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
+        let natives = program
+            .items()
+            .iter()
+            .filter_map(|item| item.native())
+            .collect::<Vec<_>>();
+        assert_eq!(natives.len(), before.1);
+        for owner in &natives {
+            let (table, warnings) =
+                tidepool_repr::serial::read_metadata(&originals[&owner.item().index()]).unwrap();
+            assert_eq!(&table, owner.table());
+            assert_eq!(warnings.captured_type, owner.warnings().captured_type);
+            assert_eq!(warnings.has_io, owner.warnings().has_io);
+            assert_eq!(warnings.warnings, owner.warnings().warnings);
+            assert_ne!(
+                warnings.captured_type.as_deref(),
+                Some("later file observation")
+            );
+            assert!(owner.table().json_layout().is_none());
+        }
+        let siblings = natives
+            .iter()
+            .map(|owner| owner.table().clone())
+            .collect::<Vec<_>>();
+        let owner = natives[0].clone();
+        let exact_target = owner.target_owned();
+        drop(natives);
+        let prefix = fixture
+            .resident
+            .begin_cell_program(admission, program)
+            .unwrap()
+            .unwrap();
+        let reserved = fixture
+            .resident
+            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
+            .unwrap();
+        let TurnResult::Bind {
+            compiled, bound, ..
+        } = consume_cell_program_item(reserved.clone()).unwrap()
+        else {
+            panic!("real bind must reach checked runtime conversion")
+        };
+        assert!(Arc::ptr_eq(compiled.prepared(), &exact_target));
+        assert_eq!(compiled.table(), owner.table());
+        assert_eq!(
+            compiled.warnings.captured_type,
+            owner.warnings().captured_type
+        );
+        assert_eq!(
+            counts(),
+            absolute_before,
+            "sealing and runtime conversion must not revisit the physical/capture owners"
+        );
+        let layout = tidepool_repr::execution_schema::JsonLayout {
+            object: 0,
+            array: 1,
+            string: 2,
+            number: 3,
+            bool_: 4,
+            null: 5,
+            map_bin: 6,
+            map_tip: 7,
+            true_: 8,
+            false_: 9,
+            cons: 10,
+            nil: 11,
+            scientific: 12,
+            integer_small: 13,
+            integer_positive: 14,
+            integer_negative: 15,
+            text: 16,
+            int: 17,
+        }
+        .map(tidepool_repr::DataConId);
+        let local = compiled.table().with_json_layout(Some(layout));
+        assert_eq!(local.json_layout(), Some(&layout));
+        assert!(compiled.table().json_layout().is_none());
+        assert!(owner.table().json_layout().is_none());
+        assert!(siblings.iter().all(|table| table.json_layout().is_none()));
+        let [binder] = bound.as_slice() else {
+            panic!("expected one actual binder")
+        };
+        let installed = tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reserved.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        let crate::session::ResidentOutcome::Completed { result, .. } = installed else {
+            panic!("installed checked bind must complete")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(41));
+        assert!(owner.table().json_layout().is_none());
+        assert!(siblings.iter().all(|table| table.json_layout().is_none()));
+        // The raw conversion continues checking independently supplied pairs.
+        let raw = tidepool_toolchain::prepared_artifact::PreparedArtifact::parse(
+            tidepool_test_data::prepared_encode::encode_wire_program(
+                &tidepool_test_data::prepared::constructor_program(),
+            ),
+            tidepool_repr::execution_schema::DecodeLimits::default(),
+        )
+        .unwrap()
+        .into_prepared();
+        assert!(!raw.constructors().is_empty());
+        assert!(CompiledTurn::from_prepared(
+            Arc::new(raw),
+            DataConTable::new(),
+            MetaWarnings::default(),
+            vec![]
+        )
+        .is_err());
+        eprintln!("checked-metadata-owner-events physical_reads={} capture_nominal_decodes={} runtime_additional_owner_events=0", before.0, before.1);
     }
 
     #[test]

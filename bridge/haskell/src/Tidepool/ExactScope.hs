@@ -68,7 +68,7 @@ import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -603,27 +603,33 @@ extendExactScopeInputs scope offered = do
     (_,base) <- captureRequestInputs (scopeCapturedInputs scope) (const (pure ()))
     transferred <- either fail pure (transferRequestInputBodies (concat [canonicalBodies proof | (_,ModuleInterfaceEvidence proof) <- offered]
       ++ concat [localBodies (localNativeProof native) | (_,LocalNativeDeclarationEvidence native) <- offered]) base)
-    (union,captured) <- captureRequestInputs (Just transferred) $ \readInput -> do
+    (union,captured) <- captureRequestInputTokens (Just transferred) $ \readToken -> do
       forM_ added $ \((iface,packages,sha),evidence) -> do
-        payload <- readInput (exactPath iface) (32 * 1024 * 1024)
-        unless (digest payload == exactSha256 iface) (fail "extended interface bytes differ from their seal")
-        packageBytes <- readInput packages (4 * 1024 * 1024)
-        unless (digest packageBytes == sha) (fail "extended package imports differ from their seal")
+        let capture reader = do
+              let readInput path bound = artifactBytes <$> reader path bound
+              payload <- readInput (exactPath iface) (32 * 1024 * 1024)
+              unless (digest payload == exactSha256 iface) (fail "extended interface bytes differ from their seal")
+              packageBytes <- readInput packages (4 * 1024 * 1024)
+              unless (digest packageBytes == sha) (fail "extended package imports differ from their seal")
+              case evidence of
+                ModuleInterfaceEvidence proof -> do
+                  certificate <- readInput (canonicalCertificatePath proof) (4 * 1024 * 1024)
+                  unless (digest certificate == canonicalCertificateSha256 proof) (fail "extended canonical certificate changed")
+                  forM_ (canonicalCoreArtifact proof) $ \core -> do
+                    bytes <- readInput (canonicalCorePath core) (32 * 1024 * 1024)
+                    unless (digest bytes == canonicalCoreSha256 core) (fail "extended defining Core changed")
+                LocalNativeDeclarationEvidence native -> do
+                  -- The native issuer owns its complete proof, including source and
+                  -- finalized Core linkage. Capture follows that current admission.
+                  revalidateLocalFinalizedAdmission (localNativeProof native) >>= either fail pure
+                  forM_ (localFinalizedCore (localNativeProof native)) $ \(path,seal) -> do
+                    bytes <- readInput path (32 * 1024 * 1024)
+                    unless (digest bytes == seal) (fail "extended local defining Core changed")
+                _ -> pure ()
         case evidence of
-          ModuleInterfaceEvidence proof -> do
-            certificate <- readInput (canonicalCertificatePath proof) (4 * 1024 * 1024)
-            unless (digest certificate == canonicalCertificateSha256 proof) (fail "extended canonical certificate changed")
-            forM_ (canonicalCoreArtifact proof) $ \core -> do
-              bytes <- readInput (canonicalCorePath core) (32 * 1024 * 1024)
-              unless (digest bytes == canonicalCoreSha256 core) (fail "extended defining Core changed")
-          LocalNativeDeclarationEvidence native -> do
-            -- The native issuer owns its complete proof, including source and
-            -- finalized Core linkage. Capture follows that current admission.
-            revalidateLocalFinalizedAdmission (localNativeProof native) >>= either fail pure
-            forM_ (localFinalizedCore (localNativeProof native)) $ \(path,seal) -> do
-              bytes <- readInput path (32 * 1024 * 1024)
-              unless (digest bytes == seal) (fail "extended local defining Core changed")
-          _ -> pure ()
+          ModuleInterfaceEvidence proof -> withCanonicalInputReader transferred proof readToken capture
+          _ -> capture readToken
+      let readInput path bound = artifactBytes <$> readToken path bound
       forM_ [product | product <- scopeProducts scope
           , not (maybe False (\inputs -> requestInputRetained inputs (originalProductPath product)
               (originalProductSha256 product)) (scopeCapturedInputs scope))] $ \product -> do
@@ -815,6 +821,14 @@ admittedInterfaceCoreBytes (ModuleInterfaceAdmission proof) = do
 admittedInterfaceCoreBytes (LocalInterfaceAdmission proof) =
   maybe (fail "local defining Core has not been captured for execution") (pure . artifactBytes) (localFinalizedCoreBody proof)
 
+-- Already captured canonical proofs cannot regain filesystem authority when
+-- promoted or transferred. Descriptor proofs retain explicit fresh admission.
+withCanonicalInputReader :: RequestOriginalInputs -> CanonicalInterfaceProof
+  -> RequestInputTokenReader -> (RequestInputTokenReader -> IO a) -> IO a
+withCanonicalInputReader inputs proof fresh action = case proofInputCustody proof of
+  DescriptorInputs -> action fresh
+  CapturedCanonicalInputs _ -> fst <$> withCapturedRequestInputTokens inputs action
+
 data CanonicalInterfaceUse = MetadataInterfaceUse | ExecutableInterfaceUse
   deriving (Eq, Show)
 
@@ -827,7 +841,7 @@ captureCanonicalProofs scope selections = do
   (_,base) <- captureRequestInputs (scope >>= scopeCapturedInputs) (const (pure ()))
   transferred <- either fail pure (transferRequestInputBodies (concatMap canonicalBodies proofs) base)
   (_,captured) <- captureRequestInputTokens (Just transferred) $ \reader ->
-    forM_ selections $ \(proof,use) -> do
+    forM_ selections $ \(proof,use) -> withCanonicalInputReader transferred proof reader $ \reader -> do
       let (iface,packages,packageSha) = proofInterfaceInput proof
       sealedInput reader (canonicalCertificatePath proof) (4 * 1024 * 1024)
         (canonicalCertificateSha256 proof)
@@ -1237,7 +1251,10 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
         ContinueOwnedOriginals _ -> do
           selected <- continueRequestInputs available imageReferences
           either fail pure (mergeRequestInputs selected [envelope])
-      (scope, originals) <- captureRequestInputTokens (Just base) $ \readToken -> do
+      let captureOriginals = case acquisition of
+            FreshFiles -> captureRequestInputTokens (Just base)
+            ContinueOwnedOriginals _ -> withCapturedRequestInputTokens base
+      (scope, originals) <- captureOriginals $ \readToken -> do
        let readInput artifact bound = artifactBytes <$> readToken artifact bound
            readVerified artifact bound sha = do
              token <- readToken artifact bound
@@ -1285,9 +1302,11 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
            sha = digest bytes
            scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
              purpose types Set.empty (Set.fromList (map fst published)) (Set.fromList (concatMap snd published))
-       forM_ (scopeValueInterfaces scope) $ \iface -> do
-         _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
-         pure ()
+       case acquisition of
+         FreshFiles -> forM_ (scopeValueInterfaces scope) $ \iface -> do
+           _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
+           pure ()
+         ContinueOwnedOriginals _ -> pure ()
        validateInputClosure producer inputs selectedProducts
        forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
@@ -1298,7 +1317,10 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
          _ <- evaluate (length sha)
          emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
        pure scope
-      let complete = retainCapturedInputsUsing originals decoder scope
+      admittedInputs <- case acquisition of
+        FreshFiles -> pure originals
+        ContinueOwnedOriginals _ -> either fail pure (bindCapturedPurposeValues scope originals)
+      let complete = retainCapturedInputsUsing admittedInputs decoder scope
       additions <- forM images $ \(OriginalInputImage _ _ key parts) -> do
         content <- either fail pure (selectedOriginalContent (map snd parts) originals)
         pure (key,content)
@@ -1335,6 +1357,20 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
     pure $ case captured of
       Left failure -> (previous,Left (show failure))
       Right (scope,settled) -> (settled,Right scope)
+
+-- Protected value paths and materialized transport paths can differ. Their
+-- typed owner and seal select already captured bytes, never a filesystem read.
+bindCapturedPurposeValues :: ExactScope -> RequestOriginalInputs -> Either String RequestOriginalInputs
+bindCapturedPurposeValues scope inputs = do
+  let AdmittedScopeInputs _ admitted _ _ _ = scopeInputs scope
+  aliases <- forM (scopeValueInterfaces scope) $ \value -> do
+    let owner = (exactUnit value,exactModule value)
+    case Map.lookup owner admitted of
+      Just (ScopeInterfaceInput (iface,_,_) CheckedValueEvidence)
+        | exactSha256 iface == exactSha256 value ->
+            Right (exactPath value,exactPath iface,exactSha256 value)
+      _ -> Left "checked purpose value differs from its captured value interface owner"
+  aliasRequestInputs aliases inputs
 
 validatePreviewOriginalTarget :: ExactScope -> Map.Map (String,String) ExactInterfaceEvidence -> IO ()
 validatePreviewOriginalTarget scope evidence = forM_ (scopeActivationPreview scope) $ \admission -> do

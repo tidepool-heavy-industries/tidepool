@@ -5,6 +5,10 @@ diagnostic inventories, oracle outcomes and six-stage acceptance policy.
 `prepared-corpus validate-fixture` admits a complete declared source/target
 output set through production metadata, prepared-program and source-evidence
 readers. It grants no execution authority.
+The standalone validation action owns one cumulative source-evidence inventory
+operation using the compiler's existing default 4 GiB work budget. Both admission
+policies charge their dependency JSON before parsing; parsed observations remain
+separate from consumed-byte and import-witness authentication.
 `validate-original` shares those output readers but validates completed source
 observations independently of replay eligibility. It is for fresh native test
 output, and grants neither source replay nor a hermetic build-input proof.

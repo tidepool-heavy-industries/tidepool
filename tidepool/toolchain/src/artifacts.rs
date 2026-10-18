@@ -4,8 +4,8 @@
 //! the extractor, reading its output directory, and deserializing typed
 //! artifacts happen in exactly one place.
 //!
-//! All cacheable requests use one recipe and one named artifact bundle.
-//! Compiler dependency evidence is validated on publication and on every hit.
+//! Each request acquires one complete named physical output. Native reuse
+//! retains its source evidence and compiler-issued product authority.
 
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -37,6 +37,7 @@ use crate::{
 mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
+pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
@@ -824,7 +825,6 @@ impl PreparedCellProgram {
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
                 turn: output.turn,
-                metadata: output.metadata,
                 products: output.products.expect("program output was sealed"),
             };
             items.push(CellProgramItem {
@@ -2027,7 +2027,7 @@ impl ModuleCandidateOffer {
         Ok(request
             .validate_outputs(source_directory)?
             .into_iter()
-            .map(|source| source.witness)
+            .map(|source| source.into_witness())
             .collect())
     }
 
@@ -2459,10 +2459,8 @@ impl SelectedModuleCandidateOffer {
                 generation,
                 observation,
                 true,
-                &output.directory,
+                output,
                 &initial.request_sha256,
-                &output.source,
-                &output.target,
                 sealed.original.execution().cloned().ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "program output lacks original execution evidence".into(),
@@ -2519,7 +2517,7 @@ impl SelectedModuleCandidateOffer {
             .admissions()
             .iter()
             .filter(|source| source.generated_source_owner().is_ok())
-            .map(|source| source.witness.source_path())
+            .map(|source| source.witness().source_path())
             .collect::<BTreeSet<_>>();
         let source_paths = source_paths.into_iter().collect::<Vec<_>>();
         let source_path = match source_paths.as_slice() {
@@ -2548,19 +2546,21 @@ impl SelectedModuleCandidateOffer {
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let exact = segment.product_admission(request, &source_path, &source, &evidence)?;
-        ensure_ready_module_inventory(&receipt.modules, &exact.source.evidence)?;
+        let inventory = validation.inventory.clone();
+        let source_admission =
+            segment.product_admission(request, &source_path, &source, &evidence, &inventory)?;
+        ensure_ready_module_inventory(
+            &receipt.modules,
+            &source_admission.exact().source.evidence(),
+        )?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
-            &evidence,
-            &source_path,
+            source_admission,
             root,
-            &source,
             &self.producer,
             &self.include,
             self.selected.as_deref(),
-            &exact,
             &self.selected_session_values,
             Some(produced),
             validation,
@@ -2586,11 +2586,11 @@ impl SelectedModuleCandidateOffer {
             .ok_or_else(|| {
                 CompileError::ExtractFailed("segment publication lacks generated source".into())
             })?;
-        let bytes = std::fs::read_to_string(source.witness.source_path())?;
+        let bytes = std::fs::read_to_string(source.witness().source_path())?;
         if !source
-            .witness
-            .matches_source(source.witness.source_path(), &bytes)
-            || source.evidence.revalidate(&bytes).is_err()
+            .witness()
+            .matches_source(source.witness().source_path(), &bytes)
+            || source.evidence().revalidate(&bytes).is_err()
         {
             return Err(CompileError::ExtractFailed(
                 "segment source changed before publication".into(),
@@ -2604,7 +2604,7 @@ impl SelectedModuleCandidateOffer {
             let (_, publication) = module_candidates::prepare_publication(
                 &self.producer,
                 &self.include,
-                &source.evidence,
+                source.evidence(),
                 parsed,
                 &bytes,
                 module_candidates::CandidateVersionOrigin::Exact {
@@ -2896,13 +2896,38 @@ impl SelectedModuleCandidateOffer {
 }
 
 #[derive(Debug)]
-struct ProgramNativeOutput {
+pub(crate) struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
     turn: Arc<[u8]>,
     metadata: Arc<[u8]>,
     products: Option<Arc<SealedTurnProducts>>,
     source: String,
+}
+
+impl ProgramNativeOutput {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+    pub(crate) fn target(&self) -> &Arc<PreparedProgram> {
+        &self.target
+    }
+    pub(crate) fn decode_metadata(&self) -> Result<(DataConTable, MetaWarnings), CompileError> {
+        let start = Instant::now();
+        let (table, warnings) =
+            tidepool_repr::serial::read_metadata_for_program(&self.metadata, &self.target)?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            "native.checked_metadata_decode",
+            start.elapsed(),
+            self.metadata.len() as u64,
+        );
+        Ok((table, warnings))
+    }
 }
 
 fn read_native_turn_artifacts(
@@ -2940,6 +2965,13 @@ fn read_native_turn_artifacts(
         timing::NO_NODE,
         timing::NO_ROUND,
         timing::STAGE_CBOR_READ,
+        metadata_read_start.elapsed(),
+        metadata.len() as u64,
+    );
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "native.metadata_read",
         metadata_read_start.elapsed(),
         metadata.len() as u64,
     );
@@ -3169,6 +3201,19 @@ impl CompilerSidecar {
         }
     }
 
+    fn read_observed(
+        self,
+        root: &Path,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<u8>, CompileError> {
+        let path = root.join(self.filename());
+        let bytes = self.read(root, &validation.inventory)?;
+        validation
+            .record_captured_bytes(&path, &bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        Ok(bytes)
+    }
+
     fn read(
         self,
         root: &Path,
@@ -3269,14 +3314,13 @@ fn seal_turn_outputs_with_validation(
             )
         })
         .transpose()?;
-    let receipt_bytes =
-        CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
-    let ordinary_inputs = if source_segment.is_none() {
+    let receipt_bytes = CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
+    let (ordinary_products, ordinary_evidence_bytes) = if source_segment.is_none() {
         let product_bytes =
-            CompilerSidecar::ModuleProducts.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
         let packages =
-            CompilerSidecar::ModulePackageImports.read(output_dir, &validation.inventory)?;
-        let evidence = CompilerSidecar::Dependencies.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModulePackageImports.read_observed(output_dir, validation)?;
+        let evidence = CompilerSidecar::Dependencies.read_observed(output_dir, validation)?;
         timing::record_inventory_work("products.decode.before", output_dir, &validation.inventory);
         let start = Instant::now();
         let products = certified_products::ParsedModuleProducts::decode_with_operation(
@@ -3293,73 +3337,68 @@ fn seal_turn_outputs_with_validation(
             start.elapsed(),
             product_bytes.len() as u64,
         );
-        Some((products, evidence))
+        (Some(products), evidence)
     } else {
-        None
+        // Segment items use their already-admitted originals. This buffer is
+        // not read or admitted on that path.
+        (None, Vec::new())
     };
+    let inventory = validation.inventory.clone();
     let exact_source_owned = if source_segment.is_none() {
         offer
             .exact
             .as_ref()
             .map(|request| {
-                request.admit_source_with_validation(
-                    source_path,
-                    source,
-                    &ordinary_inputs.as_ref().expect("ordinary products").1,
-                    validation,
-                )
+                request.admit_source_receipt_with_validation(source_path, source, validation)
             })
             .transpose()?
     } else {
         None
     };
-    let exact = match source_segment {
-        Some(segment) => Some(segment.item_admission(
-            offer.exact.as_ref().expect("segment exact request"),
-            source_path,
-            source,
-        )?),
-        None => offer
-            .exact
-            .as_ref()
-            .zip(exact_source_owned.as_ref())
-            .map(
-                |(request, source)| crate::declaration_context::ExactProductAdmission {
-                    request,
-                    source,
-                },
-            ),
-    };
-    let exact_source = exact.as_ref().map(|admission| admission.source);
-    let evidence_bytes = match exact_source.filter(|_| source_segment.is_some()) {
-        Some(source) => source.evidence_bytes.as_slice(),
-        None => ordinary_inputs
-            .as_ref()
-            .expect("ordinary products")
-            .1
-            .as_slice(),
-    };
-    let ordinary_evidence = if exact_source.is_none() {
+    let segment_exact = source_segment
+        .map(|segment| {
+            segment.item_admission(
+                offer.exact.as_ref().expect("segment exact request"),
+                source_path,
+                source,
+            )
+        })
+        .transpose()?;
+    let source_admission = if source_segment.is_none() {
+        let evidence_bytes = ordinary_evidence_bytes.as_slice();
         Some(
-            cache::CompletedSourceEvidence::from_worker(evidence_bytes, source_path, source)
-                .map_err(|failure| {
-                    CompileError::CompilerEvidence(Box::new(
-                        crate::certified_products::CertificationError::CompletedSourceEvidence {
-                            input: source_path.to_path_buf(),
-                            failure: Box::new(failure),
-                        },
-                    ))
-                })?,
+            match offer.exact.as_ref().zip(exact_source_owned.as_ref()) {
+                Some((request, admitted)) => {
+                    SourceEvidenceAdmission::from_exact(admitted.match_product(
+                        request,
+                        source_path,
+                        source,
+                        evidence_bytes,
+                        &inventory,
+                    )?)
+                }
+                None => admit_compiler_source(&inventory, evidence_bytes, source_path, source)?,
+            },
         )
     } else {
         None
     };
-    let evidence = exact_source
-        .map(|source| source.evidence.as_ref())
-        .or(ordinary_evidence.as_ref());
+    let exact = source_admission
+        .as_ref()
+        .and_then(SourceEvidenceAdmission::exact)
+        .or(segment_exact.as_ref());
+    let exact_source = exact.map(|admission| admission.source);
+    let evidence = source_admission
+        .as_ref()
+        .map(SourceEvidenceAdmission::completed)
+        .or_else(|| {
+            segment_exact
+                .as_ref()
+                .map(|exact| exact.source.evidence().as_ref())
+        });
     let fresh_products = segment_originals
         .map(|originals| originals.raw())
-        .or_else(|| ordinary_inputs.as_ref().map(|(products, _)| products))
+        .or(ordinary_products.as_ref())
         .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?;
     let needs_certificate = offer.has_candidates()
         || offer.exact.is_some()
@@ -3376,10 +3415,10 @@ fn seal_turn_outputs_with_validation(
     }
     let ordinary_receipt = if source_segment.is_none() {
         Some(
-            certified_products::decode_receipt_with_operation(
+            certified_products::decode_receipt_with_validation(
                 &receipt_bytes,
-                Some(output_dir),
-                &validation.inventory,
+                output_dir,
+                validation,
             )
             .map_err(compiler_evidence_failure)?,
         )
@@ -3426,12 +3465,6 @@ fn seal_turn_outputs_with_validation(
             (products, Some(globals), Some(packages))
         }
         None => {
-            validation
-                .inventory
-                .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
-                    CompileError::ExtractFailed("source evidence accounting overflow".into())
-                })?)
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
             timing::record_inventory_work(
                 "products.certify.before",
                 output_dir,
@@ -3441,14 +3474,12 @@ fn seal_turn_outputs_with_validation(
                 offer.selected.as_deref(),
                 ordinary_receipt.as_ref().expect("ordinary receipt"),
                 fresh_products,
-                evidence_bytes,
-                source_path,
+                source_admission
+                    .as_ref()
+                    .expect("ordinary source admission"),
                 output_dir,
-                valid,
-                source,
                 &offer.producer,
                 &offer.include,
-                exact.as_ref(),
                 authored,
                 &offer.selected_session_values,
                 produced_types,
@@ -3657,45 +3688,52 @@ fn seal_turn_outputs_with_validation(
     );
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let original_compile_input =
-        if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
-            let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
-                &output_dir.join("compiler-inputs.cbor"),
-                &evidence_bytes,
-                valid,
-            )?;
-            input_packages
-                .map(|input_packages| {
-                    crate::compile_input::seal(
-                        &offer.producer,
-                        &offer.include,
-                        valid,
-                        &input_packages,
-                        source,
-                        target,
-                        prepared,
-                        &certified_groups,
-                        &pending_imports,
-                        &package_interfaces,
-                        table.clone(),
-                        sites.to_vec(),
-                        &artifact_view,
-                        &certified.source_selection,
-                        artifact_view.native_sites_for_groups(
-                            &target_native_selection.groups_for_target(
-                                &artifact_view,
-                                typed_entry.as_ref(),
-                                &pending_imports,
-                            )?,
+    let original_compile_input = if let Some((table, sites)) =
+        identity_metadata.filter(|_| offer.exact.is_none())
+    {
+        let input_path = output_dir.join("compiler-inputs.cbor");
+        let input_bytes = crate::compile_input::ValidatedInputPackages::read_bytes(&input_path)?;
+        validation
+            .record_captured_bytes(&input_path, &input_bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let input_packages = crate::compile_input::ValidatedInputPackages::decode_supported(
+            &input_bytes,
+            source_admission
+                .as_ref()
+                .expect("ordinary input source admission"),
+        )?;
+        input_packages
+            .map(|input_packages| {
+                crate::compile_input::seal(
+                    &offer.producer,
+                    &offer.include,
+                    valid,
+                    &input_packages,
+                    source,
+                    target,
+                    prepared,
+                    &certified_groups,
+                    &pending_imports,
+                    &package_interfaces,
+                    table.clone(),
+                    sites.to_vec(),
+                    &artifact_view,
+                    &certified.source_selection,
+                    artifact_view.native_sites_for_groups(
+                        &target_native_selection.groups_for_target(
+                            &artifact_view,
+                            typed_entry.as_ref(),
+                            &pending_imports,
                         )?,
-                    )
-                })
-                .transpose()?
-                .flatten()
-                .map(Arc::new)
-        } else {
-            None
-        };
+                    )?,
+                )
+            })
+            .transpose()?
+            .flatten()
+            .map(Arc::new)
+    } else {
+        None
+    };
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original = match exact.as_ref() {
         Some(admission) => {
@@ -3757,19 +3795,20 @@ fn seal_turn_outputs_with_validation(
             .as_ref()
             .is_none_or(|exact| empty_exact_context(exact.context()))
     {
-        let publication_products = ordinary_inputs.expect("ordinary product inputs").0;
+        let version_origin = exact.map_or(
+            module_candidates::CandidateVersionOrigin::Ordinary,
+            |admission| module_candidates::CandidateVersionOrigin::Exact {
+                semantic_sha256: admission.request.semantic_sha256,
+            },
+        );
+        let publication_products = ordinary_products.expect("ordinary product inputs");
         let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
             &offer.include,
             valid,
             publication_products,
             source,
-            exact.as_ref().map_or(
-                module_candidates::CandidateVersionOrigin::Ordinary,
-                |admission| module_candidates::CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.request.semantic_sha256,
-                },
-            ),
+            version_origin,
             &certified.recovery_products,
         );
         module_candidates::publish_prepared(publication)?;
@@ -4002,9 +4041,6 @@ pub struct CompileInvocation<'a> {
 /// so two targets' different `runLLMTurn`/`runLLMTurnFork` sites never
 /// collapse into one ambiguous file.
 ///
-/// **MEMOIZED** per [`CompileInvocation::cache`] — see the module doc for why
-/// both cacheable entry points share the same recipe and bundle.
-///
 /// `on_stage(name, elapsed, bytes)` fires once per measured stage —
 /// [`timing::STAGE_EXTRACT_SPAWN`], each forwarded `extract.<phase>` row
 /// parsed from the extract's stderr, [`timing::STAGE_CBOR_READ`],
@@ -4032,8 +4068,8 @@ pub fn compile_invocation(
 }
 
 /// Compile fresh source against immutable declaration owners through the same
-/// artifact front door. Ordinary source candidates and artifact memo are
-/// unavailable; successful products require context-bound compiler receipts.
+/// artifact front door. Ordinary source candidates are unavailable; successful
+/// products require context-bound compiler receipts.
 pub fn compile_invocation_in_context(
     inv: &CompileInvocation<'_>,
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -4053,8 +4089,8 @@ pub fn compile_invocation_in_context(
 
 /// Compile a declaration probe in full-home-product mode, which produces
 /// original products for every home module, including modules with no
-/// executable references from the probe. The probe bypasses memo lookup and
-/// candidate publication while retaining the shared certification front door.
+/// executable references from the probe. The probe bypasses candidate
+/// publication while retaining the shared certification front door.
 pub(crate) fn compile_authored_products(
     source: &str,
     target: &str,
@@ -4271,8 +4307,8 @@ impl CompilationOutputOwner {
 /// Compile one declared module and target set for an immutable build action.
 /// The action owns its current-directory scratch and an absent output directory.
 /// This policy uses a
-/// direct configured compiler and cannot read or publish runtime memo entries,
-/// module candidates, deployment catalogs or mutable runtime build products.
+/// direct configured compiler and cannot read or publish runtime module
+/// candidates, deployment catalogs or mutable runtime build products.
 /// Only portable code and metadata are exported; source-bound authority stays
 /// in its original compiler transaction and is never relocated or restamped.
 pub fn build_prepared_fixture(
@@ -4359,26 +4395,255 @@ fn compile_build_action(
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
 
+pub(crate) fn charge_source_evidence(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+    bytes: usize,
+) -> Result<(), CompileError> {
+    operation
+        .charge(bytes.checked_mul(64).ok_or_else(|| {
+            CompileError::ExtractFailed("source evidence accounting overflow".into())
+        })?)
+        .map_err(|error| compiler_evidence_failure(error.into()))
+}
+
+/// One captured worker dependency observation and its authenticated source facts.
+/// Borrowing the raw input keeps digest authentication tied to the same parse.
+/// Constructors belong to the physical source-admission pipeline.
+pub(crate) struct SourceEvidenceAdmission<'a> {
+    worker_bytes: &'a [u8],
+    input_path: &'a Path,
+    target_source: &'a str,
+    inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+    completion: SourceEvidenceCompletion<'a>,
+}
+
+enum SourceEvidenceCompletion<'a> {
+    Ordinary(cache::CompletedSourceEvidence),
+    Exact(crate::declaration_context::ExactProductAdmission<'a>),
+}
+
+impl<'a> SourceEvidenceAdmission<'a> {
+    pub(crate) fn worker_bytes(&self) -> &[u8] {
+        self.worker_bytes
+    }
+
+    pub(crate) fn input_path(&self) -> &Path {
+        self.input_path
+    }
+
+    pub(crate) fn target_source(&self) -> &str {
+        self.target_source
+    }
+
+    pub(crate) fn inventory(&self) -> &tidepool_repr::execution_schema::InventoryOperation {
+        self.inventory
+    }
+
+    pub(crate) fn completed(&self) -> &cache::CompletedSourceEvidence {
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(completed) => completed,
+            SourceEvidenceCompletion::Exact(exact) => exact.source.evidence().as_ref(),
+        }
+    }
+
+    pub(crate) fn exact(&self) -> Option<&crate::declaration_context::ExactProductAdmission<'a>> {
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(_) => None,
+            SourceEvidenceCompletion::Exact(exact) => Some(exact),
+        }
+    }
+
+    pub(crate) fn from_exact(
+        matched: crate::declaration_context::MatchedExactProductAdmission<'a>,
+    ) -> Self {
+        let (exact, worker_bytes, input_path, target_source, inventory) = matched.into_parts();
+        Self {
+            worker_bytes,
+            input_path,
+            target_source,
+            inventory,
+            completion: SourceEvidenceCompletion::Exact(exact),
+        }
+    }
+}
+
+/// Admission of ordinary compiler evidence uses the same parser and physical
+/// source validator as the compile front door, including its accounting owner.
+pub(crate) fn admit_compiler_source<'a>(
+    operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+    bytes: &'a [u8],
+    input: &'a Path,
+    source: &'a str,
+) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+    ParsedSourceEvidence::parse(operation, bytes, SourceEvidenceUse::Compiler, input)?
+        .authenticate_for_certification(input, source)
+}
+
+/// Parsed worker observations, without consumed-byte or import-witness authority.
+/// The owning admission charges its existing inventory before the sole JSON decode.
+#[cfg_attr(test, derive(Clone))]
+struct ParsedSourceEvidence<'a>(
+    cache::DependencyEvidence,
+    &'a [u8],
+    &'a tidepool_repr::execution_schema::InventoryOperation,
+);
+
+#[derive(Clone, Copy)]
+enum SourceEvidenceUse {
+    BuildAction,
+    CompletedCorpus,
+    Compiler,
+}
+
+impl<'a> ParsedSourceEvidence<'a> {
+    fn parse(
+        operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+        bytes: &'a [u8],
+        usage: SourceEvidenceUse,
+        input: &Path,
+    ) -> Result<Self, CompileError> {
+        charge_source_evidence(operation, bytes.len())?;
+        #[cfg(test)]
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(count.get() + 1));
+        serde_json::from_slice(bytes)
+            .map(|facts| Self(facts, bytes, operation))
+            .map_err(|error| match usage {
+                SourceEvidenceUse::BuildAction => CompileError::ExtractFailed(format!(
+                    "build-action dependency evidence: {error}"
+                )),
+                SourceEvidenceUse::CompletedCorpus => {
+                    CompileError::ExtractFailed(format!("corpus dependency evidence: {error}"))
+                }
+                SourceEvidenceUse::Compiler => source_evidence_failure(
+                    input,
+                    cache::DependencyEvidenceFailure::WorkerDecode {
+                        message: error.to_string(),
+                    },
+                ),
+            })
+    }
+
+    fn validate_build_action_closure(
+        &self,
+        source: &Path,
+        include: &[PathBuf],
+    ) -> Result<(), CompileError> {
+        if !self.0.cache_safe || !self.0.selection_complete {
+            return Err(CompileError::ExtractFailed(
+                "build-action source evidence is incomplete".into(),
+            ));
+        }
+        validate_declared_source_closure(&self.0, source, include)
+    }
+
+    fn authenticate_for_certification(
+        self,
+        input: &'a Path,
+        source: &'a str,
+    ) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+        let completed = cache::CompletedSourceEvidence::from_worker_evidence(self.0, input, source)
+            .map_err(|failure| source_evidence_failure(input, failure))?;
+        Ok(SourceEvidenceAdmission {
+            worker_bytes: self.1,
+            input_path: input,
+            target_source: source,
+            inventory: self.2,
+            completion: SourceEvidenceCompletion::Ordinary(completed),
+        })
+    }
+
+    fn admit_build_action_for_certification(
+        self,
+        input: &'a Path,
+        include: &[PathBuf],
+        source: &'a str,
+    ) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+        let (worker_bytes, inventory) = (self.1, self.2);
+        let completed = self.admit_build_action(input, include, source)?;
+        Ok(SourceEvidenceAdmission {
+            worker_bytes,
+            input_path: input,
+            target_source: source,
+            inventory,
+            completion: SourceEvidenceCompletion::Ordinary(completed),
+        })
+    }
+
+    fn authenticate(
+        self,
+        input: &Path,
+        source: &str,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        cache::CompletedSourceEvidence::from_worker_evidence(self.0, input, source)
+            .map_err(|failure| source_evidence_failure(input, failure))
+    }
+
+    fn authenticate_build_input(
+        self,
+        input: &Path,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        cache::CompletedSourceEvidence::from_worker_evidence(
+            self.0,
+            input,
+            &std::fs::read_to_string(input)?,
+        )
+        .map_err(|_| {
+            CompileError::ExtractFailed(
+                "build-action consumed bytes or import witnesses changed".into(),
+            )
+        })
+    }
+
+    fn admit_build_action(
+        self,
+        input: &Path,
+        include: &[PathBuf],
+        expected_source: &str,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        self.validate_build_action_closure(input, include)?;
+        let completed = self.authenticate_build_input(input)?;
+        completed
+            .validate_expected_source(expected_source)
+            .map_err(|failure| source_evidence_failure(input, failure))?;
+        Ok(completed)
+    }
+}
+
+fn source_evidence_failure(
+    input: &Path,
+    failure: cache::DependencyEvidenceFailure,
+) -> CompileError {
+    compiler_evidence_failure(
+        crate::certified_products::CertificationError::CompletedSourceEvidence {
+            input: input.to_path_buf(),
+            failure: Box::new(failure),
+        },
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_EVIDENCE_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Validate consumed bytes and import witnesses against a build action's
-/// declared module and complete readable source trees. This shares the worker
-/// dependency reader with ordinary artifact admission and grants no execution.
+/// declared module and complete source namespaces. Unused declared contents
+/// need not be readable. Parsing shares the caller's inventory; parsed
+/// observations grant no execution authority.
 pub fn validate_prepared_fixture_sources(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
     evidence_bytes: &[u8],
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    validate_build_action_source_closure(evidence_bytes, source, include)?;
-    cache::DependencyEvidence::from_worker(
+    let parsed = ParsedSourceEvidence::parse(
+        operation,
         evidence_bytes,
+        SourceEvidenceUse::BuildAction,
         source,
-        &std::fs::read_to_string(source)?,
-    )
-    .ok_or_else(|| {
-        CompileError::ExtractFailed(
-            "build-action consumed bytes or import witnesses changed".into(),
-        )
-    })?;
-    Ok(())
+    )?;
+    parsed.validate_build_action_closure(source, include)?;
+    parsed.authenticate_build_input(source).map(|_| ())
 }
 
 /// Validate observations from a fresh corpus compilation owned by a native
@@ -4386,46 +4651,20 @@ pub fn validate_prepared_fixture_sources(
 /// remains ineligible for source replay and does not prove a hermetic action.
 /// Observed Haskell sources must still belong to the declared source trees.
 pub fn validate_completed_corpus_sources(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
     evidence_bytes: &[u8],
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    let evidence: cache::DependencyEvidence =
-        serde_json::from_slice(evidence_bytes).map_err(|error| {
-            CompileError::ExtractFailed(format!("corpus dependency evidence: {error}"))
-        })?;
-    validate_declared_source_closure(&evidence, source, include)?;
-    cache::CompletedSourceEvidence::from_worker_evidence(
-        evidence,
+    let parsed = ParsedSourceEvidence::parse(
+        operation,
+        evidence_bytes,
+        SourceEvidenceUse::CompletedCorpus,
         source,
-        &std::fs::read_to_string(source)?,
-    )
-    .map_err(|failure| {
-        CompileError::CompilerEvidence(Box::new(
-            crate::certified_products::CertificationError::CompletedSourceEvidence {
-                input: source.to_path_buf(),
-                failure: Box::new(failure),
-            },
-        ))
-    })?;
+    )?;
+    validate_declared_source_closure(&parsed.0, source, include)?;
+    parsed.authenticate(source, &std::fs::read_to_string(source)?)?;
     Ok(())
-}
-
-fn validate_build_action_source_closure(
-    evidence_bytes: &[u8],
-    source: &Path,
-    include: &[PathBuf],
-) -> Result<(), CompileError> {
-    let evidence: cache::DependencyEvidence =
-        serde_json::from_slice(evidence_bytes).map_err(|error| {
-            CompileError::ExtractFailed(format!("build-action dependency evidence: {error}"))
-        })?;
-    if !evidence.cache_safe || !evidence.selection_complete {
-        return Err(CompileError::ExtractFailed(
-            "build-action source evidence is incomplete".into(),
-        ));
-    }
-    validate_declared_source_closure(&evidence, source, include)
 }
 
 fn validate_declared_source_closure(
@@ -4433,16 +4672,9 @@ fn validate_declared_source_closure(
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
-    for root in include {
-        let manifest = cache::source_root_manifest(root)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        for (relative, _) in manifest {
-            declared.insert(std::fs::canonicalize(root.join(relative))?);
-        }
-    }
+    let declared = DeclaredSourceSet::observe(source, include)?;
     for consumed in &evidence.sources {
-        if !declared.contains(&std::fs::canonicalize(&consumed.path)?) {
+        if !declared.0.contains(&std::fs::canonicalize(&consumed.path)?) {
             return Err(CompileError::ExtractFailed(format!(
                 "build action consumed an undeclared source: {}",
                 consumed.path.display()
@@ -4450,6 +4682,24 @@ fn validate_declared_source_closure(
         }
     }
     Ok(())
+}
+
+/// Declaration membership is a namespace fact. Actual consumed bytes and
+/// import witnesses are authenticated separately by CompletedSourceEvidence.
+struct DeclaredSourceSet(std::collections::BTreeSet<PathBuf>);
+
+impl DeclaredSourceSet {
+    fn observe(source: &Path, include: &[PathBuf]) -> Result<Self, CompileError> {
+        let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
+        for root in include {
+            let paths = cache::dependency_source_paths(root)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            for path in paths.canonical_paths() {
+                declared.insert(path?);
+            }
+        }
+        Ok(Self(declared))
+    }
 }
 
 struct CompilationOutput {
@@ -4466,7 +4716,8 @@ fn compile_invocation_inner(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
     );
-    let multi = inv.targets.len() > 1;
+    crate::host_work::checkpoint()?;
+    let layout = invocation_output::InvocationOutputLayout::new(inv.targets)?;
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime { .. }
@@ -4617,13 +4868,10 @@ fn compile_invocation_inner(
         None
     };
 
-    // Bind the logical build-products root before recipe construction. The
-    // process boundary privately places mutable GHC outputs by daemon epoch
-    // and worker slot; its placement does not alter the logical recipe or
-    // authorize additional source inputs. Reaped slot rotations retain disk
-    // warmth, while new daemons and direct invocations use fresh namespaces.
-    let names = artifact_names(inv.targets, multi);
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    // Select build products for each bound endpoint. The process boundary
+    // privately places mutable GHC outputs by daemon epoch and worker slot;
+    // this placement never authorizes additional source inputs. Reaped slot
+    // rotations retain disk warmth; new daemons use fresh writer namespaces.
     let base_cmd = cmd;
     let attempt = retry_bounded(
         || {
@@ -4677,66 +4925,6 @@ fn compile_invocation_inner(
                     output_owner.path(),
                 )
                 .map_err(CompileAttemptError::ModulePackage)?
-            } else {
-                None
-            };
-
-            let inv_key = if allow_candidates {
-                let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: inv.source,
-                    argv: &argv,
-                    input_path: &input_path,
-                    include: inv.include,
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                });
-                if let Some(key) = &key {
-                    let load_start = Instant::now();
-                    if let Some((meta_bytes, raw, product_bytes, evidence)) = allow_candidates
-                        .then(|| load_memo(key, &name_refs, inv.targets, inv.source))
-                        .transpose()
-                        .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
-                        .flatten()
-                    {
-                        // Direct invocation memo lacks a worker group/target
-                        // certificate. Home products must use the exact
-                        // module-candidate transaction instead.
-                        if !evidence
-                            .modules
-                            .iter()
-                            .any(|module| module.product == cache::ProductAvailability::Ready)
-                        {
-                            if let Ok(mut artifacts) = decode_fresh_products(&product_bytes)
-                                .and_then(|fresh| {
-                                    assemble_with_products(
-                                        &meta_bytes,
-                                        &raw,
-                                        fresh,
-                                        Vec::new(),
-                                        Some(&evidence),
-                                        None,
-                                        None,
-                                        &mut on_stage,
-                                    )
-                                })
-                            {
-                                artifacts.producer_identity =
-                                    Some(*endpoint.identity().producer_bytes());
-                                on_stage(
-                                    timing::STAGE_CBOR_READ,
-                                    load_start.elapsed(),
-                                    total_bytes(&meta_bytes, &raw, &product_bytes),
-                                );
-                                return Ok(CompileAttempt::Cached(Box::new(artifacts)));
-                            }
-                            // An interrupted memo admission is a refusal, not
-                            // permission to retry with physical compiler work.
-                            crate::host_work::checkpoint()
-                                .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
-                        }
-                    }
-                }
-                key
             } else {
                 None
             };
@@ -4825,15 +5013,14 @@ fn compile_invocation_inner(
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
-                CompileAttempt::Executed((
+                (
                     cmd,
                     selected_session_values,
                     run,
-                    inv_key,
                     producer,
                     candidate_set,
                     deployment,
-                ))
+                )
             })
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
@@ -4853,16 +5040,7 @@ fn compile_invocation_inner(
             return Err(error.into_compile_error());
         }
     };
-    let (cmd, selected_session_values, run, inv_key, producer, candidate_set, deployment) =
-        match attempt {
-            CompileAttempt::Cached(artifacts) => {
-                return Ok(CompilationOutput {
-                    artifacts: *artifacts,
-                    original_entry: None,
-                });
-            }
-            CompileAttempt::Executed(executed) => executed,
-        };
+    let (cmd, selected_session_values, run, producer, candidate_set, deployment) = attempt;
 
     if let Some(request) = exact_request.as_ref() {
         let actual =
@@ -4923,11 +5101,58 @@ fn compile_invocation_inner(
         }
     }
     let compiler_stderr = run.output.stderr.clone();
+    if let CompilationPolicy::BuildAction {
+        export: BuildActionExport::PreparedFixture { output },
+        ..
+    } = &policy
+    {
+        let portable = (|| {
+            let layout = invocation_output::InvocationOutputLayout::portable(inv.targets)?;
+            let bundle = extract_and_read(
+                run,
+                output_owner.path(),
+                &layout,
+                &mut on_stage,
+                |stderr, success| {
+                    if !success && !stderr.is_empty() {
+                        tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
+                    }
+                },
+            )?;
+            ParsedSourceEvidence::parse(
+                bundle.operation(),
+                bundle.dependencies(),
+                SourceEvidenceUse::BuildAction,
+                &input_path,
+            )?
+            .admit_build_action(&input_path, inv.include, inv.source)?;
+            let raw = bundle.targets();
+            let artifacts = assemble_portable(bundle.metadata(), &raw, &mut on_stage)?;
+            std::fs::create_dir(output)?;
+            std::fs::write(output.join("meta.cbor"), bundle.metadata())?;
+            for target in &raw {
+                std::fs::write(
+                    output.join(prepared_artifact_name(&target.target)),
+                    target.prepared_bytes.as_slice(),
+                )?;
+                std::fs::write(
+                    output.join(format!("{}.asks.json", target.target)),
+                    target.asks_bytes.as_slice(),
+                )?;
+            }
+            Ok(CompilationOutput {
+                artifacts,
+                original_entry: None,
+            })
+        })();
+        return portable.map_err(|error| {
+            retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error)
+        });
+    }
     let extracted = extract_and_read(
         run,
         output_owner.path(),
-        inv.targets,
-        multi,
+        &layout,
         &mut on_stage,
         |stderr, success| {
             if !success && !stderr.is_empty() {
@@ -4937,76 +5162,75 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let (meta_bytes, raw, product_bytes, inventory_operation) =
-        extracted.map_err(|error| match &policy {
-            CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { .. },
-                ..
-            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        })?;
+    let bundle = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+    })?;
+    let meta_bytes = bundle.metadata();
+    let raw = bundle.targets();
+    let product_bytes = bundle.products();
+    let package_bundle_bytes = bundle.package_imports();
+    let inventory_operation = bundle.operation();
 
-    // Store only what DESERIALIZED, so a malformed artifact set is never
-    // memoized into a permanently-failing entry. Best-effort: an unwritable
-    // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory_operation.clone(),
         );
         let evidence_bytes =
             CompilerSidecar::Dependencies.read(output_owner.path(), &inventory_operation)?;
-        let package_bundle_bytes = CompilerSidecar::ModulePackageImports
-            .read(output_owner.path(), &inventory_operation)?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
-        }
-        inventory_operation
-            .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
-                CompileError::ExtractFailed("source evidence accounting overflow".into())
-            })?)
-            .map_err(|error| compiler_evidence_failure(error.into()))?;
-        if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
-            validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
         let exact_source = exact_request
             .as_ref()
             .map(|request| {
-                request.admit_source_with_validation(
+                request.admit_source_receipt_with_validation(
                     &input_path,
                     inv.source,
-                    &evidence_bytes,
                     &mut validation,
                 )
             })
             .transpose()?;
-        let exact = exact_request
-            .as_ref()
-            .zip(exact_source.as_ref())
-            .map(
-                |(request, source)| crate::declaration_context::ExactProductAdmission {
+        let source_admission = match exact_request.as_ref().zip(exact_source.as_ref()) {
+            Some((request, admitted)) => {
+                SourceEvidenceAdmission::from_exact(admitted.match_product(
                     request,
-                    source,
-                },
-            );
-        let evidence = match exact_source.as_ref() {
-            Some(source) => Some((*source.evidence).clone()),
-            None => Some(
-                cache::CompletedSourceEvidence::from_worker(
-                    &evidence_bytes,
                     &input_path,
                     inv.source,
-                )
-                .map_err(|failure| {
-                    CompileError::CompilerEvidence(Box::new(
-                        crate::certified_products::CertificationError::CompletedSourceEvidence {
-                            input: input_path.clone(),
-                            failure: Box::new(failure),
-                        },
-                    ))
-                })?,
-            ),
+                    &evidence_bytes,
+                    &inventory_operation,
+                )?)
+            }
+            None => {
+                let build_action = matches!(&policy, CompilationPolicy::BuildAction { .. });
+                let parsed = ParsedSourceEvidence::parse(
+                    &inventory_operation,
+                    &evidence_bytes,
+                    if build_action {
+                        SourceEvidenceUse::BuildAction
+                    } else {
+                        SourceEvidenceUse::Compiler
+                    },
+                    &input_path,
+                )?;
+                if build_action {
+                    parsed.admit_build_action_for_certification(
+                        &input_path,
+                        inv.include,
+                        inv.source,
+                    )?
+                } else {
+                    parsed.authenticate_for_certification(&input_path, inv.source)?
+                }
+            }
         };
+        let exact = source_admission.exact();
+        let evidence = Some(source_admission.completed());
+        let evidence_facts = evidence.map(|completed| &**completed);
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
@@ -5041,7 +5265,7 @@ fn compile_invocation_inner(
                     "fresh module product certificate unavailable".into(),
                 ));
             }
-            if evidence.as_deref().is_some_and(has_ready_home_module) {
+            if evidence_facts.is_some_and(has_ready_home_module) {
                 return Err(CompileError::ExtractFailed(
                     "ready module product certificate unavailable".into(),
                 ));
@@ -5051,7 +5275,7 @@ fn compile_invocation_inner(
                 &raw,
                 fresh_products,
                 Vec::new(),
-                evidence.as_deref(),
+                evidence_facts,
                 None,
                 None,
                 &mut *on_stage,
@@ -5071,9 +5295,7 @@ fn compile_invocation_inner(
             validation.inventory.clone(),
         )
         .map_err(compiler_evidence_failure)?;
-        let valid_evidence = evidence
-            .as_ref()
-            .filter(|value| value.revalidate(inv.source).is_ok());
+        let valid_evidence = evidence.filter(|value| value.revalidate(inv.source).is_ok());
         let cached_receipts: Vec<_> = receipt
             .modules
             .iter()
@@ -5084,14 +5306,10 @@ fn compile_invocation_inner(
                 candidate_set.as_ref(),
                 &receipt,
                 &fresh_products,
-                &evidence_bytes,
-                &input_path,
+                &source_admission,
                 output_owner.path(),
-                valid,
-                inv.source,
                 &producer,
                 inv.include,
-                exact.as_ref(),
                 authored,
                 &selected_session_values,
                 None,
@@ -5173,7 +5391,7 @@ fn compile_invocation_inner(
             &raw,
             fresh_products,
             extra_products,
-            evidence.as_deref(),
+            evidence_facts,
             exact_request.as_ref(),
             Some(&certified.retained_core_products),
             &mut on_stage,
@@ -5276,7 +5494,6 @@ fn compile_invocation_inner(
         artifacts.certified_groups = certified.groups.to_vec();
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
-        artifacts.exact_source_admission = exact_source;
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
         })?);
@@ -5309,25 +5526,7 @@ fn compile_invocation_inner(
                 &artifacts.module_products[..fresh_count],
             );
         }
-        // A memo hit has no certified source group owner mapping. The module
-        // store owns reuse for invocations with home products.
-        if allow_candidates
-            && exact_request.is_none()
-            && cached_receipts.is_empty()
-            && fresh_count == 0
-        {
-            if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
-                store_memo(
-                    key,
-                    &name_refs,
-                    &meta_bytes,
-                    &raw,
-                    &product_bytes,
-                    evidence,
-                    inv.source,
-                );
-            }
-        }
+        artifacts.exact_source_admission = exact_source;
         Ok(artifacts)
     })();
     let artifacts = assembled.map_err(|error| match &policy {
@@ -5338,26 +5537,6 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
-    if let CompilationPolicy::BuildAction {
-        export: BuildActionExport::PreparedFixture { output },
-        ..
-    } = &policy
-    {
-        std::fs::create_dir(output)?;
-        // Portable code has no authority to hydrate the source-bound
-        // native products or certificates from this transaction.
-        std::fs::write(output.join("meta.cbor"), &meta_bytes)?;
-        for target in &raw {
-            std::fs::write(
-                output.join(prepared_artifact_name(&target.target)),
-                target.prepared_bytes.as_slice(),
-            )?;
-            std::fs::write(
-                output.join(format!("{}.asks.json", target.target)),
-                &target.asks_bytes,
-            )?;
-        }
-    }
     let original_entry = if let CompilationOutputOwner::Original(preparation) = output_owner {
         match &policy {
             CompilationPolicy::RetainedEntry {
@@ -5752,11 +5931,6 @@ impl CompileAttemptError {
     }
 }
 
-enum CompileAttempt<T> {
-    Cached(Box<CompiledArtifacts>),
-    Executed(T),
-}
-
 fn retry_bounded<T, E>(
     mut attempt: impl FnMut() -> Result<T, E>,
     permits_retry: impl Fn(&E) -> bool,
@@ -5772,7 +5946,7 @@ fn retry_bounded<T, E>(
 
 /// Compile `source` against multiple named targets through
 /// [`compile_invocation`]. See its doc for the full contract
-/// (target semantics, asks sidecar shape, memoization, timing hook).
+/// (target semantics, asks sidecar shape, timing hook).
 pub fn compile_targets(
     source: &str,
     targets: &[&str],
@@ -5800,7 +5974,7 @@ pub fn compile_targets(
 /// One target's raw (pre-deserialize) bytes.
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
-    asks_bytes: Vec<u8>,
+    asks_bytes: Arc<Vec<u8>>,
     prepared_bytes: Arc<Vec<u8>>,
 }
 
@@ -5816,22 +5990,13 @@ pub(crate) struct RawTargetOutput {
 /// already gives an ordinary eval compile, so a bad target name or any other
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
-pub(crate) fn extract_and_read(
+pub(crate) fn extract_and_read<P>(
     run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
-    targets: &[&str],
-    multi: bool,
+    layout: &invocation_output::InvocationOutputLayout<P>,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<
-    (
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ),
-    CompileError,
-> {
+) -> Result<invocation_output::InvocationOutputBundle<P>, CompileError> {
     let inventory_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
         Default::default(),
     ));
@@ -5849,9 +6014,8 @@ pub(crate) fn extract_and_read(
     // Default-on per-compile summary (compile-attribution lane): unlike
     // `extract_timing` above, this is emitted by the extract UNCONDITIONALLY
     // (no `TIDEPOOL_TIMING` required) — see `Tidepool.Timing.emitCompileSummary`.
-    // Logged at INFO so it lands in the ordinary compile log; absent on
-    // a memo hit (this function isn't reached) or on a compile that threw
-    // before reaching the summary line.
+    // Logged at INFO so it lands in the ordinary compile log; absent when
+    // compilation threw before reaching the summary line.
     if let Some(summary) = timing::CompileSummary::parse(&stderr) {
         timing::log_compile_summary(&summary);
     }
@@ -5868,52 +6032,13 @@ pub(crate) fn extract_and_read(
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
 
     let cbor_read_start = Instant::now();
-    let meta_path = temp_dir.join("meta.cbor");
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-    let meta_bytes = certified_products::read_bounded_with_operation(
-        &meta_path,
-        inventory_operation.limits().max_bytes as u64,
-        &inventory_operation,
-    )
-    .map_err(compiler_evidence_failure)?;
-    let products_path = temp_dir.join("module-products.cbor");
-    if !products_path.exists() {
-        return Err(CompileError::MissingOutput(products_path));
-    }
-    let product_bytes = CompilerSidecar::ModuleProducts.read(temp_dir, &inventory_operation)?;
-
-    let mut raw = Vec::with_capacity(targets.len());
-    for target in targets {
-        let prepared_path = temp_dir.join(prepared_artifact_name(target));
-        if !prepared_path.exists() {
-            return Err(CompileError::MissingOutput(prepared_path));
-        }
-        let prepared_bytes = certified_products::read_bounded_with_operation(
-            &prepared_path,
-            DecodeLimits::default().max_bytes as u64,
-            &inventory_operation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let asks_path = if multi {
-            temp_dir.join(format!("{target}.asks.json"))
-        } else {
-            temp_dir.join("asks.json")
-        };
-        let asks_bytes = read_asks_bytes(&asks_path)?;
-        raw.push(RawTargetOutput {
-            target: (*target).to_string(),
-            asks_bytes,
-            prepared_bytes: Arc::new(prepared_bytes),
-        });
-    }
+    let bundle = layout.read(temp_dir, inventory_operation)?;
     on_stage(
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        total_bytes(&meta_bytes, &raw, &product_bytes),
+        bundle.bytes_len(),
     );
-    Ok((meta_bytes, raw, product_bytes, inventory_operation))
+    Ok(bundle)
 }
 
 /// A prepared output and its complete constructor table disagree.
@@ -5939,10 +6064,7 @@ pub fn check_constructor_identity_agreement(
         })
 }
 
-/// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
-/// — into a [`CompiledArtifacts`]. Both paths landing here (rather than each
-/// deserializing separately) is what makes a cache hit observationally
-/// identical to a cold compile.
+/// Deserialize physical metadata and ordered target outputs into checked artifacts.
 pub(crate) fn assemble(
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
@@ -6005,12 +6127,20 @@ pub(crate) fn assemble(
     })
 }
 
-fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
-    Ok(tidepool_repr::execution_schema::parse_module_products(
-        bytes,
-        &crate::prepared_artifact::production_requirements()?,
-        module_candidates::product_decode_limits(),
-    )?)
+/// A portable fixture has no external native, package or retained-value owner.
+/// Every executable import must have been closed by its compiler transaction.
+fn assemble_portable(
+    meta_bytes: &[u8],
+    raw: &[RawTargetOutput],
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    let artifacts = assemble(meta_bytes, raw, on_stage)?;
+    ensure_no_uncertified_globals(&artifacts)?;
+    for (target, artifact) in &artifacts.targets {
+        check_constructor_identity_agreement(target, &artifact.prepared, &artifacts.table)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    }
+    Ok(artifacts)
 }
 
 fn assemble_with_products(
@@ -6118,112 +6248,6 @@ fn parse_asks(bytes: &[u8]) -> Result<YieldSites, CompileError> {
 pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
     let bytes = read_asks_bytes(path)?;
     serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Invocation-keyed memo glue
-// ---------------------------------------------------------------------------
-
-/// The logical artifact names of one invocation's output set — exactly the
-/// filenames [`compile_targets`] reads out of the extract's output dir, in a
-/// fixed order: shared `meta.cbor`, then per target `<target>.cbor`,
-/// `<target>.prepared.cbor`, and its asks sidecar. `multi` picks the sidecar SHAPE on the same
-/// `targets.len() > 1` test the Haskell side uses to decide which shape to
-/// write, so the memo's names track the extract's own contract.
-fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(2 + targets.len() * 2);
-    names.push("meta.cbor".to_string());
-    for target in targets {
-        names.push(prepared_artifact_name(target));
-        names.push(if multi {
-            format!("{target}.asks.json")
-        } else {
-            "asks.json".to_string()
-        });
-    }
-    names.push("module-products.cbor".to_string());
-    names.push("module-package-imports.cbor".to_string());
-    names
-}
-
-/// Total bytes read for this compile, for the `cbor_read` timing stage —
-/// identical on the memo path and the spawn path, since both count the same
-/// artifacts.
-fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput], product_bytes: &[u8]) -> u64 {
-    let total = meta_bytes.len()
-        + product_bytes.len()
-        + raw
-            .iter()
-            .map(|r| r.prepared_bytes.len() + r.asks_bytes.len())
-            .sum::<usize>();
-    total as u64
-}
-
-/// Reassemble a memoized artifact set into the same `(meta, raw)` pair the
-/// spawn path produces. `None` — any absent-but-required artifact, or a set
-/// the memo declines — falls through to a cold compile.
-fn load_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    targets: &[&str],
-    source: &str,
-) -> std::io::Result<
-    Option<(
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        cache::DependencyEvidence,
-    )>,
-> {
-    let Some((loaded, evidence)) = cache::artifacts_load(key, names, source)? else {
-        return Ok(None);
-    };
-    Ok((|| {
-        let mut it = loaded.into_iter();
-        // Every artifact is required. An extractor represents a target with no
-        // typed suspension sites by writing an `[]` sidecar.
-        let meta_bytes = it.next()??;
-        let mut raw = Vec::with_capacity(targets.len());
-        for target in targets {
-            let prepared_bytes = it.next()??;
-            let asks_bytes = it.next()??;
-            raw.push(RawTargetOutput {
-                target: (*target).to_string(),
-                asks_bytes,
-                prepared_bytes: Arc::new(prepared_bytes),
-            });
-        }
-        Some((meta_bytes, raw, it.next()??, evidence))
-    })())
-}
-
-/// Store this invocation's full artifact set under `names`, in the order
-/// [`artifact_names`] fixed.
-fn store_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    meta_bytes: &[u8],
-    raw: &[RawTargetOutput],
-    product_bytes: &[u8],
-    evidence: &cache::DependencyEvidence,
-    source: &str,
-) {
-    let mut artifacts: Vec<(&str, Option<&[u8]>)> = Vec::with_capacity(names.len());
-    let mut names = names.iter();
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(meta_bytes)));
-    }
-    for r in raw {
-        let (Some(prepared_name), Some(asks_name)) = (names.next(), names.next()) else {
-            return;
-        };
-        artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
-        artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
-    }
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(product_bytes)));
-    }
-    cache::artifacts_store(key, &artifacts, evidence, source);
 }
 
 #[cfg(test)]
@@ -6598,7 +6622,7 @@ mod typed_site_tests {
 
     #[test]
     #[serial_test::serial]
-    fn safe_refusal_rederives_cache_and_build_products_identity() {
+    fn safe_refusal_rederives_producer_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
 
         struct RestoreDaemon(Option<std::ffi::OsString>);
@@ -6649,20 +6673,12 @@ mod typed_site_tests {
                 attempt_index += 1;
                 crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
                 let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: "result = 1",
-                    argv: &argv,
-                    input_path: Path::new("Input.hs"),
-                    include: &[],
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                })
-                .expect("test invocation is cacheable");
                 let products = argv
                     .windows(2)
                     .find(|pair| pair[0] == "--build-products-dir")
                     .map(|pair| PathBuf::from(&pair[1]))
                     .expect("bound attempt must select build products");
-                selections.push((key, products));
+                selections.push((*endpoint.identity().producer_bytes(), products));
                 if attempt_index == 1 {
                     Err(true)
                 } else {
@@ -7189,12 +7205,403 @@ mod module_product_tests {
                 sha256: "unused-by-closure-validator".into(),
             })
             .collect();
-        let encode = |evidence: &cache::DependencyEvidence| serde_json::to_vec(evidence).unwrap();
-        validate_build_action_source_closure(&encode(&evidence), &source, &[inputs]).unwrap();
-        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        parsed
+            .validate_build_action_closure(&source, &[inputs])
+            .unwrap();
+        assert!(parsed.validate_build_action_closure(&source, &[]).is_err());
         evidence.sources.pop();
         evidence.selection_complete = false;
-        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        assert!(parsed.validate_build_action_closure(&source, &[]).is_err());
+    }
+
+    #[test]
+    fn prepared_source_admission_parses_once_and_charges_before_decode() {
+        use sha2::{Digest, Sha256};
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let text = "module Main where\nresult = 42\n";
+        std::fs::write(&source, text).unwrap();
+        let mut evidence = assembly_evidence(&["Main"]);
+        evidence.modules[0].source = source.clone();
+        evidence.sources.push(cache::SourceEvidence {
+            path: source.clone(),
+            sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        });
+        // Completed observations do not acquire replay eligibility by parsing.
+        for cache_safe in [false, true] {
+            for selection_complete in [false, true] {
+                evidence.cache_safe = cache_safe;
+                evidence.selection_complete = selection_complete;
+                let bytes = serde_json::to_vec(&evidence).unwrap();
+                let operation = InventoryOperation::new(Default::default());
+                SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+                assert_eq!(
+                    validate_prepared_fixture_sources(&operation, &bytes, &source, &[]).is_ok(),
+                    cache_safe && selection_complete,
+                );
+                assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+                assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 64);
+                validate_completed_corpus_sources(&operation, &bytes, &source, &[]).unwrap();
+                assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+                assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 128);
+            }
+        }
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 63,
+            ..Default::default()
+        });
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+        // Malformed JSON would reach a different failure if decode preceded charge.
+        assert!(matches!(
+            validate_prepared_fixture_sources(&restricted, b"{", &source, &[]),
+            Err(CompileError::CompilerEvidence(_)),
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 0);
+        let operation = InventoryOperation::new(Default::default());
+        assert!(matches!(
+            validate_prepared_fixture_sources(&operation, b"{", &source, &[]),
+            Err(CompileError::ExtractFailed(message)) if message.starts_with("build-action dependency evidence:"),
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        assert!(charge_source_evidence(&operation, usize::MAX).is_err());
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 0);
+    }
+
+    #[test]
+    fn parsed_build_observations_preserve_physical_and_invocation_authentication() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let text = "module Main where\nresult = 42\n";
+        std::fs::write(&source, text).unwrap();
+        let mut evidence = assembly_evidence(&["Main"]);
+        evidence.modules[0].source = source.clone();
+        evidence.sources.push(cache::SourceEvidence {
+            path: source.clone(),
+            sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        });
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        parsed.validate_build_action_closure(&source, &[]).unwrap();
+        parsed.clone().authenticate_build_input(&source).unwrap();
+        assert!(parsed
+            .authenticate(&source, "different invocation text")
+            .is_err());
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        let mismatch = parsed.admit_build_action(&source, &[], "different invocation text");
+        assert!(matches!(mismatch,
+            Err(CompileError::CompilerEvidence(error)) if matches!(&*error,
+                certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                if matches!(&**failure, cache::DependencyEvidenceFailure::Source {
+                    index: 0,
+                    reason: cache::SourceWitnessFailure::Changed { expected, actual }
+                } if expected == &format!("{:x}", Sha256::digest(text.as_bytes()))
+                    && actual == &format!("{:x}", Sha256::digest(b"different invocation text"))))
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        std::fs::write(&source, "changed physical input").unwrap();
+        assert!(matches!(
+            parsed.admit_build_action(&source, &[], "different invocation text"),
+            Err(CompileError::ExtractFailed(message))
+                if message == "build-action consumed bytes or import witnesses changed",
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+    }
+
+    #[test]
+    fn build_admission_observes_one_closure_and_keeps_later_freshness_independent() {
+        use sha2::{Digest, Sha256};
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let dependency = root.path().join("Dependency.hs");
+        let shadow = root.path().join("earlier/Dependency.hs");
+        std::fs::create_dir(shadow.parent().unwrap()).unwrap();
+        let text = "module Main where\nresult = 42\n";
+        let dependency_bytes = b"module Dependency where\nvalue = 1\n";
+        std::fs::write(&source, text).unwrap();
+        std::fs::write(&dependency, dependency_bytes).unwrap();
+        let mut evidence = assembly_evidence(&["Main", "Dependency"]);
+        evidence.modules[0].source = source.clone();
+        evidence.modules[1].source = dependency.clone();
+        evidence.sources = [
+            (&source, text.as_bytes()),
+            (&dependency, dependency_bytes.as_slice()),
+        ]
+        .into_iter()
+        .map(|(path, bytes)| cache::SourceEvidence {
+            path: path.clone(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        })
+        .collect();
+        evidence.modules[0]
+            .imports
+            .push(cache::ModuleImportEvidence {
+                qualifier: cache::ImportQualifier::Unqualified,
+                module: "Dependency".into(),
+                boot: false,
+                selected: Some(dependency.clone()),
+            });
+        evidence.resolutions.push(cache::ResolutionEvidence {
+            qualifier: cache::ImportQualifier::Unqualified,
+            module: "Dependency".into(),
+            boot: false,
+            selected: Some(dependency.clone()),
+            candidates: vec![shadow.clone(), dependency.clone()],
+        });
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        cache::take_source_authentication_work();
+        let completed = parsed
+            .admit_build_action(&source, &[root.path().to_path_buf()], text)
+            .unwrap();
+        let observed = cache::take_source_authentication_work();
+        assert_eq!(
+            observed,
+            cache::DependencyEvidenceWork {
+                source_read_attempts: 1,
+                source_read_bytes: dependency_bytes.len() as u64,
+                negative_metadata_calls: 1,
+            }
+        );
+        // Independent old route and full recomputation preserve semantic facts;
+        // its repeated actual reads also sensitize the work observation.
+        let first = cache::CompletedSourceEvidence::from_worker(&bytes, &source, text).unwrap();
+        let second = cache::CompletedSourceEvidence::from_worker(&bytes, &source, text).unwrap();
+        assert_eq!(completed, first);
+        assert_eq!(completed, second);
+        let repeated = cache::take_source_authentication_work();
+        assert_eq!(repeated.source_read_attempts, 2);
+        assert_eq!(
+            repeated.source_read_bytes,
+            dependency_bytes.len() as u64 * 2
+        );
+        assert_eq!(repeated.negative_metadata_calls, 2);
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        // A new invocation-text check still refuses cancellation without
+        // revoking the already completed owner.
+        let cancelled = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || completed.validate_expected_source(text),
+        );
+        assert_eq!(
+            cancelled.action.unwrap_err(),
+            cache::DependencyEvidenceFailure::Interrupted
+        );
+        assert_eq!(
+            cache::take_source_authentication_work(),
+            cache::DependencyEvidenceWork::default()
+        );
+        std::fs::write(&dependency, b"changed after completed admission").unwrap();
+        completed.validate_expected_source(text).unwrap();
+        assert_eq!(
+            cache::take_source_authentication_work(),
+            cache::DependencyEvidenceWork::default()
+        );
+        assert!(
+            completed.revalidate(text).is_err(),
+            "later consumers retain their own freshness check"
+        );
+        std::fs::write(&dependency, dependency_bytes).unwrap();
+        std::fs::write(&shadow, b"higher priority provider").unwrap();
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        assert!(
+            matches!(parsed.admit_build_action(&source, &[root.path().to_path_buf()], "wrong"),
+                Err(CompileError::ExtractFailed(message))
+                    if message == "build-action consumed bytes or import witnesses changed",
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_source_membership_avoids_unused_reads_but_authenticates_consumed_sources() {
+        use cache::source_inspection_work;
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("Main.hs");
+        let dependency = temporary.path().join("outside.txt");
+        let declared = temporary.path().join("declared");
+        std::fs::create_dir(&declared).unwrap();
+        std::fs::write(&source, "module Main where\nvalue = 42\n").unwrap();
+        std::fs::write(&dependency, "module Dependency where\nvalue = 1\n").unwrap();
+        symlink(&dependency, declared.join("Alias.hs")).unwrap();
+        let unused = declared.join("Unused.hs");
+        std::fs::write(&unused, "unused = 1\n").unwrap();
+        std::fs::set_permissions(&unused, std::fs::Permissions::from_mode(0)).unwrap();
+        let ignored = declared.join("ignored.txt");
+        std::fs::write(&ignored, "not a selected source").unwrap();
+        let hardlink_target = temporary.path().join("other-outside.hs");
+        std::fs::write(&hardlink_target, "different canonical path").unwrap();
+        std::fs::hard_link(&hardlink_target, declared.join("Hardlink.hs")).unwrap();
+        let mut evidence = assembly_evidence(&["Main", "Dependency"]);
+        evidence.sources = [&source, &dependency]
+            .into_iter()
+            .map(|path| cache::SourceEvidence {
+                path: path.to_path_buf(),
+                sha256: format!("{:x}", Sha256::digest(std::fs::read(path).unwrap())),
+            })
+            .collect();
+        evidence.modules[0].source = source.clone();
+        evidence.modules[1].source = dependency.clone();
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        source_inspection_work::take();
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        let work = source_inspection_work::take();
+        assert_eq!(work.content_read_attempts, 0);
+        assert_eq!(work.hashes, 0);
+        assert!(work.entries >= 4);
+        let full_error = cache::source_root_manifest(&declared).unwrap_err();
+        assert_eq!(full_error.path, unused);
+        assert_eq!(
+            full_error.source.kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        for undeclared in [&ignored, &hardlink_target] {
+            let mut other = evidence.clone();
+            other.sources[1].path = undeclared.clone();
+            assert!(validate_declared_source_closure(
+                &other,
+                &source,
+                std::slice::from_ref(&declared)
+            )
+            .is_err());
+        }
+        std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0)).unwrap();
+        assert!(validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0o600)).unwrap();
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+
+        // Namespace observation remains complete after finding all consumed paths.
+        let missing = temporary.path().join("missing-root");
+        assert!(
+            validate_declared_source_closure(&evidence, &source, &[declared.clone(), missing])
+                .is_err()
+        );
+        let dangling = declared.join("dangling.txt");
+        symlink(temporary.path().join("absent"), &dangling).unwrap();
+        assert!(validate_declared_source_closure(
+            &evidence,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::remove_file(dangling).unwrap();
+        symlink(&declared, declared.join("back")).unwrap();
+        assert!(validate_declared_source_closure(
+            &evidence,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::remove_file(declared.join("back")).unwrap();
+        std::fs::set_permissions(&unused, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = cache::source_roots_identity(
+            b"declared-membership-control",
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        std::fs::write(&unused, "unused = 2\n").unwrap();
+        let after = cache::source_roots_identity(
+            b"declared-membership-control",
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        assert_ne!(before, after);
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        eprintln!(
+            "declared-source work: namespace_entries={} unused_content_reads={} hashes={}",
+            work.entries, work.content_read_attempts, work.hashes
+        );
     }
 
     fn product_metadata() -> Vec<u8> {
@@ -7352,6 +7759,13 @@ mod module_product_tests {
 
     #[test]
     fn fresh_product_byte_admission_refuses_malformed_and_duplicate_wire_owners() {
+        fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
+            Ok(tidepool_repr::execution_schema::parse_module_products(
+                bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                module_candidates::product_decode_limits(),
+            )?)
+        }
         let rows = |names: &[&str]| {
             Value::Array(vec![
                 Value::Text("TPMOD".into()),
@@ -7398,7 +7812,7 @@ mod module_product_tests {
     }
 
     /// This test intentionally crosses the matched Rust frontend, Haskell
-    /// worker, entry-free wire reader and invocation bundle. Run it with
+    /// worker, entry-free wire reader and physical output owner. Run it with
     /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
@@ -7435,6 +7849,60 @@ mod module_product_tests {
         assert!(consumer.imports.iter().any(|imported| {
             imported.module == "ModuleProductA" && imported.selected.is_some()
         }));
+    }
+
+    /// Construct the reachable interval where the frontend captured A but the
+    /// physical file supplied to the real worker is already B.
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn real_worker_portable_build_refuses_changed_captured_source_before_export() {
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
+        let physical = std::fs::read_to_string(fixture_root.join("ModuleProductB.hs")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("ModuleProductB.hs");
+        std::fs::write(&input, &physical).unwrap();
+        let roots = [fixture_root];
+        let histories = [
+            physical.clone(),
+            format!("{physical}\n-- captured before physical replacement\n"),
+            physical.replace("module ModuleProductB", "module PriorProductB"),
+        ];
+        for (index, captured) in histories.iter().enumerate() {
+            let output = root.path().join(format!("export-{index}"));
+            let invocation = CompileInvocation {
+                source: captured,
+                targets: &["consume"],
+                include: &roots,
+                fallback_module_name: "ModuleProductB",
+            };
+            let result = compile_invocation_inner(
+                &invocation,
+                &mut |_, _, _| {},
+                CompilationPolicy::BuildAction {
+                    source_path: &input,
+                    scratch: root.path(),
+                    export: BuildActionExport::PreparedFixture { output: &output },
+                },
+            );
+            if index == 0 {
+                assert!(result.is_ok(), "unchanged worker input: {:?}", result.err());
+                assert!(output.join("consume.prepared.cbor").is_file());
+                assert!(output.join("meta.cbor").is_file());
+            } else {
+                assert!(
+                    !output.exists(),
+                    "a refused source cannot publish portable output"
+                );
+                assert!(matches!(result,
+                    Err(CompileError::CompilerEvidence(error)) if matches!(&*error,
+                        certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                        if matches!(&**failure, cache::DependencyEvidenceFailure::Source {
+                            reason: cache::SourceWitnessFailure::Changed { .. }, ..
+                        }))
+                ));
+            }
+        }
     }
 
     #[test]
@@ -8039,6 +8507,28 @@ mod module_product_tests {
             1,
             "fresh preparation hands off its staging validation without loading again"
         );
+        let observed = production_entry::entry_observed_inputs();
+        for name in [
+            prepared_artifact_name("__prepared"),
+            "meta.cbor".into(),
+            "asks.json".into(),
+            "module-products.cbor".into(),
+            "module-package-imports.cbor".into(),
+            "dependencies.json".into(),
+            "certified-products.cbor".into(),
+            "compiler-inputs.cbor".into(),
+        ] {
+            assert!(
+                observed.contains(Path::new(&name)),
+                "actual entry admission did not observe {name}"
+            );
+        }
+        let original = first
+            .products()
+            .recovery_products
+            .first()
+            .expect("real retained entry fixture must issue an original product");
+        crate::recovery_artifacts::check_entry_unsealed_input_observations(original);
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {
@@ -8140,6 +8630,8 @@ mod module_product_tests {
     #[test]
     #[serial_test::serial]
     fn completed_quotations_admit_originals_without_source_replay() {
+        let source_validation_operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
         use crate::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
         use tidepool_repr::execution_schema::{Atom, Group, HeapRhs, ScalarLiteral};
 
@@ -8305,8 +8797,10 @@ mod module_product_tests {
             }));
             if exact {
                 let admission = compiled.exact_source_admission.as_ref().unwrap();
-                assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
-                assert!(admission.evidence.revalidate(source).is_ok());
+                assert!(
+                    !admission.evidence().cache_safe && !admission.evidence().selection_complete
+                );
+                assert!(admission.evidence().revalidate(source).is_ok());
                 let request = Arc::new(context.clone())
                     .prepare_compilation(
                         &root.path().join("original-execution-scope"),
@@ -8371,7 +8865,7 @@ mod module_product_tests {
                 // does not issue a replay recipe or a hermetic build artifact.
                 let consumer = root.path().join("QuotedConsumer.hs");
                 std::fs::write(&consumer, source).unwrap();
-                let mut observations = (*admission.evidence).clone().into_evidence();
+                let mut observations = admission.evidence().as_ref().clone().into_evidence();
                 for consumed in &mut observations.sources {
                     if consumed.path == Path::new(cache::GENERATED_SOURCE) {
                         consumed.path = consumer.clone();
@@ -8383,13 +8877,26 @@ mod module_product_tests {
                     }
                 }
                 let observations = serde_json::to_vec(&observations).unwrap();
-                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
+                validate_completed_corpus_sources(
+                    &source_validation_operation,
+                    &observations,
+                    &consumer,
+                    &include,
+                )
+                .unwrap();
                 assert!(
-                    validate_prepared_fixture_sources(&observations, &consumer, &include).is_err(),
+                    validate_prepared_fixture_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed TH output cannot become an immutable build recipe"
                 );
                 assert!(
                     validate_completed_corpus_sources(
+                        &source_validation_operation,
                         &observations,
                         &consumer,
                         std::slice::from_ref(&earlier),
@@ -8402,18 +8909,36 @@ mod module_product_tests {
                 changed.extend_from_slice(b"\n-- changed after compilation\n");
                 std::fs::write(&provider, changed).unwrap();
                 assert!(
-                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    validate_completed_corpus_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed output still validates consumed source bytes"
                 );
                 std::fs::write(&provider, provider_bytes).unwrap();
                 let shadow = earlier.join("QuotedOriginal.hs");
                 std::fs::write(&shadow, "module QuotedOriginal where\nvalue = 0\n").unwrap();
                 assert!(
-                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    validate_completed_corpus_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed output still validates negative import witnesses"
                 );
                 std::fs::remove_file(shadow).unwrap();
-                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
+                validate_completed_corpus_sources(
+                    &source_validation_operation,
+                    &observations,
+                    &consumer,
+                    &include,
+                )
+                .unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
                     &admission.home_imports().unwrap(),
@@ -8868,6 +9393,35 @@ mod constructor_identity_tests {
     }
 
     #[test]
+    fn portable_assembly_refuses_all_unexported_import_owners() {
+        use tidepool_repr::execution_schema::testing;
+        let metadata = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
+        let target = |wire: &tidepool_repr::execution_schema::WireProgram| RawTargetOutput {
+            target: "entry".into(),
+            asks_bytes: Arc::new(b"[]".to_vec()),
+            prepared_bytes: Arc::new(tidepool_test_data::prepared_encode::encode_wire_program(
+                wire,
+            )),
+        };
+        let closed = testing::wire_program();
+        assemble_portable(&metadata, &[target(&closed)], |_, _, _| {}).unwrap();
+        for (unit, generation) in [("main", None), ("package-unit", None), ("main", Some(9))] {
+            let mut open = tidepool_test_data::prepared::callable_import_program();
+            open.globals[0].identity.unit = unit.into();
+            open.globals[0].required_generation = generation;
+            assemble(&metadata, &[target(&open)], |_, _, _| {}).unwrap();
+            assert!(
+                matches!(
+                    assemble_portable(&metadata, &[target(&open)], |_, _, _| {}),
+                    Err(CompileError::ExtractFailed(message))
+                        if message == "prepared target globals require certified owners"
+                ),
+                "portable output cannot borrow any absent external authority"
+            );
+        }
+    }
+
+    #[test]
     fn immutable_native_turn_output_ignores_mutated_diagnostic_files() {
         let directory = tempfile::tempdir().unwrap();
         let metadata = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
@@ -8900,6 +9454,68 @@ mod constructor_identity_tests {
         assert_eq!(retained.metadata_bytes(), metadata.as_slice());
         assert_eq!(retained.source(), "module Input where");
         assert!(retained.products().is_none());
+    }
+
+    #[test]
+    fn captured_checked_metadata_never_reopens_a_changed_file_for_the_same_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = prepared_fixture_bytes();
+        let artifact = PreparedArtifact::parse(bytes.clone(), DecodeLimits::default()).unwrap();
+        let mut table = DataConTable::new();
+        for decl in artifact.prepared().constructors() {
+            table.insert_checked(matching_dc(decl)).unwrap();
+        }
+        let mut warnings = MetaWarnings::default();
+        warnings.captured_type = Some("captured observation".into());
+        let original = write_metadata(&table, &warnings).unwrap();
+        std::fs::write(directory.path().join("__prepared.prepared.cbor"), &bytes).unwrap();
+        // Both table-only and warning-only changes remain valid for exactly P.
+        for changed_table in [false, true] {
+            std::fs::write(directory.path().join("meta.cbor"), &original).unwrap();
+            let output = read_native_turn_artifacts(
+                directory.path(),
+                Arc::from(&b"turn"[..]),
+                "source".into(),
+            )
+            .unwrap();
+            let target = output.target().clone();
+            let mut alternate = table.clone();
+            if changed_table {
+                let decl = artifact.prepared().constructors().first().unwrap();
+                alternate = table_with_one_entry_mutated(&artifact, decl, |dc| {
+                    dc.qualified_name = Some("another.display.alias".into())
+                });
+            }
+            let changed_warnings = if changed_table {
+                warnings.clone()
+            } else {
+                MetaWarnings::default()
+            };
+            let replacement = write_metadata(&alternate, &changed_warnings).unwrap();
+            assert_ne!(original, replacement);
+            let (replacement_table, replacement_warnings) =
+                tidepool_repr::serial::read_metadata_for_program(&replacement, &target).unwrap();
+            assert_eq!(replacement_table == table, !changed_table);
+            assert_eq!(
+                replacement_warnings.captured_type == warnings.captured_type,
+                changed_table
+            );
+            std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
+            let (decoded, observed) = output.decode_metadata().unwrap();
+            assert!(Arc::ptr_eq(&target, output.target()));
+            assert_eq!(output.metadata.as_ref(), original.as_slice());
+            assert_eq!(decoded, table);
+            assert_eq!(observed.captured_type, warnings.captured_type);
+            std::fs::remove_file(directory.path().join("meta.cbor")).unwrap();
+            assert_eq!(output.decode_metadata().unwrap().0, table);
+        }
+        // A later valid file cannot repair the actual invalid observation.
+        std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
+        let invalid =
+            read_native_turn_artifacts(directory.path(), Arc::from(&b"turn"[..]), "source".into())
+                .unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), original).unwrap();
+        assert!(invalid.decode_metadata().is_err());
     }
 
     /// A table entry that agrees with `decl` on every fact this crate checks
@@ -8942,7 +9558,7 @@ mod constructor_identity_tests {
     fn raw_target(target: &str, prepared_bytes: Vec<u8>) -> RawTargetOutput {
         RawTargetOutput {
             target: target.to_string(),
-            asks_bytes: b"[]".to_vec(),
+            asks_bytes: Arc::new(b"[]".to_vec()),
             prepared_bytes: Arc::new(prepared_bytes),
         }
     }
@@ -9329,7 +9945,7 @@ mod dependency_cache_tests {
     use super::*;
 
     /// A package-importing graph, including implicit Prelude, must enter GHC
-    /// for package selection even if its paired bundle remains available.
+    /// for package selection across repeated requests and home shadow changes.
     #[test]
     fn package_imports_force_worker_selection_for_home_shadow_changes() {
         let root = tempfile::tempdir().unwrap();
@@ -9358,7 +9974,7 @@ mod dependency_cache_tests {
             .expect("fixture compiler request");
             prepared
         };
-        assert!(compile(), "fresh recipe compiles");
+        assert!(compile(), "fresh request compiles");
         assert!(
             compile(),
             "package lookup requires the worker on a repeated request"

@@ -390,8 +390,7 @@ pub const COMPILE_SUMMARY_PREFIX: &str = "tidepool-compile-summary ";
 /// compile wall time, the deferred typecheck/lowering/interface phase totals (computed
 /// regardless of [`TIMING_ENV`] — see `GhcPipeline.hs`'s `tcMsRef`/
 /// `loweringMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
-/// compile's stderr; absent on a memo hit (no extract process ran) or a hard
-/// compile failure that threw before the summary line was reached.
+/// compile's stderr; absent when compilation threw before its summary line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileSummary {
     pub modules: u32,
@@ -412,8 +411,8 @@ pub struct CompileSummary {
 
 impl CompileSummary {
     /// Scan `stderr` for one `tidepool-compile-summary ...` line. `None` when
-    /// absent (memo hit, or a compile that threw before this line was
-    /// reached) or malformed (missing a required field).
+    /// absent (a compile threw before reaching this line) or malformed
+    /// (missing a required field).
     pub fn parse(stderr: &str) -> Option<Self> {
         for line in stderr.lines() {
             let Some(rest) = line.trim().strip_prefix(COMPILE_SUMMARY_PREFIX) else {
@@ -582,7 +581,7 @@ fn interface_counts(stderr: &str) -> impl Iterator<Item = (&str, u64)> {
 
 /// Log a parsed [`CompileSummary`] at INFO — the one place this crate emits
 /// compile attribution without requiring `TIDEPOOL_TIMING` or a `debug`-level
-/// subscriber filter. Called once per fresh (non-memo-hit) extract spawn.
+/// subscriber filter. Called once per extract spawn.
 pub fn log_compile_summary(summary: &CompileSummary) {
     let top = summary
         .top
@@ -745,7 +744,7 @@ tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 lowering_
     }
 
     #[test]
-    fn compile_summary_absent_on_a_memo_hit_or_pre_summary_failure() {
+    fn compile_summary_absent_without_summary_line() {
         assert!(CompileSummary::parse("plain stderr, no summary line\n").is_none());
     }
 

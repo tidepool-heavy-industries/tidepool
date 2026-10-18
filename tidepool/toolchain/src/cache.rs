@@ -1,8 +1,7 @@
-//! One recipe-keyed, atomically published artifact bundle per compilation.
+//! Compiler source identity and validated dependency evidence.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +11,68 @@ use crate::digest::frame;
 #[derive(Clone, Debug)]
 pub struct SourceRootManifest {
     files: Vec<(PathBuf, blake3::Hash)>,
+}
+
+/// One completely observed selected namespace. Paths remain paired to the
+/// root that issued them; this inventory authenticates no file contents.
+#[derive(Debug)]
+pub(crate) struct ObservedSourcePaths {
+    root: PathBuf,
+    relative: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+pub(crate) mod source_inspection_work {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct Counts {
+        pub entries: usize,
+        pub content_read_attempts: usize,
+        pub hashes: usize,
+    }
+
+    thread_local! {
+        static COUNTS: std::cell::Cell<Counts> = const {
+            std::cell::Cell::new(Counts { entries: 0, content_read_attempts: 0, hashes: 0 })
+        };
+    }
+
+    pub(crate) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace(Counts::default()))
+    }
+
+    pub(super) fn entry() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.entries += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn read() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.content_read_attempts += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn hash() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.hashes += 1;
+            counts.set(value);
+        });
+    }
+}
+
+impl ObservedSourcePaths {
+    pub(crate) fn files(&self) -> impl Iterator<Item = (&Path, PathBuf)> {
+        self.relative
+            .iter()
+            .map(|relative| (relative.as_path(), self.root.join(relative)))
+    }
+
+    pub(crate) fn canonical_paths(&self) -> impl Iterator<Item = std::io::Result<PathBuf>> + '_ {
+        self.files().map(|(_, path)| fs::canonicalize(path))
+    }
 }
 
 impl SourceRootManifest {
@@ -104,6 +165,40 @@ pub fn shipped_haskell_source_manifest(
     selected_source_manifest(root, SourceSelection::ShippedHaskell)
 }
 
+pub(crate) fn dependency_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::Dependencies)
+}
+
+pub(crate) fn shipped_haskell_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::ShippedHaskell)
+}
+
+fn selected_source_paths(
+    root: &Path,
+    selection: SourceSelection,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    let mut relative = Vec::new();
+    visit_dependency_sources(
+        root,
+        root,
+        &mut std::collections::HashSet::new(),
+        selection,
+        &mut |path, _| {
+            relative.push(path.to_path_buf());
+            Ok(())
+        },
+    )?;
+    relative.sort();
+    Ok(ObservedSourcePaths {
+        root: root.to_path_buf(),
+        relative,
+    })
+}
+
 /// Enumerate Haskell home-module sources by their visible relative paths.
 fn dependency_source_manifest(root: &Path) -> Result<SourceRootManifest, SourceManifestError> {
     selected_source_manifest(root, SourceSelection::Dependencies)
@@ -126,7 +221,21 @@ fn selected_source_files<D>(
 ) -> Result<Vec<(PathBuf, D)>, SourceManifestError> {
     let mut files = Vec::new();
     let mut ancestors = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut files, &mut ancestors, selection, &digest)?;
+    visit_dependency_sources(
+        root,
+        root,
+        &mut ancestors,
+        selection,
+        &mut |relative, path| {
+            #[cfg(test)]
+            source_inspection_work::read();
+            let bytes = crate::host_work::read(path).map_err(|error| source_error(path, error))?;
+            #[cfg(test)]
+            source_inspection_work::hash();
+            files.push((relative.to_path_buf(), digest(&bytes)));
+            Ok(())
+        },
+    )?;
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(files)
 }
@@ -190,13 +299,12 @@ fn hex_digest(bytes: &[u8]) -> String {
     })
 }
 
-fn collect_dependency_sources<D>(
+fn visit_dependency_sources(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(PathBuf, D)>,
     ancestors: &mut std::collections::HashSet<PathBuf>,
     selection: SourceSelection,
-    digest: &impl Fn(&[u8]) -> D,
+    visit: &mut impl FnMut(&Path, &Path) -> Result<(), SourceManifestError>,
 ) -> Result<(), SourceManifestError> {
     crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
@@ -214,22 +322,22 @@ fn collect_dependency_sources<D>(
     for entry in entries {
         crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
         let path = entry.path();
+        #[cfg(test)]
+        source_inspection_work::entry();
         if !selection.includes_directory(&path) {
             continue;
         }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            collect_dependency_sources(root, &path, out, ancestors, selection, digest)?;
+            visit_dependency_sources(root, &path, ancestors, selection, visit)?;
         } else if selection.includes_file(&path) {
-            let bytes =
-                crate::host_work::read(&path).map_err(|error| source_error(&path, error))?;
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
                     &path,
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-            out.push((rel.to_path_buf(), digest(&bytes)));
+            visit(rel, &path)?;
         }
     }
     ancestors.remove(&canonical);
@@ -294,6 +402,28 @@ impl CompletedSourceEvidence {
     ) -> Result<Self, DependencyEvidenceFailure> {
         evidence.validate_consumed_sources(source)?;
         Ok(Self(evidence))
+    }
+
+    /// Check only the invocation text against this already authenticated target.
+    /// Dependency bytes, path normalization and negative witnesses keep the
+    /// completed observation that issued this owner.
+    pub(crate) fn validate_expected_source(
+        &self,
+        source: &str,
+    ) -> Result<(), DependencyEvidenceFailure> {
+        crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
+        let (index, target) = self
+            .0
+            .sources
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.path == Path::new(GENERATED_SOURCE))
+            .ok_or(DependencyEvidenceFailure::GeneratedSourceMissing)?;
+        validate_source_digest(
+            index,
+            target,
+            hex_digest(&Sha256::digest(source.as_bytes())),
+        )
     }
 
     pub(crate) fn revalidate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
@@ -501,9 +631,41 @@ pub(crate) struct DependencyEvidenceWork {
     pub negative_metadata_calls: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_AUTHENTICATION_WORK: std::cell::Cell<DependencyEvidenceWork> =
+        const { std::cell::Cell::new(DependencyEvidenceWork {
+            source_read_attempts: 0, source_read_bytes: 0, negative_metadata_calls: 0,
+        }) };
+}
+
+/// Observe actual completed-source validators in this thread, not global IO.
+#[cfg(test)]
+pub(crate) fn take_source_authentication_work() -> DependencyEvidenceWork {
+    SOURCE_AUTHENTICATION_WORK.with(|work| work.replace(DependencyEvidenceWork::default()))
+}
+
+fn validate_source_digest(
+    index: usize,
+    item: &SourceEvidence,
+    actual: String,
+) -> Result<(), DependencyEvidenceFailure> {
+    if actual != item.sha256 {
+        return Err(DependencyEvidenceFailure::Source {
+            index,
+            reason: SourceWitnessFailure::Changed {
+                expected: item.sha256.clone(),
+                actual,
+            },
+        });
+    }
+    Ok(())
+}
+
 impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
+    #[cfg(test)]
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
         let completed = CompletedSourceEvidence::from_worker(bytes, input, source).ok()?;
         completed.cache_safe.then(|| completed.into_evidence())
@@ -562,7 +724,19 @@ impl DependencyEvidence {
     }
 
     fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
-        self.validate_consumed_sources_with_work(source, &mut DependencyEvidenceWork::default())
+        let mut work = DependencyEvidenceWork::default();
+        let result = self.validate_consumed_sources_with_work(source, &mut work);
+        #[cfg(test)]
+        SOURCE_AUTHENTICATION_WORK.with(|total| {
+            let previous = total.get();
+            total.set(DependencyEvidenceWork {
+                source_read_attempts: previous.source_read_attempts + work.source_read_attempts,
+                source_read_bytes: previous.source_read_bytes + work.source_read_bytes,
+                negative_metadata_calls: previous.negative_metadata_calls
+                    + work.negative_metadata_calls,
+            });
+        });
+        result
     }
 
     fn validate_consumed_sources_with_work(
@@ -609,15 +783,7 @@ impl DependencyEvidence {
                 work.source_read_bytes += bytes.len() as u64;
                 hex_digest(&Sha256::digest(bytes))
             };
-            if digest != item.sha256 {
-                return Err(DependencyEvidenceFailure::Source {
-                    index,
-                    reason: SourceWitnessFailure::Changed {
-                        expected: item.sha256.clone(),
-                        actual: digest,
-                    },
-                });
-            }
+            validate_source_digest(index, item, digest)?;
         }
         if !target {
             return Err(DependencyEvidenceFailure::GeneratedSourceMissing);
@@ -731,223 +897,6 @@ impl DependencyEvidence {
         }
         Ok(())
     }
-
-    /// A source-path witness cannot prove GHC's package lookup result. The
-    /// existing invocation cache returns before entering the worker, so only
-    /// a request with no package imports can reuse its output until lookup is
-    /// revalidated by a worker in the same compile transaction.
-    fn reusable_without_worker(&self, source: &str) -> bool {
-        self.packages.is_empty()
-            && self
-                .resolutions
-                .iter()
-                .all(|resolution| resolution.selected.is_some())
-            && self.valid(source)
-    }
-}
-
-/// A recipe names the source and the complete ordered compiler invocation.
-/// Dependency contents are validated from worker evidence, not directory scans.
-/// Unknown options and mutable session inputs cannot form a cache recipe.
-pub struct Invocation<'a> {
-    pub source: &'a str,
-    pub argv: &'a [OsString],
-    pub input_path: &'a Path,
-    pub include: &'a [PathBuf],
-    /// The bound compiler's producer identity (frontend bytes + worker
-    /// selection + worker bytes + GHC libdir) — stable across a daemon
-    /// reboot. A frontend or worker rebuild changes it; a stdlib-only edit
-    /// is caught separately by GHC's per-module interface hash, not by this
-    /// key.
-    pub endpoint_identity: &'a [u8],
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvocationKey(String);
-
-impl std::fmt::Display for InvocationKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
-    if inv.endpoint_identity.is_empty() {
-        return None;
-    }
-    let mut hasher = blake3::Hasher::new();
-    // Product receipt v8 changes the matched worker/frontend ownership wire.
-    frame(&mut hasher, b"tidepool-compile-recipe-v3");
-    frame(&mut hasher, inv.source.as_bytes());
-    frame(&mut hasher, inv.input_path.file_name()?.as_encoded_bytes());
-    let mut args = inv.argv.iter();
-    let mut includes = Vec::new();
-    let mut input_seen = false;
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--output-dir") => {
-                args.next()?;
-            }
-            Some("--build-products-dir") => {
-                // Hash the requested logical root. The process boundary adds
-                // an exclusive writer namespace only for mutable output
-                // placement, after this recipe is formed; it introduces no
-                // source inputs and is deliberately not a recipe dimension.
-                frame(&mut hasher, b"--build-products-dir");
-                let path = std::path::absolute(PathBuf::from(args.next()?)).ok()?;
-                frame(&mut hasher, path.as_os_str().as_encoded_bytes());
-            }
-            Some("--include") => {
-                includes.push(PathBuf::from(args.next()?));
-            }
-            Some(flag @ ("--target" | "--targets")) => {
-                frame(&mut hasher, flag.as_bytes());
-                frame(&mut hasher, args.next()?.as_encoded_bytes());
-            }
-            _ if arg.as_os_str() == inv.input_path.as_os_str() && !input_seen => {
-                input_seen = true;
-            }
-            _ => return None,
-        }
-    }
-    if !input_seen || includes != inv.include {
-        return None;
-    }
-    frame(&mut hasher, &(inv.include.len() as u64).to_le_bytes());
-    for root in inv.include {
-        let absolute = std::path::absolute(root).ok()?;
-        frame(&mut hasher, absolute.as_os_str().as_encoded_bytes());
-    }
-    frame(&mut hasher, inv.endpoint_identity);
-    Some(InvocationKey(hasher.finalize().to_hex().to_string()))
-}
-
-fn take_frame<'a>(remaining: &mut &'a [u8]) -> Option<&'a [u8]> {
-    let (length, rest) = remaining.split_at_checked(8)?;
-    let length = usize::try_from(u64::from_le_bytes(length.try_into().ok()?)).ok()?;
-    let (value, rest) = rest.split_at_checked(length)?;
-    *remaining = rest;
-    Some(value)
-}
-
-fn append_frame(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    out.extend_from_slice(bytes);
-}
-
-/// Read one immutable bundle; the evidence participates in the same integrity
-/// manifest as every named artifact. Old layouts and malformed bundles miss.
-pub(crate) fn artifacts_load(
-    key: &InvocationKey,
-    names: &[&str],
-    source: &str,
-) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
-    crate::host_work::checkpoint()?;
-    let bytes = match crate::host_work::read(
-        &crate::paths::compile_cache_dir().join(format!("{key}.bundle")),
-    ) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
-        Err(_) => return Ok(None),
-    };
-    let result = decode_bundle(&bytes, names, source)?;
-    if result.is_none() {
-        crate::host_work::checkpoint()?;
-    }
-    Ok(result)
-}
-
-fn decode_bundle(
-    bytes: &[u8],
-    names: &[&str],
-    source: &str,
-) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
-    macro_rules! present {
-        ($value:expr) => {
-            match $value {
-                Some(value) => value,
-                None => return Ok(None),
-            }
-        };
-    }
-    crate::host_work::checkpoint()?;
-    let mut remaining = bytes;
-    let manifest = present!(
-        tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(present!(take_frame(
-            &mut remaining
-        )),)
-        .ok()
-    );
-    if manifest.entries().len() != names.len() + 1 {
-        return Ok(None);
-    }
-    let mut out = Vec::with_capacity(names.len());
-    let mut recorded_evidence = None;
-    for (name, entry) in names
-        .iter()
-        .copied()
-        .chain(std::iter::once("dependencies.json"))
-        .zip(manifest.entries())
-    {
-        crate::host_work::checkpoint()?;
-        if name != entry.name() || entry.digest().is_none() {
-            return Ok(None);
-        }
-        let value = present!(take_frame(&mut remaining));
-        if !entry.matches(value) {
-            return Ok(None);
-        }
-        if name == "dependencies.json" {
-            let evidence: DependencyEvidence = present!(serde_json::from_slice(value).ok());
-            if !evidence.reusable_without_worker(source) {
-                // Source authentication can observe cancellation during its read.
-                crate::host_work::checkpoint()?;
-                return Ok(None);
-            }
-            recorded_evidence = Some(evidence);
-        } else {
-            out.push(Some(value.to_vec()));
-        }
-    }
-    // This is the completion cutoff for the fully authenticated immutable memo.
-    crate::host_work::checkpoint()?;
-    Ok(remaining.is_empty().then_some(out).zip(recorded_evidence))
-}
-
-pub(crate) fn artifacts_store(
-    key: &InvocationKey,
-    artifacts: &[(&str, Option<&[u8]>)],
-    evidence: &DependencyEvidence,
-    source: &str,
-) {
-    if !evidence.valid(source)
-        || artifacts
-            .iter()
-            .any(|(name, bytes)| *name == "dependencies.json" || bytes.is_none())
-    {
-        return;
-    }
-    let Ok(dependencies) = serde_json::to_vec(evidence) else {
-        return;
-    };
-    let mut artifacts = artifacts.to_vec();
-    artifacts.push(("dependencies.json", Some(&dependencies)));
-    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
-        artifacts.iter().copied(),
-    );
-    let mut bundle = Vec::new();
-    append_frame(&mut bundle, &manifest.encode());
-    for (_, bytes) in artifacts {
-        let Some(bytes) = bytes else { return };
-        append_frame(&mut bundle, bytes);
-    }
-    let dir = crate::paths::compile_cache_dir();
-    if fs::create_dir_all(&dir).is_err() || !evidence.valid(source) {
-        return;
-    }
-    // best-effort: name says it all; a failed cache write just means the
-    // next compile misses this memo entry.
-    tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle).ok();
 }
 
 #[cfg(all(test, unix))]
@@ -1201,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_incompatible_or_malformed_evidence_cannot_hit() {
+    fn incomplete_incompatible_or_malformed_evidence_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let good = evidence(root.path());
         assert!(!good.valid("changed target"));
@@ -1238,23 +1187,8 @@ mod tests {
             candidates: vec![candidate.clone()],
         });
         assert!(evidence.valid("target"));
-        assert!(!evidence.reusable_without_worker("target"));
         fs::write(candidate, "module Package where").unwrap();
         assert!(!evidence.valid("target"));
-    }
-
-    #[test]
-    fn package_import_needs_worker_validation_before_a_direct_cache_hit() {
-        let root = tempfile::tempdir().unwrap();
-        let mut evidence = evidence(root.path());
-        evidence.packages.push("Data.List".into());
-        assert!(
-            evidence.valid("target"),
-            "fresh worker inventory remains usable"
-        );
-        assert!(!evidence.reusable_without_worker("target"));
-        evidence.packages.clear();
-        assert!(evidence.reusable_without_worker("target"));
     }
 
     #[test]
@@ -1273,7 +1207,6 @@ mod tests {
             candidates: vec![],
         });
         assert!(evidence.valid("target"));
-        assert!(!evidence.reusable_without_worker("target"));
         evidence.modules[0].imports[0].qualifier = ImportQualifier::OtherUnit("other-unit".into());
         assert!(!evidence.valid("target"));
         assert!(serde_json::from_str::<ImportQualifier>("\"other:\"").is_err());
@@ -1317,177 +1250,5 @@ mod tests {
         )
         .unwrap();
         assert!(DependencyEvidence::from_worker(&bytes, &input, "target").is_none());
-    }
-
-    fn key(source: &str, input: &Path, roots: &[PathBuf], endpoint: &[u8]) -> InvocationKey {
-        let mut argv = vec![
-            input.as_os_str().to_owned(),
-            "--target".into(),
-            "result".into(),
-        ];
-        for root in roots {
-            argv.extend(["--include".into(), root.as_os_str().to_owned()]);
-        }
-        invocation_key(&Invocation {
-            source,
-            argv: &argv,
-            input_path: input,
-            include: roots,
-            endpoint_identity: endpoint,
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn recipe_binds_source_logical_location_order_and_endpoint() {
-        let a = key(
-            "target",
-            Path::new("/scratch/a/Generated.hs"),
-            &[],
-            b"endpoint",
-        );
-        assert_eq!(
-            a,
-            key(
-                "target",
-                Path::new("/scratch/b/Generated.hs"),
-                &[],
-                b"endpoint"
-            )
-        );
-        assert_ne!(
-            a,
-            key("target", Path::new("/scratch/a/Other.hs"), &[], b"endpoint")
-        );
-        assert_ne!(
-            a,
-            key(
-                "changed",
-                Path::new("/scratch/a/Generated.hs"),
-                &[],
-                b"endpoint"
-            )
-        );
-        assert_ne!(
-            a,
-            key(
-                "target",
-                Path::new("/scratch/a/Generated.hs"),
-                &[],
-                b"rebound"
-            )
-        );
-        let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-        assert_ne!(
-            key("target", Path::new("Generated.hs"), &roots, b"endpoint"),
-            key(
-                "target",
-                Path::new("Generated.hs"),
-                &roots.into_iter().rev().collect::<Vec<_>>(),
-                b"endpoint"
-            )
-        );
-    }
-
-    #[test]
-    fn unknown_options_and_session_requests_are_uncacheable() {
-        for option in ["--session-root", "--inject-val", "--future-transform"] {
-            let argv = vec!["Generated.hs".into(), option.into(), "value".into()];
-            assert!(invocation_key(&Invocation {
-                source: "target",
-                argv: &argv,
-                input_path: Path::new("Generated.hs"),
-                include: &[],
-                endpoint_identity: b"endpoint",
-            })
-            .is_none());
-        }
-    }
-
-    #[test]
-    fn interrupted_bundle_lookup_is_a_refusal_and_fresh_decode_recovers() {
-        use tidepool_extract_cmd::{
-            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
-            CompilerTransactionClose,
-        };
-        let cancellation = CompilerTransactionCancellation::new();
-        cancellation.cancel();
-        let stopped = with_compiler_transaction_cancellable(
-            cancellation,
-            |_| {},
-            || {
-                artifacts_load(
-                    &InvocationKey("cancelled-lookup-must-not-read".into()),
-                    &["meta.cbor"],
-                    "target",
-                )
-            },
-        );
-        assert_eq!(
-            stopped.action.unwrap_err().kind(),
-            std::io::ErrorKind::Interrupted
-        );
-        assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
-        let recovered = with_compiler_transaction_cancellable(
-            CompilerTransactionCancellation::new(),
-            |_| {},
-            || decode_bundle(b"malformed", &["meta.cbor"], "target"),
-        );
-        assert!(recovered.action.unwrap().is_none());
-        assert_eq!(recovered.close, CompilerTransactionClose::NotStarted);
-    }
-
-    #[test]
-    fn bundle_integrity_binds_evidence_and_exact_named_artifacts() {
-        let root = tempfile::tempdir().unwrap();
-        let evidence_bytes = serde_json::to_vec(&evidence(root.path())).unwrap();
-        let artifacts = [
-            ("meta.cbor", Some(b"meta".as_slice())),
-            ("dependencies.json", Some(evidence_bytes.as_slice())),
-        ];
-        let manifest =
-            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(artifacts);
-        let mut bytes = Vec::new();
-        append_frame(&mut bytes, &manifest.encode());
-        for (_, value) in artifacts {
-            append_frame(&mut bytes, value.unwrap());
-        }
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
-            .unwrap()
-            .is_some());
-        assert!(decode_bundle(&bytes, &["other.cbor"], "target")
-            .unwrap()
-            .is_none());
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "other source")
-            .unwrap()
-            .is_none());
-        let end = bytes.len() - 1;
-        bytes[end] ^= 1;
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
-            .unwrap()
-            .is_none());
-        assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target")
-            .unwrap()
-            .is_none());
-
-        let mut package_evidence = evidence(root.path());
-        package_evidence.packages.push("Data.List".into());
-        let package_evidence = serde_json::to_vec(&package_evidence).unwrap();
-        let package_artifacts = [
-            ("meta.cbor", Some(b"meta".as_slice())),
-            ("dependencies.json", Some(package_evidence.as_slice())),
-        ];
-        let package_manifest =
-            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
-                package_artifacts,
-            );
-        let mut package_bytes = Vec::new();
-        append_frame(&mut package_bytes, &package_manifest.encode());
-        for (_, value) in package_artifacts {
-            append_frame(&mut package_bytes, value.unwrap());
-        }
-        assert!(decode_bundle(&package_bytes, &["meta.cbor"], "target")
-            .unwrap()
-            .is_none());
     }
 }

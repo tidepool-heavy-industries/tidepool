@@ -3,7 +3,7 @@
 **Charter.** Belongs: locating the `tidepool-extract` binary and the Haskell
 stdlib it pairs with (`toolchain.rs`), the extract/stdlib deploy handshake
 (also `toolchain.rs`), on-disk path resolution (`paths.rs`), the
-compiled-artifact cache (`cache.rs`), the ONE policy-bearing compile front
+source and dependency evidence (`cache.rs`), the ONE policy-bearing compile front
 door (`artifacts.rs`), and the structured extract-diagnostics contract
 (`diag.rs`, `timing.rs`). Sits between `tidepool-extract-cmd` (the endpoint
 and invocation boundary this crate executes through) and `tidepool-runtime` (the
@@ -18,14 +18,23 @@ must not be visible here (this crate sits below it). `failclass.rs`'s
 reason; `classify`/`classify_session` stay in `tidepool-runtime`, calling
 back into `classify_compile`.
 
-## Compile cache
+## Compilation and reuse
 
-`artifacts::compile_invocation` is the single compile front door. Immutable
-single-target and multi-target requests share one recipe and named artifact
-bundle in `cache.rs`. Session salts and injected session interfaces bypass the
-Rust artifact cache. The resident compiler daemon has a separate,
-dependency-validated module memo that can reuse immutable support across those
-requests. Matched measurement tests are the evidence for costs and savings.
+`artifacts::compile_invocation` is the single policy-bearing compile front door.
+It submits each request to the configured compiler and acquires its complete named
+physical output through `InvocationOutputLayout`. Single-target and multi-target
+layouts derive required metadata, prepared programs, typed-site sidecars, native
+module products and paired package provenance from the ordered request targets.
+Duplicate targets or unsafe generated names refuse before worker submission.
+The existing inventory operation bounds physical reads and downstream decoding;
+missing members and inaccessible members retain distinct failures. Cancellation
+is a refusal and does not authorize worker submission.
+
+The resident compiler owns dependency-validated module reuse. Native module
+candidates, deployment catalogs and retained entries keep their own certified
+reuse boundaries. There is no separate Rust invocation-output memo: a repeated
+request enters the compiler even when an unusual zero-product result could have
+been reused without it. Matched measurements own any performance claim.
 
 Runtime, exact, authored and retained-entry policies carry a borrowed caller-owned
 compiler settlement recipient. It retains independent close evidence through
@@ -37,14 +46,11 @@ to the supplied owned directory; its custody follows uncertain close evidence. K
 action typed, and never replay it. Declared build actions use their file-only
 isolated invocation and do not acquire owned request transport.
 
-The recipe binds source bytes, the generated module filename, ordered targets
-and absolute import roots, and the bound compiler's producer identity. Unknown
-options are uncacheable. A recipe lookup does not scan entire import trees.
-Instead, the worker emits versioned `dependencies.json` with SHA-256 source
+The worker emits versioned `dependencies.json` with consumed SHA-256 source
 evidence, selected home modules and absent higher-priority import candidates.
-Package dependencies belong to the producer identity. Incomplete evidence (including
-untracked preprocessing or request-time execution) cannot produce a hit.
-Cache safety and test-selection completeness are separate fields.
+Cache safety and test-selection completeness are separate fields. Source and
+negative resolution witnesses are validated by their semantic consumer before
+reuse or publication; package selection requires its owning compiler proof.
 
 Completed compiler output uses `CompletedSourceEvidence` to retain validated
 consumed bytes, import owners and negative resolution witnesses even when
@@ -54,26 +60,35 @@ its eligibility flags. Cache publication, source replay recipes and sealed
 compile-input reuse keep their stricter eligibility gates. Build actions also
 require the declared input closure; completed runtime output does not establish
 a hermetic build input proof.
+Prepared-fixture and completed-corpus source admission share the caller's
+`InventoryOperation`. The private parsed observation owner charges the existing
+length-times-64 decode allowance before serde, then lends structural facts to
+source-closure checks and consumes them through `CompletedSourceEvidence`.
+Parsed facts alone do not authenticate consumed bytes or negative witnesses.
+Build-action admission authenticates one completed physical-input/dependency
+observation, then checks captured invocation text against its generated-source
+witness. These adjacent checks do not issue a later filesystem observation;
+exact receipts, later certification and standalone corpus validation retain
+their independent authentication boundaries.
+Standalone corpus validation creates one operation at its action boundary rather
+than resetting a budget for each validation.
+
 The native Suite corpus integration test uses completed source observations
 and the same declared-source-tree guard for its run-owned output. This checks
 observed Haskell bytes and import choices without converting compile-time
 execution into a replay recipe or a hermetic Buck fixture.
 
-Before publication and on each lookup, validate consumed source bytes and
-negative resolution witnesses. The generated request path is normalized to a
-logical source marker; authored dependencies retain absolute path identity.
-Metadata, prepared programs, typed-site sidecars, and dependency evidence live
-in one checksummed bundle, published by atomic rename. A malformed bundle or
-incompatible evidence is a miss. The recipe namespace deliberately invalidates
-the former eval and invocation cache layouts; neither is read or written.
-
 `source_root_manifest` and `source_roots_identity` still own whole-source-revision
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
+Build-action and corpus declaration membership instead walks the complete selected
+namespace without reading unused source contents. Keep alias, cycle and metadata
+failures strict; consumed bytes and negative imports still require their existing
+evidence authentication. Whole-source identity callers continue hashing contents.
 
 Host authentication and private materialization use `host_work` checkpoints in
 the owning compiler scope, including between bounded reads and owner-lock polls.
-Interruption remains a refusal through optional cache lookups; it cannot admit
+Interruption remains a refusal through optional reuse lookups; it cannot admit
 physical work as a miss. A partial validation stage stays operation-local and
 is discarded on refusal. Once an immutable result is fully validated, a late
 stop cannot revoke its retained owner; cancelled consumers still lack publication
@@ -129,19 +144,21 @@ pinned compiler deployment/package closure and explicit source directory trees.
 The CLI binds the configured frontend directly, clears inherited compiler and
 package selection, and uses private scratch as its current directory. Admission
 checks complete source evidence against the declared trees before export.
-Fixture requests select typed portable output. The worker closes reachable home
-bindings through its existing prepared recovery and rejects residual home-unit
-imports before writing programs. Ordinary extraction retains native-original
+Fixture requests select typed portable output before native original projection.
+The worker closes reachable home and package bindings through its existing
+prepared recovery. The portable export owner refuses every remaining executable
+import before exporting programs. Ordinary extraction retains native-original
 boundaries; portable output cannot carry resident, candidate or exact inputs.
 The GHC compilation owner replaces package-database flags with the libdir's
 pinned global database before loading packages. User databases and ambient
 `GHC_PACKAGE_PATH` entries cannot add packages to direct, resident or corpus
 compilation. Native oracle actions select that same global database explicitly.
 
-Build actions never read or publish the runtime memo, module-candidate store,
+Build actions never read or publish the runtime module-candidate store,
 deployment catalog or runtime build-products directory. Production readers
 validate every requested prepared program, typed-site sidecar, metadata and
-product certificate before any portable output is exported. The directory
+self-contained portable result before export. Native product certification stays
+on the native output path. The directory
 contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for every
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
