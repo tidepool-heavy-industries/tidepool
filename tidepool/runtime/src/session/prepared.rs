@@ -4674,6 +4674,35 @@ impl PreparedEngine {
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
         certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        struct DiagnosticDigest<'a>(&'a [u8]);
+        impl std::fmt::Display for DiagnosticDigest<'_> {
+            fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                for byte in self.0 {
+                    write!(output, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+        }
+        fn observe_source_import(
+            owner: &CachedHomeOwner,
+            ordinal: u32,
+            key: &ScopedSourceBinder,
+            existing: Option<&SourceInstanceLease>,
+            consumer_image: u64,
+            target_image: u64,
+        ) {
+            tracing::debug!(target: "tidepool_runtime::prepared",
+                group_unit = owner.unit, group_module = owner.module,
+                group_module_version = %DiagnosticDigest(&owner.module_version.0),
+                group_iface_sha256 = %DiagnosticDigest(&owner.skinny_iface_sha256),
+                group_product_sha256 = %DiagnosticDigest(&owner.product_sha256),
+                original_ordinal = ordinal, source_domain = ?key.domain,
+                source_binder = ?key.source.binder,
+                source_instance = ?existing.map(SourceInstanceLease::instance),
+                existing_source = existing.is_some(),
+                consumer_image_instance = consumer_image, target_image_instance = target_image,
+                "certified source import resolved");
+        }
         if !target_owners_match(&target.prepared, target_owners) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
@@ -4889,6 +4918,10 @@ impl PreparedEngine {
             let mut programs = Vec::with_capacity(demanded.len() + 1);
             let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
             let mut source_needed = BTreeSet::<ScopedSourceBinder>::new();
+            let observe_imports =
+                tracing::enabled!(target: "tidepool_runtime::prepared", tracing::Level::DEBUG);
+            let mut source_imports_resolved = 0u64;
+            let target_image_instance = target.image.image_instance_id();
 
             let mut append = |image: Arc<CompiledProgram>,
                               globals: &[tidepool_repr::execution_schema::GlobalDecl],
@@ -4908,6 +4941,18 @@ impl PreparedEngine {
                             };
                             let key = source_plan(&binder_key)?;
                             if let Some(&(group, binding)) = source.get(&key) {
+                                if observe_imports {
+                                    let selected = demanded[group].group();
+                                    observe_source_import(
+                                        selected.owner(),
+                                        selected.original_ordinal(),
+                                        &key,
+                                        None,
+                                        image.image_instance_id(),
+                                        target_image_instance,
+                                    );
+                                    source_imports_resolved += 1;
+                                }
                                 if image.authenticated_source_literal(GlobalId(index as u32))
                                     != Some(&key.source)
                                 {
@@ -4930,6 +4975,17 @@ impl PreparedEngine {
                                 self.machine
                                     .handle_is_evaluated(lease.handle())
                                     .map_err(PreparedRuntimeError::Install)?;
+                                if observe_imports {
+                                    observe_source_import(
+                                        lease.owner(),
+                                        lease.original_ordinal(),
+                                        &key,
+                                        Some(lease),
+                                        image.image_instance_id(),
+                                        target_image_instance,
+                                    );
+                                    source_imports_resolved += 1;
+                                }
                                 BatchImport::Existing {
                                     handle: lease.handle(),
                                     entry_signature: lease.entry_signature().cloned(),
@@ -5072,6 +5128,12 @@ impl PreparedEngine {
                 &|source| target.qualified_source(source),
             )?;
             drop(append);
+            if observe_imports {
+                tracing::debug!(target: "tidepool_runtime::prepared",
+                    target_image_instance, source_imports_resolved,
+                    resolved_programs = programs.len(),
+                    "certified source import resolution complete");
+            }
             let requests = source_needed
                 .iter()
                 .map(|binder| {
@@ -5100,6 +5162,7 @@ impl PreparedEngine {
                     }
                     PreparedRuntimeError::Install(error)
                 })?;
+            assert_eq!(installed.programs.len(), demanded.len() + 1);
             let target_id = *installed
                 .programs
                 .last()
@@ -5137,6 +5200,19 @@ impl PreparedEngine {
         })();
         match result {
             Ok(mut staged) => {
+                // The producer appends demanded groups in order and the target
+                // last. Check cardinality before associating diagnostic rows;
+                // a zip alone would silently drop a missing batch result.
+                assert_eq!(staged.groups.len(), demanded.len());
+                for (selected, program) in demanded.iter().zip(&staged.groups) {
+                    tracing::debug!(target: "tidepool_runtime::prepared",
+                        group_owner = ?selected.group().owner(),
+                        original_ordinal = selected.group().original_ordinal(),
+                        group_domain = ?selected.domain(),
+                        image_instance = selected.image().image_instance_id(),
+                        program = ?program,
+                        "certified group staged");
+                }
                 staged.domain_leases.extend(late_attachments);
                 staged.leases.extend(new_late_roots);
                 Ok(staged)

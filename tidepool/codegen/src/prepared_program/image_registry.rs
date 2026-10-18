@@ -171,6 +171,7 @@ struct Observation<'a> {
     sequence: u64,
     operation: &'static str,
     domain: &'static str,
+    group: Option<&'a CertifiedGroupCode>,
     started: Instant,
     start_ns: Option<u64>,
     entry: Option<u64>,
@@ -184,7 +185,7 @@ struct Observation<'a> {
 }
 
 impl<'a> Observation<'a> {
-    fn new(registry: &'a ImageRegistry, operation: &'static str, key: &ImageKey) -> Self {
+    fn new(registry: &'a ImageRegistry, operation: &'static str, key: &'a ImageKey) -> Self {
         let domain = match key {
             ImageKey::Program(_) => "program",
             ImageKey::LiteralProgram(..) => "literal_program",
@@ -196,6 +197,10 @@ impl<'a> Observation<'a> {
             sequence: registry.next_observation.fetch_add(1, Ordering::Relaxed),
             operation,
             domain,
+            group: match key {
+                ImageKey::Group(group) | ImageKey::LiteralGroup(group, _) => Some(group),
+                ImageKey::Program(_) | ImageKey::LiteralProgram(..) => None,
+            },
             started: Instant::now(),
             start_ns: monotonic_ns(),
             entry: None,
@@ -222,6 +227,33 @@ impl Drop for Observation<'_> {
             shared_wait_count = self.waits, shared_wait_ns = self.wait_ns,
             failed_flights_observed = self.failed_flights, abandoned_flights_observed = self.abandoned_flights,
             "native image registry decision");
+        if let Some(group) = self.group {
+            // Borrow exact source facts from this lookup key. No prepared graph
+            // is cloned or serialized to observe the association.
+            let owner = group.owner();
+            tracing::debug!(target: "tidepool_codegen::image_registry",
+                schema = 1, process_id = std::process::id(),
+                observation_sequence = self.sequence, image_registry = self.registry.identity,
+                image_entry = self.entry, image_instance = self.image,
+                key_domain = self.domain, disposition = self.disposition.label(), outcome = self.outcome,
+                group_unit = owner.unit, group_module = owner.module,
+                group_module_version = %DiagnosticDigest(&owner.module_version.0),
+                group_iface_sha256 = %DiagnosticDigest(&owner.skinny_iface_sha256),
+                group_product_sha256 = %DiagnosticDigest(&owner.product_sha256),
+                original_ordinal = group.original_ordinal(),
+                "native group image association");
+        }
+    }
+}
+
+struct DiagnosticDigest<'a>(&'a [u8; 32]);
+
+impl std::fmt::Display for DiagnosticDigest<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -450,7 +482,7 @@ impl ImageRegistry {
             None => self.next_entry.fetch_add(1, Ordering::Relaxed),
         };
         let displaced = entries.images.insert(
-            key,
+            key.clone(),
             Entry::Ready(ReadyImage {
                 image: Arc::downgrade(&image),
                 entry,
