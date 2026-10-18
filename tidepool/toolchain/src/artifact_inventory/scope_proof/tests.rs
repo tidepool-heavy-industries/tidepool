@@ -238,3 +238,24 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn proof_custody_authentication_keeps_selected_packet_checks_strict() {
+    let provisional = ArtifactSelectionId([0; 32]);
+    let ancestor =
+        Arc::new(ScopeProofV3::issue(&rows(&[(node(1, 0), vec![])]), provisional).unwrap());
+    let descendant = Arc::new(
+        ScopeProofV3::issue(&rows(&[(node(2, 0), vec![ancestor.nodes[0]])]), provisional).unwrap(),
+    );
+    assert!(authenticate_custody(&[ancestor.clone(), descendant.clone()]).is_ok());
+    assert!(
+        matches!(authenticate(&[ancestor.clone(), descendant.clone()], &ancestor.authenticated_rows().unwrap()),
+        Err(CompileError::ExtractFailed(detail)) if detail.contains("unused binding scope proof"))
+    );
+    assert!(matches!(authenticate_custody(&[descendant]),
+        Err(CompileError::ExtractFailed(detail)) if detail.contains("binding scope proof target missing from exact ancestor")));
+    let mut malformed = ancestor.as_ref().clone();
+    malformed.nodes.push(malformed.nodes[0]);
+    assert!(matches!(authenticate_custody(&[Arc::new(malformed)]),
+        Err(CompileError::ExtractFailed(detail)) if detail.contains("noncanonical binding scope proof sources")));
+}

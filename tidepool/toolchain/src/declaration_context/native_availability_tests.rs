@@ -7379,6 +7379,214 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
 }
 
 #[test]
+fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
+    use crate::artifact_inventory::{ArtifactSelectionId, ScopeProofV3};
+    use crate::exact_context::{hydrate_context, ImmutableScopeProofRef, Materializer};
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+
+    let persist = |snapshot: &crate::exact_context::ExactContextSnapshot| {
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let receipt = writer.materialize_context(None, snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        hydrate_context(&store, receipt.root()).unwrap()
+    };
+    for ordinals in [vec![7, 9001], vec![9001], vec![]] {
+        // Only durable facts and newly acquired certified bytes leave this
+        // scope; no original offer/view/payload owner backs the restored context.
+        let (snapshot, mut acquired_inventory, id, recorded_full, carriers) = {
+            let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+            let entry = Arc::new(
+                ArtifactEntry::original(producer.sha256(), product("ProofOnlyOffer", 119)).unwrap(),
+            );
+            let id = entry.descriptor.id;
+            let inventory = ArtifactInventory::default();
+            let initial = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    &BTreeSet::from([NativeGroupKey {
+                        artifact: id,
+                        original_ordinal: 7,
+                    }]),
+                )
+                .unwrap();
+            let full = inventory
+                .admit_recovery_selection(
+                    &initial,
+                    vec![entry.clone()],
+                    &BTreeSet::from([
+                        NativeGroupKey {
+                            artifact: id,
+                            original_ordinal: 7,
+                        },
+                        NativeGroupKey {
+                            artifact: id,
+                            original_ordinal: 9001,
+                        },
+                    ]),
+                )
+                .unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+            let full_support = fixture_compiler_support(projection.clone(), full.clone());
+            let full_offer = full_support
+                .native_offers()
+                .iter()
+                .find(|offer| offer.is_full())
+                .unwrap();
+            let carriers = full_offer.issued_group_carriers().unwrap();
+            assert!(
+                carriers
+                    .iter()
+                    .any(|(group, carrier)| group.binding.selection() != carrier.selection),
+                "the fixture must issue a native group separately from its carrier"
+            );
+            let carrier_only = full.select_roots(vec![id]).unwrap();
+            let chosen = inventory
+                .admit_recovery_selection(
+                    &carrier_only,
+                    vec![entry],
+                    &ordinals
+                        .iter()
+                        .map(|ordinal| NativeGroupKey {
+                            artifact: id,
+                            original_ordinal: *ordinal,
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            let support = fixture_compiler_support(projection.clone(), chosen)
+                .retain_offers(full_support.native_offers().iter().cloned())
+                .unwrap();
+            let canonical = projection.roles()[0].interface();
+            let support = support
+                .select_support_roots(vec![canonical])
+                .unwrap()
+                .finalize_namespace()
+                .unwrap();
+            let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+                producer: producer.sha256(),
+                compiler_support: support,
+                lexical: Default::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            });
+            assert!(context.artifact_view().selected_native_groups().is_empty());
+            let row = context
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == id)
+                .unwrap();
+            assert_eq!(row.mode == NativeTransportMode::Full, ordinals.len() == 2);
+            assert_eq!(row.permits(7), ordinals.contains(&7));
+            assert_eq!(row.permits(9001), ordinals.contains(&9001));
+            let snapshot = context.snapshot();
+            let graph = snapshot.graph_selection().unwrap();
+            let selected_scopes = graph
+                .selections
+                .iter()
+                .map(|proof| proof.selection)
+                .collect::<BTreeSet<_>>();
+            assert!(
+                carriers.keys().any(|group| snapshot
+                    .selection()
+                    .scopes
+                    .contains_key(&group.binding.selection())
+                    && !selected_scopes.contains(&group.binding.selection())),
+                "carrier-only acquisition must omit an offer's distinct group scope"
+            );
+            let scratch = tempfile::tempdir().unwrap();
+            let (products, interfaces) = context
+                .materialize_recovery_products_and_interfaces(scratch.path())
+                .unwrap();
+            let recovered = RecoveredArtifactInventory::capture_bound(
+                scratch.path(),
+                &products,
+                &interfaces,
+                &[],
+                &[],
+                &context.artifact_view().descriptors(),
+                &graph.bindings,
+                &context.artifact_view().binding_dependencies(),
+            )
+            .unwrap();
+            (
+                snapshot,
+                recovered,
+                id,
+                full_offer.snapshot_facts(),
+                carriers,
+            )
+        };
+        let receipt = persist(&snapshot);
+        let restored = acquired_inventory
+            .context_for_expected_snapshot(receipt.root(), &receipt)
+            .unwrap();
+        assert!(restored.artifact_view().selected_native_groups().is_empty());
+        assert_eq!(
+            restored.snapshot().selection().as_ref(),
+            snapshot.selection().as_ref()
+        );
+        assert_eq!(
+            restored.snapshot().native_availability,
+            snapshot.native_availability
+        );
+        assert_eq!(
+            restored.snapshot().input_decisions,
+            snapshot.input_decisions
+        );
+        let full = restored
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.is_full())
+            .unwrap();
+        assert_eq!(full.snapshot_facts(), recorded_full);
+        assert_eq!(full.issued_group_carriers().unwrap(), carriers);
+        let scratch = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(restored))
+            .prepare_compilation(scratch.path(), PRODUCER)
+            .unwrap();
+        let row = request.compiler_inputs().native_availability(id).unwrap();
+        assert_eq!(row.permits(7), ordinals.contains(&7));
+        assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        drop(request);
+
+        // The writer and hydrator must accept these encoded bytes, so rejection
+        // of an unused invalid scope is attributed to inventory authentication.
+        let mut malformed = snapshot.clone();
+        let bad_scope = ArtifactSelectionId([231; 32]);
+        assert!(!malformed.selection().scopes.contains_key(&bad_scope));
+        let bad_proof = ScopeProofV3 {
+            selection: bad_scope,
+            nodes: vec![ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: id,
+                selection: bad_scope,
+            })],
+            dependencies: vec![],
+        };
+        Arc::make_mut(&mut malformed.selection).scopes.insert(
+            bad_scope,
+            ImmutableScopeProofRef::from_issued(Arc::new(bad_proof)),
+        );
+        let malformed_receipt = persist(&malformed);
+        assert!(
+            matches!(acquired_inventory.context_for_expected_snapshot(malformed_receipt.root(), &malformed_receipt),
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("binding scope proof digest differs from own complete rows"))
+        );
+        acquired_inventory.entries.remove(&id).unwrap();
+        assert!(
+            matches!(acquired_inventory.context_for_expected_snapshot(receipt.root(), &receipt),
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("missing bound recovery payload"))
+        );
+    }
+}
+
+#[test]
 fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawal() {
     use crate::artifact_inventory::IssuedNativeOffer;
     use crate::exact_context::{hydrate_context, Materializer};
