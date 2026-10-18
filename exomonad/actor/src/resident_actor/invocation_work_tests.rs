@@ -3008,6 +3008,7 @@ struct InvocationModel {
     started: Arc<AtomicUsize>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     settling: AtomicUsize,
+    settlement_entered: tokio::sync::Notify,
     settlement_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     settlement_failure: std::sync::atomic::AtomicBool,
 }
@@ -3050,6 +3051,7 @@ impl crate::CellModelBinding for InvocationModel {
     fn settle(&self) -> BoxFuture<'_, Result<(), tidepool_effect::error::EffectError>> {
         Box::pin(async move {
             self.settling.fetch_add(1, Ordering::SeqCst);
+            self.settlement_entered.notify_one();
             let gate = self.settlement_gate.lock().clone();
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -3278,6 +3280,10 @@ async fn invocation_model_cleanup_awaits_retained_binding_and_preserves_uncertai
     let refused = {
         let settling = work.cleanup(&fixture.environment, &fixture.kernel);
         tokio::pin!(settling);
+        tokio::select! {
+            _ = factory.binding.settlement_entered.notified() => {}
+            completed = &mut settling => panic!("cleanup completed before held model settlement: {completed:?}"),
+        }
         assert!(futures_util::poll!(&mut settling).is_pending());
         assert!(factory.binding.cancelled.load(Ordering::SeqCst));
         assert_eq!(factory.binding.settling.load(Ordering::SeqCst), 1);
@@ -3321,6 +3327,10 @@ async fn invocation_model_settlement_timeout_retains_its_original_owner() {
     let cleanup = {
         let cleanup = work.cleanup(&fixture.environment, &fixture.kernel);
         tokio::pin!(cleanup);
+        tokio::select! {
+            _ = factory.binding.settlement_entered.notified() => {}
+            completed = &mut cleanup => panic!("cleanup completed before held model settlement: {completed:?}"),
+        }
         assert!(futures_util::poll!(&mut cleanup).is_pending());
         assert!(work.cleanup_observation().is_none());
         tokio::time::advance(RELEASE_WAIT).await;
