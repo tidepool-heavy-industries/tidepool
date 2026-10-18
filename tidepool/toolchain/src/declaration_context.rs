@@ -1385,6 +1385,16 @@ impl RequestNativeAvailability {
         self.0.values()
     }
 
+    /// Select one exact payload before checking its issued owner and ordinal.
+    /// Classification does not filter these normalized dependency permissions.
+    pub(crate) fn dependency_support(
+        &self,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Option<NativeDependencySupport<'_>> {
+        self.0.get(&key.artifact)?.dependency_support(key, owner)
+    }
+
     pub(crate) fn from_issued_rows(
         rows: impl IntoIterator<Item = Arc<NativeTransportAvailability>>,
     ) -> Result<Self, CompileError> {
