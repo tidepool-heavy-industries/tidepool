@@ -3099,21 +3099,6 @@ impl DeclarationJoinInputs {
     }
 }
 
-/// Inherited type inputs are selected by the context owner after the fresh
-/// authored originals have established which owners they replace.
-pub(crate) struct InheritedDeclarationInterfaces(CertifiedInterfaceInputs);
-
-impl InheritedDeclarationInterfaces {
-    pub(crate) fn append_to(
-        self,
-        artifacts: &mut Vec<DeclarationArtifact>,
-    ) -> Result<(), CompileError> {
-        self.0.validate()?;
-        artifacts.extend(self.0.artifacts);
-        Ok(())
-    }
-}
-
 impl RecoveryInspectionInputs {
     pub(crate) fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
         self.0.interface(owner)
@@ -8417,19 +8402,17 @@ impl ExactDeclarationContext {
             .map(RecoveryInspectionInputs)
     }
 
-    pub(crate) fn inherited_declaration_interfaces(
-        self: &Arc<Self>,
-        directory: Arc<tempfile::TempDir>,
+    pub(crate) fn inherited_declaration_interface_entries(
+        &self,
         authored: &[CertifiedRecoveryProduct],
-    ) -> Result<InheritedDeclarationInterfaces, CompileError> {
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut metadata = self.compiler_metadata_snapshot()?;
         metadata.entries.retain(|owner, _| {
             !authored.iter().any(|product| {
                 product.owner().unit == owner.unit && product.owner().module == owner.module
             })
         });
-        self.materialize_interface_inputs(directory, metadata)
-            .map(InheritedDeclarationInterfaces)
+        Ok(metadata.entries)
     }
 
     fn materialize_interface_inputs(
@@ -8441,17 +8424,10 @@ impl ExactDeclarationContext {
         let mut artifacts = Vec::with_capacity(metadata.entries.len());
         for (owner, entry) in &metadata.entries {
             crate::host_work::checkpoint()?;
-            if entry.descriptor.owner != *owner
-                || entry.descriptor.producer_sha256 != self.toolchain_identity_sha256()
-                || entry.descriptor.kind != entry.payload.artifact_kind()
-            {
-                return Err(failure(
-                    "recovery inspection input differs from selected owner or producer",
-                ));
-            }
-            let files = recovery_artifacts::materialize_certified_interface(
+            let files = recovery_artifacts::materialize_selected_interface(
                 directory.path(),
-                &entry.payload,
+                owner,
+                entry.clone(),
                 self.toolchain_identity_sha256(),
                 &mut validation,
             )

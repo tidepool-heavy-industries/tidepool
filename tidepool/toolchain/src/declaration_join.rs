@@ -717,24 +717,31 @@ fn certify_authored_declaration_inner(
             .clone()
             .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
     );
-    let (_scratch, artifacts, original_imports, source_lexical_imports, _joined_interfaces) =
-        planned::admit_authored_artifact_closure(
-            &originals,
-            &selected_owner,
-            toolchain_identity_sha256,
-            &evidence,
-            compiled.exact_source_admission.as_ref(),
-            &source_imports,
-            Some(&artifact_context),
-            &[],
-            includes,
-        )?;
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let planned::AuthoredClosureObservation {
+        directory,
+        artifacts,
+        original_imports,
+        source_lexical_imports,
+    } = planned::ValidatedAuthoredClosure::admit(
+        &originals,
+        &selected_owner,
+        toolchain_identity_sha256,
+        &evidence,
+        compiled.exact_source_admission.as_ref(),
+        &source_imports,
+        Some(&artifact_context),
+        &[],
+        includes,
+        &mut validation,
+    )?
+    .materialize()?;
     let outcome = inspect_declaration_artifacts_with_producer(
         &artifacts,
         includes,
         session_root,
         Some(toolchain_identity_sha256),
-        _scratch,
+        directory,
         settlement,
     )?;
     let inventories = match outcome.decision {
