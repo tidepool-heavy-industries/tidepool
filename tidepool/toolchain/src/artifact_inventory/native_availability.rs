@@ -56,6 +56,7 @@ impl<'a> NativeDependencyCatalog<'a> {
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
         advertised: &BTreeSet<NativeGroupKey>,
+        new_products: &[IssuedNativeOffer],
     ) -> Result<Vec<QualifiedNativeAvailability>, CompileError> {
         let DependencyGrantSource::Request(inputs) = &self.0 else {
             return Err(failure("request qualifications require a request catalog"));
@@ -68,9 +69,12 @@ impl<'a> NativeDependencyCatalog<'a> {
                 else {
                     continue;
                 };
-                if !advertised
+                if !new_products
                     .iter()
-                    .any(|key| key.artifact == qualification.original())
+                    .any(|product| product.original() == qualification.original())
+                    || !advertised
+                        .iter()
+                        .any(|key| key.artifact == qualification.original())
                 {
                     continue;
                 }
@@ -809,7 +813,8 @@ impl CheckedNativeAvailability {
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
         let advertised = self.advertised_groups(baseline_groups)?;
-        let preferred = catalog.qualified_availability(projection, namespace, &advertised)?;
+        let preferred =
+            catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
         self.validate_advertised(advertised, &preferred, validation)
     }
 

@@ -1653,7 +1653,12 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         }]);
         assert!(
             catalog
-                .qualified_availability(&effective, &receiver, &advertised)
+                .qualified_availability(
+                    &effective,
+                    &receiver,
+                    &advertised,
+                    std::slice::from_ref(&ancestor_offer)
+                )
                 .unwrap()
                 .is_empty(),
             "B's IssuedGroups row must not turn its retained Full A proof into A permission"
