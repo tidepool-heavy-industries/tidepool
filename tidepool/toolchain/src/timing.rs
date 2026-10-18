@@ -160,7 +160,8 @@ impl InvocationInterval {
             .and_then(|(start, end)| end.checked_sub(start));
         tracing::debug!(target: "exomonad_harness::timing",
             schema = 1, phase = self.phase, outcome,
-            clock_domain = "CLOCK_MONOTONIC", inclusive = false,
+            clock_domain = "CLOCK_MONOTONIC", inclusive = true,
+            sequential_within_invocation = true,
             start_ns = self.monotonic_ns, end_ns,
             wall_ns,
             cpu_scope = "current_thread", thread_cpu_ns,
@@ -788,7 +789,8 @@ mod tests {
             ]
         );
         for row in rows.iter() {
-            assert_eq!(row["inclusive"], "false");
+            assert_eq!(row["inclusive"], "true");
+            assert_eq!(row["sequential_within_invocation"], "true");
             let start: u64 = row["start_ns"].parse().unwrap();
             let end: u64 = row["end_ns"].parse().unwrap();
             assert_eq!(row["wall_ns"].parse::<u64>().unwrap(), end - start);
