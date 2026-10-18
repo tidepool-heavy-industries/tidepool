@@ -4480,6 +4480,17 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
+    fn begin_native_request_model_budget(&self, actor: ActorRef) {
+        if crate::resident_workbench::execution_control().is_some()
+            || self.active_route_reservation_owner.is_some()
+        {
+            return;
+        }
+        if let Some(model) = self.actor_effect_owner(actor).model() {
+            model.begin_request_budget();
+        }
+    }
+
     fn begin_reply_for_effect(
         &self,
         actor: ActorRef,
@@ -12443,6 +12454,7 @@ where
                     self.checkpoint_publication = CheckpointPublication::Resident;
                     let context = self.context(kernel.identity());
                     self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
+                    self.begin_native_request_model_budget(context.actor);
                     let (_, step) = self
                         .run_receiver(
                             kernel,
@@ -12473,6 +12485,7 @@ where
                     self.checkpoint_publication = CheckpointPublication::Resident;
                     let context = self.context(kernel.identity());
                     self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
+                    self.begin_native_request_model_budget(context.actor);
                     let (reply, step) = self
                         .run_receiver(kernel, &context, Some(caller), &ancestry, request)
                         .await

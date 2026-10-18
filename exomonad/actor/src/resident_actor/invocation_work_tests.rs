@@ -3008,13 +3008,16 @@ struct InvocationModel {
     started: Arc<AtomicUsize>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     settling: AtomicUsize,
+    request_budgets: AtomicUsize,
     settlement_entered: tokio::sync::Notify,
     settlement_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     settlement_failure: std::sync::atomic::AtomicBool,
 }
 
 impl crate::CellModelBinding for InvocationModel {
-    fn begin_request_budget(&self) {}
+    fn begin_request_budget(&self) {
+        self.request_budgets.fetch_add(1, Ordering::SeqCst);
+    }
 
     fn prepare(
         &self,
@@ -3352,6 +3355,64 @@ async fn invocation_model_settlement_timeout_retains_its_original_owner() {
         factory.bound.lock().len(),
         1,
         "settlement retry cannot rebind or renew the invocation allowance"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn native_rpc_model_budget_ingress_preserves_existing_execution_allowances() {
+    let fixture = Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let factory = Arc::new(InvocationModelFactory::default());
+    let mut environment = fixture.environment.clone();
+    environment.cell_model_factory = Some(factory.clone());
+    let descriptor = model_descriptor(exomonad_tool::ModelOperation::ModelCall);
+    let mut behavior = ResidentKernelBehavior::with_boot(
+        descriptor.clone(),
+        environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.bound.lock().len(), 1);
+    crate::resident_workbench::with_execution_control(
+        crate::WorkbenchExecutionControl::untracked(),
+        async {
+            behavior.begin_native_request_model_budget(actor);
+        },
+    )
+    .await;
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    behavior.active_route_reservation_owner =
+        Some(RequestReservationOwner::Route(crate::WatchId(701)));
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "borrowed execution boundaries cannot allocate another model binding"
+    );
+    behavior.active_route_reservation_owner = None;
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "the next RPC refreshes its allowance on the retained service"
+    );
+    let denied = ResidentKernelBehavior::with_boot(
+        descriptor.with_capabilities(crate::ActorCapabilities::default()),
+        environment,
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    denied.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "an ungranted native request cannot bind a model service"
     );
     fixture.finish().await;
 }
