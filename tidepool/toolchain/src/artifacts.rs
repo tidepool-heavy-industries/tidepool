@@ -3458,7 +3458,7 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
-    let (mut certified, item_globals, item_packages) = match segment_originals {
+    let (certified, item_globals, item_packages) = match segment_originals {
         Some(originals) => {
             let item = certified_products::decode_segment_item_with_operation(
                 &receipt_bytes,
@@ -3653,28 +3653,28 @@ fn seal_turn_outputs_with_validation(
         artifacts: artifact_view,
         selection: target_native_selection,
     } = admitted_target;
-    certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
-        &artifact_view,
-        &certified.groups,
-        segment_cursor
-            .as_ref()
-            .map(|cursor| cursor.groups)
-            .unwrap_or_else(|| {
-                offer
-                    .exact
-                    .as_ref()
-                    .map_or(&[], |request| request.groups.as_ref())
-            }),
-        validation,
-    )?
-    .into();
+    let selected_groups =
+        crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+            &artifact_view,
+            &certified.groups,
+            segment_cursor
+                .as_ref()
+                .map(|cursor| cursor.groups)
+                .unwrap_or_else(|| {
+                    offer
+                        .exact
+                        .as_ref()
+                        .map_or(&[], |request| request.groups.as_ref())
+                }),
+            validation,
+        )?;
     let target_imports = match &target_demand {
         TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
             imports.as_slice()
         }
     };
     let package_closure =
-        package_catalog.select(&certified.groups, target_imports, &validation.inventory)?;
+        package_catalog.select(&selected_groups, target_imports, &validation.inventory)?;
     let typed_entry = match target_demand {
         TargetDemand::Checked { entry, .. } => Some(entry),
         TargetDemand::Ordinary(_) => None,
@@ -3682,7 +3682,7 @@ fn seal_turn_outputs_with_validation(
     let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
-        &certified.groups,
+        &selected_groups,
         &certified.source_selection,
         &package_closure,
         validation,
@@ -3703,7 +3703,7 @@ fn seal_turn_outputs_with_validation(
         1,
     );
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
-    let certified_groups: Arc<[_]> = certified.groups.into();
+    let certified_groups: Arc<[_]> = selected_groups.into();
     let original_compile_input = if let Some((table, sites)) =
         identity_metadata.filter(|_| offer.exact.is_none())
     {
@@ -5349,7 +5349,7 @@ fn compile_invocation_inner(
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
         invocation_timing.advance("product_certification");
-        let mut certified = if let Some(valid) = valid_evidence {
+        let certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
@@ -5382,7 +5382,7 @@ fn compile_invocation_inner(
                 ));
             }
             certified_products::CertifiedProducts {
-                groups: Arc::from([]),
+                groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
                 module_interfaces: Arc::from([]),
                 value_interfaces: Arc::from([]),
@@ -5498,18 +5498,17 @@ fn compile_invocation_inner(
                 &certified.source_selection,
             )?
             .artifacts;
-        certified.groups =
-            crate::declaration_context::certify_artifact_view_groups_with_validation(
+        let selected_groups =
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &artifacts.artifact_view,
                 &certified.groups,
                 exact_request
                     .as_ref()
                     .map_or(&[], |request| request.groups.as_ref()),
                 &mut validation,
-            )?
-            .into();
+            )?;
         let package_closure =
-            package_catalog.select(&certified.groups, &target_imports, &validation.inventory)?;
+            package_catalog.select(&selected_groups, &target_imports, &validation.inventory)?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -5518,7 +5517,7 @@ fn compile_invocation_inner(
                 target.pending_imports = certified_products::certify_target_owners_with_validation(
                     target.prepared.prepared(),
                     accepted,
-                    &certified.groups,
+                    &selected_groups,
                     &certified.source_selection,
                     &package_closure,
                     &mut validation,
@@ -5543,7 +5542,7 @@ fn compile_invocation_inner(
         );
         invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = certified.groups.to_vec();
+        artifacts.certified_groups = selected_groups;
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {

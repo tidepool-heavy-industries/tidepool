@@ -9396,9 +9396,29 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
 
 /// Admit only the inventory's selected dependency closure. Original byte custody
 /// remains complete; previously admitted groups must survive unchanged.
+#[cfg(test)]
 pub(crate) fn certify_artifact_view_groups_with_validation(
     view: &ArtifactView,
     candidates: &[PendingCertifiedGroup],
+    baseline: &[PendingCertifiedGroup],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+    certify_artifact_view_groups(view, candidates, None, baseline, validation)
+}
+
+pub(crate) fn certify_issued_artifact_view_groups_with_validation(
+    view: &ArtifactView,
+    candidates: &crate::certified_products::IssuedGroupCandidates,
+    baseline: &[PendingCertifiedGroup],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+    certify_artifact_view_groups(view, candidates, Some(candidates), baseline, validation)
+}
+
+fn certify_artifact_view_groups(
+    view: &ArtifactView,
+    candidates: &[PendingCertifiedGroup],
+    issued: Option<&crate::certified_products::IssuedGroupCandidates>,
     baseline: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
@@ -9443,8 +9463,19 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     let mut current = Vec::new();
     let mut current_positions = BTreeMap::new();
     for group in candidates {
-        let key = selected_key(GroupAdmissionPhase::Candidate, group)?;
+        let key = match issued {
+            Some(issued) => crate::artifact_inventory::NativeGroupKey {
+                artifact: issued.artifact(group),
+                original_ordinal: group.group().original_ordinal(),
+            },
+            None => selected_key(GroupAdmissionPhase::Candidate, group)?,
+        };
         if metadata.selected_native_groups.contains(&key) {
+            if selected_key(GroupAdmissionPhase::Candidate, group)? != key {
+                return Err(failure(
+                    "selected candidate differs from its original issuer",
+                ));
+            }
             // Baseline comparison uses the first candidate; certification below
             // retains responsibility for duplicate-current refusal.
             current_positions.entry(key).or_insert(current.len());

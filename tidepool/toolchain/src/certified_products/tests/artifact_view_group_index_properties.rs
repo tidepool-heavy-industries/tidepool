@@ -243,6 +243,43 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     wrong_owner.owner.module_version = ModuleVersion([250; 32]);
     compare_admission(&view, std::slice::from_ref(&wrong_owner), &[]);
     compare_admission(&view, &[], std::slice::from_ref(&wrong_owner));
+    let issuing_products = entries
+        .iter()
+        .map(|entry| match &entry.payload {
+            ArtifactPayload::Original(product) => product.clone(),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        IssuedGroupCandidates::bind(vec![wrong_owner.clone()].into(), &issuing_products).is_err()
+    );
+    let issued = IssuedGroupCandidates::bind(groups.clone().into(), &issuing_products).unwrap();
+    let selected_entries = entries
+        .iter()
+        .filter(|entry| {
+            selected
+                .iter()
+                .any(|key| key.artifact == entry.descriptor.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_inventory = ArtifactInventory::default();
+    let narrowed = selected_inventory
+        .admit_recovery_selection(
+            &selected_inventory.empty_view(),
+            selected_entries,
+            &selected,
+        )
+        .unwrap();
+    let admitted = crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+        &narrowed,
+        &issued,
+        &[],
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(admitted, selected_groups);
+
     for changed in [changed_imports(first), changed_body(first)] {
         compare_admission(
             &view,
