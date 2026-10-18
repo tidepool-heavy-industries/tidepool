@@ -881,6 +881,28 @@ enum NativeOfferBody {
 pub(crate) struct CheckedNativeAvailability {
     offers: Vec<IssuedNativeOffer>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    roots: BTreeSet<ArtifactId>,
+}
+
+/// Fresh producer roots and their complete offers have passed body and
+/// dependency validation together. Retained entries cannot add issuance roots.
+pub(crate) struct ValidatedFreshNativeAvailability {
+    roots: BTreeSet<ArtifactId>,
+    offers: Vec<IssuedNativeOffer>,
+}
+
+impl ValidatedFreshNativeAvailability {
+    pub(crate) fn roots(&self) -> &BTreeSet<ArtifactId> {
+        &self.roots
+    }
+
+    pub(crate) fn offers(&self) -> &[IssuedNativeOffer] {
+        &self.offers
+    }
+
+    pub(crate) fn into_offers(self) -> Vec<IssuedNativeOffer> {
+        self.offers
+    }
 }
 
 impl CheckedNativeAvailability {
@@ -892,6 +914,7 @@ impl CheckedNativeAvailability {
         Ok(Self {
             offers: IssuedNativeOffer::issue_complete_custody(admitted, originals)?,
             entries,
+            roots: originals.iter().copied().collect(),
         })
     }
 
@@ -900,7 +923,7 @@ impl CheckedNativeAvailability {
         baseline_groups: &BTreeSet<NativeGroupKey>,
         preferred: &[QualifiedNativeAvailability],
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let advertised = self.advertised_groups(baseline_groups)?;
         self.validate_advertised(advertised, preferred, validation)
     }
@@ -912,7 +935,7 @@ impl CheckedNativeAvailability {
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let advertised = self.advertised_groups(baseline_groups)?;
         let preferred =
             catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
@@ -949,7 +972,7 @@ impl CheckedNativeAvailability {
         advertised: BTreeSet<NativeGroupKey>,
         preferred: &[QualifiedNativeAvailability],
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let originals = self
             .entries
             .iter()
@@ -992,7 +1015,10 @@ impl CheckedNativeAvailability {
             validation,
         )
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        Ok(self.offers)
+        Ok(ValidatedFreshNativeAvailability {
+            roots: self.roots,
+            offers: self.offers,
+        })
     }
 }
 

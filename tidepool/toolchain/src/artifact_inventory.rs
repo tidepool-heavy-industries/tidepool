@@ -23,7 +23,7 @@ pub(crate) use compiler_projection::{
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
-    NativeOfferContribution,
+    NativeOfferContribution, ValidatedFreshNativeAvailability,
 };
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;

@@ -936,7 +936,7 @@ impl OriginalCompilerInputs {
             namespace_offers,
             &dependencies,
         )?;
-        let native_offers = match &source {
+        let validated = match &source {
             CompleteAvailabilitySource::Candidate { .. } => {
                 let qualifications = native_original_requirements
                     .iter()
@@ -959,13 +959,10 @@ impl OriginalCompilerInputs {
                 &mut validation,
             )?,
         };
-        artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
-        let native_availability = RequestNativeAvailability::issue_checked_fragment(
-            &effective,
-            &projection,
-            &artifacts,
-            &native_offers,
-        )?;
+        artifacts = artifacts.retain_issued_offer_custody(validated.offers().iter().cloned())?;
+        let native_availability =
+            RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, &validated)?;
+        let native_offers = validated.into_offers();
         Ok(Self {
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
@@ -1651,19 +1648,17 @@ impl RequestNativeAvailability {
 
     fn issue_checked_fragment(
         namespace: &CompilerInputProjection,
-        fragment: &CompilerInputProjection,
         artifacts: &ArtifactView,
-        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+        validated: &crate::artifact_inventory::ValidatedFreshNativeAvailability,
     ) -> Result<Self, CompileError> {
         let metadata = namespace.project_metadata(artifacts.metadata_snapshot())?;
-        let roots = fragment
-            .snapshot_roles()
-            .values()
-            .filter_map(|role| role.original())
-            .collect();
         Ok(Self(
             NativeCompilerTransport::issue_checked_with_roots(
-                namespace, &metadata, artifacts, offers, &roots,
+                namespace,
+                &metadata,
+                artifacts,
+                validated.offers(),
+                validated.roots(),
             )?
             .availability,
         ))
@@ -1827,7 +1822,36 @@ impl NativeCompilerTransport {
                 matches!(entry.payload, ArtifactPayload::Original(_)).then_some(entry.descriptor.id)
             })
             .collect();
-        Self::issue_checked_with_roots(roles, projection, artifacts, offers, &roots)
+        let issued = Self::issue_checked_with_roots(roles, projection, artifacts, offers, &roots)?;
+        issued.validate_selected_groups(projection)?;
+        Ok(issued)
+    }
+
+    /// Whole-selected issuance owns these obligations. Fresh issuance instead
+    /// validates its exact producer roots and native dependencies before normalization.
+    fn validate_selected_groups(
+        &self,
+        projection: &CompilerArtifactMetadata,
+    ) -> Result<(), CompileError> {
+        for selected in &projection.retained.selected_native_groups {
+            let Some(entry) = projection
+                .entries
+                .values()
+                .find(|entry| entry.descriptor.id == selected.artifact)
+            else {
+                continue;
+            };
+            let Some(availability) = self.availability.get(&selected.artifact) else {
+                continue;
+            };
+            if !availability.permits(selected.original_ordinal) {
+                return Err(failure(format!(
+                    "selected native group is outside issued availability: stage=whole-selected owner={:?} group={selected:?}",
+                    entry.descriptor.owner,
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn issue_checked_with_roots(
@@ -1957,27 +1981,6 @@ impl NativeCompilerTransport {
                 {
                     contributions.push(Arc::clone(&contribution));
                 }
-            }
-        }
-        for selected in &projection.retained.selected_native_groups {
-            if !projection
-                .entries
-                .values()
-                .any(|entry| entry.descriptor.id == selected.artifact)
-            {
-                continue;
-            }
-            let Some(contributions) = availability.get(&selected.artifact) else {
-                continue;
-            };
-            if !full.contains(&selected.artifact)
-                && !contributions
-                    .iter()
-                    .any(|contribution| contribution.permits(*selected))
-            {
-                return Err(failure(
-                    "selected native group is outside issued availability",
-                ));
             }
         }
         let role_originals = roles
