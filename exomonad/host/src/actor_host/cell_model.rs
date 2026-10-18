@@ -102,11 +102,19 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
     }
     fn with_launch_config(mut self, config: &ActorHostConfig) -> Self {
         self.launch_config = Some(Arc::new(config.clone()));
-        if let Some(catalog) = config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.clone()) {
+        if let Some(catalog) = config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|workspace| workspace.model_catalog.clone())
+        {
             let transport = self.transport.clone();
             self.selection = Some(Arc::new(move |selection| {
                 let selected = catalog_model(&catalog, selection)?;
-                Ok((transport(), selected.model.value().to_owned(), super::reasoning_effort(&selection.reasoning)))
+                Ok((
+                    transport(),
+                    selected.model.value().to_owned(),
+                    super::reasoning_effort(&selection.reasoning),
+                ))
             }));
         }
         self
@@ -136,7 +144,8 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelFactory
                 self.scheduler.clone(),
                 policy,
                 self.transport.clone(),
-            ).with_selection(self.selection.clone()),
+            )
+            .with_selection(self.selection.clone()),
         )))
     }
 }
@@ -245,26 +254,58 @@ pub(super) fn admitted_runtime_factory(
     let _ = settings;
     let auth = runtime.inference_auth().clone();
     let mut factory = EmbeddedCellModelFactory::<RunAuth, _>::new(
-            runtime.store(),
-            runtime.scheduler(),
-            config.model.clone(),
-            config.reasoning,
-            Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
-        ).with_launch_config(config);
-    if let (Some(catalog), Some(providers)) = (config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.clone()), runtime.inference_providers().cloned()) {
+        runtime.store(),
+        runtime.scheduler(),
+        config.model.clone(),
+        config.reasoning,
+        Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
+    )
+    .with_launch_config(config);
+    if let (Some(catalog), Some(providers)) = (
+        config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|workspace| workspace.model_catalog.clone()),
+        runtime.inference_providers().cloned(),
+    ) {
         factory.selection = Some(Arc::new(move |selection| {
-            let selected = catalog_model(&catalog, selection)?;
-            let auth = providers.get(&selected.provider).ok_or("model provider is unavailable")?.clone();
-            Ok((harness::transport::ResponsesClient::new(auth), selected.model.value().to_owned(), super::reasoning_effort(&selection.reasoning)))
+            catalog_transport(&catalog, &providers, selection)
         }));
     }
     Arc::new(factory)
 }
 
-fn catalog_model<'a>(catalog: &'a crate::exomonad::model_catalog::ResolvedCatalog, selection: &tidepool_bridge_effects::ModelSelectionEnvelope) -> Result<&'a crate::exomonad::model_catalog::ResolvedModel, String> {
-    if selection.catalog_identity != catalog.identity { return Err("model choice belongs to another frozen catalog".into()); }
-    let selected = catalog.models.get(&selection.key).ok_or("model is not admitted by this profile")?;
-    if selection.reasoning.backend() != selected.model.backend() { return Err("model options select a different provider".into()); }
+fn catalog_transport(
+    catalog: &crate::exomonad::model_catalog::ResolvedCatalog,
+    providers: &std::collections::BTreeMap<String, RunAuth>,
+    selection: &tidepool_bridge_effects::ModelSelectionEnvelope,
+) -> Result<(harness::transport::ResponsesClient<RunAuth>, String, Effort), String> {
+    let selected = catalog_model(catalog, selection)?;
+    let auth = providers
+        .get(&selected.provider)
+        .ok_or("model provider is unavailable")?
+        .clone();
+    Ok((
+        harness::transport::ResponsesClient::new(auth),
+        selected.model.value().to_owned(),
+        super::reasoning_effort(&selection.reasoning),
+    ))
+}
+
+fn catalog_model<'a>(
+    catalog: &'a crate::exomonad::model_catalog::ResolvedCatalog,
+    selection: &tidepool_bridge_effects::ModelSelectionEnvelope,
+) -> Result<&'a crate::exomonad::model_catalog::ResolvedModel, String> {
+    if selection.catalog_identity != catalog.identity {
+        return Err("model choice belongs to another frozen catalog".into());
+    }
+    let selected = catalog
+        .models
+        .get(&selection.key)
+        .ok_or("model is not admitted by this profile")?;
+    if selection.reasoning.backend() != selected.model.backend() {
+        return Err("model options select a different provider".into());
+    }
     Ok(selected)
 }
 

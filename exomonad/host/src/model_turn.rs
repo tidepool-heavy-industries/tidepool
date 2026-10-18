@@ -26,7 +26,9 @@ use tidepool_handlers::handlers::model::{ModelBoundaryError, ModelService};
 use tidepool_repr::PrincipalId;
 use tokio::runtime::Handle;
 
-pub type SelectedTransport<C> = dyn Fn(&tidepool_bridge_effects::ModelSelectionEnvelope) -> Result<(C, String, Effort), String> + Send + Sync;
+pub type SelectedTransport<C> = dyn Fn(&tidepool_bridge_effects::ModelSelectionEnvelope) -> Result<(C, String, Effort), String>
+    + Send
+    + Sync;
 
 pub type ModelResolver =
     dyn Fn(&tidepool_bridge_effects::Model) -> Result<String, String> + Send + Sync;
@@ -364,24 +366,33 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         self.authorize(caller)?;
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
-        let (inherited_model, inherited_effort) =
-            (self.policy.inherit_selection)().map_err(rejected)?;
-        let model = match &request.model {
-            Some(selection) => (self.policy.resolve_model)(&selection).map_err(rejected)?,
-            None => inherited_model,
-        };
-        let effort = match &request.reasoning {
-            Some(selection) => (self.policy.resolve_reasoning)(&selection).map_err(rejected)?,
-            None => inherited_effort,
-        };
         let (transport, model, effort) = match &request.selection {
             Some(selection) => {
                 if request.model.is_some() || request.reasoning.is_some() {
                     return Err(rejected("select coupled model options once"));
                 }
-                self.selection.as_ref().ok_or_else(|| rejected("no frozen model catalog is admitted"))?(selection).map_err(rejected)?
+                self.selection
+                    .as_ref()
+                    .ok_or_else(|| rejected("no frozen model catalog is admitted"))?(
+                    selection
+                )
+                .map_err(rejected)?
             }
-            None => ((self.transport)(), model, effort),
+            None => {
+                let (inherited_model, inherited_effort) =
+                    (self.policy.inherit_selection)().map_err(rejected)?;
+                let model = match &request.model {
+                    Some(selection) => (self.policy.resolve_model)(selection).map_err(rejected)?,
+                    None => inherited_model,
+                };
+                let effort = match &request.reasoning {
+                    Some(selection) => {
+                        (self.policy.resolve_reasoning)(selection).map_err(rejected)?
+                    }
+                    None => inherited_effort,
+                };
+                ((self.transport)(), model, effort)
+            }
         };
         let limits = Limits {
             requests: request
@@ -683,6 +694,89 @@ mod tests {
             }),
         )
     }
+    #[test]
+    fn explicit_catalog_selection_does_not_read_inherited_policy() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut service = service(&runtime, vec![], Limits::default());
+        service.policy.inherit_selection = Arc::new(|| Err("unavailable inherited context".into()));
+        service.transport = Arc::new(|| panic!("explicit selection used inherited transport"));
+        service.selection = Some(Arc::new(|selection| {
+            assert_eq!(selection.key, "argon");
+            Ok((
+                Script(Mutex::new(vec![final_turn()].into())),
+                "selected-actual-model".into(),
+                Effort::High,
+            ))
+        }));
+        let mut selected = request(false);
+        selected["selection"] = json!({"catalog_identity":"frozen", "key":"argon",
+            "reasoning": tidepool_bridge_effects::Reasoning::ArgonReasoning(tidepool_bridge_effects::ArgonEffort::EffortHigh)});
+        let result = service.start(PrincipalId::new(1, 2), selected).unwrap();
+        assert_eq!(result["receipt"]["outcome"]["value"], "done");
+        assert_eq!(
+            result["receipt"]["request_observations"][0]["model"],
+            "selected-actual-model"
+        );
+    }
+
+    #[test]
+    fn typed_completion_receipt_retains_callback_evidence_without_copying_it() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let summary = json!({"answer": 42});
+        let final_call = turn(vec![Item(
+            json!({"type":"function_call", "name":"finalize",
+            "call_id":"final", "arguments":serde_json::to_string(&json!({"result":summary})).unwrap()}),
+        )]);
+        let service = service(
+            &runtime,
+            vec![vec![callback(), final_call]],
+            Limits::default(),
+        );
+        let mut typed = request(true);
+        typed["result_schema"] = json!({"type":"object", "properties":{"answer":{"type":"integer"}},
+            "required":["answer"], "additionalProperties":false});
+        let caller = PrincipalId::new(1, 2);
+        let callback = service.start(caller, typed).unwrap();
+        let raw = json!({"pages": ["full helper evidence".repeat(100)]});
+        let hook = service
+            .resume(
+                caller,
+                callback["invocation"].as_str().unwrap(),
+                callback["call_id"].as_str().unwrap(),
+                callback_reply(raw.clone()),
+            )
+            .unwrap();
+        let handle = hook["handle"].as_str().unwrap();
+        let finished = service
+            .annotate(
+                caller,
+                hook["invocation"].as_str().unwrap(),
+                hook["operation"].as_str().unwrap(),
+                json!({"kind":"none"}),
+            )
+            .unwrap();
+        assert_eq!(
+            finished["receipt"]["outcome"],
+            json!({"kind":"typed", "value":summary})
+        );
+        assert!(finished["receipt"].get("transcript").is_none());
+        assert!(!finished.to_string().contains("full helper evidence"));
+        let retained = retained_model_result(&service.store, handle)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(retained.0["output"].as_str().unwrap()).unwrap(),
+            raw
+        );
+        assert_eq!(
+            finished["receipt"]["request_observations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn settlement_abandons_unanswered_callbacks_without_waiting_for_binding_drop() {
         let runtime = tokio::runtime::Runtime::new().unwrap();

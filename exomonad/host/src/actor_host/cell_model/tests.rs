@@ -671,3 +671,108 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
         6
     );
 }
+
+#[test]
+fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
+    use crate::exomonad::model_catalog::{ProviderConfig, ResolvedCatalog, ResolvedModel};
+    use exomonad_actor::{ArgonEffort, Backend, DeepSeekReasoning};
+    use harness::transport::{ResponsesProtocol, ResponsesRoute};
+    use std::collections::BTreeMap;
+    use tidepool_bridge_effects::ModelSelectionEnvelope;
+    let store = Arc::new(Store::memory().unwrap());
+    let provider = |backend| ProviderConfig {
+        backend,
+        credential_file: None,
+        credential_env: Some("TIDEPOOL_OFFLINE_UNREAD_CREDENTIAL".into()),
+        endpoint: None,
+        inference_limits: Default::default(),
+    };
+    let configurations = BTreeMap::from([
+        ("deepseek".into(), provider(Backend::DeepSeek)),
+        ("argon".into(), provider(Backend::GeminiInteractions)),
+    ]);
+    let providers = configurations
+        .iter()
+        .map(|(name, config)| {
+            (
+                name.clone(),
+                RunAuth::from_provider(config, store.clone(), "offline".into()).unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let catalog = ResolvedCatalog {
+        identity: "frozen-identity".into(),
+        primary: "flash".into(),
+        providers: configurations,
+        models: BTreeMap::from([
+            (
+                "flash".into(),
+                ResolvedModel {
+                    provider: "deepseek".into(),
+                    constructor: "Flash".into(),
+                    model: Model::DeepSeekFlash,
+                    reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+                },
+            ),
+            (
+                "argon".into(),
+                ResolvedModel {
+                    provider: "argon".into(),
+                    constructor: "Argon".into(),
+                    model: Model::GeminiArgon,
+                    reasoning: Reasoning::ArgonReasoning(ArgonEffort::EffortLow),
+                },
+            ),
+        ]),
+    };
+    let choice = ModelSelectionEnvelope {
+        catalog_identity: catalog.identity.clone(),
+        key: "argon".into(),
+        reasoning: Reasoning::ArgonReasoning(ArgonEffort::EffortHigh),
+    };
+    // The primary is DeepSeek; an explicit Argon selection must create Gemini's client.
+    let (client, model, effort) = catalog_transport(&catalog, &providers, &choice).unwrap();
+    assert_eq!(
+        client.response_contract().unwrap(),
+        (
+            ResponsesRoute::GeminiInteractions,
+            ResponsesProtocol::Interactions
+        )
+    );
+    assert_eq!(model, "gemini-4-argon");
+    assert_eq!(effort, Effort::High);
+    let flash = ModelSelectionEnvelope {
+        key: "flash".into(),
+        reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+        ..choice.clone()
+    };
+    assert_eq!(
+        catalog_transport(&catalog, &providers, &flash)
+            .unwrap()
+            .0
+            .response_contract()
+            .unwrap(),
+        (ResponsesRoute::DeepSeek, ResponsesProtocol::Standard)
+    );
+    for invalid in [
+        ModelSelectionEnvelope {
+            catalog_identity: "stale".into(),
+            ..choice.clone()
+        },
+        ModelSelectionEnvelope {
+            key: "unknown".into(),
+            ..choice.clone()
+        },
+        ModelSelectionEnvelope {
+            reasoning: flash.reasoning,
+            ..choice.clone()
+        },
+    ] {
+        assert!(catalog_transport(&catalog, &providers, &invalid).is_err());
+    }
+    assert!(catalog_transport(&catalog, &BTreeMap::new(), &choice).is_err());
+    assert!(
+        store.events(None).unwrap().is_empty(),
+        "selection checks must not issue provider work"
+    );
+}
