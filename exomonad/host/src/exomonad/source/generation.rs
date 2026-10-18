@@ -255,6 +255,7 @@ impl ExomonadSourceReload {
             revision,
             helper_branch: helper_branch.to_owned(),
         };
+        let source_revision_identity = reference.revision.identity.clone();
         let evidence = SourceGenerationEvidence {
             configuration_digest: reference.configuration_digest()?,
             reference: GenerationArtifactReference::capture(serde_json::to_vec(&reference)?),
@@ -268,6 +269,7 @@ impl ExomonadSourceReload {
             manifests,
             entries,
             evidence,
+            source_revision_identity,
         })))
     }
 
@@ -411,6 +413,7 @@ impl ExomonadSourceReload {
             manifests,
             entries,
             evidence,
+            source_revision_identity: graph.revision.identity,
         })
     }
 
@@ -676,34 +679,26 @@ impl ExomonadSourceReload {
         let evidence = source.generation_evidence().ok_or_else(|| {
             SourceInspectionError::Unavailable("source capsule has no generation evidence".into())
         })?;
+        #[cfg(test)]
+        self.revision_projection_work[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let graph: SourceGraphReference = serde_json::from_slice(evidence.reference.bytes())
             .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?;
+        #[cfg(test)]
+        self.revision_projection_work[1].fetch_add(
+            graph.revision.modules.len(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(Self::wire(&graph.revision))
     }
 
-    fn issued_module_path(
+    fn issued_source_inspection<'a>(
         &self,
-        source: &CheckpointSourceLayer,
-        module: &str,
-    ) -> std::result::Result<Option<(PathBuf, blake3::Hash)>, SourceInspectionError> {
+        source: &'a CheckpointSourceLayer,
+    ) -> std::result::Result<IssuedSourceInspection<'a>, SourceInspectionError> {
         use exomonad_actor::ActorSourceLayers;
         self.validate_source_authority(source)
             .map_err(SourceInspectionError::Unavailable)?;
-        validate_module_name(module).map_err(SourceInspectionError::Unreadable)?;
-        let manifests = source.source_manifests().ok_or_else(|| {
-            SourceInspectionError::Unavailable("source capsule has no immutable manifest".into())
-        })?;
-        for (root, manifest) in source.include_paths().iter().zip(manifests) {
-            for extension in ["hs", "lhs"] {
-                let relative = PathBuf::from(module.replace('.', "/")).with_extension(extension);
-                let Some((_, expected)) = manifest.files().find(|(path, _)| *path == relative)
-                else {
-                    continue;
-                };
-                return Ok(Some((root.join(relative), *expected)));
-            }
-        }
-        Ok(None)
+        Ok(IssuedSourceInspection { source })
     }
 
     pub(super) fn locate_issued(
@@ -711,11 +706,10 @@ impl ExomonadSourceReload {
         source: &CheckpointSourceLayer,
         module: &str,
     ) -> std::result::Result<Option<String>, SourceInspectionError> {
-        self.issued_module_path(source, module)?
-            .map(|_| {
-                self.revision_issued(source)
-                    .map(|revision| revision.identity)
-            })
+        let issued = self.issued_source_inspection(source)?;
+        issued
+            .module_path(module)?
+            .map(|_| issued.source_revision_identity().map(str::to_owned))
             .transpose()
     }
 
@@ -724,7 +718,8 @@ impl ExomonadSourceReload {
         source: &CheckpointSourceLayer,
         module: &str,
     ) -> std::result::Result<(String, String), SourceInspectionError> {
-        if let Some((path, expected)) = self.issued_module_path(source, module)? {
+        let issued = self.issued_source_inspection(source)?;
+        if let Some((path, expected)) = issued.module_path(module)? {
             let bytes = std::fs::read(&path).map_err(|error| {
                 SourceInspectionError::Unreadable(format!("{}: {error}", path.display()))
             })?;
@@ -734,14 +729,14 @@ impl ExomonadSourceReload {
                 ));
             }
             return Ok((
-                self.revision_issued(source)?.identity,
+                issued.source_revision_identity()?.to_owned(),
                 String::from_utf8(bytes)
                     .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?,
             ));
         }
         Err(SourceInspectionError::Unreadable(format!(
             "module {module} is absent from issued revision {}",
-            self.revision_issued(source)?.identity
+            issued.source_revision_identity()?
         )))
     }
 
@@ -793,6 +788,45 @@ impl ExomonadSourceReload {
             })()
             .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?;
         Ok(self.status_of(graph.revision, &observed))
+    }
+}
+
+/// A borrowed capsule admitted by this run's source issuer for one observation.
+struct IssuedSourceInspection<'a> {
+    source: &'a CheckpointSourceLayer,
+}
+
+impl<'a> IssuedSourceInspection<'a> {
+    fn source_revision_identity(&self) -> std::result::Result<&'a str, SourceInspectionError> {
+        self.source.generation_evidence().ok_or_else(|| {
+            SourceInspectionError::Unavailable("source capsule has no generation evidence".into())
+        })?;
+        self.source.source_revision_identity().ok_or_else(|| {
+            SourceInspectionError::Unavailable(
+                "source capsule has no issued revision identity".into(),
+            )
+        })
+    }
+
+    fn module_path(
+        &self,
+        module: &str,
+    ) -> std::result::Result<Option<(PathBuf, blake3::Hash)>, SourceInspectionError> {
+        validate_module_name(module).map_err(SourceInspectionError::Unreadable)?;
+        let manifests = self.source.source_manifests().ok_or_else(|| {
+            SourceInspectionError::Unavailable("source capsule has no immutable manifest".into())
+        })?;
+        for (root, manifest) in self.source.include_paths().iter().zip(manifests) {
+            for extension in ["hs", "lhs"] {
+                let relative = PathBuf::from(module.replace('.', "/")).with_extension(extension);
+                let Some((_, expected)) = manifest.files().find(|(path, _)| *path == relative)
+                else {
+                    continue;
+                };
+                return Ok(Some((root.join(relative), *expected)));
+            }
+        }
+        Ok(None)
     }
 }
 
