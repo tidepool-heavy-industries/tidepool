@@ -3184,6 +3184,15 @@ enum WorkerOperation {
     EndTransaction,
 }
 
+/// Observations of the exact aborted child. The namespace stays with its
+/// existing Worker/slot owner; reaping alone does not authorize its deletion.
+#[derive(Debug)]
+pub(crate) struct WorkerAbortRetirement {
+    pub(crate) termination: Result<(), crate::endpoint::CompilerIoCause>,
+    pub(crate) worker: crate::endpoint::CompilerWorkerRetirement,
+    pub(crate) earlier_wait: Option<crate::endpoint::CompilerIoCause>,
+}
+
 pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -3460,14 +3469,38 @@ impl Worker {
         Ok(())
     }
 
-    pub(crate) fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) -> WorkerAbortRetirement {
+        use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
         drop(self.stdin.take());
-        if let Err(error) = self.child.kill() {
+        let termination = self.child.kill().map_err(|error| {
             tracing::warn!(%error, "failed to kill aborted compiler worker");
-        }
-        if let Err(error) = self.child.wait() {
-            tracing::warn!(%error, "failed to reap aborted compiler worker");
-        }
+            CompilerIoCause::from(&error)
+        });
+        let mut earlier_wait = None;
+        let status = loop {
+            match self.child.wait() {
+                Ok(status) => break status,
+                Err(error) => {
+                    if earlier_wait.is_none() {
+                        tracing::warn!(%error, "retaining aborted compiler worker until reap is observed");
+                        earlier_wait = Some(CompilerIoCause::from(&error));
+                    }
+                    // Keep the exact Child, namespace and server slot owned.
+                    // A client's bounded retirement wait can independently
+                    // return Unconfirmed; it cannot release this obligation.
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        let retirement = WorkerAbortRetirement {
+            termination,
+            worker: CompilerWorkerRetirement::Reaped(status),
+            earlier_wait,
+        };
+        tracing::debug!(termination = ?retirement.termination,
+            worker = ?retirement.worker, earlier_wait = ?retirement.earlier_wait,
+            "aborted compiler worker retirement observed");
+        retirement
     }
 
     /// Direct frontend success must prove both bracket acknowledgement and
@@ -4307,7 +4340,12 @@ mod tests {
         assert_eq!(first[0], rotated[0]);
         assert_eq!(rotated[1], "alpha");
         assert_ne!(first[3], rotated[3]);
-        worker.abort();
+        let retired = worker.abort();
+        assert!(matches!(
+            retired.worker,
+            crate::endpoint::CompilerWorkerRetirement::Reaped(_)
+        ));
+        assert!(retired.earlier_wait.is_none());
         worker.respawn(&prepared).unwrap();
         assert_eq!(
             products_response(&mut worker, dir.path(), &argv)[1],
