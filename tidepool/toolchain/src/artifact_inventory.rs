@@ -9081,7 +9081,7 @@ mod tests {
         let producer = b"busy ancestor producer";
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(producer);
         let product = |module, version| {
-            crate::certified_products::fixture_finalized_product(
+            let finalized = crate::certified_products::fixture_finalized_product(
                 crate::certified_products::tests::original_groups_fixture_with_interface(
                     module,
                     vec![(0, vec![])],
@@ -9090,7 +9090,10 @@ mod tests {
                     format!("{module} interface").into_bytes(),
                 ),
                 producer_identity.sha256(),
-            )
+            );
+            crate::certified_products::tests::recovered_witness_fixtures(&[finalized])
+                .remove(0)
+                .product
         };
         let ancestor = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
