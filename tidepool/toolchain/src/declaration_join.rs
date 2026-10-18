@@ -2877,16 +2877,9 @@ mod authored_tests {
                 original_ordinal: chosen.original_ordinal,
                 binder,
             }];
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                 .unwrap();
-            let demanded = inputs
-                .artifacts()
-                .inventory()
-                .admit_bound_target(
-                    &mut fixed,
+            let demanded = fixed.admit_bound_target(
                     inputs.artifacts(),
                     crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                         &imports,
@@ -2918,11 +2911,7 @@ mod authored_tests {
                 .iter()
                 .any(|group| group.original_ordinal == u32::MAX));
             assert!(
-                inputs
-                    .artifacts()
-                    .inventory()
-                    .admit_bound_target(
-                        &mut fixed,
+                fixed.admit_bound_target(
                         inputs.artifacts(),
                         crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                             &denied

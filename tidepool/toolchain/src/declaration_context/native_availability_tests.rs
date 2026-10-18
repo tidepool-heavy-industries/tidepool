@@ -1718,12 +1718,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let consume = |view: &ArtifactView,
                    selection: &crate::certified_products::CertifiedSourceSelection,
                    imports: &[crate::certified_products::PendingImportOwner]| {
-        let mut fixed = view
-            .inventory()
-            .bind_segment(view, vec![], selection)
+        let mut fixed = view.bind_segment( vec![], selection)
             .expect("bind the actual receipt owner before body demand");
-        let demanded = view.inventory().admit_bound_target(
-            &mut fixed,
+        let demanded = fixed.admit_bound_target(
             view,
             NativeArtifactDemand::CertifiedTargetImports(imports),
             vec![],
@@ -1736,15 +1733,12 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .resolve()
             .map(|resolved| resolved.groups().clone())
     };
-    let mut failed_then_retried = admitted
-        .inventory()
-        .bind_segment(&admitted, vec![], &selected)
+    let mut failed_then_retried = admitted.bind_segment( vec![], &selected)
         .unwrap();
     let fixed_before = failed_then_retried.observed_binding_state();
     let cursor_before = admitted.capture_graph_selection();
     let mixed = [demand.clone(), denied_demand.clone()];
-    assert!(matches!(admitted.inventory().admit_bound_target(
-        &mut failed_then_retried, &admitted,
+    assert!(matches!(failed_then_retried.admit_bound_target( &admitted,
         NativeArtifactDemand::CertifiedTargetImports(&mixed), vec![], &selected,
     ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
         crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
@@ -1756,10 +1750,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         "a valid staged B7 followed by denied B9001 publishes no payload or choice"
     );
     assert_eq!(admitted.capture_graph_selection(), cursor_before);
-    let retried = admitted
-        .inventory()
-        .admit_bound_target(
-            &mut failed_then_retried,
+    let retried = failed_then_retried.admit_bound_target(
             &admitted,
             NativeArtifactDemand::CertifiedTargetImports(std::slice::from_ref(&demand)),
             vec![],
@@ -2605,14 +2596,9 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         )
         .unwrap();
         let source = inputs.artifacts();
-        let mut fixed = source
-            .inventory()
-            .bind_segment(source, vec![], &selection)
+        let mut fixed = source.bind_segment( vec![], &selection)
             .unwrap();
-        let target = source
-            .inventory()
-            .admit_bound_target(
-                &mut fixed,
+        let target = fixed.admit_bound_target(
                 source,
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -2865,17 +2851,10 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     )
     .unwrap();
     assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
-    let mut fixed = inputs
-        .artifacts()
-        .inventory()
-        .bind_segment(&inputs.artifacts(), vec![], &selection)
+    let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
         .unwrap();
     let imports = [source_import(&native, 9001)];
-    let demanded = inputs
-        .artifacts()
-        .inventory()
-        .admit_bound_target(
-            &mut fixed,
+    let demanded = fixed.admit_bound_target(
             &inputs.artifacts(),
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
@@ -3213,14 +3192,10 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                 .unwrap();
             let imports = [source_import(&native, 9001)];
-            let demanded = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
+            let demanded = fixed.admit_bound_target(
                 &inputs.artifacts(),
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -5539,16 +5514,12 @@ fn replay_native_transport_history(
     )
     .unwrap();
     let bind = || {
-        inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selected)
+        inputs.artifacts().bind_segment( vec![], &selected)
     };
     for index in 0..2 {
         let mut fixed = bind().unwrap();
         let imports = [source_import(&products[index + 1], 7)];
-        let admitted = inputs.artifacts().inventory().admit_bound_target(
-            &mut fixed,
+        let admitted = fixed.admit_bound_target(
             inputs.artifacts(),
             NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
@@ -5576,8 +5547,7 @@ fn replay_native_transport_history(
     }
     let mut fixed = bind().unwrap();
     let imports = [source_import(&products[0], 7)];
-    let demanded = inputs.artifacts().inventory().admit_bound_target(
-        &mut fixed,
+    let demanded = fixed.admit_bound_target(
         inputs.artifacts(),
         NativeArtifactDemand::CertifiedTargetImports(&imports),
         vec![],
@@ -5829,15 +5799,10 @@ fn replay_native_transport_history(
             proof.issued_group_carriers(view).is_err(),
             "selected carrier snapshots do not reconstruct opaque Group availability"
         );
-        let mut fixed = view
-            .inventory()
-            .bind_segment(view, vec![], &continued_selection)
+        let mut fixed = view.bind_segment( vec![], &continued_selection)
             .unwrap();
         let imports = [source_import(&dependent, 7)];
-        let admitted = view
-            .inventory()
-            .admit_bound_target(
-                &mut fixed,
+        let admitted = fixed.admit_bound_target(
                 view,
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -6081,14 +6046,10 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         for demanded in [7, 9001] {
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                 .unwrap();
             let imports = [source_import(&native, demanded)];
-            let admitted = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
+            let admitted = fixed.admit_bound_target(
                 inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -6106,14 +6067,10 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 );
             }
         }
-        let mut fixed = inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selection)
+        let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
             .unwrap();
         let imports = [source_import(&unrelated, 7)];
-        let denied = inputs.artifacts().inventory().admit_bound_target(
-            &mut fixed,
+        let denied = fixed.admit_bound_target(
             inputs.artifacts(),
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
@@ -6396,17 +6353,10 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
                 if index == 0 {
-                    let mut fixed = inputs
-                        .artifacts()
-                        .inventory()
-                        .bind_segment(&inputs.artifacts(), vec![], &selection)
+                    let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                         .unwrap();
                     let imports = [source_import(native, 9001)];
-                    let demanded = inputs
-                        .artifacts()
-                        .inventory()
-                        .admit_bound_target(
-                            &mut fixed,
+                    let demanded = fixed.admit_bound_target(
                             &inputs.artifacts(),
                             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                                 &imports,

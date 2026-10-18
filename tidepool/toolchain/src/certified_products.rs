@@ -13791,8 +13791,7 @@ pub(crate) mod tests {
                 .issued_group_carriers(inputs.artifacts())
                 .unwrap()
         );
-        let mut fixed = inventory
-            .bind_segment(inputs.artifacts(), entries, &physical)
+        let mut fixed = inputs.artifacts().bind_segment( entries, &physical)
             .unwrap();
         let source = |ordinal| {
             let definitions = original_native_group_definitions(&product, ordinal).unwrap();
@@ -13806,9 +13805,7 @@ pub(crate) mod tests {
                 binder: binding.identity.clone(),
             }
         };
-        let current = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let current = fixed.admit_bound_target(
                 &inventory.empty_view(),
                 NativeArtifactDemand::CertifiedTargetImports(&[source(0)]),
                 vec![],
@@ -13826,9 +13823,7 @@ pub(crate) mod tests {
         );
         assert!(!current.artifact_ids().contains(&future.descriptor.id));
         assert!(
-            inventory
-                .admit_bound_target(
-                    &mut fixed,
+            fixed.admit_bound_target(
                     &current,
                     NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
                     vec![],
@@ -13837,9 +13832,7 @@ pub(crate) mod tests {
                 .is_err(),
             "issued availability cannot authorize future item type demand"
         );
-        let next = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let next = fixed.admit_bound_target(
                 &current,
                 NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
                 vec![future.clone()],

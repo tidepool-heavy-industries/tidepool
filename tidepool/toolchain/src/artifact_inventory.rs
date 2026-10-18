@@ -2712,6 +2712,25 @@ enum BoundNativeGroup {
 }
 
 impl BoundArtifactSelection {
+    pub(crate) fn admit_bound_target(
+        &mut self,
+        cursor: &ArtifactView,
+        demand: NativeArtifactDemand<'_>,
+        visible_values: Vec<Arc<ArtifactEntry>>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<AdmittedTargetArtifacts, CompileError> {
+        if !matches!(
+            demand,
+            NativeArtifactDemand::VerifiedTarget { .. }
+                | NativeArtifactDemand::CertifiedTargetImports(_)
+        ) {
+            return Err(failure("bound target requires authenticated target demand"));
+        }
+        let inventory = self.view.inventory().clone();
+        inventory.admit_bound_artifacts(self, cursor, demand, visible_values, selection)?
+            .into_target()
+    }
+
     #[cfg(test)]
     pub(crate) fn observed_binding_state(
         &self,
@@ -2931,76 +2950,6 @@ impl ArtifactInventory {
                 ArtifactRootIntent::Certified,
             ),
         )
-    }
-
-    pub(crate) fn bind_segment(
-        &self,
-        parent: &ArtifactView,
-        entries: Vec<Arc<ArtifactEntry>>,
-        selection: &crate::certified_products::CertifiedSourceSelection,
-    ) -> Result<BoundArtifactSelection, CompileError> {
-        let captured_facts = entries
-            .iter()
-            .map(|entry| (entry.descriptor.id, entry.facts.clone()))
-            .collect();
-        let view = self.admit_certified_with_demand(
-            parent,
-            entries,
-            NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
-        let entries = view
-            .entries()
-            .into_iter()
-            .map(|entry| (entry.descriptor.id, entry))
-            .collect::<BTreeMap<_, _>>();
-        let state = self.0.lock().expect("inventory lock");
-        let namespace_entries = view
-            .namespace()
-            .keys()
-            .map(|id| (*id, Arc::clone(&entries[id])))
-            .collect();
-        let mut owners = SelectedOwners::new(&state, &namespace_entries, &BTreeSet::new())?;
-        // Freeze one checked full owner for each native reference. Historical
-        // custody remains admissible; an ambiguous resolver cannot be issued.
-        let native_entries = entries
-            .iter()
-            .filter(|(_, entry)| matches!(entry.payload, ArtifactPayload::Original(_)))
-            .map(|(id, entry)| (*id, Arc::clone(entry)))
-            .collect();
-        let parent_ids = artifact_ids(&parent.read_projection(&state).nodes);
-        owners.native = SelectedOwners::new(&state, &native_entries, &parent_ids)?.native;
-        drop(state);
-        let mut materializations = Vec::new();
-        view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
-        Ok(BoundArtifactSelection {
-            view,
-            entries,
-            owners,
-            captured_facts,
-            materializations,
-            groups: BTreeMap::new(),
-            native_source: selection.clone(),
-        })
-    }
-
-    pub(crate) fn admit_bound_target(
-        &self,
-        fixed: &mut BoundArtifactSelection,
-        cursor: &ArtifactView,
-        demand: NativeArtifactDemand<'_>,
-        visible_values: Vec<Arc<ArtifactEntry>>,
-        selection: &crate::certified_products::CertifiedSourceSelection,
-    ) -> Result<AdmittedTargetArtifacts, CompileError> {
-        if !matches!(
-            demand,
-            NativeArtifactDemand::VerifiedTarget { .. }
-                | NativeArtifactDemand::CertifiedTargetImports(_)
-        ) {
-            return Err(failure("bound target requires authenticated target demand"));
-        }
-        self.admit_bound_artifacts(fixed, cursor, demand, visible_values, selection)?
-            .into_target()
     }
 
     fn admit_bound_artifacts(
@@ -5503,6 +5452,58 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    pub(crate) fn bind_segment(
+        &self,
+        entries: Vec<Arc<ArtifactEntry>>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        let parent = self;
+        let inventory = self.inventory();
+        let captured_facts = entries
+            .iter()
+            .map(|entry| (entry.descriptor.id, entry.facts.clone()))
+            .collect();
+        let view = inventory.admit_certified_with_demand(
+            parent,
+            entries,
+            NativeArtifactDemand::ScopeInterfaces,
+            selection,
+        )?;
+        let entries = view
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, entry))
+            .collect::<BTreeMap<_, _>>();
+        let state = inventory.0.lock().expect("inventory lock");
+        let namespace_entries = view
+            .namespace()
+            .keys()
+            .map(|id| (*id, Arc::clone(&entries[id])))
+            .collect();
+        let mut owners = SelectedOwners::new(&state, &namespace_entries, &BTreeSet::new())?;
+        // Freeze one checked full owner for each native reference. Historical
+        // custody remains admissible; an ambiguous resolver cannot be issued.
+        let native_entries = entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry.payload, ArtifactPayload::Original(_)))
+            .map(|(id, entry)| (*id, Arc::clone(entry)))
+            .collect();
+        let parent_ids = artifact_ids(&parent.read_projection(&state).nodes);
+        owners.native = SelectedOwners::new(&state, &native_entries, &parent_ids)?.native;
+        drop(state);
+        let mut materializations = Vec::new();
+        view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        Ok(BoundArtifactSelection {
+            view,
+            entries,
+            owners,
+            captured_facts,
+            materializations,
+            groups: BTreeMap::new(),
+            native_source: selection.clone(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn retained_payload_handles(&self) -> usize {
         self.lease.payloads.len()
@@ -7972,14 +7973,11 @@ mod tests {
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let mut fixed = inventory
-            .bind_segment(&chosen, vec![native.clone()], &selection)
+        let mut fixed = chosen.bind_segment( vec![native.clone()], &selection)
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&id));
         let imports = [issued_source(&native, 7)];
-        let result = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let result = fixed.admit_bound_target(
                 &inventory.empty_view(),
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -8239,8 +8237,7 @@ mod tests {
         selection
             .with_new_product_dependencies(&prefix.metadata_snapshot(), &[requirement])
             .unwrap();
-        let mut fixed = inventory
-            .bind_segment(&prefix, vec![native.clone(), child.clone()], &selection)
+        let mut fixed = prefix.bind_segment( vec![native.clone(), child.clone()], &selection)
             .unwrap();
         let imports = [issued_source(&native, 7)];
         let expected = selected
@@ -8250,9 +8247,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let before = inventory.metrics().issued_scope_nodes;
         for _ in 0..repetitions {
-            let target = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let target = fixed.admit_bound_target(
                     &prefix,
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -8614,13 +8609,10 @@ mod tests {
                     .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                     .unwrap();
             }
-            let mut fixed = inventory
-                .bind_segment(&chosen, vec![native.clone()], &selection)
+            let mut fixed = chosen.bind_segment( vec![native.clone()], &selection)
                 .unwrap();
             let imports = [issued_source(&native, 7)];
-            let result = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let result = fixed.admit_bound_target(
                     &inventory.empty_view(),
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -8696,14 +8688,11 @@ mod tests {
             selection
                 .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                 .unwrap();
-            let mut fixed = inventory
-                .bind_segment(&chosen, vec![native.clone()], &selection)
+            let mut fixed = chosen.bind_segment( vec![native.clone()], &selection)
                 .unwrap();
             assert_eq!(fixed.view.namespace()[&id], selected_carrier);
             let imports = [issued_source(&native, 7)];
-            let demanded = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let demanded = fixed.admit_bound_target(
                     &inventory.empty_view(),
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -9445,14 +9434,11 @@ mod tests {
                 )
                 .unwrap();
             let selected = bound_selection_for_entries(&available, &entries);
-            let mut fixed = inventory
-                .bind_segment(&available, entries, &selected)
+            let mut fixed = available.bind_segment( entries, &selected)
                 .unwrap();
             let imports = vec![issued_source(&consumer, 0)];
             let before = inventory.metrics();
-            let first = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let first = fixed.admit_bound_target(
                     &inventory.empty_view(),
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -9490,9 +9476,7 @@ mod tests {
                 .unwrap()
                 .native_requirement_rows_examined
                 .load(Ordering::Relaxed);
-            let repeated = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let repeated = fixed.admit_bound_target(
                     &first,
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -9519,9 +9503,7 @@ mod tests {
                 examined
             );
             let imports = vec![issued_source(&consumer, 1)];
-            let next = inventory
-                .admit_bound_target(
-                    &mut fixed,
+            let next = fixed.admit_bound_target(
                     &repeated,
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
                     vec![],
@@ -9581,13 +9563,10 @@ mod tests {
         selected
             .with_new_product_dependencies(&available.metadata_snapshot(), &[proof])
             .unwrap();
-        let mut fixed = inventory
-            .bind_segment(&available, vec![], &selected)
+        let mut fixed = available.bind_segment( vec![], &selected)
             .unwrap();
         let first_imports = [issued_source(&native, 0)];
-        let first = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let first = fixed.admit_bound_target(
                 &inventory.empty_view(),
                 NativeArtifactDemand::CertifiedTargetImports(&first_imports),
                 vec![],
@@ -9599,9 +9578,7 @@ mod tests {
         assert_eq!(first_groups.len(), 1);
         assert!(!old_groups.contains(&first_groups[0]));
         let before_repeat = inventory.metrics();
-        let repeated = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let repeated = fixed.admit_bound_target(
                 &first,
                 NativeArtifactDemand::CertifiedTargetImports(&first_imports),
                 vec![],
@@ -9618,9 +9595,7 @@ mod tests {
             before_repeat.issued_scope_nodes
         );
         let union_imports = [issued_source(&native, 0), issued_source(&native, 1)];
-        let union = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let union = fixed.admit_bound_target(
                 &repeated,
                 NativeArtifactDemand::CertifiedTargetImports(&union_imports),
                 vec![],
@@ -9688,11 +9663,9 @@ mod tests {
             .unwrap();
         let all = bound_selection_for_entries(&available, &entries);
         let current = bound_selection_for_entries(&available, &[consumer.clone()]);
-        let mut fixed = inventory.bind_segment(&available, entries, &all).unwrap();
+        let mut fixed = available.bind_segment( entries, &all).unwrap();
         let first_imports = vec![issued_source(&consumer, 0)];
-        let cursor = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let cursor = fixed.admit_bound_target(
                 &inventory.empty_view(),
                 NativeArtifactDemand::CertifiedTargetImports(&first_imports),
                 vec![],
@@ -9704,9 +9677,7 @@ mod tests {
         let before = inventory.metrics();
         let cache_before = fixed.groups.clone();
         let future_imports = vec![issued_source(&consumer, 1)];
-        assert!(inventory
-            .admit_bound_target(
-                &mut fixed,
+        assert!(fixed.admit_bound_target(
                 &cursor,
                 NativeArtifactDemand::CertifiedTargetImports(&future_imports),
                 vec![],
@@ -9720,9 +9691,7 @@ mod tests {
             before.issued_scope_nodes
         );
         assert_eq!(cursor.selected_native_groups().len(), 1);
-        let next = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let next = fixed.admit_bound_target(
                 &cursor,
                 NativeArtifactDemand::CertifiedTargetImports(&future_imports),
                 vec![value.clone()],
@@ -9753,16 +9722,13 @@ mod tests {
                 )
                 .unwrap();
             let selected = bound_selection_for_entries(&available, &entries);
-            let mut fixed = inventory
-                .bind_segment(&available, entries, &selected)
+            let mut fixed = available.bind_segment( entries, &selected)
                 .unwrap();
             let mut cursor = inventory.empty_view();
             for ordinal in 0..count {
                 let imports = vec![issued_source(&consumer, ordinal)];
                 let before = inventory.metrics();
-                cursor = inventory
-                    .admit_bound_target(
-                        &mut fixed,
+                cursor = fixed.admit_bound_target(
                         &cursor,
                         NativeArtifactDemand::CertifiedTargetImports(&imports),
                         vec![],
@@ -9796,9 +9762,7 @@ mod tests {
                     ordinal as usize + 1
                 );
                 let before = inventory.metrics();
-                cursor = inventory
-                    .admit_bound_target(
-                        &mut fixed,
+                cursor = fixed.admit_bound_target(
                         &cursor,
                         NativeArtifactDemand::CertifiedTargetImports(&imports),
                         vec![],
@@ -9896,8 +9860,7 @@ mod tests {
             )
             .unwrap();
         let selected = bound_selection_for_entries(&available, &[captured.clone()]);
-        let mut fixed = inventory
-            .bind_segment(&available, vec![captured.clone()], &selected)
+        let mut fixed = available.bind_segment( vec![captured.clone()], &selected)
             .unwrap();
         assert!(fixed.entries[&captured.descriptor.id]
             .facts
@@ -9973,13 +9936,10 @@ mod tests {
             physical.namespace()[&cold.descriptor.id]
         );
         let selected = bound_selection_for_entries(&physical, &physical_entries);
-        let mut fixed = inventory
-            .bind_segment(&physical, physical_entries, &selected)
+        let mut fixed = physical.bind_segment( physical_entries, &selected)
             .unwrap();
         let imports = vec![issued_source(&cold, 0)];
-        let admitted = inventory
-            .admit_bound_target(
-                &mut fixed,
+        let admitted = fixed.admit_bound_target(
                 &cursor,
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -10105,7 +10065,7 @@ mod tests {
         let graph = combined.capture_graph_selection();
         let nodes = inventory.node_count();
         assert!(
-            matches!(inventory.bind_segment(&combined, vec![], &selected), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }) && error.owner_conflict.is_some())
+            matches!(combined.bind_segment( vec![], &selected), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }) && error.owner_conflict.is_some())
         );
         assert_eq!(combined.capture_graph_selection(), graph);
         assert_eq!(inventory.node_count(), nodes);
@@ -12873,12 +12833,9 @@ mod tests {
             .unwrap();
         let receipt = bound_selection_for_entries(&available, &entries);
         let issuers = originals.each_ref().map(|original| {
-            let mut fixed = inventory
-                .bind_segment(&available, entries.clone(), &receipt)
+            let mut fixed = available.bind_segment( entries.clone(), &receipt)
                 .unwrap();
-            inventory
-                .admit_bound_target(
-                    &mut fixed,
+            fixed.admit_bound_target(
                     &inventory.empty_view(),
                     NativeArtifactDemand::CertifiedTargetImports(&[issued_source(original, 7)]),
                     vec![],
@@ -13532,15 +13489,12 @@ mod tests {
                 certified
                     .with_new_product_dependencies(&recovered.metadata_snapshot(), &requirements)
                     .unwrap();
-                let mut bound = recovered_inventory
-                    .bind_segment(&recovered, vec![], &certified)
+                let mut bound = recovered.bind_segment( vec![], &certified)
                     .unwrap();
                 let imports = originals
                     .each_ref()
                     .map(|original| issued_source(original, 7));
-                let target = recovered_inventory
-                    .admit_bound_target(
-                        &mut bound,
+                let target = bound.admit_bound_target(
                         &recovered,
                         NativeArtifactDemand::CertifiedTargetImports(&imports),
                         vec![],
@@ -13552,8 +13506,7 @@ mod tests {
                 let helper_imports = [issued_source(&helper, 7)];
                 let before_bound_graph = recovered.capture_graph_selection();
                 let before_bound_nodes = recovered_inventory.node_count();
-                assert!(matches!(recovered_inventory.admit_bound_target(
-                    &mut bound, &recovered,
+                assert!(matches!(bound.admit_bound_target( &recovered,
                     NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
                     vec![], &certified,
                 ).map(|admitted| admitted.artifacts), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -13598,14 +13551,9 @@ mod tests {
                         &helper_requirements,
                     )
                     .unwrap();
-                let mut chosen_bound = chosen
-                    .inventory()
-                    .bind_segment(&chosen, vec![], &chosen_certified)
+                let mut chosen_bound = chosen.bind_segment( vec![], &chosen_certified)
                     .unwrap();
-                let direct = chosen
-                    .inventory()
-                    .admit_bound_target(
-                        &mut chosen_bound,
+                let direct = chosen_bound.admit_bound_target(
                         &chosen,
                         NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
                         vec![],
@@ -14468,8 +14416,7 @@ mod tests {
                 )
                 .unwrap();
             let selection = bound_selection_for_entries(&available, &entries);
-            let mut fixed = issuer
-                .bind_segment(&available, entries, &selection)
+            let mut fixed = available.bind_segment( entries, &selection)
                 .unwrap();
             let mut cursor = issuer.empty_view();
             let initial = if late_before_merge {
@@ -14478,9 +14425,7 @@ mod tests {
                 &[0][..]
             };
             for &ordinal in initial {
-                cursor = issuer
-                    .admit_bound_target(
-                        &mut fixed,
+                cursor = fixed.admit_bound_target(
                         &cursor,
                         NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
                             &inspection,
@@ -14588,9 +14533,7 @@ mod tests {
                 assert!(projected.binding_dependencies().contains(exact_edge));
             }
             assert!(!projected.namespace().contains_key(&wire.descriptor.id));
-            let demanded = issuer
-                .admit_bound_target(
-                    &mut fixed,
+            let demanded = fixed.admit_bound_target(
                     &projected,
                     NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
                         &inspection,
@@ -14800,10 +14743,8 @@ mod tests {
             certified
                 .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
                 .unwrap();
-            let mut bound = inventory.bind_segment(view, vec![], &certified).unwrap();
-            let selected = inventory
-                .admit_bound_target(
-                    &mut bound,
+            let mut bound = view.bind_segment( vec![], &certified).unwrap();
+            let selected = bound.admit_bound_target(
                     view,
                     NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 7)]),
                     vec![],

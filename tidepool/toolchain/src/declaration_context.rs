@@ -9516,9 +9516,7 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
         .cloned()
         .collect::<Vec<_>>();
     let baseline = retain_native_offers(baseline, &offers)?;
-    baseline
-        .inventory()
-        .bind_segment(&baseline, entries, originals.source_selection())
+    baseline.bind_segment( entries, originals.source_selection())
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then
@@ -9552,9 +9550,7 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
         .filter(|entry| !admitted.contains(&entry.descriptor.id))
         .cloned()
         .collect();
-    cursor
-        .inventory()
-        .admit_bound_target(bound, cursor, demand, visible, selection)
+    bound.admit_bound_target( cursor, demand, visible, selection)
 }
 
 /// Check the inventory's selected dependency closure without issuing group rows.
@@ -13513,16 +13509,9 @@ mod tests {
             &validation.inventory,
         )
         .unwrap();
-        let mut fixed = inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selected)
+        let mut fixed = inputs.artifacts().bind_segment( vec![], &selected)
             .unwrap();
-        let target = inputs
-            .artifacts()
-            .inventory()
-            .admit_bound_target(
-                &mut fixed,
+        let target = fixed.admit_bound_target(
                 inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -14865,13 +14854,9 @@ mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                 .unwrap();
-            let target = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
+            let target = fixed.admit_bound_target(
                 &inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -15373,16 +15358,9 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
                 .unwrap();
-            let target = inputs
-                .artifacts()
-                .inventory()
-                .admit_bound_target(
-                    &mut fixed,
+            let target = fixed.admit_bound_target(
                     &inputs.artifacts(),
                     crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                         &imports,
