@@ -14998,10 +14998,29 @@ mod tests {
     fn check_retained_value_compiler_selection(old_epoch: u8, new_epoch: u8, demands_epoch: bool) {
         let (initial, _) = metadata_fixture();
         let epoch = |version: u8| {
-            crate::certified_products::fixture_finalized_product(
+            let finalized = crate::certified_products::fixture_finalized_product(
                 support_product_with_interface("fixture", "Epoch", vec![version; 16]),
                 initial.owner.facts.producer,
+            );
+            let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+                std::slice::from_ref(&finalized),
             )
+            .remove(0)
+            .product;
+            assert_eq!(recovered.owner(), finalized.owner());
+            assert_eq!(recovered.interface_bytes(), finalized.interface_bytes());
+            assert_eq!(recovered.product_bytes(), finalized.product_bytes());
+            assert_eq!(
+                recovered.certification_bytes(),
+                finalized.certification_bytes()
+            );
+            assert_eq!(
+                crate::certified_products::original_available_groups(&recovered)
+                    .unwrap()
+                    .count(),
+                0
+            );
+            recovered
         };
         let old = initial
             .as_ref()
