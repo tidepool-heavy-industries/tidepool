@@ -421,7 +421,7 @@ impl From<&io::Error> for CompilerIoCause {
 const FAILURE_END_MAGIC: &[u8; 8] = b"TPCEND01";
 const MAX_FAILURE_END_BYTES: usize = 64 * 1024;
 const MAX_SCRATCH_FAILURES: usize = 128;
-const DIRECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DIRECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn invalid_close(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

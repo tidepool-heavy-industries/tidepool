@@ -3190,7 +3190,30 @@ enum WorkerOperation {
 pub(crate) struct WorkerAbortRetirement {
     pub(crate) termination: Result<(), crate::endpoint::CompilerIoCause>,
     pub(crate) worker: crate::endpoint::CompilerWorkerRetirement,
-    pub(crate) earlier_wait: Option<crate::endpoint::CompilerIoCause>,
+}
+
+fn observe_aborted_worker(
+    mut observe: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+    deadline: Instant,
+) -> crate::endpoint::CompilerWorkerRetirement {
+    use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
+    loop {
+        match observe() {
+            Ok(Some(status)) => return CompilerWorkerRetirement::Reaped(status),
+            Err(error) => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(&error));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(
+                    &io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "aborted compiler worker retirement remains unconfirmed",
+                    ),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 pub(crate) struct Worker {
@@ -3470,36 +3493,22 @@ impl Worker {
     }
 
     pub(crate) fn abort(&mut self) -> WorkerAbortRetirement {
-        use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
+        use crate::endpoint::CompilerIoCause;
         drop(self.stdin.take());
         let termination = self.child.kill().map_err(|error| {
             tracing::warn!(%error, "failed to kill aborted compiler worker");
             CompilerIoCause::from(&error)
         });
-        let mut earlier_wait = None;
-        let status = loop {
-            match self.child.wait() {
-                Ok(status) => break status,
-                Err(error) => {
-                    if earlier_wait.is_none() {
-                        tracing::warn!(%error, "retaining aborted compiler worker until reap is observed");
-                        earlier_wait = Some(CompilerIoCause::from(&error));
-                    }
-                    // Keep the exact Child, namespace and server slot owned.
-                    // A client's bounded retirement wait can independently
-                    // return Unconfirmed; it cannot release this obligation.
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        };
+        let worker = observe_aborted_worker(
+            || self.child.try_wait(),
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        );
         let retirement = WorkerAbortRetirement {
             termination,
-            worker: CompilerWorkerRetirement::Reaped(status),
-            earlier_wait,
+            worker,
         };
         tracing::debug!(termination = ?retirement.termination,
-            worker = ?retirement.worker, earlier_wait = ?retirement.earlier_wait,
-            "aborted compiler worker retirement observed");
+            worker = ?retirement.worker, "aborted compiler worker retirement observed");
         retirement
     }
 
@@ -4318,6 +4327,22 @@ mod tests {
     }
 
     #[test]
+    fn abort_observation_preserves_permanent_wait_error_without_retry() {
+        let mut observations = 0;
+        let retired = observe_aborted_worker(
+            || {
+                observations += 1;
+                Err(io::Error::from_raw_os_error(libc::ECHILD))
+            },
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        );
+        assert_eq!(observations, 1);
+        assert!(matches!(retired,
+            crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(cause)
+                if cause.raw_os_error == Some(libc::ECHILD)));
+    }
+
+    #[test]
     fn build_products_stay_warm_only_after_reaped_slot_rotation() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("Expr.hs");
@@ -4345,7 +4370,6 @@ mod tests {
             retired.worker,
             crate::endpoint::CompilerWorkerRetirement::Reaped(_)
         ));
-        assert!(retired.earlier_wait.is_none());
         worker.respawn(&prepared).unwrap();
         assert_eq!(
             products_response(&mut worker, dir.path(), &argv)[1],
