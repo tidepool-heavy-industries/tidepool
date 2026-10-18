@@ -17434,8 +17434,7 @@ pub(crate) mod tests {
         let mut historical_child = None;
         let mut current_child = None;
         for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
-            let projection = context.compiler_input_projection().interface_only();
-            context = context.recover_fixture_projection(projection).unwrap();
+            context = context.original_interface_context().unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
@@ -17444,6 +17443,24 @@ pub(crate) mod tests {
                 .prepare_compilation(&directory.join("inputs"), &producer)
                 .unwrap();
             assert!(request.compiler_original_products().unwrap().is_empty());
+            assert!(request
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.product.is_none()));
+            let selected = request
+                .compiler_inputs()
+                .metadata
+                .entries
+                .values()
+                .find(|entry| entry.descriptor.owner.module == "Fresh")
+                .unwrap();
+            let crate::artifact_inventory::ArtifactPayload::Canonical(interface) =
+                &selected.payload
+            else {
+                panic!("Core-only request must retain the canonical interface");
+            };
+            assert_eq!(interface, &canonical);
+            assert!(interface.core_bytes().is_some());
             assert_eq!(
                 request.context().recovery_products().len(),
                 expected_owners.len()
@@ -17486,6 +17503,11 @@ pub(crate) mod tests {
                 request: &request,
                 source: &admission,
             };
+            assert!(admission
+                .evidence()
+                .modules
+                .iter()
+                .all(|module| module.module != "Fresh"));
             let bytes = nonempty_sidecar(body_tag);
             let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
             packet.modules[0].product_sha256 = sha(&bytes);
