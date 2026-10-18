@@ -48,8 +48,20 @@ pub(super) fn prepared_scaffold(config: &mut super::ActorHostConfig) {
     );
     scaffold(config);
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
+        // The shipped scaffold's aliases belong to its default provider. A
+        // hosted fixture owns the replacement provider and its matching aliases.
+        project
+            .models
+            .retain(|_, model| model.backend() == embedded.provider);
         project.launch.embedded = Some(embedded);
         project.defaults = defaults;
+        assert!(
+            project
+                .resolved_catalog()
+                .expect("the prepared hosted fixture must have one coherent inference selection")
+                .is_some(),
+            "the hosted transport must resolve an inference catalog"
+        );
     });
     commit_workspace(&config.workspace);
 }
