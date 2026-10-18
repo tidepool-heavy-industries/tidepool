@@ -9420,9 +9420,45 @@ fn replay_fresh_fragment_obligations(
             original_ordinal: 9001,
         }))
         .collect::<BTreeSet<_>>();
-    let chosen = inventory
-        .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
-        .unwrap();
+    let chosen = if grant_full {
+        // Change demand under this same issued carrier and canonical namespace.
+        // A separate admission would issue different bindings and correctly
+        // demote the earlier Full qualification during normalization.
+        let issued = full_support.artifacts();
+        let mut graph = issued.capture_graph_selection();
+        let namespace = graph.namespace.clone();
+        let unused = graph
+            .roots
+            .iter()
+            .filter(|node| match node {
+                ArtifactBindingNode::Group(group) => !selected.contains(&NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                }),
+                ArtifactBindingNode::Artifact(_) => false,
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        graph.roots.retain(|node| !unused.contains(node));
+        graph.custody_roots.extend(unused);
+        graph.custody_roots.sort();
+        graph.custody_roots.dedup();
+        let chosen = issued
+            .select_issued(
+                namespace.iter().map(|binding| binding.artifact).collect(),
+                &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                    graph,
+                ),
+            )
+            .unwrap();
+        assert_eq!(chosen.capture_graph_selection().namespace, namespace);
+        assert_eq!(chosen.selected_native_groups(), selected);
+        chosen
+    } else {
+        inventory
+            .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
+            .unwrap()
+    };
     let mut support = fixture_compiler_support(projection, chosen)
         .retain_offers(full_support.native_offers().iter().cloned())
         .unwrap();
