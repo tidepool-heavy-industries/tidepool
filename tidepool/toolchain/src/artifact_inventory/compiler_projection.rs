@@ -1605,6 +1605,20 @@ impl NativeNamespaceContributions {
     }
 }
 
+enum CompilerRolePayloads<'a> {
+    Retained(RetainedArtifactPayloads<'a>),
+    Metadata(&'a BTreeMap<ArtifactId, Arc<ArtifactEntry>>),
+}
+
+impl CompilerRolePayloads<'_> {
+    fn get(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        match self {
+            Self::Retained(payloads) => payloads.get(id),
+            Self::Metadata(payloads) => payloads.get(id),
+        }
+    }
+}
+
 impl CompilerInputProjection {
     /// Retained offers keep their original exact custody. Current admissions
     /// consume only contributions derived from this issued compiler namespace.
@@ -2026,7 +2040,7 @@ impl CompilerInputProjection {
     }
 
     pub(crate) fn validate(&self, view: &ArtifactView) -> Result<(), CompileError> {
-        self.entries_from_metadata(&view.metadata_snapshot())
+        self.entries_from_payloads(CompilerRolePayloads::Retained(view.retained_payloads()))
             .map(|_| ())
     }
 
@@ -2041,7 +2055,14 @@ impl CompilerInputProjection {
         &self,
         artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
-        let selected = self.associated_entries(artifacts)?;
+        self.entries_from_payloads(CompilerRolePayloads::Metadata(artifacts))
+    }
+
+    fn entries_from_payloads(
+        &self,
+        artifacts: CompilerRolePayloads<'_>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
+        let selected = self.associated_entries(&artifacts)?;
         for entry in selected.values() {
             for required in &entry.requirements {
                 let role = self.roles.get(required).ok_or_else(|| {
@@ -2053,7 +2074,12 @@ impl CompilerInputProjection {
                     })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
-                    artifacts[&role.interface()].descriptor.interface_sha256 != *seal
+                    artifacts
+                        .get(&role.interface())
+                        .expect("associated canonical interface")
+                        .descriptor
+                        .interface_sha256
+                        != *seal
                 }) {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::InterfaceSealMismatch {
@@ -2074,8 +2100,8 @@ impl CompilerInputProjection {
         &self,
         view: &ArtifactView,
     ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
-        let metadata = view.metadata_snapshot();
-        let entries = self.associated_entries(&metadata.artifacts)?;
+        let artifacts = CompilerRolePayloads::Retained(view.retained_payloads());
+        let entries = self.associated_entries(&artifacts)?;
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
         let mut selected = BTreeMap::new();
@@ -2105,7 +2131,11 @@ impl CompilerInputProjection {
                 ResolvedCompilerRole {
                     interface: (
                         canonical,
-                        Arc::clone(&metadata.artifacts[&role.interface()]),
+                        Arc::clone(
+                            artifacts
+                                .get(&role.interface())
+                                .expect("associated canonical interface"),
+                        ),
                     ),
                     original,
                 },
@@ -2116,7 +2146,7 @@ impl CompilerInputProjection {
 
     fn associated_entries(
         &self,
-        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        artifacts: &CompilerRolePayloads<'_>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
@@ -2141,8 +2171,7 @@ impl CompilerInputProjection {
                         failure("compiler original offer lacks canonical attachment")
                     })?;
                     if &original.descriptor.owner != owner
-                        || ArtifactEntry::canonical(canonical.clone()).descriptor.id
-                            != role.interface()
+                        || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
                     {
                         return Err(failure(
                             "compiler original offer differs from its interface",
@@ -2639,6 +2668,169 @@ mod tests {
                 support.selected_interfaces().unwrap().iter().count(),
                 expected.len()
             );
+        }
+    }
+
+    #[test]
+    fn payload_validation_preserves_exact_membership_and_first_refusal() {
+        let inventory = ArtifactInventory::default();
+        let selected = Arc::new(crate::artifact_inventory::tests::entry("Selected", &[]));
+        let excluded = Arc::new(crate::artifact_inventory::tests::entry("Excluded", &[]));
+        let full = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![selected.clone(), excluded.clone()],
+            )
+            .unwrap();
+        let narrowed = full.select_roots(vec![selected.descriptor.id]).unwrap();
+        // Reuse the already issued narrow selection with its broad parent
+        // acquisition map, exactly as the production draft owner does. This
+        // changes no roots, namespace, proof, or binding authority.
+        let narrowed = ArtifactView::new(ViewDraft {
+            roots: vec![],
+            selection: Arc::clone(&narrowed.lease.selection),
+            inventory: inventory.clone(),
+            parents: vec![Arc::clone(&full.lease)],
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        assert!(narrowed
+            .lease
+            .payloads
+            .contains_key(&excluded.descriptor.id));
+        assert!(narrowed
+            .retained_payloads()
+            .get(&excluded.descriptor.id)
+            .is_none());
+        let valid = CompilerInputProjection::from_issued_entries(&[selected.clone()]).unwrap();
+        valid.validate(&narrowed).unwrap();
+        valid.validate_associations(&narrowed).unwrap();
+        let mut invalid = valid.clone();
+        invalid.roles.insert(
+            ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "AFirst".into(),
+            },
+            CompilerInputRole::InterfaceOnly {
+                interface: excluded.descriptor.id,
+            },
+        );
+        invalid.roles.insert(
+            ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "ZLater".into(),
+            },
+            CompilerInputRole::InterfaceOnly {
+                interface: selected.descriptor.id,
+            },
+        );
+        let actual = invalid.validate(&narrowed).unwrap_err();
+        let expected = invalid
+            .entries_from_metadata(&narrowed.metadata_snapshot())
+            .unwrap_err();
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert!(
+            format!("{actual:?}").contains("compiler interface role is outside retained custody")
+        );
+        let actual = invalid.validate_associations(&narrowed).unwrap_err();
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
+    #[test]
+    fn complete_support_new_and_merge_do_not_materialize_unused_metadata() {
+        for demand in [
+            NativeArtifactDemand::AllGroups,
+            NativeArtifactDemand::ScopeInterfaces,
+        ] {
+            let entries = decision_affinity_entries();
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let issued =
+                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            assert!(issued.native_availability.rows().next().is_some());
+            // A fresh read owner over the exact same issued lease prevents a
+            // prior cached full snapshot from hiding eager metadata work.
+            let fresh = ArtifactView::from_custody(Arc::clone(&issued.artifacts.lease));
+            let mut support = CompilerSourceSupport::new(
+                projection,
+                fresh.clone(),
+                issued.native_offers.iter().cloned(),
+                issued.native_availability.clone(),
+            )
+            .unwrap();
+            support.input_decisions = issued.input_decisions.clone();
+            let no_metadata = |view: &ArtifactView| {
+                let state = view.lease.inventory.0.lock().unwrap();
+                let read = view.read_projection(&state);
+                assert!(read.metadata.get().is_none());
+                assert!(read.dependencies.get().is_none());
+                assert!(read.native_selection.get().is_none());
+            };
+            no_metadata(&fresh);
+            no_metadata(&support.artifacts);
+            let joined = support.merge(&support).unwrap();
+            no_metadata(&support.artifacts);
+            no_metadata(&joined.artifacts);
+            assert_eq!(joined.input_decisions, support.input_decisions);
+            assert_eq!(joined.native_availability, support.native_availability);
+            // Explicit complete observation remains available, and agrees
+            // with the original independently issued graph and payload set.
+            let actual = joined.artifacts.metadata_snapshot();
+            let expected = issued.artifacts.metadata_snapshot();
+            assert_eq!(actual.artifacts, expected.artifacts);
+            assert_eq!(actual.entries, expected.entries);
+            assert_eq!(actual.dependencies, expected.dependencies);
+            assert_eq!(
+                actual.selected_native_groups,
+                expected.selected_native_groups
+            );
+            assert_eq!(
+                actual.ambiguous_native_owners,
+                expected.ambiguous_native_owners
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_id_without_entry_matches_independent_descriptor_encoding() {
+        use sha2::Digest;
+        for producer in [[2; 32], [7; 32]] {
+            for module in ["CanonicalA", "CanonicalB"] {
+                let interface = crate::certified_products::fixture_module_interface(
+                    producer,
+                    "fixture",
+                    module,
+                    BTreeMap::from([(("fixture".into(), "Dependency".into()), [9; 32])]),
+                );
+                let mut expected = ArtifactDescriptor {
+                    id: ArtifactId([0; 32]),
+                    kind: ArtifactKind::CanonicalModuleInterface,
+                    owner: ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: module.into(),
+                    },
+                    producer_sha256: producer,
+                    interface_sha256: interface.interface_sha256(),
+                    product_sha256: None,
+                    package_imports_sha256: interface.package_imports_sha256(),
+                    certification_sha256: Some(
+                        sha2::Sha256::digest(interface.certificate_bytes()).into(),
+                    ),
+                };
+                expected.id =
+                    ArtifactId(sha2::Sha256::digest(serde_json::to_vec(&expected).unwrap()).into());
+                assert_eq!(
+                    ArtifactEntry::canonical_artifact_id(&interface),
+                    expected.id
+                );
+                let entry = ArtifactEntry::canonical(interface);
+                assert_eq!(entry.descriptor, expected);
+                assert_eq!(entry.requirements.len(), 1);
+            }
         }
     }
 

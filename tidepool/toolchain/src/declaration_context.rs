@@ -1466,7 +1466,7 @@ impl RequestNativeAvailability {
         if self.0.is_empty() {
             return Ok(self.clone());
         }
-        let metadata = artifacts.metadata_snapshot();
+        let payloads = artifacts.retained_payloads();
         let mut retained = BTreeSet::new();
         let mut roots_by_contribution = BTreeMap::new();
         for (id, row) in self.0.iter() {
@@ -1514,7 +1514,7 @@ impl RequestNativeAvailability {
             if !direct && !dependencies.contains_key(id) {
                 continue;
             }
-            if !metadata.artifacts.contains_key(id) {
+            if payloads.get(id).is_none() {
                 return Err(failure("normalized native payload is outside custody"));
             }
             let mut selected = (**row).clone();
