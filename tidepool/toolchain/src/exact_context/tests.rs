@@ -47,7 +47,7 @@ fn shared_scope_snapshots() -> (ImmutableScopeProofRef, Vec<Arc<ExactSelectionSn
             .collect(),
         dependencies: Vec::new(),
     }));
-    let snapshots = [0..8, 0..4, 2..6]
+    let mut snapshots = [0..8, 0..4, 2..6]
         .into_iter()
         .map(|range| {
             let selected = &bindings[range];
@@ -65,7 +65,15 @@ fn shared_scope_snapshots() -> (ImmutableScopeProofRef, Vec<Arc<ExactSelectionSn
                 custody_roots: OrdMap::new(),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    snapshots.push(Arc::new(ExactSelectionSnapshot {
+        scopes: [(selection, proof.clone())].into_iter().collect(),
+        roots: OrdMap::new(),
+        namespace: OrdMap::new(),
+        custody_roots: [(ArtifactBindingNode::Artifact(bindings[0]), ())]
+            .into_iter()
+            .collect(),
+    }));
     (proof, snapshots)
 }
 
@@ -86,6 +94,8 @@ fn shared_scope_and_selection_materialization_work_is_operation_local() {
         })
         .collect::<Vec<_>>();
     assert_eq!(store.get(&proof_cid).unwrap().unwrap(), expected);
+    // The canonical oracle warms the immutable encoding owner in both arms;
+    // this comparison varies physical store custody, not proof encoder warmth.
     for warm in [false, true] {
         let empty = MemoryBlockstore::new();
         let base = if warm { &store } else { &empty };
