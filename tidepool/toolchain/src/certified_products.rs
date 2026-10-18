@@ -17788,7 +17788,8 @@ None,
                 child,
                 "entry_7",
             )
-            .unwrap();
+            .unwrap()
+            .complete_native_availability(&producer);
         assert_eq!(
             prior_planned.request.compiler_original_products().unwrap()[0].owner(),
             &historical_child,
@@ -17863,7 +17864,8 @@ None,
             &prior_module_product,
             "ancestor_7",
         )
-        .unwrap();
+        .unwrap()
+        .complete_native_availability(&producer);
         let compiler_originals = planned.request.compiler_original_products().unwrap();
         assert!(compiler_originals
             .iter()
@@ -18079,13 +18081,17 @@ None,
                 "issued_selected_fresh_versions": selected_fresh.len(),
             })
         );
+        let output = crate::declaration_context::IssuedOriginalOutput::issue(
+            planned.certified.source_selection.clone(),
+            view.clone(),
+        )
+        .unwrap();
         let joined = crate::declaration_join::certify_same_offer_planned_declaration(
             planned_module,
             &planned_source,
             &producer,
             &selected,
-            &view,
-            &planned.certified.source_selection,
+            &output,
             &exact,
             &include,
             &serde_json::to_vec(&inventory).unwrap(),

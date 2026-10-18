@@ -31,6 +31,25 @@ pub(super) struct IssuedOriginal {
     pub(super) certified: CertifiedProducts,
 }
 
+impl IssuedOriginal {
+    pub(super) fn complete_native_availability(mut self, producer: &[u8]) -> Self {
+        let physical = crate::declaration_context::certified_product_artifact_view(
+            CanonicalProducerIdentity::from_producer_bytes(producer).sha256(),
+            &self.certified.recovery_products,
+            &self.certified.module_interfaces,
+            Some(self.request.context()),
+        )
+        .unwrap();
+        crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            &mut self.certified.source_selection,
+            self.request.compiler_inputs().artifacts(),
+            physical.entries(),
+        )
+        .unwrap();
+        self
+    }
+}
+
 fn planned_interface(module: &str) -> Vec<u8> {
     format!("planned-interface:main:{module}").into_bytes()
 }
@@ -343,6 +362,7 @@ fn issue_planned_original(
     issue_planned_original_with_source_value(
         root, module, producer, include, source_tag, body_tag, 3,
     )
+    .complete_native_availability(producer)
 }
 
 pub(super) fn issue_planned_original_with_source_value(
@@ -562,13 +582,20 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             request: &current.request,
             source: &current.source,
         };
+        assert!(crate::declaration_context::IssuedOriginalOutput::issue(
+            current.certified.source_selection.clone(), view.inventory().empty_view(),
+        ).is_err(), "an issued output cannot pair this source selection with missing canonical/native custody");
+        let output = crate::declaration_context::IssuedOriginalOutput::issue(
+            current.certified.source_selection.clone(),
+            view.clone(),
+        )
+        .unwrap();
         let certified = crate::declaration_join::certify_same_offer_planned_declaration(
             module,
             &format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n"),
             &producer,
             &originals,
-            &view,
-            &current.certified.source_selection,
+            &output,
             &exact,
             &include,
             &serde_json::to_vec(&inventory).unwrap(),
@@ -583,8 +610,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
                 &wrong_source,
                 &producer,
                 &originals,
-                &view,
-                &current.certified.source_selection,
+                &output,
                 &exact,
                 &include,
                 &serde_json::to_vec(&inventory).unwrap(),
@@ -717,13 +743,17 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                 source: &selected_issue.source,
             };
             let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
+            let output = crate::declaration_context::IssuedOriginalOutput::issue(
+                selected_issue.certified.source_selection.clone(),
+                view.clone(),
+            )
+            .unwrap();
             let joined = crate::declaration_join::certify_same_offer_planned_declaration(
                 module,
                 &source,
                 &producer,
                 &selected,
-                &view,
-                &selected_issue.certified.source_selection,
+                &output,
                 &exact,
                 &include,
                 &serde_json::to_vec(&inventory).unwrap(),
@@ -736,8 +766,7 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                     &drifted,
                     &producer,
                     &selected,
-                    &view,
-                    &selected_issue.certified.source_selection,
+                    &output,
                     &exact,
                     &include,
                     &serde_json::to_vec(&inventory).unwrap(),

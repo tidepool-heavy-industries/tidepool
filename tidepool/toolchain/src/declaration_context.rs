@@ -452,6 +452,41 @@ fn capture_native_original_requirements(
     Ok(requirements)
 }
 
+/// One strict output issuer binds source decisions and the target view to its
+/// completed compiler inputs. Publication borrows this owner without reissuance.
+#[derive(Debug)]
+pub(crate) struct IssuedOriginalOutput {
+    selection: crate::certified_products::CertifiedSourceSelection,
+    artifacts: ArtifactView,
+    inputs: Arc<OriginalCompilerInputs>,
+}
+
+impl IssuedOriginalOutput {
+    pub(crate) fn issue(
+        selection: crate::certified_products::CertifiedSourceSelection,
+        artifacts: ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let inputs = Arc::new(OriginalCompilerInputs::from_selection(
+            &selection, &artifacts,
+        )?);
+        Ok(Self {
+            selection,
+            artifacts,
+            inputs,
+        })
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.selection
+    }
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        &self.artifacts
+    }
+    pub(crate) fn compiler_inputs(&self) -> &OriginalCompilerInputs {
+        &self.inputs
+    }
+}
+
 impl OriginalCompilerInputs {
     #[cfg(test)]
     pub(crate) fn from_checked_support_products(

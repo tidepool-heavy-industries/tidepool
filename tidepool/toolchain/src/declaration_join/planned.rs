@@ -648,12 +648,13 @@ pub(crate) fn certify_same_offer_planned_declaration(
     normalized_source: &str,
     producer_identity: &[u8],
     originals: &crate::certified_products::SelectedOriginalClosure,
-    sealed_artifacts: &crate::artifact_inventory::ArtifactView,
-    source_selection: &crate::certified_products::CertifiedSourceSelection,
+    output: &crate::declaration_context::IssuedOriginalOutput,
     admission: &ExactProductAdmission<'_>,
     includes: &[PathBuf],
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    let sealed_artifacts = output.artifacts();
+    let source_selection = output.source_selection();
     let source_admission = admission.source;
     let module_name = module.module_name();
     let source_path = source_admission.witness().source_path();
@@ -747,15 +748,13 @@ pub(crate) fn certify_same_offer_planned_declaration(
         }),
         &source_admission.home_imports()?,
     )?;
-    let issued_inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        source_selection,
-        sealed_artifacts,
-    )?;
     let artifact_context = Arc::new(
         artifact_context
             .as_ref()
             .clone()
-            .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
+            .retain_issued_native_offers(
+                output.compiler_inputs().issued_offers().iter().cloned(),
+            )?,
     );
     let (_scratch, artifacts, original_imports, mut source_lexical_imports, _joined_interfaces) =
         admit_authored_artifact_closure(
