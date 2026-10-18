@@ -671,17 +671,23 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
                     )
                     .await;
                     assert_eq!(observed["status"], "committed", "{observed:?}");
-                    let roster_type = dispatch_lookup(policy, &["AgentRosterEntry"]).await;
-                    assert!(
-                        roster_type["items"][0]["output"]
-                            .as_str()
-                            .is_some_and(|output| output.contains("rosterActorId")),
-                        "{roster_type:?}"
-                    );
+                    let roster_type = dispatch_haskell_script(
+                        policy,
+                        "let rosterActorIdentity = rosterActorId :: AgentRosterEntry -> Int",
+                    )
+                    .await;
+                    assert_eq!(roster_type["status"], "committed", "{roster_type}");
                     let next = dispatch_haskell_script(policy, "40 + 2 :: Int").await;
                     assert_eq!(next["status"], "committed", "{next:?}");
                     assert_eq!(next["items"][0]["output"], "42", "{next:?}");
                 }
+                let roster_type = dispatch_lookup(root.as_ref(), &["AgentRosterEntry"]).await;
+                assert!(
+                    roster_type["items"][0]["output"]
+                        .as_str()
+                        .is_some_and(|output| output.contains("rosterActorId")),
+                    "{roster_type}"
+                );
                 let status = dispatch_status(root.as_ref(), "detailed").await;
                 assert_ne!(status["status"], "failed", "{status:?}");
             })
@@ -1862,10 +1868,12 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     let admitted = idle_send.await.unwrap();
     assert_eq!(admitted["status"], "committed", "{admitted:?}");
     for name in ["respond", "sessionReply", "sessionInput"] {
-        let absent = dispatch_lookup(idle.policy.as_ref(), &[name]).await;
+        let absent = dispatch_haskell_script(idle.policy.as_ref(), name).await;
+        assert_eq!(absent["status"], "rejected", "{absent}");
+        assert_eq!(absent["items"][0]["failureLayer"], "compile", "{absent}");
         assert!(
-            absent.to_string().to_lowercase().contains("no match"),
-            "idle recipient gained {name}: {absent:?}"
+            absent.to_string().contains(name) && absent.to_string().contains("not in scope"),
+            "idle recipient gained {name}: {absent}"
         );
     }
     campaign.assert_no_deployment("idle admission fabricated an activation", |_| true);
@@ -1980,14 +1988,11 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
         .await;
 }
 
-/// Companion to [`held_native_delivery_preserves_typed_request_bindings`]:
-/// `lookup` selects the same request-aware workbench `respond` cells do,
-/// and the extractor resolves the preamble's own declarations (where
-/// `respond`/`sessionReply`/`sessionInput` are bound) through the query
-/// module's typechecked environment, since that module is never loaded and
-/// `getInfo` alone cannot see its top level.
+/// The request-local helpers keep their exact types while a notification is
+/// durably admitted to the actor's inbox. Pure bindings check the compiler's
+/// request-aware scope without running the pending response action.
 #[tokio::test]
-async fn lookup_during_held_native_delivery_returns_respond_signature() {
+async fn notebook_during_held_native_delivery_retains_typed_request_bindings() {
     let campaign = test_campaign::TestCampaign::start().await;
     campaign
         .run_scenario(|campaign| {
@@ -2049,13 +2054,19 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
                 let sent = send.await.unwrap();
                 assert_eq!(sent["status"], "committed", "{sent:?}");
 
-                for name in ["respond", "sessionReply", "sessionInput"] {
-                    let found = dispatch_lookup(child.policy.as_ref(), &[name]).await;
-                    assert!(
-                        !found.to_string().to_lowercase().contains("no match"),
-                        "expected {name} to resolve while the request is pending: {found:?}"
-                    );
-                }
+                let found = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "import qualified Data.Void as FixtureVoid\nlet heldRequestBindings = ((respond :: Text -> Eff '[Replies] FixtureVoid.Void), (sessionReply :: Reply Text), (sessionInput :: Text))",
+                ).await;
+                assert_eq!(found["status"], "committed", "{found}");
+                assert!(
+                    found["items"].as_array().unwrap().iter().any(|item| {
+                        item["installedBindings"].as_array().is_some_and(|bindings| {
+                            bindings.iter().any(|binding| binding == "heldRequestBindings")
+                        })
+                    }),
+                    "{found}"
+                );
 
                 // Settle the request so the campaign shuts down cleanly.
                 let reply = dispatch_haskell_script(
