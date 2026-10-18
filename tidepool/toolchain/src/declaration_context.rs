@@ -14832,25 +14832,21 @@ mod tests {
             )
         };
         let scratch = tempfile::tempdir().unwrap();
-        let base = extend(&initial, product("Native", 7, 11));
+        let native = product("Native", 7, 11);
+        let base = extend(&initial, native.clone());
         let base_request = base
             .prepare_compilation(&scratch.path().join("base"), &producer)
             .unwrap();
         assert!(base_request.groups.is_empty());
-        let demand = |request: &ExactCompilationRequest, module: &str| {
+        let demand = |request: &ExactCompilationRequest, expected: &CertifiedRecoveryProduct| {
+            let module = expected.owner().module.as_str();
             let inputs = request.compiler_inputs();
             assert!(inputs.artifacts().selected_native_groups().is_empty());
-            let (id, product) = inputs
-                .metadata
-                .entries
-                .values()
-                .find_map(|entry| match &entry.payload {
-                    ArtifactPayload::Original(product) if product.owner().module == module => {
-                        Some((entry.descriptor.id, product.clone()))
-                    }
-                    _ => None,
-                })
-                .unwrap();
+            let id = ArtifactEntry::original(producer, expected.clone())
+                .unwrap()
+                .descriptor
+                .id;
+            let product = expected;
             let definitions =
                 crate::certified_products::original_native_group_definitions(&product, 7).unwrap();
             let binding = match &definitions.bindings()[0] {
@@ -14922,9 +14918,18 @@ mod tests {
                 std::fs::read(&physical.product.as_ref().unwrap().path).unwrap(),
                 product.product_bytes()
             );
-            product
+            target
+                .artifacts()
+                .entries_for_artifacts(&BTreeSet::from([id]))
+                .unwrap()
+                .into_iter()
+                .find_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(product) => Some(product.clone()),
+                    _ => None,
+                })
+                .expect("the resolved target retains its exact original payload")
         };
-        let base_native = demand(&base_request, "Native");
+        let base_native = demand(&base_request, &native);
         assert_eq!(base_native.owner().module_version.0, [7; 32]);
         assert!(matches!(
             crate::certified_products::original_native_group_imports(&base_native, 7).unwrap()[0],
@@ -14964,8 +14969,10 @@ mod tests {
             fields[7].clone()
         };
         let base_descriptor = native_descriptor(&base_request);
-        let left = extend(&base, product("Left", 8, 12));
-        let right = extend(&base, product("Right", 9, 13));
+        let left_product = product("Left", 8, 12);
+        let right_product = product("Right", 9, 13);
+        let left = extend(&base, left_product.clone());
+        let right = extend(&base, right_product.clone());
         let left_request = left
             .prepare_compilation(&scratch.path().join("left"), &producer)
             .unwrap();
@@ -15006,13 +15013,14 @@ mod tests {
         assert_eq!(visited.len(), 4, "the diamond visits its shared base once");
         assert_eq!(visited[0], Arc::as_ptr(base_owner));
         assert_eq!(visited[3], Arc::as_ptr(joined_owner));
-        for (branch, module, version, generation) in [
-            (&base_request, "Native", 7, 11),
-            (&left_request, "Left", 8, 12),
-            (&right_request, "Right", 9, 13),
+        for (branch, expected, version, generation) in [
+            (&base_request, &native, 7, 11),
+            (&left_request, &left_product, 8, 12),
+            (&right_request, &right_product, 9, 13),
         ] {
-            let original = demand(branch, module);
-            let selected = demand(&joined_request, module);
+            let module = expected.owner().module.as_str();
+            let original = demand(branch, expected);
+            let selected = demand(&joined_request, expected);
             assert_eq!(selected.owner(), original.owner());
             assert_eq!(selected.owner().module_version.0, [version; 32]);
             assert_eq!(selected.product_bytes(), original.product_bytes());
@@ -15048,12 +15056,13 @@ mod tests {
             );
         }
 
-        let replacement = extend(&initial, product("Native", 10, 22));
+        let replacement_product = product("Native", 10, 22);
+        let replacement = extend(&initial, replacement_product.clone());
         let replacement_request = replacement
             .prepare_compilation(&scratch.path().join("replacement"), &producer)
             .unwrap();
         assert!(replacement_request.groups.is_empty());
-        let selected = demand(&replacement_request, "Native");
+        let selected = demand(&replacement_request, &replacement_product);
         assert_eq!(selected.owner().module_version.0, [10; 32]);
         assert_ne!(selected.owner(), base_native.owner());
         assert!(matches!(
@@ -15061,7 +15070,10 @@ mod tests {
             crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
         ));
         {
-            let metadata = &replacement_request.compiler_inputs().metadata;
+            let metadata = &replacement_request
+                .compiler_inputs()
+                .native_transport
+                .metadata;
             let mixed = RetainedArtifactMaterialization::select_custody_inputs(
                 &[
                     Arc::clone(joined_owner),
