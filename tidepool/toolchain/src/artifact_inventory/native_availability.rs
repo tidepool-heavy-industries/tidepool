@@ -121,7 +121,7 @@ pub(super) fn bind_certified_input_demand(
         .id;
         let mut compatible = Vec::new();
         for group in candidates {
-            let Some(offer) = selection.issued_group_offer(*key, product.owner(), group) else {
+            let Some(support) = selection.native_group_support(*key, product.owner(), group) else {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: key.artifact,
@@ -130,12 +130,37 @@ pub(super) fn bind_certified_input_demand(
                 ));
             };
             let node = InventoryNodeKey::Group(group);
-            let owned = offer
-                .custody_snapshot()
-                .nodes_from_seeds([node])
-                .map_err(|_| failure("issued native dependency closure missing"))?;
-            if !offer.contains_checked_group(group)
-                || !state.contains_node(&node)
+            let (owned, payloads) = match support {
+                crate::certified_products::CertifiedNativeGroupSupport::Issued(offer) => {
+                    if !offer.contains_checked_group(group) {
+                        return Err(failure("issued native contribution lacks demanded group"));
+                    }
+                    (
+                        offer
+                            .custody_snapshot()
+                            .nodes_from_seeds([node])
+                            .map_err(|_| failure("issued native dependency closure missing"))?,
+                        &offer.custody_lease().payloads,
+                    )
+                }
+                crate::certified_products::CertifiedNativeGroupSupport::NewProductDependency(
+                    proof,
+                ) => {
+                    validate_issued_selection(
+                        state,
+                        &parent.read_projection(state).nodes,
+                        proof.selection.graph_selection(),
+                    )?;
+                    (
+                        admitted_closure(state, [node].into_iter())
+                            .iter()
+                            .copied()
+                            .collect(),
+                        &parent.lease.payloads,
+                    )
+                }
+            };
+            if !state.contains_node(&node)
                 || admitted_closure(state, [node].into_iter())
                     .iter()
                     .copied()
@@ -183,7 +208,7 @@ pub(super) fn bind_certified_input_demand(
                         && *edge == ArtifactDependency::Interface
                 })
             {
-                compatible.push((group, offer, owned));
+                compatible.push((group, payloads, owned));
             }
         }
         if compatible.len() > 1 {
@@ -193,7 +218,7 @@ pub(super) fn bind_certified_input_demand(
                 },
             ));
         }
-        let Some((group, offer, owned)) = compatible.pop() else {
+        let Some((group, payloads, owned)) = compatible.pop() else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeGroupUnavailable {
                     artifact: key.artifact,
@@ -205,9 +230,7 @@ pub(super) fn bind_certified_input_demand(
         // authority for membership; no sibling proof roots enter selection.
         for node in owned {
             if let InventoryNodeKey::Artifact(binding) = node {
-                let payload = offer
-                    .custody_lease()
-                    .payloads
+                let payload = payloads
                     .get(&binding.artifact)
                     .ok_or_else(|| failure("issued native dependency payload missing"))?;
                 if entries
