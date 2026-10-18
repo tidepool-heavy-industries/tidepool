@@ -8658,7 +8658,7 @@ impl ExactDeclarationContext {
     ) -> Result<ExactCompilationRequest, CompileError> {
         let scaffold = ProtectedScaffoldRequirements::default();
         let inputs = scaffold.compiler_inputs(self, None)?;
-        let metadata = &inputs.metadata;
+        let metadata = &inputs.native_transport.metadata;
         if !root.is_absolute()
             || self
                 .owner
