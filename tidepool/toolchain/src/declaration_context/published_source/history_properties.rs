@@ -636,9 +636,9 @@ proptest! {
             context.clone().extend_issued_compiler_support(&other)
         else { panic!("a competing selected original must refuse publication reopening") };
         prop_assert!(detail.starts_with("exact declaration context: published selection changes a selected original dependency"));
-        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.owner)));
-        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.id)));
-        prop_assert!(detail.contains(&format!("{:?}", other_helper.descriptor.id)));
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.owner)), "refusal identifies the dependency owner");
+        prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.id)), "refusal identifies the issued original");
+        prop_assert!(detail.contains(&format!("{:?}", other_helper.descriptor.id)), "refusal identifies the competing original");
         prop_assert_eq!(context.semantic_sha256(), before);
     }
 }
