@@ -8765,12 +8765,13 @@ fn recovery_interface_materialization_work_is_independent_of_native_body_growth(
             producer,
         );
         native_sizes.push(product.product_bytes().len());
-        let payload = ArtifactPayload::Original(product);
+        let entry = Arc::new(ArtifactEntry::original(producer, product).unwrap());
         let directory = tempfile::tempdir().unwrap();
         let mut validation = PackageInterfaceValidation::default();
-        let files = recovery_artifacts::materialize_certified_interface(
+        let files = recovery_artifacts::materialize_selected_interface(
             directory.path(),
-            &payload,
+            &entry.descriptor.owner,
+            entry.clone(),
             producer,
             &mut validation,
         )

@@ -2142,12 +2142,11 @@ pub(crate) struct MaterializedInterfaceFiles {
 
 /// Project only the interface and package witness of an already authenticated
 /// payload. This does not issue, inspect or materialize its native availability.
-pub(crate) fn materialize_certified_interface(
-    root: &Path,
-    payload: &crate::artifact_inventory::ArtifactPayload,
+fn admit_certified_interface<'a>(
+    payload: &'a crate::artifact_inventory::ArtifactPayload,
     producer: [u8; 32],
     validation: &mut PackageInterfaceValidation,
-) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
+) -> Result<ValidatedInterfaceBytes<'a>, RecoveryArtifactError> {
     use crate::artifact_inventory::ArtifactPayload;
     let (unit, module, bytes, packages) = match payload {
         ArtifactPayload::Original(product) => (
@@ -2179,15 +2178,86 @@ pub(crate) fn materialize_certified_interface(
             )
         }
     };
-    materialize_owned_interface(
-        root,
-        producer,
-        unit,
-        module,
-        bytes,
-        packages,
-        validation,
-        MaterializationMode::Scratch,
+    ValidatedInterfaceBytes::admit(producer, unit, module, bytes, packages, validation)
+}
+
+struct ValidatedInterfaceInput {
+    entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+    skinny_iface_sha256: [u8; 32],
+}
+
+impl ValidatedInterfaceInput {
+    fn admit(
+        owner: &crate::declaration_join::ExactModuleIdentity,
+        entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+        producer: [u8; 32],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
+        if entry.descriptor.owner != *owner
+            || entry.descriptor.producer_sha256 != producer
+            || entry.descriptor.kind != entry.payload.artifact_kind()
+        {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let checked = admit_certified_interface(&entry.payload, producer, validation)?;
+        if checked.skinny_iface_sha256 != entry.descriptor.interface_sha256 {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let skinny_iface_sha256 = checked.skinny_iface_sha256;
+        Ok(Self {
+            entry,
+            skinny_iface_sha256,
+        })
+    }
+
+    fn materialize(
+        self,
+        root: &Path,
+        validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
+    ) -> Result<MaterializedInterfaceInput, RecoveryArtifactError> {
+        let (bytes, packages) = match &self.entry.payload {
+            crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                (product.interface_bytes(), product.package_imports_bytes())
+            }
+            crate::artifact_inventory::ArtifactPayload::Canonical(interface) => (
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            ),
+            crate::artifact_inventory::ArtifactPayload::Interface(interface, _) => (
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            ),
+        };
+        let checked = ValidatedInterfaceBytes {
+            bytes,
+            packages,
+            skinny_iface_sha256: self.skinny_iface_sha256,
+        };
+        let files = checked.materialize(root, validation, mode)?;
+        Ok(MaterializedInterfaceInput {
+            entry: self.entry,
+            files,
+        })
+    }
+}
+
+pub(crate) struct MaterializedInterfaceInput {
+    pub(crate) entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+    pub(crate) files: MaterializedInterfaceFiles,
+}
+
+pub(crate) fn materialize_selected_interface(
+    root: &Path,
+    owner: &crate::declaration_join::ExactModuleIdentity,
+    entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+    producer: [u8; 32],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
+    Ok(
+        ValidatedInterfaceInput::admit(owner, entry, producer, validation)?
+            .materialize(root, validation, MaterializationMode::Scratch)?
+            .files,
     )
 }
 
@@ -2619,6 +2689,7 @@ pub(crate) struct ValidatedCertifiedProducts<'a, 'validation> {
         BTreeMap<[u8; 32], &'a Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
     interfaces: Vec<ValidatedModuleInterface<'a>>,
     validation: &'validation mut PackageInterfaceValidation,
+    inherited_interfaces: Vec<ValidatedInterfaceInput>,
 }
 
 impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
@@ -2729,14 +2800,48 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
             source_graphs,
             interfaces,
             validation,
+            inherited_interfaces: Vec::new(),
         })
+    }
+
+    pub(crate) fn validation(&mut self) -> &mut PackageInterfaceValidation {
+        self.validation
+    }
+
+    pub(crate) fn include_interfaces(
+        &mut self,
+        producer: [u8; 32],
+        entries: BTreeMap<
+            crate::declaration_join::ExactModuleIdentity,
+            Arc<crate::artifact_inventory::ArtifactEntry>,
+        >,
+    ) -> Result<(), RecoveryArtifactError> {
+        for (owner, entry) in entries {
+            crate::host_work::checkpoint()?;
+            self.inherited_interfaces
+                .push(ValidatedInterfaceInput::admit(
+                    &owner,
+                    entry,
+                    producer,
+                    self.validation,
+                )?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn interface_entries(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::ArtifactEntry> {
+        self.inherited_interfaces
+            .iter()
+            .map(|input| input.entry.as_ref())
     }
 
     pub(crate) fn materialize(
         self,
         recovery_root: &Path,
         mode: MaterializationMode,
-    ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+    ) -> Result<MaterializedCertifiedProducts, RecoveryArtifactError> {
         let validation = self.validation;
         let toolchain_identity_sha256 = self.producer;
         let owned = prepare_owned_directory(recovery_root, mode)?;
@@ -2842,8 +2947,20 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
         if mode == MaterializationMode::Durable {
             File::open(&owned)?.sync_all()?;
         }
-        Ok(refs)
+        let mut interfaces = Vec::with_capacity(self.inherited_interfaces.len());
+        for input in self.inherited_interfaces {
+            interfaces.push(input.materialize(recovery_root, validation, mode)?);
+        }
+        Ok(MaterializedCertifiedProducts {
+            products: refs,
+            interfaces,
+        })
     }
+}
+
+pub(crate) struct MaterializedCertifiedProducts {
+    pub(crate) products: Vec<RecoveryArtifactRef>,
+    pub(crate) interfaces: Vec<MaterializedInterfaceInput>,
 }
 
 pub(crate) fn materialize_certified_products_with_validation(
@@ -2853,8 +2970,11 @@ pub(crate) fn materialize_certified_products_with_validation(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
-    ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?
-        .materialize(recovery_root, mode)
+    Ok(
+        ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?
+            .materialize(recovery_root, mode)?
+            .products,
+    )
 }
 
 /// Read captured path inputs into owned bundles, then use the same immutable
