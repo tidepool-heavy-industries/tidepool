@@ -2377,30 +2377,6 @@ impl ExactCompileContext {
             private,
         )
     }
-
-    pub(crate) fn prepare_compilation_authorizing_with_private_input(
-        &self,
-        root: &Path,
-        producer: &[u8],
-        authorize: impl FnOnce(
-            [u8; 32],
-        ) -> Result<(Value, Option<OriginalCompilerInputs>), CompileError>,
-    ) -> Result<ExactCompilationRequest, CompileError> {
-        self.declarations
-            .prepare_compilation_authorizing_with_scaffold(
-                root,
-                producer,
-                &self.protected_scaffold,
-                |semantic| {
-                    let (authorization, private) = authorize(semantic)?;
-                    Ok((
-                        self.authorization(Some(authorization))
-                            .expect("purpose authorization"),
-                        private,
-                    ))
-                },
-            )
-    }
 }
 
 impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
@@ -7201,38 +7177,6 @@ impl ExactDeclarationContext {
             joins,
             values,
             None,
-            lexical,
-        )
-    }
-    pub fn capture_recovery_with_inventory(
-        root: &Path,
-        products: &[RecoveryArtifactRef],
-        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
-        joins: &[RecoveryJoinRef],
-        values: &[RecoveryValueInterfaceRef],
-        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
-        dependencies: &[(
-            crate::artifact_inventory::ArtifactId,
-            crate::artifact_inventory::ArtifactId,
-            crate::artifact_inventory::ArtifactDependency,
-        )],
-        native_groups: &[crate::artifact_inventory::NativeGroupKey],
-        compiler_roles: &[CompilerInputRole],
-        lexical: Vec<ExactLexicalNode>,
-    ) -> Result<Self, CompileError> {
-        let inventory = RecoveredArtifactInventory::capture_inputs(
-            root,
-            products,
-            module_interfaces,
-            joins,
-            values,
-            Some((descriptors, dependencies)),
-        )
-        .map_err(failure)?;
-        inventory.context_with_roles(
-            &inventory.entries.keys().copied().collect::<Vec<_>>(),
-            native_groups,
-            compiler_roles,
             lexical,
         )
     }
