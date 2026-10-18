@@ -3172,11 +3172,22 @@ mod tests {
                 .unwrap();
             let support =
                 CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
-            assert!(support
-                .input_decisions
-                .facts
-                .values()
-                .all(|fact| fact.groups.is_empty() == empty));
+            assert_eq!(support.input_decisions.facts.len(), entries.len());
+            for (entry, ordinal) in entries.iter().zip([9, 7, 3]) {
+                let choice = &support.input_decisions.facts[&entry.descriptor.owner];
+                let expected = if empty { vec![] } else { vec![ordinal] };
+                assert_eq!(choice.groups.keys().copied().collect::<Vec<_>>(), expected);
+            }
+            let parent = entries[1].descriptor.id;
+            assert_eq!(
+                support
+                    .native_offers
+                    .iter()
+                    .find(|offer| offer.original() == parent)
+                    .expect("the issued parent has an actual native offer")
+                    .is_full(),
+                !empty,
+            );
             assert!(matches!(
                 support
                     .artifacts
@@ -3244,13 +3255,8 @@ mod tests {
                 use crate::declaration_context::NativeTransportMode;
                 let before = type_only.native_availability.snapshot_facts().unwrap();
                 let after = narrowed.native_availability.snapshot_facts().unwrap();
-                assert!(before
-                    .values()
-                    .any(|row| row.mode == NativeTransportMode::Full));
-                assert!(!after.is_empty());
-                assert!(after
-                    .values()
-                    .all(|row| row.mode == NativeTransportMode::IssuedGroups));
+                assert_eq!(before[&parent].mode, NativeTransportMode::Full);
+                assert_eq!(after[&parent].mode, NativeTransportMode::Full);
             }
             assert_eq!(narrowed, expected);
             assert_eq!(
