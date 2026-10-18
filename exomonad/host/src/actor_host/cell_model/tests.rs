@@ -325,10 +325,12 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
                         "the real caller Console effect must run once: {result}"
                     );
                 }
-                let invalid = super::super::test_campaign::dispatch_haskell_script_result(
+                let invalid = dispatch_haskell_script(
                     endpoint.as_ref(),
                     "import qualified Exomonad.Models as Models\nlet invalidChoice = Models.Primary (Models.ArgonOptions Models.EffortLow)",
-                ).await.expect_err("wrong provider options must fail GHC typechecking");
+                ).await;
+                assert_eq!(invalid["status"], "rejected", "{invalid}");
+                assert_eq!(invalid["items"][0]["failureLayer"], "compile", "{invalid}");
                 let diagnostic = invalid.to_string();
                 assert!(diagnostic.contains("OpenAIOptions") && diagnostic.contains("ArgonOptions"),
                     "expected an options type mismatch, got: {diagnostic}");

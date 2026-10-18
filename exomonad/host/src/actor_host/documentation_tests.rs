@@ -175,9 +175,11 @@ async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
             );
             let result = displayed(campaign, root.as_ref(), &source).await;
             assert_eq!(super::test_campaign::committed_display_text(&result), "True");
-            let refusal = dispatch_haskell_script_result(root.as_ref(), &format!(
+            let refusal = dispatch_haskell_script(root.as_ref(), &format!(
                 "let invalidChoice = {invalid}"
-            )).await.expect_err("provider-mismatched options must fail typechecking");
+            )).await;
+            assert_eq!(refusal["status"], "rejected", "{primary}: {refusal}");
+            assert_eq!(refusal["items"][0]["failureLayer"], "compile", "{primary}: {refusal}");
             assert!(refusal.to_string().contains(expected_option), "{primary}: {refusal}");
         })).await;
     }
