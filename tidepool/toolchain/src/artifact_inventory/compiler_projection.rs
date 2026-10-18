@@ -2719,6 +2719,90 @@ mod tests {
     }
 
     #[test]
+    fn source_choice_affinity_does_not_resolve_unselected_ambiguous_custody() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let issue = |marker: &str, with_caller: bool| {
+            let selected = if with_caller {
+                &entries[..]
+            } else {
+                &entries[..2]
+            };
+            let mut issued = selected.to_vec();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), issued)
+                .unwrap();
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                view,
+            )
+            .unwrap()
+        };
+        let winner = issue("SelectedNamespaceMarker", false);
+        let historical = issue("HistoricalNamespaceMarker", true);
+        let extra = issue("CustodyOnlyMarker", false);
+        let mut losing = historical
+            .artifacts
+            .retain_custody(&extra.artifacts)
+            .unwrap();
+        // Exercise the artifact merge boundary with authentic issued choices
+        // and graphs, but no losing namespace endorsement. Metadata role
+        // equality cannot resolve or promote this ambiguous byte custody.
+        losing.replace_namespace(&BTreeMap::new());
+        let parent = &entries[1];
+        {
+            let state = losing.lease.inventory.0.lock().unwrap();
+            let owned = &losing.read_projection(&state).nodes;
+            assert!(
+                matches!(losing.resolve_binding(parent.descriptor.id, owned),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                        if artifact == parent.descriptor.id))
+            );
+        }
+        let expected = losing
+            .binding_dependencies()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let (joined, projection, decisions) = winner
+            .artifacts
+            .merge_compiler_inputs_with_demand(
+                &winner.projection,
+                &losing,
+                &historical.projection,
+                CompilerNativeDemand::SourceSelections {
+                    left: Some(&winner.input_decisions),
+                    right: Some(&historical.input_decisions),
+                },
+                CompilerInputValidation::Closed,
+            )
+            .expect("unselected ambiguous custody cannot veto an exact selected choice");
+        assert_eq!(
+            projection,
+            winner.projection.merge(&historical.projection).unwrap()
+        );
+        assert_eq!(
+            decisions.facts[&parent.descriptor.owner].groups,
+            winner.input_decisions.facts[&parent.descriptor.owner].groups
+        );
+        let selected = joined.capture_graph_selection().native_groups;
+        let caller_group =
+            historical.input_decisions.facts[&entries[2].descriptor.owner].groups[&3];
+        let historical_parent =
+            historical.input_decisions.facts[&parent.descriptor.owner].groups[&7];
+        assert!(selected.contains(&caller_group));
+        assert!(selected.contains(&historical_parent));
+        drop(extra);
+        drop(historical);
+        drop(losing);
+        assert!(expected.is_subset(&joined.binding_dependencies().into_iter().collect()));
+    }
+
+    #[test]
     fn source_merge_refuses_different_group_choices_with_the_same_exact_issuer() {
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
