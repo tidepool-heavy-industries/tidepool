@@ -1559,18 +1559,37 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     assert_ne!(replacement_b.descriptor.id, b_id);
     let b = base.select_roots(vec![b_id]).unwrap();
     let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
-    let b_context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
-        producer: producer.sha256(),
-        compiler_support: recover_fixture_compiler_support(
-            b_projection.clone(),
-            b.clone(),
-            [ancestor_offer.clone(), dependency_offer.clone()],
-        )
-        .unwrap(),
-        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-        template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
-    });
+    let b_context = {
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: recover_fixture_compiler_support(
+                b_projection.clone(),
+                b.clone(),
+                [ancestor_offer.clone(), dependency_offer.clone()],
+            )
+            .unwrap(),
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        let missing_row = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&context, None)
+            .err()
+            .expect("a selected original without its issued permission row must refuse");
+        assert!(
+            matches!(&missing_row, CompileError::ExtractFailed(detail)
+                if detail == "exact declaration context: selected original lacks its normalized native permission row"),
+            "unexpected missing-row refusal: {missing_row:?}",
+        );
+        context.rebuild(|facts| {
+            facts.compiler_support = facts
+                .compiler_support
+                .retain_normalized_availability(
+                    &RequestNativeAvailability::from_issued_rows([Arc::clone(&receipt)]).unwrap(),
+                )
+                .expect("the already issued B row matches its selected canonical role");
+        })
+    };
     let inputs = ProtectedScaffoldRequirements::default()
         .compiler_inputs(&b_context, None)
         .unwrap();
