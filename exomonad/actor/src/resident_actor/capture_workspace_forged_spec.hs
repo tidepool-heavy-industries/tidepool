@@ -22,7 +22,7 @@ do
   started <- send (Core.ForkAgentSpawnWith Core.OpenAIWitness
     (\_ -> installPreparedSpec invalidPrepared >> Agents.installRequestReceiver)
     (Core.CapturedSpawn "CHECKPOINT_TOKEN")
-    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON ([] :: [Text])) (Just "forged-spec-child")
+    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON (Selection.modelPermissionRequests Selection.noModelPermissions)) (Just "forged-spec-child")
     (toJSON (Selection.modelSelection (Selection.openAI "capture-catalog" "reader" (Selection.OpenAIOptions Selection.OpenAILow))))
     Nothing Core.ActorOwned Nothing
     (preparedAgentSpecMetadata validPrepared))

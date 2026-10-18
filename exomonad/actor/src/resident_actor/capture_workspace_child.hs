@@ -10,7 +10,7 @@ do
   let Right prepared = prepareAgentSpec actualSpec
   started <- send (Core.ForkAgentSpawnWith Core.OpenAIWitness
     (\_ -> installPreparedSpec prepared >> Agents.installRequestReceiver) (Core.CapturedSpawn "CHECKPOINT_TOKEN")
-    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON ([] :: [Text])) (Just "CHILD_LABEL")
+    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON (Selection.modelPermissionRequests Selection.noModelPermissions)) (Just "CHILD_LABEL")
     (toJSON (Selection.modelSelection (Selection.openAI "capture-catalog" "reader" (Selection.OpenAIOptions Selection.OpenAILow))))
     Nothing CHILD_LIFETIME Nothing (preparedAgentSpecMetadata prepared))
   case started of
