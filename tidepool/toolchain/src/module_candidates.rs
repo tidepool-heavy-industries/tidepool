@@ -445,7 +445,7 @@ pub(crate) fn record_deployment_acceptance(
     if !candidates
         .by_owner
         .values()
-        .any(|bundle| matches!(bundle.origin, CandidateOrigin::Deployment { .. }))
+        .any(|bundle| matches!(bundle.origin, CandidateOrigin::Deployment))
     {
         return;
     }
@@ -459,7 +459,7 @@ pub(crate) fn record_deployment_acceptance(
             let bundle = candidates
                 .by_owner
                 .get(&(module.unit.clone(), module.module.clone()))?;
-            matches!(bundle.origin, CandidateOrigin::Deployment { .. }).then_some(bundle)
+            matches!(bundle.origin, CandidateOrigin::Deployment).then_some(bundle)
         })
         .collect();
     tracing::info!(target: "tidepool_toolchain::module_candidates",
@@ -566,7 +566,7 @@ impl std::ops::Deref for CandidateRecord {
 }
 
 impl CandidateRecord {
-    fn acquired_artifacts(&self) -> Option<&Arc<deployment::DeploymentArtifactPaths>> {
+    fn acquired_artifacts(&self) -> Option<&Arc<deployment::CapturedCatalogInputs>> {
         match self {
             Self::Deployment(record) => record.artifacts(),
             Self::Encoded(_) => None,
@@ -1690,7 +1690,7 @@ fn omit_or_refuse_candidate(
     module: &str,
     reason: CacheOfferOmission,
 ) -> bool {
-    if matches!(origin, CandidateOrigin::Deployment { .. }) {
+    if matches!(origin, CandidateOrigin::Deployment) {
         tracing::warn!(target: "tidepool_toolchain::module_candidates",
             unit, module, ?reason, location = %std::panic::Location::caller(),
             "deployment candidate refused");
@@ -1882,10 +1882,7 @@ fn ordinary_records_with_limits(
 #[derive(Clone, Debug)]
 pub(crate) enum CandidateOrigin {
     Ordinary,
-    Deployment {
-        interface: PathBuf,
-        packages: PathBuf,
-    },
+    Deployment,
 }
 
 /// Ordinary cache policy retains exact ordered include roots.
@@ -2764,12 +2761,13 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             })
             .collect();
         let owner = record.original_owner.owner();
-        let (iface_path, package_imports_path) = match &origin {
-            CandidateOrigin::Deployment {
-                interface,
-                packages,
-            } => (interface.clone(), packages.clone()),
-            CandidateOrigin::Ordinary => {
+        let (iface_path, package_imports_path) = match record.record.acquired_artifacts() {
+            Some(inputs) => {
+                use crate::declaration_context::original_inputs::OriginalInputKind as Kind;
+                (inputs.receiving_alias(Kind::Interface)?.to_owned(),
+                 inputs.receiving_alias(Kind::Packages)?.to_owned())
+            }
+            None => {
                 let iface_path = scratch.join(format!(
                     "candidate-{}.hi",
                     sha(format!("{}:{}", record.unit, record.module).as_bytes())
@@ -2782,26 +2780,24 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             }
         };
         let canonical = &record.canonical;
-        let (canonical_root, canonical_reference) = match record.record.acquired_artifacts() {
-            Some(artifacts) => (
-                artifacts.canonical_root.clone(),
-                artifacts.canonical.clone(),
-            ),
-            None => (
-                scratch.clone(),
-                crate::recovery_artifacts::materialize_module_interface(
-                    &scratch,
-                    canonical,
-                    &mut package_validation,
-                    crate::recovery_artifacts::MaterializationMode::Scratch,
-                )
-                .ok()?,
-            ),
-        };
-        let core_reference = canonical_reference.core.as_ref().or_else(|| {
-        tracing::warn!(target: "tidepool_toolchain::module_candidates", unit = %record.unit, module = %record.module, "candidate has no core reference");
-        None
-    })?;
+        let (certificate_path, certificate_sha256, core_path, core_sha256) =
+            match record.record.acquired_artifacts() {
+                Some(inputs) => {
+                    use crate::declaration_context::original_inputs::OriginalInputKind as Kind;
+                    (inputs.receiving_alias(Kind::Certificate)?.to_owned(),
+                     *inputs.transport(Kind::Certificate)?.sha256(),
+                     inputs.receiving_alias(Kind::Core)?.to_owned(),
+                     *inputs.transport(Kind::Core)?.sha256())
+                }
+                None => {
+                    let reference = crate::recovery_artifacts::materialize_module_interface(
+                        &scratch, canonical, &mut package_validation,
+                        crate::recovery_artifacts::MaterializationMode::Scratch).ok()?;
+                    let core = reference.core.as_ref()?;
+                    (scratch.join(&reference.certificate_path), reference.certificate_sha256,
+                     scratch.join(&core.path), core.sha256)
+                }
+            };
         let bundle = CandidateBundle {
             owner: owner.clone(),
             product: record.record.product(product),
@@ -2831,7 +2827,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
         }
         let selected = &by_owner[&(record.unit.clone(), record.module.clone())];
         let product_path = match selected.product.bytes {
-            CandidateProductBytes::Deployment(ref record) => record.artifacts()?.product.clone(),
+            CandidateProductBytes::Deployment(ref record) => record.artifacts()?.receiving_alias(crate::declaration_context::original_inputs::OriginalInputKind::Native)?.to_owned(),
             CandidateProductBytes::Owned(_) => {
                 let path =
                     scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
@@ -2854,10 +2850,10 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             packages_sha256: sha(&selected.package_imports_bytes),
             product: product_path,
             canonical_requirements: canonical.requirements().clone(),
-            certificate: canonical_root.join(&canonical_reference.certificate_path),
-            certificate_sha256: canonical_reference.certificate_sha256,
-            core: canonical_root.join(&core_reference.path),
-            core_sha256: core_reference.sha256,
+            certificate: certificate_path,
+            certificate_sha256,
+            core: core_path,
+            core_sha256,
         }))
     }).ok()?;
     let originals = context
@@ -2891,11 +2887,10 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             .map(|(digest, graph)| {
                 let retained = by_owner.values().find_map(|bundle| {
                     let custody = bundle.original_module_interface.catalog_input_custody()?;
-                    custody
-                        .graph
-                        .as_ref()
-                        .filter(|(seal, _)| *seal == digest)
-                        .map(|(_, path)| path.clone())
+                    use crate::declaration_context::original_inputs::OriginalInputKind as Kind;
+                    (custody.transport(Kind::Graph)?.sha256() == &digest)
+                        .then(|| custody.receiving_alias(Kind::Graph).map(Path::to_owned))
+                        .flatten()
                 });
                 let path = match retained {
                     Some(path) => path,
@@ -3092,11 +3087,21 @@ fn candidate_owned_acquisition(
         }
         for (kind, path, bytes) in parts {
             aliases.insert((key.clone(), kind), path);
-            if let Some(slice) = canonical
-                .catalog_input_custody()
-                .and_then(|custody| custody.owned_inputs.get(&kind).cloned())
-            {
-                acquired.insert((key.clone(), kind), slice);
+            if let Some(custody) = canonical.catalog_input_custody() {
+                let slice = custody.transport(kind)?;
+                let expected = match kind {
+                    Kind::Interface => parse_sha(row[5].as_text()?)?,
+                    Kind::Packages => parse_sha(row[12].as_text()?)?,
+                    Kind::Native => parse_sha(row[7].as_text()?)?,
+                    Kind::Certificate => parse_sha(evidence[2].as_text()?)?,
+                    Kind::Core => parse_sha(evidence[4].as_text()?)?,
+                    Kind::Graph => bundle.original_execution.as_ref()?.graph.digest(),
+                    Kind::Census => return None,
+                };
+                if slice.len() != bytes.len() as u64 || slice.sha256() != &expected {
+                    return None;
+                }
+                acquired.insert((key.clone(), kind), slice.clone());
             } else if kind == Kind::Graph {
                 let digest = bundle.original_execution.as_ref()?.graph.digest();
                 if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -5114,10 +5119,7 @@ pub(crate) mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut record = candidate_fixture(root.path(), "Library");
         let include = record.include.clone();
-        let deployment = || CandidateOrigin::Deployment {
-            interface: root.path().join("Library.hi"),
-            packages: root.path().join("Library.packages"),
-        };
+        let deployment = || CandidateOrigin::Deployment;
         let admitted = select_records_inner(
             b"endpoint",
             &include,

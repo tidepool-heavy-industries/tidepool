@@ -5,7 +5,7 @@ import Test.Tasty (withResource)
 import SourceBootCases
 import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -25,6 +25,7 @@ tests = testGroup "source-boot"
   , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
   , testCase "owned scope input reuse" ownedScopeInputReuse
+  , testCase "captured canonical promotion refuses readable missing inputs" capturedCanonicalPromotionRefusesReadableMissingInputs
   , testCase "fixture issuer counting histories" fixtureIssuerCountingHistories
   , testCase "retained compilation publication" retainedCompilationPublication
   , testCase "validation timing outcomes" validationTimingControl

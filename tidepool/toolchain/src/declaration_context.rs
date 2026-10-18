@@ -346,26 +346,11 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// Complete private compiler inputs from one already certified output.
 /// This retains exact native roles and their custody without publishing either
 /// authored lexical rights or persistent source-reuse roles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum OriginalInputDemand {
     RolePolicy,
-    // This is the existing immutable selection owner, not a census of its custody.
-    SelectedSource(ArtifactView),
+    Issued(crate::artifact_inventory::IssuedInputNativeDecisions),
 }
-
-impl PartialEq for OriginalInputDemand {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::RolePolicy, Self::RolePolicy) => true,
-            (Self::SelectedSource(left), Self::SelectedSource(right)) => {
-                crate::artifact_inventory::ExactArtifactSelection::capture(left)
-                    == crate::artifact_inventory::ExactArtifactSelection::capture(right)
-            }
-            _ => false,
-        }
-    }
-}
-impl Eq for OriginalInputDemand {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OriginalCompilerInputs {
@@ -473,19 +458,22 @@ impl OriginalCompilerInputs {
         producer: [u8; 32],
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability(
+        Self::issue_complete_native_availability_with_source(
             support.artifacts(),
             support.projection(),
             producer,
             products,
             &native_requirement_facts(support.native_offers()),
+            CompleteAvailabilitySource::Candidate(support),
         )
     }
 
-    pub(crate) fn selected_demand_source(&self) -> Option<&ArtifactView> {
+    pub(crate) fn issued_input_decisions(
+        &self,
+    ) -> Option<&crate::artifact_inventory::IssuedInputNativeDecisions> {
         match &self.demand {
             OriginalInputDemand::RolePolicy => None,
-            OriginalInputDemand::SelectedSource(source) => Some(source),
+            OriginalInputDemand::Issued(decisions) => Some(decisions),
         }
     }
 
@@ -619,7 +607,7 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
-            demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+            demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
@@ -668,7 +656,7 @@ impl OriginalCompilerInputs {
             let source = &context.owner.facts.compiler_support;
             let projection = source.projection().for_source_owners(&reused);
             let reused = Self {
-                demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+                demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
                 projection,
                 artifacts: source.artifacts().clone(),
                 native_offers: source.native_offers().to_vec(),
@@ -687,7 +675,7 @@ impl OriginalCompilerInputs {
             producer.sha256(),
             &fresh,
             &[],
-            Some(&context.owner.facts.compiler_support),
+            CompleteAvailabilitySource::Candidate(&context.owner.facts.compiler_support),
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -711,12 +699,13 @@ impl OriginalCompilerInputs {
         let projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
+        let continuation = ContinuationNativeInputs::from_selection(selection, &projection)?;
         let preferred = selection
             .native_original_requirements()
             .cloned()
             .collect::<Vec<_>>();
         let mut native_offers = Vec::new();
-        for issued in selection.issued_native_availability() {
+        for issued in continuation.availability_rows() {
             for offer in issued.offers() {
                 if !native_offers.contains(offer) {
                     native_offers.push(offer.clone());
@@ -738,7 +727,7 @@ impl OriginalCompilerInputs {
                 producer,
                 &complete,
                 &preferred,
-                None,
+                CompleteAvailabilitySource::Request(&continuation),
             )?;
             native_offers.extend(issued.native_offers);
             issued.artifacts
@@ -760,7 +749,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(&artifacts, &native_offers)?;
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         Ok(Self {
-            demand: OriginalInputDemand::RolePolicy,
+            demand: OriginalInputDemand::Issued(continuation.decisions),
             projection,
             artifacts,
             native_offers,
@@ -775,40 +764,10 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
-        Self::from_native_availability_with_requirements(context, producer, products, &[])
-    }
-
-    #[cfg(test)]
-    fn from_native_availability_with_requirements(
-        context: &ExactDeclarationContext,
-        producer: CanonicalProducerIdentity,
-        products: &[CertifiedRecoveryProduct],
-        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-    ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability(
-            &context.owner.facts.compiler_support.artifacts(),
-            &context.owner.facts.compiler_support.projection(),
+        Self::from_checked_support_products(
+            context.compiler_source_support(),
             producer.sha256(),
             products,
-            availability,
-        )
-    }
-
-    #[cfg(test)]
-    fn issue_complete_native_availability(
-        inventory: &ArtifactView,
-        baseline: &CompilerInputProjection,
-        producer_sha256: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
-        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-    ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability_with_source(
-            inventory,
-            baseline,
-            producer_sha256,
-            products,
-            availability,
-            None,
         )
     }
 
@@ -818,8 +777,12 @@ impl OriginalCompilerInputs {
         producer_sha256: [u8; 32],
         products: &[CertifiedRecoveryProduct],
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-        selected_source: Option<&crate::artifact_inventory::CompilerSourceSupport>,
+        source: CompleteAvailabilitySource<'_>,
     ) -> Result<Self, CompileError> {
+        let selected_source = match source {
+            CompleteAvailabilitySource::Candidate(source) => Some(source),
+            _ => None,
+        };
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
@@ -888,7 +851,7 @@ impl OriginalCompilerInputs {
                 }
             }
         }
-        let mut native_original_requirements =
+        let native_original_requirements =
             capture_native_original_requirements(&projection, inventory, &preferred)?;
         let effective = baseline.merge(&projection)?;
         let mut dependency_offers = Vec::new();
@@ -902,154 +865,41 @@ impl OriginalCompilerInputs {
                 dependency_offers.push(offer);
             }
         }
+        let dependencies = match source {
+            CompleteAvailabilitySource::Candidate(source) => {
+                crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
+            }
+            CompleteAvailabilitySource::Request(inputs) => {
+                crate::artifact_inventory::NativeDependencyCatalog::from_request(inputs)
+            }
+        };
+        // Physical request permissions are already frozen in its row catalog.
+        // Raw parent proofs cannot become namespace grants during reissuance.
+        let namespace_offers = match source {
+            CompleteAvailabilitySource::Request(_) => &[][..],
+            _ => dependency_offers.as_slice(),
+        };
         // Available code retains custody without selecting executable groups.
         let mut artifacts = effective.admit_interfaces_with_native_offers(
             inventory,
             entries.clone(),
-            &dependency_offers,
+            namespace_offers,
+            &dependencies,
         )?;
-        let issued = effective.admit_complete_native_products_with_dependencies(
-            &artifacts,
-            entries.clone(),
-            &dependency_offers,
-            selected_source.map_or(&[], |source| source.native_offers()),
-        )?;
-        for entry in &entries {
-            if entry.native_group_ordinals.is_empty() {
-                continue;
-            }
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                unreachable!()
-            };
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-                .descriptor
-                .id;
-            let proof =
-                crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
-                    entry.descriptor.id,
-                    canonical,
-                    &issued,
-                )?
-                .ok_or_else(|| {
-                    failure("complete private product lacks its issued dependency closure")
-                })?;
-            if !native_original_requirements.contains(&proof) {
-                native_original_requirements.push(proof);
-            }
-        }
-        artifacts = issued.retain_original_custody(&artifacts)?;
-        let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
-        let originals = metadata
-            .retained
-            .artifacts
-            .iter()
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
-        // The baseline exposes its issued selection. Only this private offer
-        // advertises complete native censuses; custody alone exposes no binder.
-        let mut advertised = metadata.retained.selected_native_groups.clone();
-        for role in projection.roles() {
-            let Some(id) = role.original() else { continue };
-            let product = originals
-                .get(&id)
-                .ok_or_else(|| failure("private original is outside retained custody"))?;
-            advertised.extend(
-                crate::certified_products::original_available_groups(product)
-                    .map_err(compiler_evidence_failure)?
-                    .map(|group| crate::artifact_inventory::NativeGroupKey {
-                        artifact: id,
-                        original_ordinal: group.original_ordinal(),
-                    }),
-            );
-        }
-        if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
-        {
-            let missing = advertised.iter().find_map(|key| {
-                let entry = metadata.retained.artifacts.get(&key.artifact)?;
-                entry
-                    .native_requirements
-                    .get(&key.original_ordinal)?
-                    .iter()
-                    .find_map(|(owner, dependency)| {
-                        let crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                            required_ordinal,
-                            ..
-                        } = dependency
-                        else {
-                            return None;
-                        };
-                        let required_owner = entry.native_owners.get(owner)?;
-                        let artifact = originals
-                            .iter()
-                            .find(|(_, product)| {
-                                crate::artifact_inventory::NativeOwnerKey::from_owner(
-                                    product.owner(),
-                                ) == *required_owner
-                            })?
-                            .0;
-                        let required = crate::artifact_inventory::NativeGroupKey {
-                            artifact: *artifact,
-                            original_ordinal: *required_ordinal,
-                        };
-                        (!advertised.contains(&required)).then_some((*key, required))
-                    })
-            });
-            if let Some((consumer, required)) = missing {
-                let recorded = native_original_requirements
-                    .iter()
-                    .map(|proof| {
-                        let graph = proof.selection.graph_selection();
-                        (
-                            proof.original,
-                            graph.native_groups.len(),
-                            graph
-                                .native_groups
-                                .iter()
-                                .filter(|group| {
-                                    group.binding.artifact() == required.artifact
-                                        && group.original_ordinal == required.original_ordinal
-                                })
-                                .copied()
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?consumer, ?required, ?recorded,
-                    "private availability dependency proof observation");
-            }
-        }
-        let mut private_closures = BTreeMap::new();
-        for requirement in &native_original_requirements {
-            let Some(closure) = requirement.qualify_availability(&artifacts)? else {
-                continue;
-            };
-            if let Some(previous) = private_closures.get(&closure.original()) {
-                if previous != &closure {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: closure.original(),
-                        },
-                    ));
-                }
-            } else {
-                private_closures.insert(closure.original(), closure);
-            }
-        }
-        crate::certified_products::validate_available_originals_with_validation(
-            &originals,
-            &advertised,
-            &private_closures.into_values().collect::<Vec<_>>(),
-            &mut validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let native_offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-            &projection,
-            &artifacts,
-            &native_original_requirements,
-        )?;
+        let native_offers = effective
+            .issue_complete_native_availability(
+                &artifacts,
+                entries,
+                namespace_offers,
+                &dependencies,
+            )?
+            .validate(
+                &artifacts,
+                &selected.retained.selected_native_groups,
+                &native_original_requirements,
+                &mut validation,
+            )?;
+        artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
         Ok(Self {
             demand: OriginalInputDemand::RolePolicy,
             projection,
@@ -1089,8 +939,14 @@ impl OriginalCompilerInputs {
         projection.validate(support)?;
         let native_offers = preserve_native_offers(&projection, support, &self.native_offers)?;
         let artifacts = retain_native_offers(support, &native_offers)?;
+        let demand = match &self.demand {
+            OriginalInputDemand::RolePolicy => OriginalInputDemand::RolePolicy,
+            OriginalInputDemand::Issued(decisions) => {
+                OriginalInputDemand::Issued(decisions.restricted(&projection, &artifacts))
+            }
+        };
         Ok(Self {
-            demand: self.demand.clone(),
+            demand,
             projection,
             artifacts,
             native_offers,
@@ -1098,7 +954,8 @@ impl OriginalCompilerInputs {
     }
 
     fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        let (artifacts, projection) = ArtifactView::merge_original_fragments(self, other)?;
+        let (artifacts, projection, decisions) =
+            ArtifactView::merge_original_fragments(self, other)?;
         // This joins alternatives, rather than selecting a caller namespace.
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
@@ -1107,13 +964,7 @@ impl OriginalCompilerInputs {
                 native_offers.push(offer.clone());
             }
         }
-        let demand = if self.selected_demand_source().is_some()
-            || other.selected_demand_source().is_some()
-        {
-            OriginalInputDemand::SelectedSource(artifacts.clone())
-        } else {
-            OriginalInputDemand::RolePolicy
-        };
+        let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
             demand,
             projection,
@@ -1131,9 +982,9 @@ impl OriginalCompilerInputs {
 }
 
 pub(crate) struct RequestCompilerInputs {
-    pub(crate) projection: CompilerInputProjection,
+    // Retained availability outlives the transport subset consumed by this request.
+    source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: CompilerArtifactMetadata,
-    pub(crate) artifacts: ArtifactView,
     native_transport: NativeCompilerTransport,
     declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
@@ -1141,17 +992,92 @@ pub(crate) struct RequestCompilerInputs {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeTransportAvailability {
+    original: Arc<ArtifactEntry>,
     mode: NativeTransportMode,
+    classification: NativeInputClassification,
     issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
+    contributions: Arc<[Arc<crate::artifact_inventory::NativeOfferContribution>]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeInputClassification {
+    CompilerRole,
+    PrivateInput,
 }
 
 #[derive(Clone, Debug)]
 enum NativeTransportMode {
     Full,
-    IssuedGroups(BTreeSet<u32>),
+    IssuedGroups,
+}
+
+/// One validated continuation supplies both physical availability and choices.
+/// No caller can combine rows from one request with another request's decisions.
+pub(crate) struct ContinuationNativeInputs<'a> {
+    _selection: &'a crate::certified_products::CertifiedSourceSelection,
+    projection: CompilerInputProjection,
+    rows: Vec<Arc<NativeTransportAvailability>>,
+    decisions: crate::artifact_inventory::IssuedInputNativeDecisions,
+}
+
+impl<'a> ContinuationNativeInputs<'a> {
+    fn from_selection(
+        selection: &'a crate::certified_products::CertifiedSourceSelection,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            _selection: selection,
+            projection: projection.clone(),
+            rows: selection.issued_native_availability().cloned().collect(),
+            decisions:
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    selection, projection,
+                )?,
+        })
+    }
+
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        &self.projection
+    }
+
+    pub(crate) fn availability_rows(&self) -> &[Arc<NativeTransportAvailability>] {
+        &self.rows
+    }
+    pub(crate) fn input_decisions(&self) -> &crate::artifact_inventory::IssuedInputNativeDecisions {
+        &self.decisions
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompleteAvailabilitySource<'a> {
+    Candidate(&'a crate::artifact_inventory::CompilerSourceSupport),
+    Request(&'a ContinuationNativeInputs<'a>),
 }
 
 impl NativeTransportAvailability {
+    pub(crate) fn original_owner(&self) -> &tidepool_repr::execution_schema::CachedHomeOwner {
+        let ArtifactPayload::Original(product) = &self.original.payload else {
+            unreachable!("transport issuer checked original payload")
+        };
+        product.owner()
+    }
+
+    /// Resolve one dependency through this physical request's issued row.
+    /// A retained parent proof cannot grant another row's or ordinal's rights.
+    pub(crate) fn dependency_support(
+        &self,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Option<NativeDependencySupport<'_>> {
+        (self.original.descriptor.id == key.artifact
+            && self.original_owner() == owner
+            && self.permits(key.original_ordinal))
+        .then_some(NativeDependencySupport {
+            availability: self,
+            key,
+        })
+    }
+
     pub(crate) fn offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
         &self.issuance
     }
@@ -1159,8 +1085,100 @@ impl NativeTransportAvailability {
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
         match &self.mode {
             NativeTransportMode::Full => true,
-            NativeTransportMode::IssuedGroups(groups) => groups.contains(&ordinal),
+            NativeTransportMode::IssuedGroups => self.contributions.iter().any(|contribution| {
+                contribution.permits(crate::artifact_inventory::NativeGroupKey {
+                    artifact: self.original.descriptor.id,
+                    original_ordinal: ordinal,
+                })
+            }),
         }
+    }
+
+    fn issued_ordinals(&self) -> BTreeSet<u32> {
+        self.contributions
+            .iter()
+            .flat_map(|contribution| contribution.ordinals(self.original.descriptor.id))
+            .collect()
+    }
+}
+
+/// A borrowed exact-key answer from an existing request availability owner.
+/// Its construction cannot bypass the row's identity and availability mode.
+pub(crate) struct NativeDependencySupport<'a> {
+    availability: &'a NativeTransportAvailability,
+    key: NativeGroupKey,
+}
+
+impl NativeDependencySupport<'_> {
+    pub(crate) fn groups(
+        &self,
+    ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
+        self.availability
+            .contributions
+            .iter()
+            .flat_map(|contribution| contribution.groups(self.key))
+    }
+}
+
+/// Issuer-bound input availability, independent of output visibility and roles.
+/// Only transport issuance constructs a nonempty component; clones retain its
+/// exact payload owners and opaque availability handles.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestNativeAvailability(
+    Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+);
+
+impl RequestNativeAvailability {
+    pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
+        self.0
+            .values()
+            .filter(|row| row.classification == NativeInputClassification::PrivateInput)
+    }
+
+    pub(crate) fn receipt_original(
+        &self,
+        unit: &str,
+        module: &str,
+        version: &tidepool_repr::execution_schema::ModuleVersion,
+    ) -> Result<Option<&NativeTransportAvailability>, CompileError> {
+        let mut candidates = self.issued().filter(|row| {
+            let owner = row.original_owner();
+            owner.unit == unit && owner.module == module && &owner.module_version == version
+        });
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                    owner: first.unwrap().original.descriptor.owner.clone(),
+                },
+            ));
+        }
+        Ok(first.map(Arc::as_ref))
+    }
+
+    pub(crate) fn requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.issued().flat_map(|availability| {
+            availability
+                .offers()
+                .iter()
+                .filter_map(|offer| offer.proof())
+        })
+    }
+
+    pub(crate) fn permits(
+        &self,
+        original: ArtifactId,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+        ordinal: u32,
+    ) -> Option<bool> {
+        self.0
+            .get(&original)
+            .filter(|row| row.classification == NativeInputClassification::PrivateInput)
+            .map(|availability| {
+                availability.original_owner() == owner && availability.permits(ordinal)
+            })
     }
 }
 
@@ -1168,7 +1186,8 @@ impl NativeTransportAvailability {
 /// Exact issuer bindings remain in the offers; transport records body availability.
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
-    availability: BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
+    availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    private: RequestNativeAvailability,
 }
 
 impl NativeCompilerTransport {
@@ -1180,7 +1199,7 @@ impl NativeCompilerTransport {
         &self,
         mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
     ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
-        for (original, availability) in &self.availability {
+        for (original, availability) in self.availability.iter() {
             let entry = self
                 .metadata
                 .retained
@@ -1216,31 +1235,52 @@ impl NativeCompilerTransport {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
         };
-        let mut availability = BTreeMap::new();
+        let mut availability = BTreeMap::<
+            ArtifactId,
+            Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
+        >::new();
         for entry in projection
             .entries
             .values()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
-            availability.insert(entry.descriptor.id, BTreeSet::new());
+            availability.insert(entry.descriptor.id, Vec::new());
         }
-        let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
-        let mut issuance =
-            BTreeMap::<ArtifactId, Vec<crate::artifact_inventory::IssuedNativeOffer>>::new();
+        let mut full = BTreeSet::new();
+        let mut originals_by_owner = BTreeMap::new();
         for offer in offers {
-            let groups = if offered_roots.contains(&offer.original()) {
-                offer.issued_group_carriers()?
-            } else {
-                offer.dependency_group_carriers(&offered_roots)?
-            };
-            if !offered_roots.contains(&offer.original())
-                && !groups
-                    .keys()
-                    .any(|group| offered_roots.contains(&group.binding.artifact()))
+            if offer
+                .qualified_private_availability(roles, artifacts)
+                .is_none()
             {
                 continue;
             }
+            let entry = metadata
+                .retained
+                .artifacts
+                .get(&offer.original())
+                .ok_or_else(|| failure("qualified native original is outside request custody"))?;
+            if originals_by_owner
+                .insert(entry.descriptor.owner.clone(), offer.original())
+                .is_some_and(|previous| previous != offer.original())
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                        owner: entry.descriptor.owner.clone(),
+                    },
+                ));
+            }
+        }
+        for offer in offers {
+            let private = offer.qualified_private_availability(roles, artifacts);
+            let mut contribution_roots = offered_roots.clone();
+            if private.is_some() {
+                contribution_roots.insert(offer.original());
+            }
+            let Some(contribution) = offer.contribution_for(&contribution_roots)? else {
+                continue;
+            };
             let consumed = if offered_roots.contains(&offer.original()) {
                 offer
                     .within_projection(roles, artifacts)?
@@ -1248,50 +1288,56 @@ impl NativeCompilerTransport {
             } else {
                 offer.clone()
             };
-            let offer = &consumed;
-            if offered_roots.contains(&offer.original()) {
-                let sources = issuance.entry(offer.original()).or_default();
-                if !sources.contains(offer) {
-                    sources.push(offer.clone());
-                }
-            }
-            // Each offer authenticates its own exact group-to-carrier edges.
-            // Independent offers may retain different bindings for the same body.
-            if offered_roots.contains(&offer.original()) && offer.is_full() {
-                if !groups
-                    .keys()
-                    .any(|group| group.binding.artifact() == offer.original())
-                {
+            // Qualification can demote Full, but cannot change exact membership.
+            let contribution = if consumed.is_full() == offer.is_full() {
+                contribution
+            } else {
+                consumed
+                    .contribution_for(&contribution_roots)?
+                    .expect("same checked contribution")
+            };
+            if (offered_roots.contains(&consumed.original()) && consumed.is_full())
+                || private.is_some()
+            {
+                if !contribution.originals().contains(&consumed.original()) {
                     return Err(failure("full native offer has no issued carrier"));
                 }
-                full.insert(offer.original());
+                full.insert(consumed.original());
             }
-            for group in groups.keys() {
-                let sources = issuance.entry(group.binding.artifact()).or_default();
-                if !sources.contains(offer) {
-                    sources.push(offer.clone());
+            let contribution = Arc::new(contribution);
+            if offered_roots.contains(&consumed.original()) || private.is_some() {
+                let contributions = availability.entry(consumed.original()).or_default();
+                if !contributions
+                    .iter()
+                    .any(|prior| prior.offer() == contribution.offer())
+                {
+                    contributions.push(Arc::clone(&contribution));
                 }
+            }
+            for original in contribution.originals() {
                 let entry = metadata
                     .retained
                     .artifacts
-                    .get(&group.binding.artifact())
+                    .get(original)
                     .ok_or_else(|| failure("issued native dependency is outside request custody"))?
                     .clone();
                 crate::artifact_inventory::validate_consumed_native_namespace(
                     &entry,
                     &metadata.entries,
                 )?;
-                let owner = &entry.descriptor.owner;
-                metadata.entries.insert(owner.clone(), entry);
-                availability
-                    .entry(group.binding.artifact())
-                    .or_default()
-                    .insert(group.original_ordinal);
+                metadata
+                    .entries
+                    .insert(entry.descriptor.owner.clone(), entry);
+                let contributions = availability.entry(*original).or_default();
+                if !contributions
+                    .iter()
+                    .any(|prior| prior.offer() == contribution.offer())
+                {
+                    contributions.push(Arc::clone(&contribution));
+                }
             }
         }
         for selected in &projection.retained.selected_native_groups {
-            // Retained generations can independently demand historical owners
-            // which this request does not offer to the compiler.
             if !projection
                 .entries
                 .values()
@@ -1299,35 +1345,73 @@ impl NativeCompilerTransport {
             {
                 continue;
             }
-            let Some(offer) = availability.get(&selected.artifact) else {
+            let Some(contributions) = availability.get(&selected.artifact) else {
                 continue;
             };
-            if !full.contains(&selected.artifact) && !offer.contains(&selected.original_ordinal) {
+            if !full.contains(&selected.artifact)
+                && !contributions
+                    .iter()
+                    .any(|contribution| contribution.permits(*selected))
+            {
                 return Err(failure(
                     "selected native group is outside issued availability",
                 ));
             }
         }
+        let role_originals = roles
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
         let availability = availability
             .into_iter()
-            .map(|(id, offer)| {
+            .map(|(id, contributions)| {
+                let original = metadata
+                    .retained
+                    .artifacts
+                    .get(&id)
+                    .ok_or_else(|| failure("issued native original is outside request custody"))?
+                    .clone();
+                if original.descriptor.id != id
+                    || !matches!(original.payload, ArtifactPayload::Original(_))
+                {
+                    return Err(failure(
+                        "issued native availability lacks its exact original payload",
+                    ));
+                }
                 let mode = if full.contains(&id) {
                     NativeTransportMode::Full
                 } else {
-                    NativeTransportMode::IssuedGroups(offer)
+                    NativeTransportMode::IssuedGroups
                 };
-                (
+                let mut issuance = Vec::new();
+                for contribution in &contributions {
+                    if !issuance.contains(contribution.offer()) {
+                        issuance.push(contribution.offer().clone());
+                    }
+                }
+                Ok((
                     id,
                     Arc::new(NativeTransportAvailability {
+                        original,
                         mode,
-                        issuance: issuance.remove(&id).unwrap_or_default().into(),
+                        classification: if role_originals.contains(&id) {
+                            NativeInputClassification::CompilerRole
+                        } else {
+                            NativeInputClassification::PrivateInput
+                        },
+                        contributions: contributions.into(),
+                        issuance: issuance.into(),
                     }),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let availability = Arc::new(availability);
+        let private = RequestNativeAvailability(Arc::clone(&availability));
         Ok(Self {
             metadata,
             availability,
+            private,
         })
     }
 }
@@ -1375,6 +1459,26 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    pub(crate) fn shared_compiler_source_support(
+        &self,
+    ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        Arc::clone(&self.source_support)
+    }
+
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.source_support
+    }
+
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        self.source_support.projection()
+    }
+
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        self.source_support.artifacts()
+    }
+
     #[cfg(test)]
     pub(crate) fn native_original_requirements(
         &self,
@@ -1399,6 +1503,10 @@ impl RequestCompilerInputs {
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
         self.native_transport.availability.get(&original).cloned()
+    }
+
+    pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
+        self.native_transport.private.clone()
     }
 
     pub(crate) fn available_original_sources(
@@ -1435,16 +1543,18 @@ impl ProtectedScaffoldRequirements {
         let support = context
             .compiler_source_support()
             .close_request(private, self)?;
-        let projection = support.projection().clone();
-        let artifacts = support.artifacts().clone();
-        let native_offers = support.native_offers();
-        let metadata = projection.project_metadata(artifacts.metadata_snapshot())?;
-        let native_transport =
-            NativeCompilerTransport::issue(&projection, &metadata, &artifacts, &native_offers)?;
+        let metadata = support
+            .projection()
+            .project_metadata(support.artifacts().metadata_snapshot())?;
+        let native_transport = NativeCompilerTransport::issue(
+            support.projection(),
+            &metadata,
+            support.artifacts(),
+            support.native_offers(),
+        )?;
         Ok(RequestCompilerInputs {
-            projection,
+            source_support: Arc::new(support),
             metadata,
-            artifacts,
             native_transport,
             declaration_semantic_sha256,
             original_sources: Default::default(),
@@ -1675,7 +1785,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "15";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "16";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -2505,7 +2615,7 @@ impl RecoveredArtifactInventory {
             .owner
             .facts
             .compiler_support
-            .restore_snapshot_offers(snapshot)?;
+            .restore_snapshot_evidence(snapshot)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
         Ok(context)
     }
@@ -4308,7 +4418,7 @@ impl ExactProductAdmission<'_> {
         let mut projection = self
             .request
             .compiler_inputs()
-            .projection
+            .projection()
             .within_view(artifacts)
             .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
         if let Some(support) = &self.request.program_support {
@@ -6098,6 +6208,11 @@ fn failure(message: impl std::fmt::Display) -> CompileError {
 
 fn materialization_failure(error: recovery_artifacts::RecoveryArtifactError) -> CompileError {
     match error {
+        recovery_artifacts::RecoveryArtifactError::InputDecision { owner, reason } => {
+            compiler_evidence_failure(
+                crate::certified_products::CertificationError::InputDecision { owner, reason },
+            )
+        }
         recovery_artifacts::RecoveryArtifactError::Io(error)
         | recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. }
             if error.kind() == std::io::ErrorKind::Interrupted =>
@@ -7152,7 +7267,6 @@ impl ExactDeclarationContext {
         self.owner
             .facts
             .compiler_support
-            .artifacts()
             .authored_native_binding_custody_requirements(owners)
     }
 
@@ -7215,6 +7329,12 @@ impl ExactDeclarationContext {
                 })
                 .collect(),
             lexical: self.owner.facts.lexical.clone(),
+            input_decisions: self
+                .owner
+                .facts
+                .compiler_support
+                .recorded_input_decisions()
+                .clone(),
         }
     }
 
@@ -7232,7 +7352,10 @@ impl ExactDeclarationContext {
                 "restored compiler context differs from exact snapshot",
             ));
         }
-        if self.snapshot().offers != snapshot.offers {
+        if self.snapshot().offers != snapshot.offers
+            || self.owner.facts.compiler_support.recorded_input_decisions()
+                != &snapshot.input_decisions
+        {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",
             ));
@@ -7496,9 +7619,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "8"
+                    "10"
                 } else {
-                    "9"
+                    "11"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -7517,6 +7640,21 @@ impl ExactDeclarationContext {
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
+                    self.owner
+                        .facts
+                        .compiler_support
+                        .recorded_input_decisions()
+                        .iter()
+                        .map(|(owner, fact)| {
+                            (
+                                owner,
+                                fact.groups
+                                    .iter()
+                                    .map(|(ordinal, group)| (*ordinal, *group))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 ))
                 .expect("inventory encoding"),
             )
@@ -7641,9 +7779,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "8"
+                    "10"
                 } else {
-                    "9"
+                    "11"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -7662,6 +7800,21 @@ impl ExactDeclarationContext {
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
+                    self.owner
+                        .facts
+                        .compiler_support
+                        .recorded_input_decisions()
+                        .iter()
+                        .map(|(owner, fact)| {
+                            (
+                                owner,
+                                fact.groups
+                                    .iter()
+                                    .map(|(ordinal, group)| (*ordinal, *group))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 ))
                 .expect("inventory encoding"),
             )
@@ -8391,7 +8544,7 @@ impl ExactDeclarationContext {
             };
             if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
             {
-                acquired_inputs.insert(entry.descriptor.id, custody.owned_inputs.clone());
+                acquired_inputs.insert(entry.descriptor.id, custody.transports());
                 continue;
             }
             for (kind, bytes) in original_inputs::entry_payloads(entry) {
@@ -8532,8 +8685,7 @@ impl ExactDeclarationContext {
                             .and_then(|canonical| canonical.catalog_input_custody())
                             .and_then(|custody| {
                                 custody
-                                    .owned_inputs
-                                    .get(&original_inputs::OriginalInputKind::Graph)
+                                    .transport(original_inputs::OriginalInputKind::Graph)
                                     .cloned()
                             })
                         {
@@ -8768,12 +8920,13 @@ impl ExactDeclarationContext {
                         let availability = inputs.native_transport.availability[&selected].as_ref();
                         let mode = match &availability.mode {
                             NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
-                            NativeTransportMode::IssuedGroups(groups) => Value::Array(vec![
+                            NativeTransportMode::IssuedGroups => Value::Array(vec![
                                 text("issued-groups"),
                                 Value::Array(
-                                    groups
-                                        .iter()
-                                        .map(|ordinal| Value::Integer((*ordinal).into()))
+                                    availability
+                                        .issued_ordinals()
+                                        .into_iter()
+                                        .map(|ordinal| Value::Integer(ordinal.into()))
                                         .collect(),
                                 ),
                             ]),
@@ -8796,6 +8949,10 @@ impl ExactDeclarationContext {
                                 .id]
                                 .native_certification()?,
                             mode,
+                            text(match availability.classification {
+                                NativeInputClassification::CompilerRole => "compiler-original",
+                                NativeInputClassification::PrivateInput => "private-native",
+                            }),
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -12248,15 +12405,74 @@ mod tests {
         );
     }
 
+    fn published_original_choice_history_fixture() -> &'static ExactDeclarationContext {
+        static FIXTURE: std::sync::OnceLock<ExactDeclarationContext> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let producer = [2; 32];
+            let products = ["Alpha", "Beta"].map(|module| {
+                crate::certified_products::fixture_source_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture_with_interface(
+                        module,
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                        format!("{module} interface").into_bytes(),
+                    ),
+                    producer,
+                    vec![],
+                )
+            });
+            let products = crate::certified_products::tests::recovered_witness_fixtures(&products);
+            let target = identity("fixture", "PrivateSourceTarget");
+            let mut entries = products
+                .into_iter()
+                .map(|product| {
+                    Arc::new(ArtifactEntry::original(producer, product.product).unwrap())
+                })
+                .collect::<Vec<_>>();
+            entries.push(Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    &target.unit,
+                    &target.module,
+                    BTreeMap::new(),
+                ),
+            )));
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                projection,
+                vec![
+                    ExactLexicalNode {
+                        owner: target.clone(),
+                        imports: vec![identity("fixture", "Alpha")],
+                    },
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Alpha"),
+                        imports: vec![],
+                    },
+                ],
+                target,
+                &[],
+            )
+            .unwrap()
+        })
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(24))]
         #[test]
         fn merkle_context_history_matches_canonical_and_cold_facts(
-            operations in proptest::collection::vec((proptest::prelude::any::<u16>(), 0u8..6), 1..28),
+            operations in proptest::collection::vec((proptest::prelude::any::<u16>(), 0u8..7), 1..28),
         ) {
             use fvm_ipld_blockstore::{Blockstore,MemoryBlockstore};
             use crate::exact_context::{Materializer,hydrate_context};
-            let issued = published_original_history_fixture();
+            let issued = published_original_choice_history_fixture();
             let mut lexical = issued.lexical_graph().to_vec();
             lexical.iter_mut().find(|node| node.owner.module == "PrivateSourceTarget").unwrap().imports.push(identity("fixture","Beta"));
             lexical.push(ExactLexicalNode { owner: identity("fixture","Beta"), imports: vec![] });
@@ -12270,6 +12486,18 @@ mod tests {
             let left = empty.clone().with_published_source_originals(&alpha).unwrap();
             let right = empty.clone().with_published_source_originals(&beta).unwrap();
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
+            assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
+                "published fixture must carry a real issued decision domain");
+            assert!(left.compiler_source_support().recorded_input_decisions().values()
+                .any(|fact| !fact.groups.is_empty()),
+                "withdrawal history starts with an actually chosen native Group");
+            let interface_roots = left.compiler_input_projection().roles().into_iter()
+                .map(|role| role.interface()).collect();
+            let withdrawn_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
+            let withdrawn = left.clone().rebuild(|facts| facts.compiler_support = withdrawn_support).finish().unwrap();
+            assert!(!withdrawn.compiler_source_support().recorded_input_decisions().is_empty());
+            assert!(withdrawn.compiler_source_support().recorded_input_decisions().values()
+                .all(|fact| fact.groups.is_empty()), "withdrawal preserves domains but no chosen Group");
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
             let initial = materializer.materialize_context(None,&left.snapshot()).unwrap();
@@ -12286,7 +12514,8 @@ mod tests {
                     },
                     3 => empty.clone(),
                     4 => right.clone(),
-                    _ => joined.clone(),
+                    5 => joined.clone(),
+                    _ => withdrawn.clone(),
                 };
                 assert_context_observation_wire(&next);
                 let snapshot = next.snapshot();
@@ -12309,6 +12538,11 @@ mod tests {
                 let restored = hydrate_context(&store,result.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),snapshot.graph_selection().unwrap());
                 proptest::prop_assert_eq!(restored.snapshot().compiler_roles(),snapshot.compiler_roles());
+                proptest::prop_assert_eq!(
+                    &restored.snapshot().input_decisions,
+                    next.compiler_source_support().recorded_input_decisions(),
+                    "the real incremental writer/reader must preserve issued empty domains and exact Group references",
+                );
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),snapshot.lexical());
                 proptest::prop_assert_eq!(restored.snapshot().producer_sha256(),snapshot.producer_sha256());
                 let graph = restored.snapshot().graph_selection().unwrap();
@@ -12322,6 +12556,11 @@ mod tests {
                     interfaces: view.interface_dependencies(),
                 };
                 let mut recovered = inventory.context_with_snapshot(restored.snapshot()).unwrap();
+                proptest::prop_assert_eq!(
+                    recovered.compiler_source_support().recorded_input_decisions(),
+                    next.compiler_source_support().recorded_input_decisions(),
+                    "authenticated context recovery must preserve the same issued choices without policy resurrection",
+                );
                 proptest::prop_assert_eq!(recovered.original_instance_environment(),&OriginalInstanceEnvironment::Unknown);
                 assert_context_observation_wire(&recovered);
                 recovered.bind_snapshot_baseline(&restored).unwrap();
@@ -12335,6 +12574,10 @@ mod tests {
             for (context,receipt) in history {
                 let restored = hydrate_context(&store,receipt.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),context.lexical_graph());
+                proptest::prop_assert_eq!(
+                    &restored.snapshot().input_decisions,
+                    context.compiler_source_support().recorded_input_decisions(),
+                );
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),context.snapshot().graph_selection().unwrap());
             }
         }
@@ -13950,7 +14193,7 @@ mod tests {
         );
         let mut captured = next.as_ref().clone();
         let support = private_support
-            .retain_custody(&request.compiler_inputs().artifacts)
+            .retain_custody(request.compiler_inputs().artifacts())
             .unwrap()
             .select_support_roots(vec![id])
             .unwrap();
@@ -14168,9 +14411,10 @@ mod tests {
                 .find(|row| row.as_array().unwrap()[1] == text("Native"))
                 .unwrap();
             let fields = row.as_array().unwrap();
-            assert_eq!(fields.len(), 9);
+            assert_eq!(fields.len(), 10);
             assert_eq!(fields[6].as_array().unwrap().len(), 1);
             assert_eq!(fields[8], Value::Array(vec![text("full-carrier")]));
+            assert_eq!(fields[9], text("compiler-original"));
             let descriptor = fields[7].as_array().unwrap();
             let Value::Text(path) = &descriptor[0] else {
                 unreachable!()
@@ -15358,8 +15602,8 @@ mod tests {
                     .get(&original)
                     .unwrap();
                 assert!(
-                    matches!(&offers.mode, NativeTransportMode::IssuedGroups(groups)
-                    if groups == &BTreeSet::from([7]))
+                    matches!(&offers.mode, NativeTransportMode::IssuedGroups)
+                        && offers.issued_ordinals() == BTreeSet::from([7])
                 );
                 assert!(offers.permits(7));
                 assert!(!offers.permits(11));
@@ -15397,9 +15641,12 @@ mod tests {
                 program_admitted.home_imports().unwrap(),
                 admitted.home_imports().unwrap()
             );
-            assert_eq!(local.compiler_inputs().projection, roles);
+            assert_eq!(local.compiler_inputs().projection(), &roles);
             assert_eq!(
-                local.compiler_inputs().artifacts.capture_graph_selection(),
+                local
+                    .compiler_inputs()
+                    .artifacts()
+                    .capture_graph_selection(),
                 before_graph
             );
             for availability in local
@@ -15409,8 +15656,8 @@ mod tests {
                 .values()
             {
                 assert!(
-                    matches!(&availability.mode, NativeTransportMode::IssuedGroups(groups)
-                    if groups == &BTreeSet::from([7]))
+                    matches!(&availability.mode, NativeTransportMode::IssuedGroups)
+                        && availability.issued_ordinals() == BTreeSet::from([7])
                 );
                 assert!(!availability.permits(11));
             }
@@ -18533,45 +18780,222 @@ mod tests {
         assert!(decoded.retained_generations().is_empty());
         std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
         let compiler_identity = endpoint.identity().clone();
-        let envelope = read_receipt(&request.manifest);
-        let acquisition = envelope.as_array().unwrap()[10].as_array().unwrap();
-        assert_eq!(acquisition[0].as_text(), Some("continue-originals"));
-        let mut changed_aliases = BTreeSet::new();
-        for image in acquisition[2].as_array().unwrap() {
-            for part in image.as_array().unwrap()[4].as_array().unwrap() {
-                let part = part.as_array().unwrap();
-                let path = PathBuf::from(part[1].as_text().unwrap());
-                if changed_aliases.insert(path.clone()) {
-                    if changed_aliases.len() % 2 == 0 {
-                        std::fs::remove_file(path).unwrap();
-                    } else {
-                        std::fs::write(path, b"changed after owned capture").unwrap();
-                    }
-                }
+        // Inspect the actual issuing owner, not a second native-row decoder.
+        let materialization = request
+            .materialization
+            .as_ref()
+            .expect("live input materialization");
+        let metadata = &request.inputs.compiler.native_transport.metadata;
+        let rows = materialization.selected_rows(metadata);
+        let mut supplied_kinds = BTreeSet::new();
+        let mut aliases = BTreeSet::new();
+        for entry in metadata.entries.values() {
+            for part in rows[&entry.descriptor.id]
+                .original_input_parts(entry)
+                .unwrap()
+            {
+                supplied_kinds.insert(part.kind);
+                aliases.insert(part.path);
             }
         }
-        assert!(
-            changed_aliases.len() >= 6,
-            "actual owned request covers companion payloads"
+        for graph in materialization.graph_path_refs().values() {
+            supplied_kinds.insert(original_inputs::OriginalInputKind::Graph);
+            aliases.insert(graph.path.clone());
+        }
+        assert_eq!(
+            supplied_kinds,
+            BTreeSet::from([
+                original_inputs::OriginalInputKind::Interface,
+                original_inputs::OriginalInputKind::Packages,
+                original_inputs::OriginalInputKind::Certificate,
+                original_inputs::OriginalInputKind::Core,
+                original_inputs::OriginalInputKind::Native,
+                original_inputs::OriginalInputKind::Census,
+                original_inputs::OriginalInputKind::Graph,
+            ]),
+            "genuine executable input history must supply every part kind"
         );
-        let run = crate::artifacts::test_support::with_settlement(|recipient| {
-            crate::CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
-                &command,
-                offer.input_transport_files(),
-                |close| recipient(close),
-            ))
-        })
-        .unwrap();
-        std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
-        std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
-        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .expect("actual current-source inspection compiles");
-        assert!(std::fs::metadata(&inspection_output).unwrap().len() > 0);
-        let persisted_admissions = request.validate_outputs(&output).unwrap();
-        assert_eq!(persisted_admissions.len(), 1);
-        assert!(persisted_admissions[0]
-            .selected_originals
-            .contains_key(&owner));
+        for (index, path) in aliases.iter().enumerate() {
+            if index % 2 == 0 {
+                std::fs::remove_file(path).unwrap();
+            } else {
+                std::fs::write(path, b"changed after owned capture").unwrap();
+            }
+        }
+        let history = tidepool_extract_cmd::with_compiler_transaction(
+            |_| {},
+            || {
+                let run = crate::CompileError::compiler_invocation_result(
+                    endpoint.execute_with_input_files(
+                        &command,
+                        offer.input_transport_files(),
+                        |_| {},
+                    ),
+                )
+                .unwrap();
+                std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
+                std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
+                crate::diag::decode_extract_result(
+                    run.success(),
+                    &run.output.stdout,
+                    &run.output.stderr,
+                )
+                .expect("actual current-source inspection compiles");
+                assert!(std::fs::metadata(&inspection_output).unwrap().len() > 0);
+                let persisted_admissions = request.validate_outputs(&output).unwrap();
+                assert_eq!(persisted_admissions.len(), 1);
+                assert!(persisted_admissions[0]
+                    .selected_originals
+                    .contains_key(&owner));
+                assert_ne!(
+                    compiler_identity.as_bytes(),
+                    compiler_identity.producer_bytes(),
+                    "owned input reuse requires the declared resident compiler"
+                );
+                let observations = |stderr: &[u8]| {
+                    let rows = String::from_utf8_lossy(stderr)
+                        .lines()
+                        .filter_map(|line| {
+                            let raw = line.strip_prefix("tidepool-validation ")?;
+                            let row: serde_json::Value = serde_json::from_str(raw).unwrap();
+                            (row["owner"] == "original_inputs"
+                                && row["reason"] == "scope_acquisition")
+                                .then_some(row)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !rows.is_empty(),
+                        "actual scope acquisition summary was not observed"
+                    );
+                    for row in &rows {
+                        assert_eq!(
+                            row["outcome"], "success",
+                            "scope acquisition did not complete"
+                        );
+                        assert!(row["worker_pid"].as_u64().unwrap() > 0);
+                        for kind in ["certificate", "packages", "census", "graph"] {
+                            for suffix in ["hits", "misses"] {
+                                row["counts"][format!("original_inputs.{kind}.{suffix}")]
+                                    .as_u64()
+                                    .expect("required measured counter is absent");
+                            }
+                        }
+                    }
+                    rows
+                };
+                let first_observations = observations(&run.output.stderr);
+                let worker_pid = first_observations[0]["worker_pid"].as_u64().unwrap();
+                let count = |rows: &[serde_json::Value], wanted: &str| -> u64 {
+                    rows.iter()
+                        .map(|row| {
+                            assert_eq!(
+                                row["worker_pid"].as_u64(),
+                                Some(worker_pid),
+                                "history rotated physical worker"
+                            );
+                            row["counts"][wanted]
+                                .as_u64()
+                                .expect("required measured counter is absent")
+                        })
+                        .sum()
+                };
+                assert!(
+                    count(&first_observations, "original_inputs.certificate.misses") > 0,
+                    "real history needs an observed cold admitted certificate read"
+                );
+                assert!(count(&first_observations, "original_inputs.census.misses") > 0);
+                assert!(count(&first_observations, "original_inputs.graph.misses") > 0);
+                // The compiler universe owns its retained input reader across A/B/A.
+                // Each request and its backing files remain live until actual close.
+                for (label, context, imports) in [
+                    ("empty", Arc::new(empty.clone()), false),
+                    ("again", persisted.clone(), true),
+                ] {
+                    let next_output = root.join(format!("consumer-{label}"));
+                    std::fs::create_dir(&next_output).unwrap();
+                    let next_source = next_output.join("Consumer.hs");
+                    std::fs::write(
+                &next_source,
+                if imports {
+                    "module Consumer where\nimport PrefixSelectedSupport\nresult = selected\n"
+                } else {
+                    "module Consumer where\nresult = (0 :: Int)\n"
+                },
+            )
+            .unwrap();
+                    let (next_endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+                    let next_offer = crate::artifacts::ModuleCandidateOffer::select_inspection(
+                        compiler_identity.producer_bytes(),
+                        &includes,
+                        &root.join(format!("scope-{label}")),
+                        Some(Arc::new(ExactCompileContext::new(context.clone()))),
+                        Vec::new(),
+                        &[],
+                    )
+                    .unwrap();
+                    let next_request = next_offer.exact.as_ref().unwrap().clone();
+                    let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+                    command
+                        .input(&next_source)
+                        .includes(&includes)
+                        .inspect_type("result")
+                        .inspect_out(next_output.join("inspection.cbor"))
+                        .inspection_strict()
+                        .output_dir(&next_output);
+                    let applied = next_offer.apply_to(command, &next_output).unwrap();
+                    let next_run = crate::CompileError::compiler_invocation_result(
+                        next_endpoint.execute_with_input_files(
+                            applied.command(),
+                            applied.input_transport_files(),
+                            |_| {},
+                        ),
+                    )
+                    .unwrap();
+                    let next_observations = observations(&next_run.output.stderr);
+                    for row in &next_observations {
+                        assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
+                    }
+                    std::fs::write(
+                        root.join(format!("consumer-{label}.stderr")),
+                        &next_run.output.stderr,
+                    )
+                    .unwrap();
+                    crate::diag::decode_extract_result(
+                        next_run.success(),
+                        &next_run.output.stdout,
+                        &next_run.output.stderr,
+                    )
+                    .expect("actual resident input history compiles");
+                    let admissions = next_request.validate_outputs(&next_output).unwrap();
+                    assert_eq!(admissions.len(), 1);
+                    if imports {
+                        assert!(admissions[0].selected_originals.contains_key(&owner));
+                        assert_eq!(context.semantic_sha256(), persisted.semantic_sha256());
+                        assert_eq!(
+                            count(&next_observations, "original_inputs.certificate.misses"),
+                            0
+                        );
+                        for metric in [
+                            "original_inputs.certificate.hits",
+                            "original_inputs.packages.hits",
+                            "original_inputs.census.hits",
+                            "original_inputs.graph.hits",
+                        ] {
+                            assert!(
+                                count(&next_observations, metric) > 0,
+                                "real resident A/B/A did not reuse {metric}"
+                            );
+                        }
+                    }
+                }
+                persisted_admissions
+            },
+        );
+        assert_eq!(
+            history.close,
+            tidepool_extract_cmd::CompilerTransactionClose::Clean
+        );
+        let persisted_admissions = history.action;
         let receipts = std::fs::read_dir(output.join(".exact-compilations"))
             .unwrap()
             .map(|entry| entry.unwrap().path().join("receipt.cbor"))

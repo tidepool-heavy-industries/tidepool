@@ -497,7 +497,7 @@ pub(super) fn decode_envelope_with_operation(
 #[derive(Clone, Debug)]
 pub(crate) struct CertifiedModuleInterface {
     facts: Arc<CanonicalFacts>,
-    input_custody: Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>>,
+    input_custody: Option<Arc<crate::module_candidates::deployment::CapturedCatalogInputs>>,
 }
 
 /// Complete immutable compiler facts. Admission custody belongs to the facade.
@@ -551,7 +551,7 @@ impl CertifiedModuleInterface {
 
     pub(crate) fn with_catalog_input_custody(
         mut self,
-        custody: Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>,
+        custody: Arc<crate::module_candidates::deployment::CapturedCatalogInputs>,
     ) -> Self {
         self.input_custody = Some(custody);
         self
@@ -568,9 +568,7 @@ impl CertifiedModuleInterface {
         }
         let custody = match (&self.input_custody, &other.input_custody) {
             (Some(first), Some(second)) => Some(
-                crate::module_candidates::deployment::DeploymentArtifactPaths::merge(
-                    first, second,
-                )?,
+                crate::module_candidates::deployment::CapturedCatalogInputs::merge(first, second)?,
             ),
             (Some(custody), None) | (None, Some(custody)) => Some(Arc::clone(custody)),
             (None, None) => None,
@@ -594,7 +592,7 @@ impl CertifiedModuleInterface {
 
     pub(crate) fn catalog_input_custody(
         &self,
-    ) -> Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>> {
+    ) -> Option<Arc<crate::module_candidates::deployment::CapturedCatalogInputs>> {
         self.input_custody.clone()
     }
     pub(crate) fn origin(&self) -> CanonicalOrigin {

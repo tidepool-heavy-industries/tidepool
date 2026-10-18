@@ -184,6 +184,8 @@ impl StagedBlocks {
 }
 
 /// FVM HAMTs and their unsynchronized child caches never leave this owner.
+/// The caller retains immutable CID storage for this operation. Another store
+/// or publication attempt requires a fresh materializer and authentication.
 pub struct Materializer<'a, BS: Blockstore> {
     base: &'a BS,
     pending: MemoryBlockstore,
@@ -192,6 +194,13 @@ pub struct Materializer<'a, BS: Blockstore> {
     serialized_bytes: Cell<u64>,
     cid_validation_bytes: Cell<u64>,
     selection_base: Option<MaterializedSelection>,
+    scopes: std::collections::BTreeMap<ArtifactSelectionId, MaterializedScope>,
+    selections: std::collections::BTreeMap<usize, MaterializedSelection>,
+}
+
+struct MaterializedScope {
+    cid: Cid,
+    owners: std::collections::BTreeMap<usize, ImmutableScopeProofRef>,
 }
 
 impl<'a, BS: Blockstore> Materializer<'a, BS> {
@@ -204,6 +213,8 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             serialized_bytes: Cell::new(0),
             cid_validation_bytes: Cell::new(0),
             selection_base: None,
+            scopes: Default::default(),
+            selections: Default::default(),
         }
     }
 
@@ -775,9 +786,7 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         store: &mut Materializer<'_, BS>,
         value: &ImmutableScopeProofRef,
     ) -> Result<Cid, SnapshotError> {
-        let (cid, bytes) = value.encoded()?;
-        store.put_keyed(cid, bytes).map_err(storage_error)?;
-        Ok(*cid)
+        store.materialize_scope(value)
     }
     fn decode<BS: Blockstore>(
         store: &SnapshotHydrator<'_, BS>,
@@ -821,11 +830,50 @@ impl MaterializedSelection {
     }
 }
 impl<BS: Blockstore> Materializer<'_, BS> {
-    pub fn materialize_selection(
+    fn materialize_scope(&mut self, value: &ImmutableScopeProofRef) -> Result<Cid, SnapshotError> {
+        let selection = value.proof().selection;
+        let identity = Arc::as_ptr(&value.0) as usize;
+        if let Some(receipt) = self.scopes.get_mut(&selection) {
+            if receipt.owners.contains_key(&identity) {
+                return Ok(receipt.cid);
+            }
+            // A different incoming owner must establish its own exact bytes.
+            // A claimed scope identity alone cannot borrow another proof.
+            let (cid, bytes) = value.encoded()?;
+            add_bytes(&self.cid_validation_bytes, bytes.len());
+            verify_block(cid, bytes)?;
+            let original = receipt.owners.values().next().expect("issued scope owner");
+            let (_, original_bytes) = original.encoded()?;
+            if *cid != receipt.cid
+                || value.proof() != original.proof()
+                || bytes.as_ref() != original_bytes.as_ref()
+            {
+                return Err(malformed("conflicting immutable scope proof"));
+            }
+            receipt.owners.insert(identity, value.clone());
+            return Ok(receipt.cid);
+        }
+        let (cid, bytes) = value.encoded()?;
+        self.put_keyed(cid, bytes).map_err(storage_error)?;
+        self.scopes.insert(
+            selection,
+            MaterializedScope {
+                cid: *cid,
+                owners: [(identity, value.clone())].into(),
+            },
+        );
+        Ok(*cid)
+    }
+
+    pub(crate) fn materialize_selection(
         &mut self,
         base: Option<&MaterializedSelection>,
-        next: &ExactSelectionSnapshot,
+        next: &Arc<ExactSelectionSnapshot>,
     ) -> Result<MaterializedSelection, SnapshotError> {
+        let identity = Arc::as_ptr(next) as usize;
+        if let Some(receipt) = self.selections.get(&identity) {
+            return Ok(receipt.clone());
+        }
         let scopes = self
             .materialize_map_with::<_, _, ScopeProofCodec>(base.map(|b| &b.scopes), &next.scopes)?;
         let roots = self.materialize_map(base.map(|b| &b.roots), &next.roots)?;
@@ -849,14 +897,18 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         } else {
             SelectionRoot(self.materialize_value(&descriptor)?)
         };
-        Ok(MaterializedSelection {
+        let receipt = MaterializedSelection {
             root,
-            snapshot: Arc::new(next.clone()),
+            snapshot: Arc::clone(next),
             scopes,
             roots,
             namespace,
             custody_roots,
-        })
+        };
+        // Retaining the original immutable snapshot prevents allocation-address
+        // reuse. This lookup table lasts only for this materialization operation.
+        self.selections.insert(identity, receipt.clone());
+        Ok(receipt)
     }
 }
 pub fn hydrate_selection<BS: Blockstore>(
@@ -1168,6 +1220,8 @@ pub struct ExactContextSnapshot {
     pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
     pub(crate) lexical: ExactLexicalSnapshot,
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
+    pub(crate) input_decisions:
+        OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
 }
 impl ExactContextSnapshot {
     pub(crate) fn native_offers(&self) -> impl Iterator<Item = &NativeOfferSnapshotFacts> {
@@ -1306,6 +1360,54 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct InputNativeDecisionWire {
+    role: Cid,
+    groups: Vec<crate::artifact_inventory::NativeGroupBinding>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputNativeDecisionCodec;
+impl SnapshotValueCodec<crate::artifact_inventory::RecordedInputNativeDecision>
+    for InputNativeDecisionCodec
+{
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        value: &crate::artifact_inventory::RecordedInputNativeDecision,
+    ) -> Result<Cid, SnapshotError> {
+        let role = CompilerRoleCodec::encode(store, &value.role)?;
+        store.materialize_value(&InputNativeDecisionWire {
+            role,
+            groups: value.groups.values().copied().collect(),
+        })
+    }
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        cid: Cid,
+    ) -> Result<crate::artifact_inventory::RecordedInputNativeDecision, SnapshotError> {
+        let wire: InputNativeDecisionWire = read_value(store, &cid)?;
+        let mut groups = OrdMap::new();
+        for group in wire.groups {
+            if groups.insert(group.original_ordinal, group).is_some() {
+                return Err(malformed("input decision repeats an ordinal"));
+            }
+        }
+        let role = CompilerRoleCodec::decode(store, wire.role)?;
+        let original = role
+            .original()
+            .ok_or_else(|| malformed("input decision has no original role"))?;
+        if groups
+            .values()
+            .any(|group| group.binding.artifact() != original)
+        {
+            return Err(malformed("input decision group differs from its original"));
+        }
+        Ok(crate::artifact_inventory::RecordedInputNativeDecision { role, groups })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContextDescriptor {
     version: u32,
     producer: [u8; 32],
@@ -1313,6 +1415,8 @@ struct ContextDescriptor {
     roles: SnapshotMapRoot,
     lexical: SnapshotMapRoot,
     offers: SnapshotMapRoot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_decisions: Option<SnapshotMapRoot>,
 }
 #[derive(Clone, Debug)]
 pub struct MaterializedContext {
@@ -1322,6 +1426,11 @@ pub struct MaterializedContext {
     roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
+    input_decisions: MaterializedMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::RecordedInputNativeDecision,
+        InputNativeDecisionCodec,
+    >,
 }
 impl MaterializedContext {
     pub fn root(&self) -> &ContextRoot {
@@ -1352,13 +1461,18 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.offers),
             &next.offers,
         )?;
+        let input_decisions = self.materialize_map_with::<_, _, InputNativeDecisionCodec>(
+            base.map(|base| &base.input_decisions),
+            &next.input_decisions,
+        )?;
         let descriptor = ContextDescriptor {
-            version: 3,
+            version: 4,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
             lexical: lexical.root.clone(),
             offers: offers.root.clone(),
+            input_decisions: Some(input_decisions.root.clone()),
         };
         let root = if base.is_some_and(|base| {
             base.snapshot.producer == next.producer
@@ -1366,6 +1480,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 && base.roles.root == roles.root
                 && base.lexical.root == lexical.root
                 && base.offers.root == offers.root
+                && base.input_decisions.root == input_decisions.root
         }) {
             base.expect("equal context implies base").root.clone()
         } else {
@@ -1378,6 +1493,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             roles,
             lexical,
             offers,
+            input_decisions,
         })
     }
 }
@@ -1388,8 +1504,10 @@ pub fn hydrate_context<BS: Blockstore>(
     let hydrator = SnapshotHydrator::new(store);
     let store = &hydrator;
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 3 {
-        return Err(malformed("context encoding version"));
+    if descriptor.version != 4 {
+        return Err(malformed(
+            "context encoding requires version 4 with issued input decisions",
+        ));
     }
     let selection = store.selection(&descriptor.selection)?;
     let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
@@ -1408,11 +1526,19 @@ pub fn hydrate_context<BS: Blockstore>(
             return Err(malformed("native offer key differs from fact identity"));
         }
     }
+    let input_decisions = hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(
+        store,
+        descriptor
+            .input_decisions
+            .as_ref()
+            .ok_or_else(|| malformed("context version 4 omits input decisions"))?,
+    )?;
     let snapshot = ExactContextSnapshot {
         producer: descriptor.producer,
         selection: selection.snapshot.clone(),
         roles: roles.facts.clone(),
         offers: offers.facts.clone(),
+        input_decisions: input_decisions.facts.clone(),
         lexical: ExactLexicalSnapshot {
             facts: lexical.facts.clone(),
             rows: Arc::new(OnceLock::new()),
@@ -1425,6 +1551,7 @@ pub fn hydrate_context<BS: Blockstore>(
         roles,
         lexical,
         offers,
+        input_decisions,
     })
 }
 

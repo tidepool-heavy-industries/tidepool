@@ -16,10 +16,7 @@ fn select(
         records
             .into_iter()
             .map(|record| {
-                let origin = CandidateOrigin::Deployment {
-                    interface: record.source.clone(),
-                    packages: record.source.clone(),
-                };
+                let origin = CandidateOrigin::Deployment;
                 (record, origin)
             })
             .collect(),

@@ -2643,7 +2643,7 @@ mod authored_tests {
             .compiler_source_support()
             .native_offers()
             .iter()
-            .map(|offer| offer.custody().selection_snapshot().clone())
+            .map(|offer| offer.custody_snapshot().clone())
             .collect::<Vec<_>>();
 
         let worker_root = Arc::new(tempfile::tempdir().unwrap());
@@ -2736,7 +2736,7 @@ mod authored_tests {
             .iter()
             .zip(&offer_snapshots)
         {
-            assert!(Arc::ptr_eq(offer.custody().selection_snapshot(), snapshot));
+            assert!(Arc::ptr_eq(offer.custody_snapshot(), snapshot));
         }
         let joined_binding = *accepted_graph
             .namespace

@@ -311,7 +311,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     ));
     let effective = request.compiler_inputs();
     let selection = CertifiedSourceSelection::from_compiler_projection(
-        &effective.projection,
+        &effective.projection(),
         &effective.metadata.retained,
         &InventoryOperation::new(Default::default()),
     )
@@ -478,7 +478,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert!(late_request.groups.is_empty());
     let late_effective = late_request.compiler_inputs();
     let late_selection = CertifiedSourceSelection::from_compiler_projection(
-        &late_effective.projection,
+        &late_effective.projection(),
         &late_effective.metadata.retained,
         &InventoryOperation::new(Default::default()),
     )
@@ -558,7 +558,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             &issued.recovery_products,
             &issued.module_interfaces,
             &issued.value_interfaces,
-            Some(&late_effective.artifacts),
+            Some(&late_effective.artifacts()),
             NativeArtifactDemand::CertifiedTargetImports(&late_imports),
             &mut PackageInterfaceValidation::default(),
         )

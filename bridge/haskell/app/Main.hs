@@ -121,7 +121,7 @@ import Tidepool.ExactScope
   , originalGroupFromProjected
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..)
-  , revalidateExactScope, extendExactScopeGeneration, extendCheckedValueScope
+  , revalidateExactScope, ExactScopeOriginal(..), extendExactScopeGeneration, extendCheckedValueScope
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -1407,7 +1407,7 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
         <> text "planned-declaration"
   extended <- extendExactScopeGeneration supportScope
     [((interface,packagesPath,packagesSha),LocalNativeDeclarationEvidence nativeEvidence)]
-    [originalProduct] [((unit,reserved),lexicalRequirements)] >>= either fail pure
+    [CompilerOriginal originalProduct] [((unit,reserved),lexicalRequirements)] >>= either fail pure
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
   pure (finalized, original, inventory, extended, (prepared,certified))
   where

@@ -541,6 +541,7 @@ fn borrow_catalog(
 #[test]
 fn acquired_catalog_borrows_captured_bytes_and_detached_views_keep_transport() {
     use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
+    use crate::declaration_context::original_inputs::OriginalInputKind as Kind;
     let fixture = Fixture::with_modules_and_execution(&["Library"], true);
     let counter = DecodeCounter::new();
     let package = Arc::new(fixture.load().unwrap());
@@ -548,28 +549,31 @@ fn acquired_catalog_borrows_captured_bytes_and_detached_views_keep_transport() {
     let selected = borrow_catalog(&package).unwrap();
     let original = &selected.by_owner[&("u".into(), "Library".into())];
     let private_interface = original.iface_path.clone();
-    let expected_interface = fs::read(&private_interface).unwrap();
     let custody = original
         .original_module_interface
         .catalog_input_custody()
         .unwrap();
-    let canonical_path = custody
-        .canonical_root
-        .join(&custody.canonical.interface.interface_path);
-    let graph_path = custody.graph.as_ref().unwrap().1.clone();
-    let endpoint = custody.owned_inputs
+    let canonical_path = custody.receiving_alias(Kind::Interface).unwrap().to_owned();
+    let graph_path = custody.receiving_alias(Kind::Graph).unwrap().to_owned();
+    assert_eq!(
+        fs::read_dir(custody._namespace.path()).unwrap().count(),
+        0,
+        "catalog acquisition creates no duplicate payload files"
+    );
+    let expected_interface = read_owned_slice(custody.transport(Kind::Interface).unwrap());
+    let endpoint = custody.transports()
         [&crate::declaration_context::original_inputs::OriginalInputKind::Interface]
         .endpoint()
         .to_owned();
     let captured_parts = custody
-        .owned_inputs
+        .transports()
         .iter()
         .map(|(kind, slice)| (*kind, read_owned_slice(slice)))
         .collect::<BTreeMap<_, _>>();
     fs::write(&private_interface, b"changed private alias").unwrap();
     fs::write(&canonical_path, b"changed canonical alias").unwrap();
-    fs::remove_file(&graph_path).unwrap();
-    for (kind, slice) in &custody.owned_inputs {
+    assert!(!graph_path.exists());
+    for (kind, slice) in &custody.transports() {
         assert_eq!(read_owned_slice(slice), captured_parts[kind]);
     }
     let catalog_paths = fixture.catalog().modules[0].clone();
@@ -584,7 +588,7 @@ fn acquired_catalog_borrows_captured_bytes_and_detached_views_keep_transport() {
     assert_eq!(continued_original.product.bytes(), original.product.bytes());
     assert_eq!(
         read_owned_slice(
-            &custody.owned_inputs
+            &custody.transports()
                 [&crate::declaration_context::original_inputs::OriginalInputKind::Interface]
         ),
         expected_interface
@@ -737,7 +741,7 @@ fn acquired_catalog_history_separates_source_drift_from_original_image_drift() {
         let before = package.records[0].products.clone();
         let artifacts = package.records[0].artifacts().unwrap();
         let captured_parts = artifacts
-            .owned_inputs
+            .transports()
             .iter()
             .map(|(kind, slice)| (*kind, read_owned_slice(slice)))
             .collect::<BTreeMap<_, _>>();
@@ -757,15 +761,36 @@ fn acquired_catalog_history_separates_source_drift_from_original_image_drift() {
                     .output
                     .join(&reference.module_interface.core.as_ref().unwrap().path),
                 7 => fixture.output.join(&reference.interface.path),
-                8 => artifacts.interface.clone(),
-                9 => artifacts.product.clone(),
+                8 => artifacts
+                    .receiving_alias(
+                        crate::declaration_context::original_inputs::OriginalInputKind::Interface,
+                    )
+                    .unwrap()
+                    .to_owned(),
+                9 => artifacts
+                    .receiving_alias(
+                        crate::declaration_context::original_inputs::OriginalInputKind::Native,
+                    )
+                    .unwrap()
+                    .to_owned(),
                 10 => artifacts
-                    .canonical_root
-                    .join(&artifacts.canonical.core.as_ref().unwrap().path),
+                    .receiving_alias(
+                        crate::declaration_context::original_inputs::OriginalInputKind::Core,
+                    )
+                    .unwrap()
+                    .to_owned(),
                 11 => artifacts
-                    .canonical_root
-                    .join(&artifacts.canonical.certificate_path),
-                _ => artifacts.graph.as_ref().unwrap().1.clone(),
+                    .receiving_alias(
+                        crate::declaration_context::original_inputs::OriginalInputKind::Certificate,
+                    )
+                    .unwrap()
+                    .to_owned(),
+                _ => artifacts
+                    .receiving_alias(
+                        crate::declaration_context::original_inputs::OriginalInputKind::Graph,
+                    )
+                    .unwrap()
+                    .to_owned(),
             };
             let original = fs::read(&path).ok();
             let mut changed = original.clone().unwrap_or_default();
@@ -779,7 +804,7 @@ fn acquired_catalog_history_separates_source_drift_from_original_image_drift() {
                     "unrelated old private aliases cannot revoke a new catalog acquisition"
                 );
             }
-            for (kind, slice) in &artifacts.owned_inputs {
+            for (kind, slice) in &artifacts.transports() {
                 proptest::prop_assert_eq!(read_owned_slice(slice), captured_parts[kind].as_slice());
             }
             let borrowed = borrow_catalog(&package);
@@ -917,6 +942,50 @@ fn selected_merge_preserves_acquired_catalog_origins_in_exact_scope() {
     }
 }
 
+fn catalog_interface_endpoint(
+    interface: &crate::certified_products::CertifiedModuleInterface,
+) -> PathBuf {
+    interface
+        .catalog_input_custody()
+        .unwrap()
+        .transport(crate::declaration_context::original_inputs::OriginalInputKind::Interface)
+        .unwrap()
+        .endpoint()
+        .to_owned()
+}
+
+fn read_catalog_view_interface(
+    view: &crate::artifact_inventory::ArtifactView,
+    id: crate::artifact_inventory::ArtifactId,
+) -> Vec<u8> {
+    use crate::artifact_inventory::ArtifactPayload;
+    let entry = view
+        .entries()
+        .into_iter()
+        .find(|entry| entry.descriptor.id == id)
+        .unwrap();
+    let interface = match &entry.payload {
+        ArtifactPayload::Canonical(interface) => interface,
+        ArtifactPayload::Original(product) => product.module_interface().unwrap(),
+        ArtifactPayload::Interface(..) => panic!("catalog original or canonical owner required"),
+    };
+    read_owned_slice(
+        interface
+            .catalog_input_custody()
+            .unwrap()
+            .transport(crate::declaration_context::original_inputs::OriginalInputKind::Interface)
+            .unwrap(),
+    )
+}
+
+fn assert_catalog_endpoint_released(endpoint: &Path) {
+    assert!(
+        matches!(fs::File::open(endpoint), Err(error)
+        if error.kind() == std::io::ErrorKind::NotFound),
+        "released captured arena must no longer be readable"
+    );
+}
+
 #[test]
 fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
     use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
@@ -933,9 +1002,8 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
             .unwrap()
             .clone();
         assert_eq!(canonical, bare);
-        let original_path = selected.by_owner[&("u".into(), "Library".into())]
-            .iface_path
-            .clone();
+        let original_endpoint = catalog_interface_endpoint(&canonical);
+        let expected_interface = canonical.interface_bytes().to_vec();
         let inventory = ArtifactInventory::default();
         let first = ArtifactEntry::canonical(if acquired_first {
             canonical.clone()
@@ -987,7 +1055,8 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
         );
         let new_selected = borrow_catalog(&reacquired).unwrap();
         let other = &new_selected.by_owner[&("u".into(), "Library".into())];
-        let other_path = other.iface_path.clone();
+        let other_endpoint = catalog_interface_endpoint(&other.original_module_interface);
+        assert_ne!(original_endpoint, other_endpoint);
         let both = inventory
             .admit(
                 &retained,
@@ -1064,11 +1133,13 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
         drop(package);
         drop(view);
         drop(retained);
-        assert!(original_path.exists());
-        assert!(other_path.exists());
+        assert_eq!(read_catalog_view_interface(&both, id), expected_interface);
+        assert!(original_endpoint.exists());
+        // The merged owner keeps its chosen captured parts plus both origin
+        // proofs. Equal incoming bytes do not require a second live arena.
+        assert_catalog_endpoint_released(&other_endpoint);
         drop(both);
-        assert!(!original_path.exists());
-        assert!(!other_path.exists());
+        assert_catalog_endpoint_released(&original_endpoint);
     }
 }
 
@@ -1133,15 +1204,18 @@ fn identical_native_and_same_batch_admissions_preserve_catalog_custody() {
             let incoming = new_selected.by_owner[&("u".into(), "Library".into())]
                 .original_module_interface
                 .clone();
-            let incoming_path = new_selected.by_owner[&("u".into(), "Library".into())]
-                .iface_path
-                .clone();
+            let incoming_endpoint = catalog_interface_endpoint(&incoming);
+            assert!(incoming_endpoint.exists());
             let continued = inventory
                 .admit(&retained, vec![make_entry(incoming)])
                 .unwrap();
             drop(new_selected);
             drop(reacquired);
-            assert!(!incoming_path.exists());
+            assert_catalog_endpoint_released(&incoming_endpoint);
+            assert_eq!(
+                read_catalog_view_interface(&continued, id),
+                canonical.interface_bytes()
+            );
             let origin_facts = |view: &crate::artifact_inventory::ArtifactView| {
                 view.original_input_origins(id)
                     .iter()
@@ -1189,9 +1263,8 @@ fn independent_catalog_views_preserve_cold_and_warm_issuing_custody() {
             .iter()
             .map(|origin| origin.path.clone())
             .collect::<BTreeSet<_>>();
-        let first_path = selected.by_owner[&("u".into(), "Library".into())]
-            .iface_path
-            .clone();
+        let first_endpoint = catalog_interface_endpoint(&interface);
+        let expected_interface = interface.interface_bytes().to_vec();
         let inventory = ArtifactInventory::default();
         let first_entry = ArtifactEntry::canonical(interface);
         let id = first_entry.descriptor.id;
@@ -1221,7 +1294,8 @@ fn independent_catalog_views_preserve_cold_and_warm_issuing_custody() {
             .iter()
             .map(|origin| origin.path.clone())
             .collect::<BTreeSet<_>>();
-        let second_path = other.iface_path.clone();
+        let second_endpoint = catalog_interface_endpoint(&other.original_module_interface);
+        assert_ne!(first_endpoint, second_endpoint);
         let b = inventory
             .admit(
                 &inventory.empty_view(),
@@ -1270,13 +1344,15 @@ fn independent_catalog_views_preserve_cold_and_warm_issuing_custody() {
         drop(package);
         drop(new_selected);
         drop(new_package);
-        assert!(
-            !first_path.exists(),
-            "projected B does not retain unrelated A materialization"
+        assert_catalog_endpoint_released(&first_endpoint);
+        assert!(second_endpoint.exists());
+        assert_eq!(
+            read_catalog_view_interface(&detached_b, id),
+            expected_interface,
+            "detached B must still read its issued sealed bytes after both source parents drop"
         );
-        assert!(second_path.exists());
         drop(detached_b);
-        assert!(!second_path.exists());
+        assert_catalog_endpoint_released(&second_endpoint);
     }
 }
 
@@ -1299,9 +1375,9 @@ fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custod
             .clone(),
     );
     let id_b = first_b.descriptor.id;
-    let old_path = selected.by_owner[&("u".into(), "A".into())]
-        .iface_path
-        .clone();
+    let old_endpoint = catalog_interface_endpoint(
+        &selected.by_owner[&("u".into(), "A".into())].original_module_interface,
+    );
     let original_a = selected.by_owner[&("u".into(), "A".into())]
         .original_module_interface
         .interface_bytes()
@@ -1309,6 +1385,11 @@ fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custod
     let old = inventory
         .admit(&inventory.empty_view(), vec![first_a, first_b])
         .unwrap();
+    assert_eq!(
+        read_catalog_view_interface(&old, id_a),
+        original_a,
+        "original captured owner must read its live sealed range before release"
+    );
     let moved = fixture._root.path().join("moved-products");
     fs::rename(&fixture.output, &moved).unwrap();
     let new_package = Arc::new(
@@ -1368,7 +1449,7 @@ fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custod
     drop(old);
     drop(selected);
     drop(package);
-    assert!(!old_path.exists());
+    assert_catalog_endpoint_released(&old_endpoint);
     let semantic = b
         .entries()
         .into_iter()
