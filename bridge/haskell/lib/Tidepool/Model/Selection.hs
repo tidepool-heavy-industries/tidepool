@@ -38,15 +38,15 @@ import qualified Tidepool.Internal.ModelControl as Control
 
 -- The nominal index prevents Data.Coerce from changing provider families.
 type role Model nominal
-data Model family where
+data Model modelFamily where
   OpenAIModel :: Text -> Text -> OpenAIOptions -> Model OpenAI
   ArgonModel :: Text -> Text -> ArgonOptions -> Model Argon
   DeepSeekModel :: Text -> Text -> DeepSeekOptions -> Model DeepSeek
 
-instance Eq (Model family) where
+instance Eq (Model modelFamily) where
   left == right = modelSelection left == modelSelection right
 
-instance Show (Model family) where
+instance Show (Model modelFamily) where
   showsPrec precedence = showsPrec precedence . modelSelection
 
 -- | Bind a catalog identity and exact entry key to typed provider options.
@@ -59,7 +59,7 @@ argon = ArgonModel
 deepSeek :: Text -> Text -> DeepSeekOptions -> Model DeepSeek
 deepSeek = DeepSeekModel
 
-modelSelection :: Model family -> ModelSelectionEnvelope
+modelSelection :: Model modelFamily -> ModelSelectionEnvelope
 modelSelection (OpenAIModel catalog key options) =
   ModelSelectionEnvelope catalog key (OpenAIReasoning (openAIEffort options))
 modelSelection (ArgonModel catalog key options) =
@@ -81,16 +81,16 @@ noModelPermissions = ModelPermissions []
 modelPermissions :: [ModelPermission] -> ModelPermissions
 modelPermissions requests = ModelPermissions [request | ModelPermission request <- requests]
 
-allowModelCall :: Model family -> ModelPermission
+allowModelCall :: Model modelFamily -> ModelPermission
 allowModelCall = permission Control.ModelCall
 
-allowForkAgent :: Model family -> ModelPermission
+allowForkAgent :: Model modelFamily -> ModelPermission
 allowForkAgent = permission Control.ForkAgent
 
-allowSpawnAgent :: Model family -> ModelPermission
+allowSpawnAgent :: Model modelFamily -> ModelPermission
 allowSpawnAgent = permission Control.SpawnAgent
 
-permission :: ModelOperation -> Model family -> ModelPermission
+permission :: ModelOperation -> Model modelFamily -> ModelPermission
 permission operation model = case modelSelection model of
   ModelSelectionEnvelope catalog key reasoning ->
     ModelPermission (ModelGrantRequest operation catalog key [reasoning])

@@ -3,6 +3,7 @@ module Main (main, tests) where
 
 import Control.Monad (unless)
 import qualified Tidepool.Actors.Spawn as Spawn
+import qualified Tidepool.Model.Selection as Model
 import Tidepool.Actors.Workbench ()
 import qualified Tidepool.Effects.Core as Core
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
@@ -212,14 +213,18 @@ preparedSpecContracts = do
       (_, installed) = run $ interpret noReload $ interpret (\(_ :: ContextReadWrite a) -> error "unexpected context request") $
         runState Null $ reinterpret installation $ installPreparedSpec prepared
   require "preparation and installation share exactly one declaration set" (metadata == installed)
-  let refused = run $ interpret refuse $ Spawn.spawnSubagent (Spawn.FreshCtx "fixture") Spawn.SameDir (Spawn.defaultSpawnOptions spec)
+  let model = Model.openAI "test-catalog" "primary" (Model.OpenAIOptions Model.OpenAILow)
+      refused = run $ interpret noSpawn $ interpret refuse $
+        Spawn.spawnSubagent (Spawn.FreshCtx "fixture") Spawn.SameDir (Spawn.defaultSpawnOptions model spec)
   require "public scalar preflight refusal does not emit a child allocation" (case refused of
     Left (Spawn.SpawnInvalidSpec (Core.SpecInputSchemaInvalid _)) -> True
     _ -> False)
   where
-    refuse :: Core.AgentLaunch a -> Eff '[] a
+    refuse :: Core.AgentLaunch a -> Eff '[Core.SpawnAgent Core.OpenAI] a
     refuse (Core.AgentLaunchValidateSpecWith _ _) = pure (Left (Core.SpecInputSchemaInvalid "function input must be an object"))
-    refuse _ = error "refused preflight reached a launch or another authored effect"
+    refuse _ = error "refused preflight reached another administrative effect"
+    noSpawn :: Core.SpawnAgent Core.OpenAI a -> Eff '[] a
+    noSpawn _ = error "refused preflight reached a child allocation"
 
 
 presentedCompositionContracts :: IO ()

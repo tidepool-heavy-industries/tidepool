@@ -60,24 +60,24 @@ data ResultFormat a where
   TextResult :: ResultFormat Text
   JsonResult :: (FromJSON a, JsonSchema a) => Proxy a -> ResultFormat a
 
-data ModelTurn family tools effects a = ModelTurn
+data ModelTurn modelFamily tools effects a = ModelTurn
   { turnSpec :: AgentSpec tools effects
   , turnInstructions :: Text
   , turnFormat :: ResultFormat a
-  , turnModel :: Model family
+  , turnModel :: Model modelFamily
   , turnLimits :: ModelLimits
   }
 
-textTurn :: Model family -> AgentSpec tools effects -> Text -> ModelTurn family tools effects Text
+textTurn :: Model modelFamily -> AgentSpec tools effects -> Text -> ModelTurn modelFamily tools effects Text
 textTurn model spec instructions = ModelTurn spec instructions TextResult model defaultLimits
 
-typedTurn :: forall a family tools effects. (FromJSON a, JsonSchema a) => Model family -> AgentSpec tools effects -> Text -> ModelTurn family tools effects a
+typedTurn :: forall a modelFamily tools effects. (FromJSON a, JsonSchema a) => Model modelFamily -> AgentSpec tools effects -> Text -> ModelTurn modelFamily tools effects a
 typedTurn model spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) model defaultLimits
 
 -- | Select another exact model and effort in the same provider family.
-withModel :: Model family -> ModelTurn family tools effects a -> ModelTurn family tools effects a
+withModel :: Model modelFamily -> ModelTurn modelFamily tools effects a -> ModelTurn modelFamily tools effects a
 withModel model turn = turn { turnModel = model }
-withLimits :: ModelLimits -> ModelTurn family tools effects a -> ModelTurn family tools effects a
+withLimits :: ModelLimits -> ModelTurn modelFamily tools effects a -> ModelTurn modelFamily tools effects a
 withLimits limits turn = turn { turnLimits = limits }
 
 data ModelLimit = ProviderRequests | ToolAttempts | ReportedTokens | Deadline
@@ -137,12 +137,12 @@ data ModelResult a = ModelResult
 -- cancellation contract and cannot be caught by this wrapper.
 -- Callback and after-tool programs use the ordinary row, even inside a
 -- synchronous notebook. Raise a base-row invocation into the enclosing row.
-invokeModel :: forall family tools effects a. (KnownFamily family, Member (ModelCall family) effects, HasAgentApi tools (Eff effects), AsyncEffects effects)
-            => ModelTurn family tools effects a -> Text -> Eff effects (ModelResult a)
+invokeModel :: forall modelFamily tools effects a. (KnownFamily modelFamily, Member (ModelCall modelFamily) effects, HasAgentApi tools (Eff effects), AsyncEffects effects)
+            => ModelTurn modelFamily tools effects a -> Text -> Eff effects (ModelResult a)
 invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
   Left err -> pure (failed (InvalidModelSpec (renderToolCompileError err)))
   Right compiled -> do
-    initial <- send @(ModelCall family) (ModelStartWith (familyWitness @family) (request compiled))
+    initial <- send @(ModelCall modelFamily) (ModelStartWith (familyWitness @modelFamily) (request compiled))
     drive compiled Nothing initial
   where
     request compiled = toJSON (ModelRequestEnvelope
@@ -151,7 +151,7 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
       (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))) (modelSelection (turnModel turn)))
     stop Nothing failure = pure (failed failure)
     stop (Just token) failure = do
-      closed <- send @(ModelCall family) (ModelCloseWith (familyWitness @family) token)
+      closed <- send @(ModelCall modelFamily) (ModelCloseWith (familyWitness @modelFamily) token)
       pure (failed (either (ModelCleanupFailed failure) (const failure) closed))
     drive _ active (Left err) = stop active (ModelBoundary err)
     drive compiled active (Right value) = case fromJSON value of
@@ -160,13 +160,13 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
         pure (ModelResult (decodeOutcome (turnFormat turn) (receiptOutcome receipt)) (Just (publicReceipt receipt)))
       Success (ModelCallback token callId name args) -> do
         answer <- dispatch compiled name args
-        next <- send @(ModelCall family) (ModelResumeWith (familyWitness @family) token callId (toolDispatchReply answer))
+        next <- send @(ModelCall modelFamily) (ModelResumeWith (familyWitness @modelFamily) token callId (toolDispatchReply answer))
         drive compiled (Just token) next
       Success (ModelHook token operation name args handle ordinal semantic output) -> do
         annotation <- case afterTool (turnSpec turn) of
           Nothing -> pure NoAnnotation
           Just hook -> hook (ToolCall name args) (ToolResult name handle ordinal semantic output)
-        next <- send @(ModelCall family) (ModelAnnotateWith (familyWitness @family) token operation (toJSON (controlAnnotation annotation)))
+        next <- send @(ModelCall modelFamily) (ModelAnnotateWith (familyWitness @modelFamily) token operation (toJSON (controlAnnotation annotation)))
         drive compiled (Just token) next
 
 failed :: ModelFailure -> ModelResult a

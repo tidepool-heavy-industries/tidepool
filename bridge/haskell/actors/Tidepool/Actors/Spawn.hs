@@ -84,7 +84,7 @@ import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Runtime-issued exact provider and Haskell capture, never a source string.
 type role ContextCheckpoint nominal
-newtype ContextCheckpoint family = ContextCheckpoint Text
+newtype ContextCheckpoint modelFamily = ContextCheckpoint Text
   deriving (Show, Eq)
 
 data Captured
@@ -92,30 +92,30 @@ data Fresh
 
 -- | The context mode selects the required effect, and a capture retains its
 -- nominal family even when the child chooses another exact model or effort.
-data SpawnContext mode family where
-  ForkCtx :: ContextCheckpoint family -> SpawnContext Captured family
-  FreshCtx :: Text -> SpawnContext Fresh family
+data SpawnContext mode modelFamily where
+  ForkCtx :: ContextCheckpoint modelFamily -> SpawnContext Captured modelFamily
+  FreshCtx :: Text -> SpawnContext Fresh modelFamily
 
-instance Show (SpawnContext mode family) where
+instance Show (SpawnContext mode modelFamily) where
   showsPrec precedence (ForkCtx capture) = showParen (precedence > 10)
     (showString "ForkCtx " . showsPrec 11 capture)
   showsPrec precedence (FreshCtx prompt) = showParen (precedence > 10)
     (showString "FreshCtx " . showsPrec 11 prompt)
 
-instance Eq (SpawnContext mode family) where
+instance Eq (SpawnContext mode modelFamily) where
   ForkCtx left == ForkCtx right = left == right
   FreshCtx left == FreshCtx right = left == right
 
-type family SpawnEffect mode family where
-  SpawnEffect Captured family = ForkAgent family
-  SpawnEffect Fresh family = SpawnAgent family
+type family SpawnEffect mode modelFamily where
+  SpawnEffect Captured modelFamily = ForkAgent modelFamily
+  SpawnEffect Fresh modelFamily = SpawnAgent modelFamily
 
 -- | Capture the caller's actual conversation. The model value pins only the
 -- family; it does not switch the conversation to another model or effort.
-checkpoint :: forall family effects. (KnownFamily family, Member (ForkAgent family) effects) => Model family -> Text -> Eff effects (Either CheckpointRefusal (ContextCheckpoint family))
-checkpoint _ name = fmap ContextCheckpoint <$> send @(ForkAgent family) (ForkAgentCheckpointWith (familyWitness @family) name)
+checkpoint :: forall modelFamily effects. (KnownFamily modelFamily, Member (ForkAgent modelFamily) effects) => Model modelFamily -> Text -> Eff effects (Either CheckpointRefusal (ContextCheckpoint modelFamily))
+checkpoint _ name = fmap ContextCheckpoint <$> send @(ForkAgent modelFamily) (ForkAgentCheckpointWith (familyWitness @modelFamily) name)
 
-releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint family -> Eff effects (Either CheckpointRefusal ())
+releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint modelFamily -> Eff effects (Either CheckpointRefusal ())
 releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpointWith token)
 
 -- | A partial admission retains usable runtime-issued handles for cleanup.
@@ -165,9 +165,9 @@ limitsWire :: SpawnLimits -> (Int, Int)
 limitsWire (SpawnLimits (DescendantDepth depth) (ActiveDescendants active)) = (depth, active)
 
 -- | The real typed spec is retained with all its compiled closure dependencies.
-data SpawnOptions family tools childEffects = SpawnOptions
+data SpawnOptions modelFamily tools childEffects = SpawnOptions
   { selectedSpawnSpec :: SpawnSpec tools childEffects
-  , spawnModel :: Model family
+  , spawnModel :: Model modelFamily
   , spawnPermissions :: ModelPermissions
   , spawnInstructions :: Maybe Text
   , spawnLabel :: Maybe Text
@@ -176,7 +176,7 @@ data SpawnOptions family tools childEffects = SpawnOptions
   , spawnLimits :: Maybe SpawnLimits
   }
 
-defaultSpawnOptions :: Model family -> AgentSpec tools childEffects -> SpawnOptions family tools childEffects
+defaultSpawnOptions :: Model modelFamily -> AgentSpec tools childEffects -> SpawnOptions modelFamily tools childEffects
 defaultSpawnOptions model spec = SpawnOptions (RawSpawnSpec spec) model noModelPermissions Nothing Nothing ActorOwned Nothing
 
 data SpawnSpec tools effects
@@ -199,7 +199,7 @@ validatedAgentSpecReport (ValidatedAgentSpec prepared receipt) =
 
 -- | Reuse the exact prepared value. Spawn still rechecks current admission;
 -- editing draft source cannot substitute another spec into this value.
-defaultValidatedSpawnOptions :: Model family -> ValidatedAgentSpec tools effects -> SpawnOptions family tools effects
+defaultValidatedSpawnOptions :: Model modelFamily -> ValidatedAgentSpec tools effects -> SpawnOptions modelFamily tools effects
 defaultValidatedSpawnOptions model validated = SpawnOptions (ValidatedSpawnSpec validated) model noModelPermissions Nothing Nothing ActorOwned Nothing
 
 -- | Inspect this concrete value's declarations on the current host without
@@ -225,10 +225,10 @@ validatePreparedSpec prepared = do
 -- | Return only after workspace, tools and provider attachment are ready.
 -- Fresh seed text creates context; it does not activate inference.
 spawnSubagent
-  :: forall mode family tools childEffects effects.
-     ( KnownFamily family, Member (SpawnEffect mode family) effects, Member AgentLaunch effects, HasInstalledAgentApi tools childEffects
+  :: forall mode modelFamily tools childEffects effects.
+     ( KnownFamily modelFamily, Member (SpawnEffect mode modelFamily) effects, Member AgentLaunch effects, HasInstalledAgentApi tools childEffects
      , KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects )
-  => SpawnContext mode family -> Workspace -> SpawnOptions family tools childEffects
+  => SpawnContext mode modelFamily -> Workspace -> SpawnOptions modelFamily tools childEffects
   -> Eff effects (Either SpawnError AgentRef)
 spawnSubagent context workspace options = do
   validation <- case selectedSpawnSpec options of
@@ -241,14 +241,14 @@ spawnSubagent context workspace options = do
     launch :: PreparedAgentSpec tools childEffects -> Eff effects (Either SpawnError AgentRef)
     launch prepared = do
       admitted <- case context of
-        ForkCtx _ -> send @(ForkAgent family) (ForkAgentSpawnWith (familyWitness @family)
+        ForkCtx _ -> send @(ForkAgent modelFamily) (ForkAgentSpawnWith (familyWitness @modelFamily)
           (contextWire context) (entry prepared) (Launch.workspaceWire workspace)
           (effectKeys (knownEffects @childEffects))
           (toJSON (modelPermissionRequests (spawnPermissions options)))
           (spawnLabel options) (toJSON (modelSelection (spawnModel options)))
           (spawnInstructions options) (spawnLifetime options)
           (limitsWire <$> spawnLimits options) (preparedAgentSpecMetadata prepared))
-        FreshCtx _ -> send @(SpawnAgent family) (SpawnAgentSpawnWith (familyWitness @family)
+        FreshCtx _ -> send @(SpawnAgent modelFamily) (SpawnAgentSpawnWith (familyWitness @modelFamily)
           (contextWire context) (entry prepared) (Launch.workspaceWire workspace)
           (effectKeys (knownEffects @childEffects))
           (toJSON (modelPermissionRequests (spawnPermissions options)))
@@ -278,7 +278,7 @@ retainedResources (Core.SpawnRetainedWorkspace workspace) = SpawnRetainedWorkspa
 retainedResources (Core.SpawnRetainedActor (actor, incarnation) workspace) =
   SpawnRetainedActor (admittedAgent actor incarnation workspace)
 
-contextWire :: SpawnContext mode family -> SpawnContextWire
+contextWire :: SpawnContext mode modelFamily -> SpawnContextWire
 contextWire (ForkCtx (ContextCheckpoint token)) = CapturedSpawn token
 contextWire (FreshCtx prompt) = FreshSpawn prompt
 

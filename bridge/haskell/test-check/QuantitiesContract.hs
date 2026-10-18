@@ -40,4 +40,10 @@ quantitiesTests =
   , testCase "pure installed profile refuses resource scopes" $ checkFixture "NarrowScopeRefusal" (Rejected ["ResourceScopes", "is not a member of the type-level list"])
   , testCase "pure installed profile refuses sleep" $ checkFixture "NarrowSleepRefusal" (Rejected ["Sleep", "is not a member of the type-level list"])
   , testCase "command observation units cannot be swapped" $ checkFixture "SwappedCommandObservation" (Rejected ["Couldn't match expected type", "Cmd.Wait", "Int"])
+  , testCase "same-family bounded choice captured launch and cleanup execute" $ checkFixture "FamilyOperations" Executed
+  , testCase "model family cannot be changed by coercion" $ checkFixture "ModelFamilyCoerceRefusal" (Rejected ["OpenAI", "Argon", "coerce"])
+  , testCase "checkpoint family cannot be changed by coercion" $ checkFixture "CheckpointFamilyCoerceRefusal" (Rejected ["OpenAI", "Argon", "coerce"])
+  , testCase "bounded invocation requires its selected model family effect" $ checkFixture "ModelFamilyRowRefusal" (Rejected ["ModelCall", "OpenAI", "Argon"])
+  , testCase "captured checkpoint cannot launch another model family" $ checkFixture "CapturedFamilyRefusal" (Rejected ["OpenAI", "Argon"])
+  , testCase "fresh context requires spawn permission even with captured-context permission" $ checkFixture "FreshFamilyRowRefusal" (Rejected ["SpawnAgent", "OpenAI", "is not a member of the type-level list"])
   ]
