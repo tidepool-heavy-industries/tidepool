@@ -2574,31 +2574,65 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     let directory_path = directory.path().to_path_buf();
     assert!(!materialization.rows.is_empty());
     assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
-    let entry = context
-        .artifact_view()
-        .entries()
-        .into_iter()
-        .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+    let offer = {
+        let inputs = completed.compiler_inputs();
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
+        let entry = context
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+            .unwrap();
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
+        let definitions =
+            crate::certified_products::original_native_group_definitions(product, 7).unwrap();
+        let binding = match &definitions.bindings()[0] {
+            tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+            tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+        };
+        let imports = [crate::certified_products::PendingImportOwner::Source {
+            owner: product.owner().clone(),
+            original_ordinal: 7,
+            binder: binding.identity.clone(),
+        }];
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
         .unwrap();
-    let canonical = context
-        .owner
-        .facts
-        .compiler_support
-        .projection()
-        .roles()
-        .into_iter()
-        .find(|role| role.original() == Some(entry.descriptor.id))
-        .unwrap()
-        .interface();
-    let proof = NativeOriginalRequirement::from_issued_group_custody(
-        entry.descriptor.id,
-        canonical,
-        context.artifact_view(),
-    )
-    .unwrap()
-    .unwrap();
-    let offer = IssuedNativeOffer::issue(entry.descriptor.id, context.artifact_view(), Some(proof))
-        .unwrap();
+        let source = inputs.artifacts();
+        let mut fixed = source
+            .inventory()
+            .bind_segment(source, vec![], &selection)
+            .unwrap();
+        let target = source
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                source,
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            )
+            .unwrap();
+        assert_eq!(
+            target.artifacts().selected_native_groups(),
+            BTreeSet::from([NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: 7,
+            }]),
+        );
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
+        let proof =
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, target.artifacts())
+                .unwrap()
+                .unwrap();
+        IssuedNativeOffer::issue(entry.descriptor.id, target.artifacts(), Some(proof)).unwrap()
+    };
     drop(completed);
     drop(context);
     assert!(
