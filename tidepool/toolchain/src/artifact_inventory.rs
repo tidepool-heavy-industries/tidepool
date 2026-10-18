@@ -3441,9 +3441,9 @@ impl ArtifactInventory {
             .set(projection)
             .ok()
             .expect("fresh bound projection");
-        if let Some(custody) = view.attach_projected_materializations(&demanded_materializations) {
-            inherited_materializations.push(custody);
-        }
+        inherited_materializations.extend(
+            view.attach_projected_materializations(&demanded_materializations),
+        );
         let _ = view
             .reads
             .inherited_materializations
@@ -5542,6 +5542,11 @@ impl ArtifactView {
         let mut parents = Vec::new();
         self.lease
             .collect_inherited_materializations(&mut parents, &mut BTreeSet::new())?;
+        let parents =
+            crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
+                &parents,
+                &metadata.retained,
+            );
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
         Ok(materialization)
@@ -6566,14 +6571,18 @@ impl ArtifactView {
     fn attach_projected_materializations(
         &mut self,
         owners: &[Arc<crate::declaration_context::RetainedArtifactMaterialization>],
-    ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+    ) -> Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
         if owners.is_empty() {
-            return None;
+            return Vec::new();
         }
-        let custody = crate::declaration_context::RetainedArtifactMaterialization::select_custody(
-            owners,
-            &self.metadata_snapshot(),
-        )?;
+        let custody =
+            crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
+                owners,
+                &self.metadata_snapshot(),
+            );
+        if custody.is_empty() {
+            return custody;
+        }
         let lease = Arc::get_mut(&mut self.lease).expect("new demanded selection lease");
         let mut fixed = lease
             .materialization
@@ -6581,9 +6590,9 @@ impl ArtifactView {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        fixed.push(Arc::clone(&custody));
+        fixed.extend(custody.iter().cloned());
         lease.materialization.fixed = fixed.into();
-        Some(custody)
+        custody
     }
 
     fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {
@@ -6628,14 +6637,14 @@ impl ArtifactView {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
             if !materializations.is_empty() {
                 let custody =
-                    crate::declaration_context::RetainedArtifactMaterialization::select_custody(
+                    crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                         &materializations,
                         &retained.metadata_snapshot(),
                     );
                 Arc::get_mut(&mut retained.lease)
                     .expect("new selection lease")
                     .materialization
-                    .fixed = custody.into_iter().collect();
+                    .fixed = custody.into();
             }
         }
         Ok(retained)

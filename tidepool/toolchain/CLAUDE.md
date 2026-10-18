@@ -139,6 +139,15 @@ Whole-program and value publication keep their existing atomic owners. A fresh a
 physical artifacts afresh; an existing shared owner needs no repeated immutable
 byte observation or proof memo.
 
+Private materialization issues each immutable row and graph file once behind an
+`Arc`. Detached physical custody clones those fact handles, which retain their
+actual directory and arena slices without retaining a compilation or sibling
+metadata. Complete compilation inputs preserve their exact owner frontier;
+only subsets of the same issued fact handles may be removed. Selection keeps
+source precedence, and a whole owner containing any excluded or shadowed fact
+must yield only its selected facts. Equal paths, hashes or artifact IDs cannot
+equate independently issued physical facts.
+
 ## Immutable build fixtures
 
 `tidepool_prepared_fixture` in `build/haskell/prepared_fixture.bzl` invokes

@@ -395,6 +395,113 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
 }
 
 #[test]
+fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
+    let (first, producer) = metadata_fixture();
+    let (second, second_producer) = metadata_fixture();
+    assert_eq!(producer, second_producer);
+    let scratch = tempfile::tempdir().unwrap();
+    let first_request = first
+        .prepare_compilation(&scratch.path().join("first"), &producer)
+        .unwrap();
+    let second_request = second
+        .prepare_compilation(&scratch.path().join("second"), &producer)
+        .unwrap();
+    let first_owner = first_request.materialization.as_ref().unwrap();
+    let second_owner = second_request.materialization.as_ref().unwrap();
+    assert_eq!(
+        first_owner.rows.keys().collect::<Vec<_>>(),
+        second_owner.rows.keys().collect::<Vec<_>>()
+    );
+    for (id, row) in &first_owner.rows {
+        let independent = &second_owner.rows[id];
+        assert!(!Arc::ptr_eq(row, independent));
+        assert!(!Arc::ptr_eq(&row._directory, &independent._directory));
+        assert_eq!(
+            std::fs::read(&row.interface.path).unwrap(),
+            std::fs::read(&independent.interface.path).unwrap()
+        );
+        match (&row.payload, &independent.payload) {
+            (RetainedArtifactPayload::InterfaceOnly, RetainedArtifactPayload::InterfaceOnly) => {}
+            (
+                RetainedArtifactPayload::Native {
+                    product,
+                    certification_path,
+                    ..
+                },
+                RetainedArtifactPayload::Native {
+                    product: other,
+                    certification_path: other_certification,
+                    ..
+                },
+            ) => {
+                assert_eq!(
+                    std::fs::read(&product.path).unwrap(),
+                    std::fs::read(&other.path).unwrap()
+                );
+                assert_eq!(
+                    std::fs::read(certification_path).unwrap(),
+                    std::fs::read(other_certification).unwrap()
+                );
+            }
+            _ => panic!("independent fixtures changed physical payload kind"),
+        }
+    }
+    let metadata = first.compiler_metadata_snapshot().unwrap();
+    for (owners, expected) in [
+        (
+            vec![first_owner.clone(), second_owner.clone()],
+            second_owner,
+        ),
+        (vec![second_owner.clone(), first_owner.clone()], first_owner),
+        (vec![first_owner.clone(), first_owner.clone()], first_owner),
+    ] {
+        let selected =
+            RetainedArtifactMaterialization::select_custody_inputs(&owners, &metadata.retained);
+        assert_eq!(selected.len(), 1);
+        assert!(Arc::ptr_eq(&selected[0], expected));
+    }
+    let empty = ArtifactInventory::default()
+        .empty_view()
+        .metadata_snapshot();
+    assert!(
+        RetainedArtifactMaterialization::select_custody_inputs(&[first_owner.clone()], &empty)
+            .is_empty()
+    );
+    let beta = metadata.entries[&identity("fixture", "Beta")].descriptor.id;
+    let selected_metadata = first
+        .artifact_view()
+        .select_roots(vec![beta])
+        .unwrap()
+        .metadata_snapshot();
+    let captured = RetainedArtifactMaterialization::select_custody_inputs(
+        &[first_owner.clone()],
+        &selected_metadata,
+    );
+    assert_eq!(captured.len(), 1);
+    assert!(!Arc::ptr_eq(&captured[0], first_owner));
+    assert!(captured[0]._parents.is_empty() && captured[0]._directory.is_none());
+    assert_eq!(captured[0].rows.len(), 1);
+    assert!(Arc::ptr_eq(
+        &captured[0].rows[&beta],
+        &first_owner.rows[&beta]
+    ));
+    let first_directory = first_owner.directory().path().to_path_buf();
+    let second_directory = second_owner.directory().path().to_path_buf();
+    let selected_file = first_owner.rows[&beta].interface.path.clone();
+    let first_weak = Arc::downgrade(first_owner);
+    let second_weak = Arc::downgrade(second_owner);
+    drop(first_request);
+    drop(second_request);
+    drop(first);
+    drop(second);
+    assert!(first_weak.upgrade().is_none() && second_weak.upgrade().is_none());
+    assert!(first_directory.is_dir() && selected_file.is_file());
+    assert!(!second_directory.exists());
+    drop(captured);
+    assert!(!first_directory.exists());
+}
+
+#[test]
 fn captured_dependency_graph_files_keep_their_issued_directories() {
     let source = tempfile::tempdir().unwrap();
     let (graph_b, originals) = crate::execution_source::test_prepared_graph(source.path());
