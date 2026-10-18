@@ -3551,8 +3551,9 @@ impl ArtifactInventory {
             .set(projection)
             .ok()
             .expect("fresh bound projection");
-        inherited_materializations
-            .extend(view.attach_projected_materializations(&demanded_materializations));
+        inherited_materializations.extend(
+            view.attach_projected_materializations(&demanded_materializations),
+        );
         let _ = view
             .reads
             .inherited_materializations
