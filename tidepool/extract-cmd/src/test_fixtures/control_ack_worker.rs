@@ -77,6 +77,10 @@ fn main() {
             for _ in 0..u32::from_le_bytes(argc) {
                 let _ = frame(&mut input);
             }
+            if first_worker && phase == 18 {
+                std::fs::write(directory.join("stalled"), b"request").unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
             request_count += 1;
             let stdout = if first_worker && phase == 17 {
                 "body-report-v1".to_owned()

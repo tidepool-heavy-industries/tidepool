@@ -2929,12 +2929,13 @@ pub(crate) fn typecheck_candidate_revision_owned(
             settlement,
         )
     })?;
-    if matches!(
-        &outcome.close,
+    match &outcome.close {
+        tidepool_runtime::CompilerTransactionClose::Clean
+        | tidepool_runtime::CompilerTransactionClose::NotStarted => {}
         tidepool_runtime::CompilerTransactionClose::Unconfirmed(_)
-            | tidepool_runtime::CompilerTransactionClose::Retired(_)
-    ) {
-        return Err(Box::new(ActorCompilerCheckUnconfirmed { outcome }));
+        | tidepool_runtime::CompilerTransactionClose::Retired(_) => {
+            return Err(Box::new(ActorCompilerCheckUnconfirmed { outcome }));
+        }
     }
     outcome.action
 }
@@ -2953,7 +2954,7 @@ impl fmt::Display for ActorCompilerCheckUnconfirmed {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "source check compiler close is unconfirmed: {:?}",
+            "source check compiler transaction did not finish cleanly: {:?}",
             self.outcome.close
         )
     }

@@ -279,7 +279,7 @@ impl CompilerTransactionClose {
             }
             (abnormal @ (Retired(_) | Unconfirmed(_)), Clean | NotStarted)
             | (Clean | NotStarted, abnormal @ (Retired(_) | Unconfirmed(_))) => abnormal,
-            (Clean, _) | (_, Clean) => Clean,
+            (Clean, Clean) | (Clean, NotStarted) | (NotStarted, Clean) => Clean,
             (NotStarted, NotStarted) => NotStarted,
         }
     }

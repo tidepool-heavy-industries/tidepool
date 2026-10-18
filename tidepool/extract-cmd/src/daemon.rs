@@ -7178,6 +7178,7 @@ tidepool-reuse-error: witness failed\n";
 
         for operation in [
             WorkerOperation::BeginTransaction,
+            WorkerOperation::Request,
             WorkerOperation::EndTransaction,
         ] {
             let dir = scratch.path().join(format!("{operation:?}"));
@@ -7187,7 +7188,7 @@ tidepool-reuse-error: witness failed\n";
             let phase = match operation {
                 WorkerOperation::BeginTransaction => TRANSACTION_REQUEST,
                 WorkerOperation::EndTransaction => TRANSACTION_END,
-                WorkerOperation::Request => unreachable!(),
+                WorkerOperation::Request => 18,
             };
             std::fs::write(dir.join("phase"), [phase]).unwrap();
             let socket = dir.join("daemon.sock");
@@ -7240,12 +7241,16 @@ tidepool-reuse-error: witness failed\n";
             let (client_settled_tx, client_settled_rx) = std::sync::mpsc::channel();
             let client = std::thread::spawn(move || {
                 let result = match operation {
-                    WorkerOperation::BeginTransaction => {
-                        execute_transaction_request(&mut transaction, &client_dir, &client_argv)
-                            .map(|_| None)
+                    WorkerOperation::BeginTransaction | WorkerOperation::Request => {
+                        let action = execute_transaction_request(
+                            &mut transaction,
+                            &client_dir,
+                            &client_argv,
+                        )
+                        .map(|_| ());
+                        (action, end_transaction(&mut transaction))
                     }
-                    WorkerOperation::EndTransaction => end_transaction(&mut transaction).map(Some),
-                    WorkerOperation::Request => unreachable!(),
+                    WorkerOperation::EndTransaction => (Ok(()), end_transaction(&mut transaction)),
                 };
                 client_settled_tx.send(()).unwrap();
                 result
@@ -7276,20 +7281,27 @@ tidepool-reuse-error: witness failed\n";
             client_settled_rx
                 .recv_timeout(Duration::from_secs(4))
                 .expect("control operation did not settle");
-            match client.join().unwrap() {
-                Ok(Some(DaemonClose::Retired(retirement))) => {
-                    assert!(matches!(operation, WorkerOperation::EndTransaction));
-                    assert!(matches!(
-                        retirement.worker,
-                        crate::CompilerWorkerRetirement::Reaped(_)
-                    ));
-                }
-                Err(error) => {
-                    assert!(error.was_accepted(), "{error}");
-                    assert!(!error.permits_rebind(), "{error}");
-                }
-                _ => panic!("failed/cancelled control work cannot become clean END"),
+            let (action, close) = client.join().unwrap();
+            if !matches!(operation, WorkerOperation::EndTransaction) {
+                let error = action.unwrap_err();
+                assert!(error.was_accepted(), "{error}");
+                assert!(!error.permits_rebind(), "{error}");
             }
+            let DaemonClose::Retired(retirement) =
+                close.expect("exact worker retirement must be reported on the original connection")
+            else {
+                panic!("failed/cancelled control work cannot become clean END");
+            };
+            assert!(matches!(
+                retirement.worker,
+                crate::CompilerWorkerRetirement::Reaped(_)
+            ));
+            let pids = std::fs::read_to_string(dir.join("worker-pids")).unwrap();
+            let first = pids.lines().next().unwrap();
+            assert!(
+                !Path::new("/proc").join(first).exists(),
+                "retirement receipt preceded exact worker reap"
+            );
             if !matches!(recovery, ControlRecovery::Stop) {
                 let next = preflight(&socket).unwrap();
                 assert_eq!(next.epoch, binding.epoch);

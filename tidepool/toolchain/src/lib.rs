@@ -69,7 +69,7 @@ pub enum CompileError {
     CompilerEndpoint(#[source] tidepool_extract_cmd::SpawnError),
     /// The action and its input descriptors remain owned by exact close
     /// evidence. Neither a completed response nor this error permits replay.
-    #[error("compiler transaction close is unconfirmed")]
+    #[error("compiler transaction did not finish cleanly")]
     CompilerCloseUnconfirmed(
         Box<
             tidepool_extract_cmd::CompilerTransactionOutcome<
@@ -82,7 +82,7 @@ pub enum CompileError {
     CompilerPublication(#[from] tidepool_extract_cmd::CompilerTransactionPublicationError),
     /// Completed host preparation is unusable until its compiler END is
     /// confirmed. Exact input directories remain with this close evidence.
-    #[error("completed compiler preparation close is unconfirmed")]
+    #[error("completed compiler preparation did not finish cleanly")]
     CompilerPreparationCloseUnconfirmed(
         Box<tidepool_extract_cmd::CompilerTransactionCloseEvidence>,
     ),
@@ -165,12 +165,13 @@ impl CompileError {
             Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
         >,
     ) -> Result<tidepool_extract_cmd::ExtractRun, Self> {
-        if matches!(
-            &outcome.close,
+        match &outcome.close {
+            tidepool_extract_cmd::CompilerTransactionClose::Clean
+            | tidepool_extract_cmd::CompilerTransactionClose::NotStarted => {}
             tidepool_extract_cmd::CompilerTransactionClose::Unconfirmed(_)
-                | tidepool_extract_cmd::CompilerTransactionClose::Retired(_)
-        ) {
-            return Err(Self::CompilerCloseUnconfirmed(Box::new(outcome)));
+            | tidepool_extract_cmd::CompilerTransactionClose::Retired(_) => {
+                return Err(Self::CompilerCloseUnconfirmed(Box::new(outcome)));
+            }
         }
         outcome.action.map_err(|mut error| {
             error.source = extract_spawn_error(error.source);
