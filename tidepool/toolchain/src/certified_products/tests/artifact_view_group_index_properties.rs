@@ -23,13 +23,13 @@ fn linear_group_admission(
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
-    let selected_key = |group: &PendingCertifiedGroup| {
+    let selected_key = |phase: &str, group: &PendingCertifiedGroup| {
         let mut exact = available
             .iter()
             .filter(|(_, product)| product.owner() == group.owner());
         let (artifact, _) = exact
             .next()
-            .ok_or_else(|| context_failure("certified group has no exact original artifact"))?;
+            .ok_or_else(|| context_failure(format!("certified group has no exact original artifact: phase={phase} owner={:?} ordinal={} selected_groups={} available_originals={}", group.owner(), group.group().original_ordinal(), metadata.selected_native_groups.len(), available.len())))?;
         if exact.next().is_some() {
             return Err(context_failure(
                 "certified group has ambiguous exact original artifacts",
@@ -44,14 +44,14 @@ fn linear_group_admission(
     for group in candidates {
         if metadata
             .selected_native_groups
-            .contains(&selected_key(group)?)
+            .contains(&selected_key("Candidate", group)?)
         {
             current.push(group.clone());
         }
     }
     let mut baseline_keys = BTreeSet::new();
     for group in baseline {
-        let key = selected_key(group)?;
+        let key = selected_key("Baseline", group)?;
         if !baseline_keys.insert(key) || !metadata.selected_native_groups.contains(&key) {
             return Err(context_failure(
                 "artifact view removed or duplicated a previously selected group",

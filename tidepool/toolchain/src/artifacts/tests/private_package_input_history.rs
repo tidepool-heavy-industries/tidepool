@@ -265,7 +265,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             },
         ),
     ]);
-    let mut issued = issue_original(directory.path(), &packages);
+    let issued = issue_original(directory.path(), &packages);
     assert_eq!(issued.recovery_products.len(), 1);
     assert_eq!(issued.groups.len(), 1);
     assert!(matches!(issued.groups[0].imports(),
@@ -444,13 +444,12 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Custody without a selected native package edge does not grant a target
     // package witness, even when the original still owns that witness.
-    let selected_groups = std::mem::take(&mut issued.groups);
-    let unselected = selected_package_closure(
-        &BTreeMap::new(),
-        &issued,
-        &mut PackageInterfaceValidation::default(),
-    )
-    .unwrap();
+    let unselected_validation = &mut PackageInterfaceValidation::default();
+    let unselected =
+        package_availability_with_validation(&BTreeMap::new(), &issued, unselected_validation)
+            .unwrap()
+            .select(&[], &[], &unselected_validation.inventory)
+            .unwrap();
     assert!(unselected.is_empty());
 
     // A source root and a direct package global can both be admitted before
@@ -602,10 +601,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert!(!late_closure.contains_key(&arbitrary_owner));
     assert!(late_request.context().lexical_graph().is_empty());
     assert!(late_request.context().compiler_input_roles().is_empty());
-    issued.groups = selected_groups;
     let archive_root = directory.path().join("two-native-groups");
     std::fs::create_dir_all(&archive_root).unwrap();
-    let mut subset = issue_original_with_extra_group(
+    let subset = issue_original_with_extra_group(
         &archive_root,
         &packages,
         Some(SymbolIdentity {
@@ -621,18 +619,18 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     )
     .unwrap();
     assert!(all_groups.contains_key(&arbitrary_owner));
-    subset.groups = subset
+    let subset_groups = subset
         .groups
         .iter()
         .filter(|group| group.group().original_ordinal() == ORDINAL)
         .cloned()
-        .collect();
-    let selected = selected_package_closure(
-        &BTreeMap::new(),
-        &subset,
-        &mut PackageInterfaceValidation::default(),
-    )
-    .unwrap();
+        .collect::<Vec<_>>();
+    let selected_validation = &mut PackageInterfaceValidation::default();
+    let selected =
+        package_availability_with_validation(&BTreeMap::new(), &subset, selected_validation)
+            .unwrap()
+            .select(&subset_groups, &[], &selected_validation.inventory)
+            .unwrap();
     assert_eq!(
         selected.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
         Some(&witness)
