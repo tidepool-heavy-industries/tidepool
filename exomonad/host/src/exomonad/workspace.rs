@@ -1822,6 +1822,49 @@ mod tests {
         assert!(error.downcast_ref::<std::io::Error>().is_some());
     }
 
+    #[test]
+    fn deployment_source_validation_retains_manifest_and_header_refusals() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        for role in NativeSourceRole::ORDERED {
+            std::fs::create_dir_all(root.join(role.relative_root())).unwrap();
+        }
+        let probe = b"module TidepoolCatalog where\n";
+        let header = b"#define VALUE 7\n";
+        std::fs::write(root.join("TidepoolCatalog.hs"), probe).unwrap();
+        std::fs::write(root.join("Include.h"), header).unwrap();
+        // A raw private mirror exercises host checks, without issuing catalog authority.
+        let selection = DeploymentSources {
+            version: 1,
+            sources: NativeCatalogSourceSelection {
+                snapshot_root: root.clone(),
+                roles: NativeSourceRole::ORDERED,
+                source_files: NativeCatalogSourceSelection::source_manifest(&root).unwrap(),
+            },
+            source_pin: "source-validation-fixture".into(),
+            producer_identity: [1; 32],
+            catalog_identity: "source-validation-fixture".into(),
+        };
+        SOURCE_INSPECTION_WORK.with(|work| work.set((0, 0, 0)));
+        verify_deployment_sources(&selection).unwrap();
+        assert_eq!(
+            SOURCE_INSPECTION_WORK.with(|work| work.replace((0, 0, 0))),
+            (2, probe.len() + header.len(), 0)
+        );
+        std::fs::write(root.join("TidepoolCatalog.hs"), b"changed").unwrap();
+        assert!(verify_deployment_sources(&selection)
+            .unwrap_err()
+            .to_string()
+            .contains("deployment source changed"));
+        std::fs::write(root.join("TidepoolCatalog.hs"), probe).unwrap();
+        std::fs::remove_file(root.join("Include.h")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(root.join("Include.h")).unwrap();
+        assert!(verify_deployment_sources(&selection)
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+    }
+
     // Workspace tests supply a private selection mirror. Production constructs
     // that mirror only from the toolchain's admitted immutable module package.
     fn deployment_fixture() -> (tempfile::TempDir, DeploymentSources) {
