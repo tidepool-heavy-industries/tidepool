@@ -12911,8 +12911,17 @@ pub(crate) mod tests {
             }
             .unwrap();
             assert_eq!(
-                admitted.capture_graph_selection().namespace,
-                full.artifacts().capture_graph_selection().namespace
+                admitted
+                    .capture_graph_selection()
+                    .namespace
+                    .iter()
+                    .map(|binding| binding.artifact)
+                    .collect::<BTreeSet<_>>(),
+                roles
+                    .roles()
+                    .into_iter()
+                    .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                    .collect(),
             );
             assert_eq!(
                 admitted.selected_native_groups(),
