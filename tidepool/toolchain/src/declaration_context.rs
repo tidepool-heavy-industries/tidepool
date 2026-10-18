@@ -1323,6 +1323,46 @@ pub(crate) struct RequestNativeAvailability(
 );
 
 impl RequestNativeAvailability {
+    fn semantic_observations(
+        &self,
+    ) -> Result<
+        Vec<(
+            ArtifactId,
+            String,
+            String,
+            [u8; 32],
+            [u8; 32],
+            [u8; 32],
+            u8,
+            Vec<[u8; 32]>,
+        )>,
+        CompileError,
+    > {
+        self.rows()
+            .map(|row| {
+                let owner = row.original_owner();
+                Ok((
+                    row.original.descriptor.id,
+                    owner.unit.clone(),
+                    owner.module.clone(),
+                    owner.module_version.0,
+                    owner.skinny_iface_sha256,
+                    owner.product_sha256,
+                    match row.mode {
+                        NativeTransportMode::Full => 1,
+                        NativeTransportMode::IssuedGroups => 0,
+                    },
+                    row.contributions
+                        .iter()
+                        .map(|contribution| contribution.identity())
+                        .collect::<Result<BTreeSet<_>, _>>()?
+                        .into_iter()
+                        .collect(),
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn rows(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
         self.0.values()
     }
@@ -8383,13 +8423,33 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "10"
+                    "12"
                 } else {
-                    "11"
+                    "13"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
+                    self.snapshot()
+                        .native_availability
+                        .iter()
+                        .map(|(id, fact)| {
+                            let owner = &fact.owner;
+                            (
+                                *id,
+                                owner.unit.clone(),
+                                owner.module.clone(),
+                                owner.module_version.0,
+                                owner.skinny_iface_sha256,
+                                owner.product_sha256,
+                                match fact.mode {
+                                    NativeTransportMode::Full => 1u8,
+                                    NativeTransportMode::IssuedGroups => 0u8,
+                                },
+                                fact.contributions.keys().copied().collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                     metadata.descriptors(),
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
@@ -8549,13 +8609,19 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "10"
+                    "12"
                 } else {
-                    "11"
+                    "13"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
+                    self.owner
+                        .facts
+                        .compiler_support
+                        .native_availability()
+                        .semantic_observations()
+                        .expect("issued native permission observation"),
                     metadata.descriptors(),
                     metadata.dependencies(),
                     &metadata.selected_native_groups,

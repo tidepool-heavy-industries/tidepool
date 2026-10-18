@@ -9094,3 +9094,170 @@ fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
         "unrelated native custody must add no copied inspection files or native payload"
     );
 }
+
+#[test]
+fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody() {
+    use crate::exact_context::{hydrate_context, Materializer};
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+    let product = product("TemplatePermissionOwner", 61);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let entry = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+    let owner = entry.descriptor.owner.clone();
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let full_support = fixture_compiler_support(projection.clone(), full.clone());
+    assert!(full_support
+        .native_offers()
+        .iter()
+        .any(|offer| offer.is_full()));
+    for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
+        let selected = ordinals
+            .iter()
+            .map(|ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            })
+            .collect();
+        let chosen = inventory
+            .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
+            .unwrap();
+        let support = fixture_compiler_support(projection.clone(), chosen)
+            .retain_offers(full_support.native_offers().iter().cloned())
+            .unwrap();
+        assert!(support.native_offers().iter().any(|offer| offer.is_full()));
+        let original = ExactDeclarationContext::from_authenticated_execution_support(
+            producer,
+            support,
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }],
+            owner.clone(),
+            std::slice::from_ref(&owner),
+        )
+        .unwrap();
+        let captured =
+            RetainedTemplateImports::capture(&original, &[format!("import {}\n", owner.module)])
+                .unwrap()
+                .unwrap();
+        assert!(captured
+            .compiler_support
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(captured
+            .compiler_support
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        let exported = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&captured.compiler_support)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(exported.clone()))
+            .prepare_compilation(root.path(), PRODUCER)
+            .unwrap();
+        let row = request
+            .compiler_inputs()
+            .native_availability(entry.descriptor.id)
+            .expect("explicit empty remains an issued row");
+        assert_eq!(row.mode == NativeTransportMode::Full, ordinals.len() == 2);
+        assert_eq!(row.permits(7), ordinals.contains(&7));
+        assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        let snapshot = exported.snapshot();
+        let store = MemoryBlockstore::default();
+        let mut writer = Materializer::new(&store);
+        let committed = writer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let acquired = hydrate_context(&store, committed.root()).unwrap();
+        let view = exported.artifact_view();
+        let graph = view.capture_graph_selection();
+        let recovered = RecoveredArtifactInventory {
+            producer,
+            entries: view
+                .entries()
+                .into_iter()
+                .map(|entry| (entry.descriptor.id, entry))
+                .collect(),
+            recorded_inventory: true,
+            bindings: graph.bindings.iter().copied().collect(),
+            binding_edges: view.binding_dependencies(),
+            interfaces: view.interface_dependencies(),
+        };
+        let reopened = recovered
+            .context_for_expected_snapshot(committed.root(), &acquired)
+            .unwrap();
+        assert_eq!(
+            reopened.snapshot().native_availability,
+            snapshot.native_availability
+        );
+        if ordinals.len() == 2 {
+            // The real writer/acquired-root boundary can retain a narrower
+            // grant with exactly the same payloads, proofs, roles and demand.
+            let mut limited = snapshot.clone();
+            limited
+                .native_availability
+                .get_mut(&entry.descriptor.id)
+                .unwrap()
+                .mode = NativeTransportMode::IssuedGroups;
+            let mut writer = Materializer::new(&store);
+            let limited_root = writer.materialize_context(None, &limited).unwrap();
+            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+            let limited_receipt = hydrate_context(&store, limited_root.root()).unwrap();
+            let limited_context = recovered
+                .context_for_expected_snapshot(limited_root.root(), &limited_receipt)
+                .unwrap();
+            assert_eq!(
+                limited_context.snapshot().selection,
+                reopened.snapshot().selection
+            );
+            assert_eq!(limited_context.snapshot().roles, reopened.snapshot().roles);
+            assert_eq!(
+                limited_context.snapshot().offers,
+                reopened.snapshot().offers
+            );
+            assert_eq!(
+                limited_context.snapshot().input_decisions,
+                reopened.snapshot().input_decisions
+            );
+            assert_ne!(
+                limited_context.semantic_sha256(),
+                reopened.semantic_sha256()
+            );
+            assert_eq!(
+                limited_context.original_semantic_bytes_oracle(
+                    &limited_context.artifact_view().metadata_snapshot()
+                ),
+                limited_context.semantic_bytes_from_metadata(
+                    &limited_context.artifact_view().metadata_snapshot()
+                )
+            );
+        }
+        if ordinals.len() != 2 {
+            let mut widened = snapshot.clone();
+            widened
+                .native_availability
+                .get_mut(&entry.descriptor.id)
+                .unwrap()
+                .mode = NativeTransportMode::Full;
+            let mut writer = Materializer::new(&store);
+            let substituted = writer.materialize_context(None, &widened).unwrap();
+            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+            let substituted = hydrate_context(&store, substituted.root()).unwrap();
+            assert!(
+                matches!(recovered.context_for_expected_snapshot(committed.root(), &substituted), Err(CompileError::CompilerEvidence(error)) if matches!(*error, crate::certified_products::CertificationError::Mismatch("acquired compiler snapshot root differs from expected context")))
+            );
+        }
+    }
+}
