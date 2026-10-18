@@ -402,6 +402,15 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             .is_some_and(|row| row.permits(7)));
         let expected_publication = original.compiler_input_roles().into_iter()
             .find(CompilerInputRole::is_published_source_original).unwrap();
+        // Legacy role DTOs authenticate a selected graph, not the complete v5
+        // owner: their selected proof set can omit unused available scopes.
+        let wire_roles: Vec<CompilerInputRole> = serde_json::from_slice(
+            &serde_json::to_vec(&original.compiler_input_roles()).unwrap(),
+        ).unwrap();
+        let (_wire_scratch, _wire_inventory, wire_owner) =
+            restored_graph_roles(original, &wire_roles).unwrap();
+        prop_assert_eq!(wire_owner.artifact_view().capture_graph_selection(),
+            original.artifact_view().capture_graph_selection());
         let mut expected_roles = original.compiler_input_roles();
         let mut expected_artifacts = original.artifact_view().artifact_ids();
         let initial_groups = std::iter::once(NativeGroupKey {
@@ -517,10 +526,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 Operation::Recover => {
                     observed[2].set(observed[2].get() + 1);
                     let before = context.artifact_view().clone();
-                    let roles: Vec<CompilerInputRole> = serde_json::from_slice(
-                        &serde_json::to_vec(&context.compiler_input_roles()).unwrap(),
-                    )
-                    .unwrap();
+                    let roles = context.compiler_input_roles();
                     context = restored(&context, &roles).unwrap();
                     prop_assert_eq!(context.artifact_view(), &before);
                     prop_assert_eq!(
@@ -557,7 +563,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         *dependency = CompilerInputRole::InterfaceOnly {
                             interface: dependency.interface(),
                         };
-                        prop_assert!(restored(&context, &altered).is_err());
+                        prop_assert!(restored_graph_roles(&context, &altered).is_err());
                         refusals[6].set(refusals[6].get() + 1);
                         continue;
                     }
@@ -594,7 +600,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     }
                     prop_assert_ne!(&roles[published], &issued);
                     let altered: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert!(restored(&context, &altered).is_err());
+                    prop_assert!(restored_graph_roles(&context, &altered).is_err());
                     refusals[usize::from(partition)]
                         .set(refusals[usize::from(partition)].get() + 1);
                 }
@@ -606,13 +612,14 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .position(CompilerInputRole::is_published_source_original)
                         .unwrap();
                     let mut roles = serde_json::to_value(&issued_roles).unwrap();
+                    let baseline_wire: Vec<CompilerInputRole> = serde_json::from_value(roles.clone()).unwrap();
                     let bindings = roles[published]["selection"]["graph"]["bindings"]
                         .as_array_mut()
                         .unwrap();
                     bindings.push(bindings[0].clone());
                     let repeated: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert_eq!(&repeated, &issued_roles);
-                    prop_assert!(restored(&context, &repeated).is_err());
+                    prop_assert_eq!(&repeated, &baseline_wire);
+                    prop_assert!(restored_graph_roles(&context, &repeated).is_err());
                     duplicate_refusals.set(duplicate_refusals.get() + 1);
                 }
             }
