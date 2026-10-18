@@ -1395,7 +1395,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                 else {
                     panic!("the warm item must issue an exact native group root");
                 };
-                let selected = products.artifact_view.selected_native_groups();
+                let selected = products.artifact_view().selected_native_groups();
                 assert!(selected.contains(&NativeGroupKey {
                     artifact,
                     original_ordinal

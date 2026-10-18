@@ -1858,7 +1858,7 @@ impl CompiledTurn {
         let products = item.native_products().ok_or_else(missing)?;
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
-            artifact_view: products.artifact_view.clone(),
+            artifact_view: products.artifact_view().clone(),
             original_compile_input: None,
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports.clone(),
@@ -3741,7 +3741,11 @@ fn audit_compiler_issued_item_receipts(
                 |(item_index, capture_index)| {
                     let item = native[item_index];
                     let (ordinal, module) = captures[capture_index];
-                    let selected = item.native_products().unwrap().artifact_view.descriptors();
+                    let selected = item
+                        .native_products()
+                        .unwrap()
+                        .artifact_view()
+                        .descriptors();
                     let table = item.native().unwrap().table();
                     let sites = match decode_turn_out(item.native_turn_bytes().unwrap()).unwrap() {
                         DecodedTurnOut::Bind { asks, .. } | DecodedTurnOut::Expr { asks, .. } => {
@@ -3955,10 +3959,10 @@ fn audit_compiler_issued_item_receipts(
             .any(|row| row.as_array().unwrap()[1].as_text() == Some(same_segment_module)),
         "shared originals privately capture later types once"
     );
-    let first_view = &valid.items()[index]
+    let first_view = valid.items()[index]
         .native_products()
         .unwrap()
-        .artifact_view;
+        .artifact_view();
     assert!(
         !first_view
             .descriptors()
@@ -4615,7 +4619,7 @@ fn compiled_native_output(
     compiled.certification = products
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
-                artifact_view: products.artifact_view.clone(),
+                artifact_view: products.artifact_view().clone(),
                 original_compile_input: products.original_compile_input.clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports.clone(),
