@@ -694,9 +694,62 @@ pub(crate) struct NativeOfferContribution {
     offer: IssuedNativeOffer,
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     originals: BTreeSet<ArtifactId>,
+    identity: OnceLock<[u8; 32]>,
 }
 
+impl PartialEq for NativeOfferContribution {
+    fn eq(&self, other: &Self) -> bool { self.offer == other.offer && self.reachable == other.reachable && self.originals == other.originals }
+}
+impl Eq for NativeOfferContribution {}
+
 impl NativeOfferContribution {
+    pub(crate) fn snapshot_facts(&self) -> Result<crate::declaration_context::NativeContributionSnapshotFacts, CompileError> {
+        Ok(crate::declaration_context::NativeContributionSnapshotFacts {
+            offer: self.offer.snapshot_facts().identity()?,
+            reachable: self.reachable.clone(),
+        })
+    }
+
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        if let Some(identity) = self.identity.get() { return Ok(*identity); }
+        let identity = self.snapshot_facts()?.identity()?;
+        let _ = self.identity.set(identity);
+        Ok(identity)
+    }
+
+    pub(crate) fn restore(
+        offer: IssuedNativeOffer,
+        facts: &crate::declaration_context::NativeContributionSnapshotFacts,
+    ) -> Result<Self, CompileError> {
+        if offer.snapshot_facts().identity()? != facts.offer
+            || !facts.reachable.iter().all(|node| offer.0.custody.reachable.contains(node)) {
+            return Err(failure("native contribution exceeds its issued proof"));
+        }
+        let state = offer.0.custody.lease.inventory.0.lock().expect("inventory lock");
+        let closure = admitted_closure(&state, facts.reachable.iter().copied());
+        if !closure.iter().all(|node| facts.reachable.contains(node)) {
+            return Err(failure("native contribution omits an issued dependency"));
+        }
+        drop(state);
+        let originals = facts.reachable.iter().filter_map(|node| match node {
+            ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
+            _ => None,
+        }).collect();
+        let identity = OnceLock::new();
+        let _ = identity.set(facts.identity()?);
+        Ok(Self { offer, reachable: facts.reachable.clone(), originals, identity })
+    }
+
+    /// Restrict an already issued contribution to authenticated dependency roots.
+    pub(crate) fn for_groups(&self, roots: &BTreeSet<NativeGroupBinding>) -> Result<Self, CompileError> {
+        let state = self.offer.0.custody.lease.inventory.0.lock().expect("inventory lock");
+        let reachable = admitted_closure(&state, roots.iter().copied().filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group))).map(ArtifactBindingNode::Group));
+        if !reachable.iter().all(|node| self.reachable.contains(node)) { return Err(failure("restricted native contribution exceeds its issuer")); }
+        drop(state);
+        let originals = reachable.iter().filter_map(|node| match node { ArtifactBindingNode::Group(group) => Some(group.binding.artifact()), _ => None }).collect();
+        Ok(Self { offer: self.offer.clone(), reachable, originals, identity: OnceLock::new() })
+    }
+
     pub(crate) fn offer(&self) -> &IssuedNativeOffer {
         &self.offer
     }
@@ -1640,6 +1693,7 @@ impl IssuedNativeOffer {
             offer: self.clone(),
             reachable,
             originals,
+            identity: OnceLock::new(),
         }))
     }
 
