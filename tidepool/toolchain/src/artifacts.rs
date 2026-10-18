@@ -2505,7 +2505,6 @@ impl SelectedModuleCandidateOffer {
                     ))
                 }
             };
-            let sealed = output.products.as_ref().expect("program output was sealed");
             let prepared = checked_cell::PreparedCheckedItemOutput::capture(
                 &cell.item(index)?,
                 generation,
@@ -2513,14 +2512,6 @@ impl SelectedModuleCandidateOffer {
                 true,
                 output,
                 &initial.request_sha256,
-                sealed.original.execution().cloned().ok_or_else(|| {
-                    CompileError::ExtractFailed(
-                        "program output lacks original execution evidence".into(),
-                    )
-                })?,
-                sealed.typed_entry.as_ref(),
-                &sealed.pending_imports,
-                &sealed.target_native_selection,
             )?;
             prepared_items.insert(index, prepared);
         }
@@ -2955,6 +2946,11 @@ pub(crate) struct ProgramNativeOutput {
 }
 
 impl ProgramNativeOutput {
+    pub(crate) fn sealed_products(&self) -> Result<&SealedTurnProducts, CompileError> {
+        self.products
+            .as_deref()
+            .ok_or_else(|| CompileError::ExtractFailed("program output was not sealed".into()))
+    }
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
@@ -3070,11 +3066,9 @@ impl NativeTurnOutput {
 #[derive(Debug)]
 pub struct SealedTurnProducts {
     original: SealedOriginalEvidence,
-    typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
-    target_native_selection: crate::artifact_inventory::IssuedTargetNativeSelection,
+    target: crate::artifact_inventory::TargetNativeInputs,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
-    pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Arc<[crate::recovery_artifacts::CertifiedRecoveryProduct]>,
     pub(crate) retained_core_products: certified_products::CertifiedRetainedCoreProducts,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
@@ -3137,6 +3131,26 @@ impl SealedTurnProducts {
         }
     }
 
+    pub fn pending_imports(&self) -> &[certified_products::PendingImportOwner] {
+        self.target.imports()
+    }
+    pub(crate) fn typed_entry(&self) -> Option<&crate::checked_cell::CheckedTypedEntry> {
+        self.target.entry()
+    }
+    pub(crate) fn original_execution(
+        &self,
+    ) -> Result<&Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original.execution().ok_or_else(|| {
+            CompileError::ExtractFailed("program output lacks original execution evidence".into())
+        })
+    }
+    pub(crate) fn resolve_native_execution(
+        &self,
+    ) -> Result<crate::artifact_inventory::ResolvedNativeTarget<'_>, CompileError> {
+        let resolved = self.target.resolve()?;
+        resolved.ensure_original_execution_custody(self.original_execution()?)?;
+        Ok(resolved)
+    }
     fn original_compiler_inputs(
         &self,
     ) -> Result<&crate::declaration_context::OriginalCompilerInputs, CompileError> {
@@ -3714,10 +3728,7 @@ fn seal_turn_outputs_with_validation(
             )?
         }
     };
-    let crate::artifact_inventory::AdmittedTargetArtifacts {
-        artifacts: artifact_view,
-        selection: target_native_selection,
-    } = admitted_target;
+    let artifact_view = admitted_target.artifacts();
     let selected_groups =
         crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
             &artifact_view,
@@ -3769,6 +3780,8 @@ fn seal_turn_outputs_with_validation(
     );
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let certified_groups: Arc<[_]> = selected_groups.into();
+    let target_native = admitted_target.bind_target(typed_entry, pending_imports);
+    let artifact_view = target_native.artifacts();
     let original_compile_input = if let Some((table, sites)) =
         identity_metadata.filter(|_| offer.exact.is_none())
     {
@@ -3794,19 +3807,13 @@ fn seal_turn_outputs_with_validation(
                     target,
                     prepared,
                     &certified_groups,
-                    &pending_imports,
+                    target_native.imports(),
                     &package_interfaces,
                     table.clone(),
                     sites.to_vec(),
                     &artifact_view,
                     &certified.source_selection,
-                    artifact_view.native_sites_for_groups(
-                        &target_native_selection.groups_for_target(
-                            &artifact_view,
-                            typed_entry.as_ref(),
-                            &pending_imports,
-                        )?,
-                    )?,
+                    target_native.resolve()?.native_sites()?,
                 )
             })
             .transpose()?
@@ -3909,12 +3916,10 @@ fn seal_turn_outputs_with_validation(
     }
     Ok(Some(SealedTurnProducts {
         original,
-        typed_entry,
-        target_native_selection,
+        target: target_native,
         original_compile_input,
         checked,
         certified_groups,
-        pending_imports,
         recovery_products: certified.recovery_products.clone(),
         retained_core_products: certified.retained_core_products,
         package_interfaces,
@@ -5671,7 +5676,8 @@ fn compile_invocation_inner(
                 &mut validation,
                 &certified.source_selection,
             )?
-            .artifacts;
+            .artifacts()
+            .clone();
         let selected_groups =
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &artifacts.artifact_view,

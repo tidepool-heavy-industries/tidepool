@@ -332,18 +332,13 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             record_parent: None,
                         },
                     };
-                    let view = context
-                        .owner.facts.compiler_support.artifacts()
-                        .inventory()
-                        .admit_shared_with_demand(
-                            context.artifact_view(),
-                            vec![root.clone()],
-                            NativeArtifactDemand::CertifiedTargetImports(&[import.clone()]),
-                        )
-                        .unwrap();
-                    context = continued_context(&context, &view, &root).unwrap();
                     let imports = [import];
-                    let groups = context.artifact_view().native_groups_for_target(None, &imports).unwrap();
+                    let target = context.owner.facts.compiler_support.artifacts().inventory()
+                        .admit_product_artifacts(context.artifact_view(), vec![root.clone()],
+                            NativeArtifactDemand::CertifiedTargetImports(&imports), None)
+                        .unwrap().into_target().unwrap().bind_target(None, imports.to_vec());
+                    context = continued_context(&context, target.artifacts(), &root).unwrap();
+                    let groups = target.resolve().unwrap().groups().clone();
                     let issuer_originals = expected_roles.iter().filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
                     let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
                         .all(|group| original.artifact_view().contains_issued_native_group(*group));

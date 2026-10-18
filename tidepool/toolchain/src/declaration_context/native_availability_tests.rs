@@ -1495,11 +1495,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
     assert!(receipt
         .offers()
-        .iter()
         .any(|offer| offer.original() == entries[0].descriptor.id));
     assert!(receipt
         .offers()
-        .iter()
         .all(|offer| offer.original() != entries[2].descriptor.id));
     assert!(receipt.permits(7));
     assert!(!receipt.permits(9001));
@@ -1711,7 +1709,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
     assert!(matches!(
-        admitted.native_groups_for_target(None, std::slice::from_ref(&demand)),
+        admitted.native_requirements_from_roots(&[crate::artifact_inventory::NativeRequirementRoot::Group { artifact: b_id, original_ordinal: 7 }]),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                 artifact, original_ordinal: 7,
@@ -1733,8 +1731,10 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         )?;
         drop(fixed);
         demanded
-            .selection
-            .groups_for_target(&demanded.artifacts, None, imports)
+            .clone()
+            .bind_target(None, (imports).to_vec())
+            .resolve()
+            .map(|resolved| resolved.groups().clone())
     };
     let mut failed_then_retried = admitted
         .inventory()
@@ -1769,8 +1769,10 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     drop(failed_then_retried);
     assert_eq!(
         retried
-            .selection
-            .groups_for_target(&retried.artifacts, None, std::slice::from_ref(&demand))
+            .clone()
+            .bind_target(None, (std::slice::from_ref(&demand)).to_vec())
+            .resolve()
+            .map(|resolved| resolved.groups().clone())
             .unwrap(),
         exact
     );
@@ -1831,7 +1833,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .native_transport
         .availability
         .values()
-        .flat_map(|availability| availability.offers().iter().cloned())
+        .flat_map(|availability| availability.offers().cloned())
         .collect::<Vec<_>>();
     let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
         request.compiler_source_support(),
@@ -1989,7 +1991,6 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         assert!(!empty.permits(9001));
         assert!(empty
             .offers()
-            .iter()
             .all(|offer| offer.proof().is_none() && !offer.is_full()));
         assert!(
             matches!(baseline.artifacts().native_requirements_from_roots(&[NativeRequirementRoot::Group {
@@ -2847,10 +2848,12 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
             &selection,
         )
         .expect("later target uses the same issuer's previously unselected body");
-    assert!(demanded.artifacts.selected_native_groups().is_empty());
+    assert!(demanded.artifacts().selected_native_groups().is_empty());
     let groups = demanded
-        .selection
-        .groups_for_target(&demanded.artifacts, None, &imports)
+        .clone()
+        .bind_target(None, (&imports).to_vec())
+        .resolve()
+        .map(|resolved| resolved.groups().clone())
         .unwrap();
     let expected = offer
         .issued_group_carriers()
@@ -3138,7 +3141,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             assert!(available.permits(9001));
             assert_eq!(available.offers().len(), 2);
             for offer in &offers {
-                assert!(available.offers().contains(offer));
+                assert!(available.offers().any(|available| available == offer));
             }
             let support =
                 recover_fixture_compiler_support(projection.clone(), namespace.clone(), [])
@@ -4019,7 +4022,7 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             .unwrap();
         let prepared = request.compiler_inputs();
         let carried = prepared.native_availability(entry.descriptor.id).unwrap();
-        assert_eq!(carried.offers(), &[offer]);
+        assert_eq!(carried.offers().collect::<Vec<_>>(), vec![&offer]);
     }
 }
 
@@ -5526,8 +5529,10 @@ fn replay_native_transport_history(
         } else {
             let admitted = admitted.unwrap();
             let groups = admitted
-                .selection
-                .groups_for_target(&admitted.artifacts, None, &imports)
+                .clone()
+                .bind_target(None, (&imports).to_vec())
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
             let expected_index = if same_root { 0 } else { index };
             assert_eq!(groups, expected[expected_index].keys().copied().collect());
@@ -5553,8 +5558,10 @@ fn replay_native_transport_history(
     } else {
         let demanded = demanded.unwrap();
         let groups = demanded
-            .selection
-            .groups_for_target(&demanded.artifacts, None, &imports)
+            .clone()
+            .bind_target(None, (&imports).to_vec())
+            .resolve()
+            .map(|resolved| resolved.groups().clone())
             .unwrap();
         assert_eq!(groups, BTreeSet::from([child(0).0]));
         coverage.successful_demands += 1;
@@ -5803,8 +5810,10 @@ fn replay_native_transport_history(
             )
             .unwrap();
         let demanded = admitted
-            .selection
-            .groups_for_target(&admitted.artifacts, None, &imports)
+            .clone()
+            .bind_target(None, (&imports).to_vec())
+            .resolve()
+            .map(|resolved| resolved.groups().clone())
             .unwrap();
         assert_eq!(demanded, dependent_expected.keys().copied().collect());
         coverage.successful_demands += 1;
@@ -6371,10 +6380,12 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                             &selection,
                         )
                         .expect("restored private Full survives certification and actual demand");
-                    assert!(demanded.artifacts.selected_native_groups().is_empty());
+                    assert!(demanded.artifacts().selected_native_groups().is_empty());
                     let groups = demanded
-                        .selection
-                        .groups_for_target(&demanded.artifacts, None, &imports)
+                        .clone()
+                        .bind_target(None, (&imports).to_vec())
+                        .resolve()
+                        .map(|resolved| resolved.groups().clone())
                         .unwrap();
                     let expected = offer
                         .issued_group_carriers()

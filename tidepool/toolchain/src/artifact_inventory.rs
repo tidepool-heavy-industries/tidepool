@@ -313,53 +313,93 @@ pub(crate) enum NativeArtifactDemand<'a> {
     CertifiedTargetImports(&'a [crate::certified_products::PendingImportOwner]),
 }
 
-/// The target admission's exact executable roots, independent of prefix custody.
+#[cfg(test)]
+thread_local! {
+    static NATIVE_TARGET_RESOLUTION_WORK: std::cell::Cell<(usize, usize)> = const {
+        std::cell::Cell::new((0, 0))
+    };
+}
+
+/// Exact executable roots remain private to their solver-issued view.
 #[derive(Clone, Debug)]
-pub(crate) struct IssuedTargetNativeSelection {
+struct IssuedTargetNativeSelection {
     roots: Arc<[NativeGroupBinding]>,
 }
 
-impl IssuedTargetNativeSelection {
-    pub(crate) fn requirements_for_entry(
-        &self,
-        view: &ArtifactView,
-        entry: &crate::checked_cell::CheckedTypedEntry,
-    ) -> Result<NativeRequirements, CompileError> {
-        let key = entry.native_group_key();
-        let mut candidates = self.roots.iter().filter(|group| {
-            group.binding.artifact() == key.artifact
-                && group.original_ordinal == key.original_ordinal
-        });
-        let binding = *candidates
-            .next()
-            .ok_or_else(|| failure("typed entry is outside issued target roots"))?;
-        if candidates.next().is_some() {
-            return Err(failure("typed entry has multiple issued target bindings"));
-        }
-        let state = view.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &view.read_projection(&state).nodes;
-        if !owned.contains(&InventoryNodeKey::Group(binding)) {
-            return Err(failure("issued entry is outside retained custody"));
-        }
-        Ok(view
-            .native_requirements_for_exact_groups_locked(&state, owned, vec![binding])?
-            .0)
+#[derive(Clone, Debug)]
+pub(crate) struct AdmittedTargetArtifacts {
+    artifacts: ArtifactView,
+    selection: IssuedTargetNativeSelection,
+}
+
+impl AdmittedTargetArtifacts {
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        &self.artifacts
     }
 
-    pub(crate) fn groups_for_target(
-        &self,
-        view: &ArtifactView,
-        entry: Option<&crate::checked_cell::CheckedTypedEntry>,
-        imports: &[crate::certified_products::PendingImportOwner],
-    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+    /// Final target observations are moved under the same admission owner.
+    /// Resolution checks their correspondence at the consuming boundary.
+    pub(crate) fn bind_target(
+        self,
+        entry: Option<crate::checked_cell::CheckedTypedEntry>,
+        imports: Vec<crate::certified_products::PendingImportOwner>,
+    ) -> TargetNativeInputs {
+        let target = match entry {
+            Some(entry) => FinalNativeTarget::Checked { entry, imports },
+            None => FinalNativeTarget::Ordinary { imports },
+        };
+        TargetNativeInputs {
+            admitted: self,
+            target,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FinalNativeTarget {
+    Checked {
+        entry: crate::checked_cell::CheckedTypedEntry,
+        imports: Vec<crate::certified_products::PendingImportOwner>,
+    },
+    Ordinary {
+        imports: Vec<crate::certified_products::PendingImportOwner>,
+    },
+}
+
+/// Prepared final target inputs cannot replace their admitted graph/view.
+#[derive(Debug)]
+pub(crate) struct TargetNativeInputs {
+    admitted: AdmittedTargetArtifacts,
+    target: FinalNativeTarget,
+}
+
+impl TargetNativeInputs {
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        self.admitted.artifacts()
+    }
+    pub(crate) fn entry(&self) -> Option<&crate::checked_cell::CheckedTypedEntry> {
+        match &self.target {
+            FinalNativeTarget::Checked { entry, .. } => Some(entry),
+            FinalNativeTarget::Ordinary { .. } => None,
+        }
+    }
+    pub(crate) fn imports(&self) -> &[crate::certified_products::PendingImportOwner] {
+        match &self.target {
+            FinalNativeTarget::Checked { imports, .. }
+            | FinalNativeTarget::Ordinary { imports } => imports,
+        }
+    }
+    pub(crate) fn resolve(&self) -> Result<ResolvedNativeTarget<'_>, CompileError> {
+        let view = self.artifacts();
+        let entry = self.entry();
+        let imports = self.imports();
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
-        for group in self.roots.iter() {
-            if !owned.contains(&InventoryNodeKey::Group(*group)) {
-                return Err(failure("issued target group is outside retained custody"));
-            }
-        }
+        // Both solver paths coissue these exact roots with this immutable view.
+        // A later original execution context is checked separately by its owner.
         let ids = self
+            .admitted
+            .selection
             .roots
             .iter()
             .map(|group| group.binding.artifact())
@@ -373,6 +413,8 @@ impl IssuedTargetNativeSelection {
             expected.insert(entry.native_group_key());
         }
         let keys = self
+            .admitted
+            .selection
             .roots
             .iter()
             .map(|group| NativeGroupKey {
@@ -380,24 +422,92 @@ impl IssuedTargetNativeSelection {
                 original_ordinal: group.original_ordinal,
             })
             .collect::<BTreeSet<_>>();
-        if keys != expected || keys.len() != self.roots.len() {
+        if keys != expected || keys.len() != self.admitted.selection.roots.len() {
             return Err(failure(
                 "issued native target roots differ from authenticated target",
             ));
         }
-        native_groups_in_custody(
+        let entry_binding = entry.map(|entry| {
+            let key = entry.native_group_key();
+            *self
+                .admitted
+                .selection
+                .roots
+                .iter()
+                .find(|group| {
+                    group.binding.artifact() == key.artifact
+                        && group.original_ordinal == key.original_ordinal
+                })
+                .expect("validated target contains its one typed entry")
+        });
+        let groups = native_groups_in_custody(
             &state,
             &view.lease.payloads,
             owned,
-            self.roots.to_vec(),
+            self.admitted.selection.roots.to_vec(),
             None,
-        )
+        )?;
+        #[cfg(test)]
+        NATIVE_TARGET_RESOLUTION_WORK.with(|work| {
+            let (resolutions, groups_seen) = work.get();
+            work.set((resolutions + 1, groups_seen + groups.len()));
+        });
+        Ok(ResolvedNativeTarget {
+            owner: self,
+            groups,
+            entry_binding,
+        })
     }
 }
 
-pub(crate) struct AdmittedTargetArtifacts {
-    pub(crate) artifacts: ArtifactView,
-    pub(crate) selection: IssuedTargetNativeSelection,
+/// Operation-local resolution borrows the one final target owner.
+pub(crate) struct ResolvedNativeTarget<'a> {
+    owner: &'a TargetNativeInputs,
+    groups: BTreeSet<NativeGroupBinding>,
+    entry_binding: Option<NativeGroupBinding>,
+}
+
+impl ResolvedNativeTarget<'_> {
+    pub(crate) fn groups(&self) -> &BTreeSet<NativeGroupBinding> {
+        &self.groups
+    }
+    pub(crate) fn imports(&self) -> &[crate::certified_products::PendingImportOwner] {
+        self.owner.imports()
+    }
+    pub(crate) fn native_sites(
+        &self,
+    ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {
+        self.owner.artifacts().native_sites_for_groups(&self.groups)
+    }
+    /// Original execution is a separate issued context. Check its custody of
+    /// these already-resolved bindings; never derive another target from it.
+    pub(crate) fn ensure_original_execution_custody(
+        &self,
+        context: &crate::declaration_context::ExactDeclarationContext,
+    ) -> Result<(), CompileError> {
+        let view = context.artifact_view();
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &view.read_projection(&state).nodes;
+        if self
+            .groups
+            .iter()
+            .any(|group| !owned.contains(&InventoryNodeKey::Group(*group)))
+        {
+            return Err(failure("issued target group is outside retained custody"));
+        }
+        Ok(())
+    }
+    pub(crate) fn requirements_for_entry(&self) -> Result<NativeRequirements, CompileError> {
+        let binding = self
+            .entry_binding
+            .ok_or_else(|| failure("ordinary target has no typed entry"))?;
+        let view = self.owner.artifacts();
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &view.read_projection(&state).nodes;
+        Ok(view
+            .native_requirements_for_exact_groups_locked(&state, owned, vec![binding])?
+            .0)
+    }
 }
 
 pub(crate) struct ArtifactAdmission {
@@ -5837,28 +5947,6 @@ impl ArtifactView {
     }
 
     #[cfg(test)]
-    pub(crate) fn native_groups_for_target(
-        &self,
-        entry: Option<&crate::checked_cell::CheckedTypedEntry>,
-        imports: &[crate::certified_products::PendingImportOwner],
-    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
-        let mut roots = certified_target_source_groups(&self.entries(), imports)?;
-        if let Some(entry) = entry {
-            roots.insert(entry.native_group_key());
-        }
-        let roots = roots
-            .into_iter()
-            .map(|key| NativeRequirementRoot::Group {
-                artifact: key.artifact,
-                original_ordinal: key.original_ordinal,
-            })
-            .collect::<Vec<_>>();
-        Ok(self
-            .native_requirements_with_group_bindings_from_roots(&roots)?
-            .1)
-    }
-
-    #[cfg(test)]
     fn native_requirements_with_groups_from_roots(
         &self,
         roots: &[NativeRequirementRoot],
@@ -6790,8 +6878,8 @@ impl ArtifactView {
         ),
         CompileError,
     > {
-        let incoming =
-            interfaces.support_for_owners(interfaces.entries().keys().cloned().collect())?;
+        let incoming = interfaces
+            .support_for_owners(interfaces.iter().map(|(owner, _)| owner.clone()).collect())?;
         self.merge_compiler_inputs_with_demand(
             projection,
             incoming.artifacts(),
@@ -7945,24 +8033,76 @@ mod tests {
             .into_target()
             .unwrap();
         assert_eq!(admitted.artifacts.selected_native_groups().len(), 3);
-        let selected = admitted
-            .selection
-            .groups_for_target(&admitted.artifacts, None, &imports)
-            .unwrap();
+        let target = admitted.clone().bind_target(None, imports.to_vec());
+        let before = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        let resolved = target.resolve().unwrap();
+        let selected = resolved.groups();
+        let _sites = resolved.native_sites().unwrap();
+        assert_eq!(resolved.imports(), imports.as_slice());
+        let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 1),
+            "derived target observations reuse the one resolved exact closure"
+        );
         assert_eq!(selected.len(), 1);
         assert_eq!(
             selected.first().unwrap().binding.artifact(),
             native.descriptor.id
         );
         assert_eq!(selected.first().unwrap().original_ordinal, 7);
-        assert!(admitted
-            .selection
-            .groups_for_target(&admitted.artifacts, None, &[])
-            .is_err());
-        assert!(admitted
-            .selection
-            .groups_for_target(&inventory.empty_view(), None, &imports)
-            .is_err());
+        let mut wrong_imports = imports.to_vec();
+        let crate::certified_products::PendingImportOwner::Source { binder, .. } =
+            &mut wrong_imports[0]
+        else {
+            unreachable!("fixture source import")
+        };
+        binder.occurrence.push_str("_different");
+        assert!(matches!(
+            admitted.clone().bind_target(None, wrong_imports).resolve(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: certified target native membership"
+        ));
+        assert!(matches!(
+            admitted.clone().bind_target(None, vec![]).resolve(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: issued native target roots differ from authenticated target"
+        ));
+        assert!(matches!(
+            admitted
+                .clone()
+                .bind_target(None, imports.to_vec())
+                .resolve()
+                .and_then(|resolved| {
+                    let empty =
+                        crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])?;
+                    resolved.ensure_original_execution_custody(&empty)
+                }),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: issued target group is outside retained custody"
+        ));
+        let empty_target = inventory
+            .admit_product_artifacts(
+                &inventory.empty_view(),
+                vec![native],
+                NativeArtifactDemand::CertifiedTargetImports(&[]),
+                None,
+            )
+            .unwrap()
+            .into_target()
+            .unwrap()
+            .bind_target(None, vec![]);
+        let before = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        let empty = empty_target.resolve().unwrap();
+        assert!(empty.groups().is_empty());
+        assert_eq!(empty.native_sites().unwrap().ids().count(), 0);
+        assert!(matches!(
+            empty.requirements_for_entry(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "artifact inventory: ordinary target has no typed entry"
+        ));
+        let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
     }
 
     #[test]
@@ -8106,17 +8246,19 @@ mod tests {
                 .all(|node| !matches!(node, InventoryNodeKey::Group(_))));
             assert_eq!(
                 target
-                    .selection
-                    .groups_for_target(&target.artifacts, None, &imports)
+                    .clone()
+                    .bind_target(None, (&imports).to_vec())
+                    .resolve()
+                    .map(|resolved| resolved.groups().clone())
                     .unwrap(),
                 expected
             );
             assert_eq!(
-                target.artifacts.selected_native_groups(),
+                target.artifacts().selected_native_groups(),
                 prefix.selected_native_groups()
             );
             assert_eq!(inventory.metrics().issued_scope_nodes, before);
-            prefix = target.artifacts;
+            prefix = target.artifacts().clone();
         }
         if retain_source {
             assert!(
@@ -12748,7 +12890,13 @@ mod tests {
             let groups = publication
                 .context()
                 .artifact_view()
-                .native_groups_for_target(None, &imports)
+                .native_requirements_with_group_bindings_from_roots(&[
+                    NativeRequirementRoot::Group {
+                        artifact: helper.descriptor.id,
+                        original_ordinal: 7,
+                    },
+                ])
+                .map(|(_, groups)| groups)
                 .unwrap();
             assert!(!groups.is_empty());
             assert_eq!(
@@ -12771,7 +12919,13 @@ mod tests {
         }
         for (index, issuer) in issuers.iter().enumerate() {
             let actual = issuer
-                .native_groups_for_target(None, &[issued_source(&originals[index], 7)])
+                .native_requirements_with_group_bindings_from_roots(&[
+                    NativeRequirementRoot::Group {
+                        artifact: originals[index].descriptor.id,
+                        original_ordinal: 7,
+                    },
+                ])
+                .map(|(_, groups)| groups)
                 .unwrap();
             let helper_group = *actual
                 .iter()
@@ -13904,7 +14058,11 @@ mod tests {
         let historical_imports = [issued_source(&old, 7)];
         let historical_groups = current
             .artifact_view()
-            .native_groups_for_target(None, &historical_imports)
+            .native_requirements_with_group_bindings_from_roots(&[NativeRequirementRoot::Group {
+                artifact: old.descriptor.id,
+                original_ordinal: 7,
+            }])
+            .map(|(_, groups)| groups)
             .unwrap();
         assert!(!historical_groups.is_empty());
         assert!(historical_groups
@@ -13920,7 +14078,11 @@ mod tests {
         let selected_imports = [issued_source(&new, 7)];
         let selected_groups = current
             .artifact_view()
-            .native_groups_for_target(None, &selected_imports)
+            .native_requirements_with_group_bindings_from_roots(&[NativeRequirementRoot::Group {
+                artifact: new.descriptor.id,
+                original_ordinal: 7,
+            }])
+            .map(|(_, groups)| groups)
             .unwrap();
         assert_eq!(
             current
@@ -14390,7 +14552,13 @@ mod tests {
                 demanded.binding_dependencies()
             );
             assert!(reopened
-                .native_groups_for_target(None, &[issued_source(&inspection, 118)])
+                .native_requirements_with_group_bindings_from_roots(&[
+                    NativeRequirementRoot::Group {
+                        artifact: inspection.descriptor.id,
+                        original_ordinal: 118
+                    }
+                ])
+                .map(|(_, groups)| groups)
                 .unwrap()
                 .iter()
                 .any(|group| group.binding.artifact() == inspection.descriptor.id
@@ -14567,11 +14735,14 @@ mod tests {
                     vec![],
                     &certified,
                 )
-                .map(|admitted| admitted.artifacts)
                 .unwrap();
             let actual = selected
-                .native_groups_for_target(None, &[issued_source(&native, 7)])
+                .clone()
+                .bind_target(None, vec![issued_source(&native, 7)])
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
+            let selected = selected.artifacts();
             assert_eq!(actual, expected.iter().copied().collect());
             assert!(new
                 .capture_graph_selection()

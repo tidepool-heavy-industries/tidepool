@@ -565,7 +565,6 @@ impl OriginalCompilerInputs {
     ) -> Result<Option<Self>, CompileError> {
         let interfaces = context.owner.facts.compiler_support.selected_interfaces()?;
         let authored = interfaces
-            .entries()
             .values()
             .filter_map(|entry| {
                 let ArtifactPayload::Canonical(interface) = &entry.payload else {
@@ -1031,7 +1030,6 @@ pub(crate) struct NativeTransportAvailability {
     original: Arc<ArtifactEntry>,
     mode: NativeTransportMode,
     classification: NativeInputClassification,
-    issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
     contributions: Arc<[Arc<crate::artifact_inventory::NativeOfferContribution>]>,
 }
 
@@ -1123,8 +1121,12 @@ impl NativeTransportAvailability {
         })
     }
 
-    pub(crate) fn offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
-        &self.issuance
+    pub(crate) fn offers(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::artifact_inventory::IssuedNativeOffer> {
+        self.contributions
+            .iter()
+            .map(|contribution| contribution.offer())
     }
 
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
@@ -1219,12 +1221,8 @@ impl RequestNativeAvailability {
     pub(crate) fn requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
-        self.issued().flat_map(|availability| {
-            availability
-                .offers()
-                .iter()
-                .filter_map(|offer| offer.proof())
-        })
+        self.issued()
+            .flat_map(|availability| availability.offers().filter_map(|offer| offer.proof()))
     }
 
     pub(crate) fn permits(
@@ -1247,7 +1245,6 @@ impl RequestNativeAvailability {
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
     availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
-    private: RequestNativeAvailability,
 }
 
 impl NativeCompilerTransport {
@@ -1444,12 +1441,6 @@ impl NativeCompilerTransport {
                 } else {
                     NativeTransportMode::IssuedGroups
                 };
-                let mut issuance = Vec::new();
-                for contribution in &contributions {
-                    if !issuance.contains(contribution.offer()) {
-                        issuance.push(contribution.offer().clone());
-                    }
-                }
                 Ok((
                     id,
                     Arc::new(NativeTransportAvailability {
@@ -1461,17 +1452,14 @@ impl NativeCompilerTransport {
                             NativeInputClassification::PrivateInput
                         },
                         contributions: contributions.into(),
-                        issuance: issuance.into(),
                     }),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let availability = Arc::new(availability);
-        let private = RequestNativeAvailability(Arc::clone(&availability));
         Ok(Self {
             metadata,
             availability,
-            private,
         })
     }
 }
@@ -1566,7 +1554,7 @@ impl RequestCompilerInputs {
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        self.native_transport.private.clone()
+        RequestNativeAvailability(Arc::clone(&self.native_transport.availability))
     }
 
     pub(crate) fn available_original_sources(
@@ -4008,7 +3996,6 @@ impl RetainedTemplateImports {
     ) -> Result<Option<Arc<Self>>, CompileError> {
         let interfaces = original.compiler_source_support().selected_interfaces()?;
         let canonical = interfaces
-            .entries()
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Canonical(interface)
@@ -6018,11 +6005,7 @@ impl ExactCompilationRequest {
                 None => context.compiler_source_support().clone(),
             };
             let selected_interfaces = source_support.selected_interfaces()?;
-            let entries = selected_interfaces
-                .entries()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
+            let entries = selected_interfaces.values().cloned().collect::<Vec<_>>();
             let canonical = entries
                 .iter()
                 .filter_map(|entry| canonical_source_interface(entry))
@@ -7106,16 +7089,6 @@ impl ExactDeclarationContext {
             return Err(failure("original type context lacks its compiler producer"));
         }
         let selected = support.selected_interfaces()?;
-        let entries = selected.entries();
-        let home_units = entries
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Canonical(interface) => Some(interface.home_units()),
-                _ => None,
-            })
-            .flatten()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
         let mut owners = BTreeSet::new();
         for witness in witnesses {
             for (unit, module, seal) in witness.interface_seals() {
@@ -7123,7 +7096,7 @@ impl ExactDeclarationContext {
                     unit: unit.to_owned(),
                     module: module.to_owned(),
                 };
-                match entries.get(&owner) {
+                match selected.get(&owner) {
                     Some(entry) => {
                         if entry.descriptor.producer_sha256 != producer
                             || hex(&entry.descriptor.interface_sha256) != seal
@@ -7134,7 +7107,7 @@ impl ExactDeclarationContext {
                         }
                         owners.insert(owner);
                     }
-                    None if unit == "main" || home_units.contains(unit) => {
+                    None if unit == "main" || selected.is_home_unit(unit) => {
                         return Err(failure("original input lacks its certified home interface"));
                     }
                     None => {}
@@ -7151,7 +7124,7 @@ impl ExactDeclarationContext {
                 unit: name.unit().to_owned(),
                 module: name.module().to_owned(),
             };
-            match entries.get(&owner) {
+            match selected.get(&owner) {
                 Some(entry) => {
                     if entry.descriptor.producer_sha256 != producer {
                         return Err(failure(
@@ -7160,7 +7133,7 @@ impl ExactDeclarationContext {
                     }
                     owners.insert(owner);
                 }
-                None if name.unit() == "main" || home_units.contains(name.unit()) => {
+                None if name.unit() == "main" || selected.is_home_unit(name.unit()) => {
                     return Err(failure(
                         "original native signature lacks its certified Name owner",
                     ));
@@ -13554,10 +13527,34 @@ mod tests {
             owner,
             original_ordinal: 7,
         }];
-        let groups = context
-            .artifact_view()
-            .native_groups_for_target(None, &imports)
+        let inputs = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&Arc::new(context.clone()), None)
             .unwrap();
+        let validation = PackageInterfaceValidation::default();
+        let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        let mut fixed = inputs
+            .artifacts()
+            .inventory()
+            .bind_segment(inputs.artifacts(), vec![], &selected)
+            .unwrap();
+        let target = inputs
+            .artifacts()
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                inputs.artifacts(),
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .bind_target(None, imports.to_vec());
+        let groups = target.resolve().unwrap().groups().clone();
         let published_original = publication
             .context()
             .compiler_input_roles()
@@ -14916,15 +14913,17 @@ mod tests {
                 )
                 .unwrap();
             let groups = target
-                .selection
-                .groups_for_target(&target.artifacts, None, &imports)
+                .clone()
+                .bind_target(None, (&imports).to_vec())
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
             assert_eq!(group.original_ordinal, 7);
             assert_eq!(
-                target.artifacts.selected_native_groups(),
+                target.artifacts().selected_native_groups(),
                 BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,
@@ -15165,10 +15164,29 @@ mod tests {
     fn check_retained_value_compiler_selection(old_epoch: u8, new_epoch: u8, demands_epoch: bool) {
         let (initial, _) = metadata_fixture();
         let epoch = |version: u8| {
-            crate::certified_products::fixture_finalized_product(
+            let finalized = crate::certified_products::fixture_finalized_product(
                 support_product_with_interface("fixture", "Epoch", vec![version; 16]),
                 initial.owner.facts.producer,
+            );
+            let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+                std::slice::from_ref(&finalized),
             )
+            .remove(0)
+            .product;
+            assert_eq!(recovered.owner(), finalized.owner());
+            assert_eq!(recovered.interface_bytes(), finalized.interface_bytes());
+            assert_eq!(recovered.product_bytes(), finalized.product_bytes());
+            assert_eq!(
+                recovered.certification_bytes(),
+                finalized.certification_bytes()
+            );
+            assert_eq!(
+                crate::certified_products::original_available_groups(&recovered)
+                    .unwrap()
+                    .count(),
+                0
+            );
+            recovered
         };
         let old = initial
             .as_ref()
@@ -15329,15 +15347,17 @@ mod tests {
                 )
                 .unwrap();
             let groups = target
-                .selection
-                .groups_for_target(&target.artifacts, None, &imports)
+                .clone()
+                .bind_target(None, (&imports).to_vec())
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
             assert_eq!(group.original_ordinal, 7);
             assert_eq!(
-                target.artifacts.selected_native_groups(),
+                target.artifacts().selected_native_groups(),
                 BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,

@@ -159,7 +159,7 @@ pub(crate) struct CompilerSourceSupport {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     native_offers: Arc<[IssuedNativeOffer]>,
-    selected: Arc<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>>,
+    selected: Arc<AdmittedCompilerRoles>,
     input_decisions: IssuedInputNativeDecisions,
 }
 
@@ -313,17 +313,127 @@ impl ResolvedCompilerRole {
     }
 }
 
+#[cfg(test)]
+mod type_query_work {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(super) struct Counts {
+        pub census_rows: usize,
+        pub iterated_rows: usize,
+        pub lookups: usize,
+        pub resolved_rows: usize,
+        pub canonical_checks: usize,
+    }
+
+    thread_local! {
+        static COUNTS: std::cell::Cell<Counts> = const { std::cell::Cell::new(Counts {
+            census_rows: 0, iterated_rows: 0, lookups: 0, resolved_rows: 0,
+            canonical_checks: 0,
+        }) };
+    }
+
+    pub(super) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace(Counts::default()))
+    }
+    fn observe(update: impl FnOnce(&mut Counts)) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            update(&mut value);
+            counts.set(value);
+        });
+    }
+    pub(super) fn census_row() {
+        observe(|counts| counts.census_rows += 1);
+    }
+    pub(super) fn iterated_row() {
+        observe(|counts| counts.iterated_rows += 1);
+    }
+    pub(super) fn lookup() {
+        observe(|counts| counts.lookups += 1);
+    }
+    pub(super) fn resolved_row() {
+        observe(|counts| counts.resolved_rows += 1);
+    }
+    pub(super) fn canonical_check() {
+        observe(|counts| counts.canonical_checks += 1);
+    }
+}
+
+/// Canonical classification belongs to the exact admitted rows. A raw role
+/// projection cannot supply home units independently of those interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdmittedCompilerRoles {
+    rows: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    home_units: Arc<BTreeSet<String>>,
+}
+
+impl AdmittedCompilerRoles {
+    fn from_admitted(rows: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>) -> Self {
+        let mut home_units = BTreeSet::new();
+        for row in rows.values() {
+            #[cfg(test)]
+            type_query_work::census_row();
+            if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+                home_units.extend(interface.home_units().iter().cloned());
+            }
+        }
+        Self {
+            rows,
+            home_units: Arc::new(home_units),
+        }
+    }
+}
+
+impl AdmittedCompilerRoles {
+    fn get(&self, owner: &ExactModuleIdentity) -> Option<&ResolvedCompilerRole> {
+        #[cfg(test)]
+        type_query_work::lookup();
+        self.rows.get(owner)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&ExactModuleIdentity, &ResolvedCompilerRole)> {
+        self.rows.iter().inspect(|_| {
+            #[cfg(test)]
+            type_query_work::iterated_row();
+        })
+    }
+
+    fn values(&self) -> impl Iterator<Item = &ResolvedCompilerRole> {
+        self.iter().map(|(_, row)| row)
+    }
+}
+
+impl std::ops::Index<&ExactModuleIdentity> for AdmittedCompilerRoles {
+    type Output = ResolvedCompilerRole;
+
+    fn index(&self, owner: &ExactModuleIdentity) -> &Self::Output {
+        self.get(owner).expect("admitted compiler role")
+    }
+}
+
 /// Borrowed selected interface observations and the same issuing view that
 /// resolves their scoped bindings. Historical custody cannot choose a row.
 pub(crate) struct SelectedCompilerInterfaces<'a> {
     artifacts: &'a ArtifactView,
-    selected: &'a BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
-    entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    selected: &'a AdmittedCompilerRoles,
 }
 
 impl SelectedCompilerInterfaces<'_> {
-    pub(crate) fn entries(&self) -> &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>> {
-        &self.entries
+    pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
+        self.selected.get(owner).map(|row| &row.interface.1)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&ExactModuleIdentity, &Arc<ArtifactEntry>)> {
+        self.selected
+            .iter()
+            .map(|(owner, row)| (owner, &row.interface.1))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
+        self.iter().map(|(_, entry)| entry)
+    }
+
+    pub(crate) fn is_home_unit(&self, unit: &str) -> bool {
+        self.selected.home_units.contains(unit)
     }
 
     pub(crate) fn support_for_owners(
@@ -337,7 +447,6 @@ impl SelectedCompilerInterfaces<'_> {
                 continue;
             }
             let entry = self
-                .entries
                 .get(&owner)
                 .ok_or_else(|| failure("selected interface dependency lacks its issued role"))?;
             pending.extend(entry.requirements.iter().cloned());
@@ -372,7 +481,7 @@ impl SelectedCompilerInterfaces<'_> {
             projection,
             artifacts,
             native_offers: Arc::from([]),
-            selected: Arc::new(selected),
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
         })
     }
@@ -384,8 +493,7 @@ impl SelectedCompilerInterfaces<'_> {
         let ids = owners
             .iter()
             .map(|owner| {
-                self.entries
-                    .get(owner)
+                self.get(owner)
                     .map(|entry| entry.descriptor.id)
                     .ok_or_else(|| failure("selected interface owner lacks its issued role"))
             })
@@ -445,7 +553,7 @@ impl CompilerSourceSupport {
             projection,
             artifacts: retained,
             native_offers: offers.into(),
-            selected: Arc::new(selected),
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
         })
     }
@@ -565,15 +673,9 @@ impl CompilerSourceSupport {
     pub(crate) fn selected_interfaces(
         &self,
     ) -> Result<SelectedCompilerInterfaces<'_>, CompileError> {
-        let entries = self
-            .selected
-            .iter()
-            .map(|(owner, row)| (owner.clone(), Arc::clone(&row.interface.1)))
-            .collect();
         Ok(SelectedCompilerInterfaces {
             artifacts: &self.artifacts,
             selected: &self.selected,
-            entries,
         })
     }
 
@@ -892,7 +994,7 @@ impl CompilerSourceSupport {
         )?;
         let offers = selection
             .issued_native_availability()
-            .flat_map(|availability| availability.offers().iter().cloned());
+            .flat_map(|availability| availability.offers().cloned());
         self.rebuild(
             projection,
             artifacts,
@@ -979,7 +1081,7 @@ impl CompilerSourceSupport {
         // Canonical requirements may differ from an original's requirements,
         // so validate the resulting actual dependency/seal relationships.
         projection.entries_from_artifacts(&entries)?;
-        let mut selected = self.selected.as_ref().clone();
+        let mut selected = self.selected.rows.clone();
         for (owner, role) in &projection.roles {
             let row = selected.get_mut(owner).expect("existing compiler role");
             if row.interface.0.artifact != role.interface() {
@@ -1002,7 +1104,10 @@ impl CompilerSourceSupport {
             projection,
             artifacts: self.artifacts.clone(),
             native_offers: Arc::clone(&self.native_offers),
-            selected: Arc::new(selected),
+            selected: Arc::new(AdmittedCompilerRoles {
+                rows: selected,
+                home_units: Arc::clone(&self.selected.home_units),
+            }),
             input_decisions,
         })
     }
@@ -1094,12 +1199,18 @@ impl CompilerSourceSupport {
         certificate: &crate::recovery_artifacts::CertifiedValueInterface,
     ) -> Result<Self, CompileError> {
         let selected = self.selected_interfaces()?;
-        let owner = selected
-            .entries()
-            .iter()
-            .find(|(_, entry)| entry.descriptor.id == certificate.artifact_id())
-            .map(|(owner, _)| owner.clone())
-            .ok_or_else(|| failure("value certificate is outside selected compiler interfaces"))?;
+        let owner = ExactModuleIdentity {
+            unit: certificate.interface().unit().to_owned(),
+            module: certificate.interface().module().to_owned(),
+        };
+        if selected
+            .get(&owner)
+            .is_none_or(|entry| entry.descriptor.id != certificate.artifact_id())
+        {
+            return Err(failure(
+                "value certificate is outside selected compiler interfaces",
+            ));
+        }
         selected.support_for_owners(vec![owner])
     }
 
@@ -1275,7 +1386,7 @@ impl CompilerSourceSupport {
             projection,
             artifacts,
             native_offers: offers.into(),
-            selected: Arc::new(selected),
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
         })
     }
@@ -1828,6 +1939,8 @@ impl CompilerInputProjection {
         let owned = &view.read_projection(&state).nodes;
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
+            #[cfg(test)]
+            type_query_work::resolved_row();
             let canonical = view.resolve_binding(role.interface(), owned)?;
             let original = if let Some(original) = role.original() {
                 let carrier = view.resolve_binding(original, owned)?;
@@ -1866,6 +1979,8 @@ impl CompilerInputProjection {
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
+            #[cfg(test)]
+            type_query_work::canonical_check();
             let interface = artifacts
                 .get(&role.interface())
                 .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
@@ -1904,6 +2019,113 @@ impl CompilerInputProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The ordinary type-query front door parses Names through the existing
+    // signature codec; interface authority still comes from the admitted view.
+    fn type_signature(unit: &str, module: &str) -> crate::checked_cell::ExactCheckedSignature {
+        use ciborium::Value;
+        let text = |value: &str| Value::Text(value.to_owned());
+        let wire = Value::Array(vec![
+            text("TPCHECKEDSIGNATURE2"),
+            text("request-reply"),
+            text("input type"),
+            Value::Bytes(vec![1]),
+            Value::Array(vec![Value::Array(vec![
+                text(unit),
+                text(module),
+                text("type"),
+                text("Input"),
+            ])]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&wire, &mut bytes).unwrap();
+        crate::checked_cell::fixture_checked_signature(&bytes).unwrap()
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn borrowed_type_queries_visit_only_their_required_rows(
+            unrelated in 0usize..65, queries in 1usize..5,
+        ) {
+            use crate::declaration_context::ExactDeclarationContext;
+            let inventory = ArtifactInventory::default();
+            let root = Arc::new(crate::artifact_inventory::tests::entry("Selected", &["Required"]));
+            let required = Arc::new(crate::artifact_inventory::tests::entry("Required", &[]));
+            let mut entries = vec![Arc::clone(&root), Arc::clone(&required)];
+            entries.extend((0..unrelated).map(|index| {
+                Arc::new(ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                    [2; 32], &format!("other_unit_{index}"), "Unrelated", BTreeMap::new(),
+                )))
+            }));
+            // Expected canonical bytes and units are recomputed from the original
+            // issued inputs, before any borrowed query or restricted owner exists.
+            let expected_home_units = entries.iter().flat_map(|entry| match &entry.payload {
+                ArtifactPayload::Canonical(interface) => interface.home_units().iter().cloned().collect::<Vec<_>>(),
+                _ => unreachable!(),
+            }).collect::<BTreeSet<_>>();
+            let view = inventory.admit_shared(&inventory.empty_view(), entries.clone()).unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            type_query_work::take();
+            let support = CompilerSourceSupport::new(projection.clone(), view.clone(), []).unwrap();
+            let admission_work = type_query_work::take();
+            proptest::prop_assert_eq!(admission_work.census_rows, entries.len());
+            proptest::prop_assert_eq!(support.selected.home_units.as_ref(), &expected_home_units);
+            let context = ExactDeclarationContext::from_authenticated_interfaces([2; 32], &view, projection).unwrap();
+            let signature = type_signature("unit", "Selected");
+            type_query_work::take();
+            let mut narrowed = Vec::new();
+            for _ in 0..queries {
+                narrowed.push(context.select_original_type_interfaces(&[], &[&signature]).unwrap());
+            }
+            let work = type_query_work::take();
+            eprintln!("borrowed-type-query-work unrelated={unrelated} queries={queries} admission={admission_work:?} query={work:?}");
+            proptest::prop_assert_eq!(work.iterated_rows, 0);
+            proptest::prop_assert_eq!(work.resolved_rows, 0);
+            proptest::prop_assert!(work.lookups > 0 && work.lookups <= 9 * queries);
+            proptest::prop_assert_eq!(work.canonical_checks, 2 * queries);
+            proptest::prop_assert_eq!(work.census_rows, 2 * queries);
+            let expected = BTreeMap::from([
+                (root.descriptor.owner.clone(), Arc::clone(&root)),
+                (required.descriptor.owner.clone(), Arc::clone(&required)),
+            ]);
+            // Full validating admission is an oracle outside the measured region.
+            let oracle_view = support.selected_interfaces().unwrap().select_owners(expected.keys().cloned().collect()).unwrap();
+            let oracle = CompilerSourceSupport::new(
+                CompilerInputProjection::from_issued_entries(&expected.values().cloned().collect::<Vec<_>>()).unwrap(),
+                oracle_view, [],
+            ).unwrap();
+            for result in &narrowed {
+                let actual = result.compiler_source_support();
+                proptest::prop_assert_eq!(&actual.selected, &oracle.selected);
+                proptest::prop_assert_eq!(actual.artifacts.selection_snapshot(), oracle.artifacts.selection_snapshot());
+                proptest::prop_assert_eq!(actual.selected.home_units.as_ref(), &BTreeSet::from(["unit".to_owned()]));
+                for (owner, original) in &expected {
+                    proptest::prop_assert_eq!(&actual.selected[owner].interface.1, original);
+                }
+                proptest::prop_assert!(result.artifact_view().selected_native_groups().is_empty());
+                proptest::prop_assert!(result.lexical_graph().is_empty());
+            }
+            // The same Name is a missing home in the full owner, but an external
+            // unit in the restricted owner. Its classification must not leak.
+            if unrelated > 0 {
+                let absent = type_signature("other_unit_0", "Absent");
+                proptest::prop_assert!(context.select_original_type_interfaces(&[], &[&absent]).is_err());
+                let external = narrowed[0].select_original_type_interfaces(&[], &[&absent]).unwrap();
+                proptest::prop_assert!(external.compiler_input_roles().is_empty());
+            }
+            let missing_home = type_signature("unit", "Absent");
+            proptest::prop_assert!(context.select_original_type_interfaces(&[], &[&missing_home]).is_err());
+            // An explicit full-map observation must be visible to the row oracle;
+            // reinserting the deleted wrapper loop would fail the zero above.
+            type_query_work::take();
+            let full = support.selected_interfaces().unwrap().iter()
+                .map(|(owner, entry)| (owner.clone(), Arc::clone(entry))).collect::<BTreeMap<_, _>>();
+            let observed = type_query_work::take();
+            proptest::prop_assert_eq!(full.len(), entries.len());
+            proptest::prop_assert_eq!(observed.iterated_rows, entries.len());
+        }
+    }
 
     #[test]
     fn closed_interface_narrowing_preserves_rows_without_output_metadata() {
@@ -2099,7 +2321,6 @@ mod tests {
             for _ in 0..4 {
                 let observation = support.selected_interfaces().unwrap();
                 let actual = observation
-                    .entries()
                     .iter()
                     .map(|(owner, entry)| {
                         let ArtifactPayload::Canonical(interface) = &entry.payload else {
@@ -2163,7 +2384,13 @@ mod tests {
             .unwrap();
             let original_graph = reusable.artifacts.capture_graph_selection();
             let before_policy = inventory.metrics();
+            type_query_work::take();
             let interface_only = reusable.for_source_owners(&BTreeSet::new()).unwrap();
+            assert_eq!(type_query_work::take().census_rows, 0);
+            assert!(Arc::ptr_eq(
+                &reusable.selected.home_units,
+                &interface_only.selected.home_units
+            ));
             assert!(interface_only
                 .projection
                 .roles()
@@ -2251,7 +2478,7 @@ mod tests {
                 if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { dependent, required: dependency, .. }
                     if dependent == &selected.descriptor.owner && dependency == &required.descriptor.owner)));
             assert_eq!(
-                support.selected_interfaces().unwrap().entries().len(),
+                support.selected_interfaces().unwrap().iter().count(),
                 expected.len()
             );
         }
