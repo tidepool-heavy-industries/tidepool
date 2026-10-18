@@ -9,11 +9,92 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 import hashlib
 import json
 import re
 from pathlib import Path
 import sys
+
+
+class ClaimKind(str, Enum):
+    WORKLOAD_TIMING = "workload_timing"
+    FROZEN_WORKLOAD_TIMING = "frozen_workload_timing"
+
+
+class AssessmentStatus(str, Enum):
+    VALID = "valid_workload_timing"
+    QUALIFIED = "qualified_frozen_timing"
+    DIAGNOSTICS = "failed_workload_diagnostics"
+    INSUFFICIENT = "insufficient_observations"
+    NOT_APPLICABLE = "not_applicable"
+    UNASSESSED = "unassessed"
+
+
+def claim_assessment(report, requested):
+    """Select only the requested claim; historical reports confer no claim."""
+    requested = ClaimKind(requested)
+    if type(report.get("schema")) is not int or report["schema"] != 2:
+        return {"kind": requested.value, "status": AssessmentStatus.UNASSESSED.value}
+    for assessment in (report.get("assessment"), report.get("workload_assessment")):
+        if isinstance(assessment, dict) and assessment.get("kind") == requested.value:
+            AssessmentStatus(assessment.get("status"))
+            return assessment
+    return {"kind": requested.value, "status": AssessmentStatus.NOT_APPLICABLE.value}
+
+
+def require_claim(report, requested):
+    requested = ClaimKind(requested)
+    assessment = claim_assessment(report, requested)
+    accepted = (AssessmentStatus.VALID if requested == ClaimKind.WORKLOAD_TIMING
+                else AssessmentStatus.QUALIFIED)
+    if assessment["status"] != accepted.value:
+        raise ValueError(f"{requested.value}: {assessment['status']}")
+    prerequisites = assessment.get("prerequisites")
+    if (not isinstance(prerequisites, dict) or not prerequisites
+            or not all(value is True for value in prerequisites.values())
+            or assessment.get("scope") not in KNOWN_ROSTERS):
+        raise ValueError(f"{requested.value}: inconsistent assessment")
+    return assessment
+
+
+def workload_assessment(report, record):
+    execution = record.get("execution") or {}
+    coverage = report["phase_coverage"]
+    physical = report["whole_physical_stream_reconciliation"]
+    expected = KNOWN_ROSTERS.get(coverage.get("cohort"))
+    prerequisites = {
+        "workload_contract_matches_selected_cohort": expected is not None
+            and coverage.get("expected_order") == list(expected),
+        "counted_behavior_passed": record.get("passed") is True
+            and type(execution.get("executed_test_count")) is int
+            and execution["executed_test_count"] == 1
+            and type(execution.get("exit_code")) is int and execution["exit_code"] == 0,
+        "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") == "owned-resident",
+        "artifacts_retained": execution.get("artifacts_retained_after_success") is True,
+        "applied_trace_profile_confirmed": report["trace_capture"]["status"] == "complete",
+        "applicable_execution_observations_complete": report["execution_observations"]["status"] == "complete",
+        "phase_measurements_complete": report["phase_measurements"]["status"] == "complete",
+        "phase_coverage_complete": coverage.get("complete") is True,
+        "workload_request_service_joins_complete": report["workload_request_service_joins"]["status"] == "complete",
+        "whole_physical_stream_reconciled": physical["status"] == "complete",
+        "all_physical_services_succeeded": physical["physical_service_outcome_status"] == "all_successful",
+        "raw_trace_capture_complete": physical["raw_event_capture_status"] == "complete",
+        "queue_evidence_complete": report["queue_evidence"]["status"] == "complete",
+        "compiler_job_grants_complete": report["compiler_job_grants"]["status"] in
+            ("observed", "not_applicable_no_compiler_requests"),
+        "startup_owner_complete": report["startup_scope"]["owner_status"] == "complete",
+        "cleanup_confirmed": report["runner"]["cleanup"]["complete"] is True,
+        "bounded_owner_observations_complete": report["owned_artifact_observations"]["status"] in
+            ("observed", "native_only_no_compiler_requests"),
+    }
+    disposal = execution.get("disposal") or {}
+    known_failure = (record.get("passed") is False and disposal.get("status") != "pending"
+                     and type(execution.get("executed_test_count")) is int)
+    status = (AssessmentStatus.DIAGNOSTICS if known_failure else AssessmentStatus.VALID
+              if all(prerequisites.values()) else AssessmentStatus.INSUFFICIENT)
+    return {"kind": ClaimKind.WORKLOAD_TIMING.value, "status": status.value,
+            "scope": coverage.get("cohort"), "prerequisites": prerequisites}
 
 
 EXPECTED_PHASES = (
@@ -1398,7 +1479,7 @@ def analyze(record_path):
     observed_counts = [value for value in logical_counts if type(value) is int and value >= 0]
     unknown_count = len(logical_counts) - len(observed_counts)
     report = {
-        "schema": 1,
+        "schema": 2,
         "whole_case_wall": case_wall_ledger(phases, roster),
         "catalog_acceptance": catalog_acceptance_observations(host_rows),
         "workspace_route": {"selected": environment.get("workspace_route"),
@@ -1441,7 +1522,7 @@ def analyze(record_path):
         },
         "phase_coverage": phase_coverage,
         "phase_measurements": {
-            "status": "complete" if not invalid_phase_measurements else "partial_or_unknown",
+            "status": "complete" if phase_coverage["complete"] and not invalid_phase_measurements else "partial_or_unknown",
             "invalid_records": invalid_phase_measurements,
             "required_values": "wall_ns and logical_compiler_requests are nonnegative JSON integers",
         },
@@ -1564,6 +1645,8 @@ def analyze(record_path):
             phase["harness_runtime_cost_events"] = None
             phase["harness_runtime_cost_coverage"] = None
             phase["store_projection_status"] = "unknown_by_trace_profile"
+    report["runner_record"] = {"path": str(record_path), "sha256": sha256_file(record_path)}
+    report["assessment"] = workload_assessment(report, record)
     return report
 
 
@@ -1571,14 +1654,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runner_record", type=Path,
                         help="retained <sha256(test-name)>.json from isolated-libtest --output-dir")
+    parser.add_argument("--require-claim", choices=[kind.value for kind in ClaimKind],
+                        help="require this explicit claim after emitting the observations")
     options = parser.parse_args(argv)
     try:
         report = analyze(options.runner_record)
     except (OSError, ValueError, TypeError) as error:
+        json.dump({"schema": 2, "assessment": {
+            "kind": ClaimKind.WORKLOAD_TIMING.value,
+            "status": AssessmentStatus.INSUFFICIENT.value,
+            "reason": str(error)}, "runner_record": str(options.runner_record)}, sys.stdout)
+        sys.stdout.write("\n")
         print(f"harness use-case report failed: {error}", file=sys.stderr)
         return 2
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
+    if options.require_claim:
+        try:
+            require_claim(report, options.require_claim)
+        except ValueError as error:
+            print(f"measurement claim refused: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

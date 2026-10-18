@@ -1049,7 +1049,7 @@ class NativeQualificationTests(unittest.TestCase):
                         '--output', str(output), '--jobs', '2'])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], 6)
                 self.assertEqual(report['runner_exit_code'], 0)
                 self.assertEqual(set(report['case_premises']), set(selected))
@@ -1119,7 +1119,7 @@ class NativeQualificationTests(unittest.TestCase):
                     ])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], len(selected))
                 self.assertEqual(report['runner_exit_code'], 0)
 
@@ -1279,7 +1279,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                '--output', str(output)])
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
-                self.assertEqual(report['completed'], expected == 0)
+                self.assertEqual(report['behavior_selection_completed'], expected == 0)
                 self.assertEqual(report['expected_count'], len(qualification.PREPARED_CHILD_TESTS))
                 command = commands[0]
                 self.assertEqual(command[2], '/frozen/libtest')
@@ -1410,7 +1410,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                '--output', str(output), '--jobs', '1'])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], 6)
                 if mutation == 'control':
                     crash = next(record for record in report['tests']
@@ -1503,7 +1503,7 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertTrue(compiler_allowance_selection_confirmed)
                     records = args[1]
                     paths = args[2]
-                    return {'status': 'partial' if records else 'refused', 'completed': False,
+                    return {'schema': 2, 'assessment': {'kind': 'frozen_workload_timing', 'status': 'insufficient_observations'},
                             'reporter': qualification.HARNESS_PERFORMANCE_REPORTER,
                             'runner_record': str(paths[0]) if paths else None,
                             'qualification': {'prerequisites': {
@@ -1517,14 +1517,14 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['behavioral_completed'], count == 1)
-                self.assertFalse(report['measurement']['completed'])
-                self.assertEqual(report['measurement']['status'], 'partial')
+                self.assertEqual(report['measurement']['assessment']['kind'], 'frozen_workload_timing')
+                self.assertEqual(report['measurement']['assessment']['status'], 'insufficient_observations')
                 self.assertEqual(report['measurement']['reporter'], qualification.HARNESS_PERFORMANCE_REPORTER)
                 self.assertEqual(report['scheduling']['trace_profile'], 'minimal')
                 if count:
                     analyze.assert_called_once()
                     self.assertEqual(report['measurement']['runner_record'], str(output / 'tests/case.json'))
-                self.assertEqual(report['completed'], expected == 0)
+                self.assertEqual(report['behavior_selection_completed'], expected == 0)
                 self.assertTrue(report['tests'][0]['passed'])
 
     def test_harness_performance_refuses_unprepared_inputs_and_parallel_execution(self):
@@ -1621,10 +1621,10 @@ class NativeQualificationTests(unittest.TestCase):
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
                 True, descriptor_path, requested_trace_profile="full")
-            self.assertEqual(measured['status'], 'qualified')
-            self.assertTrue(measured['completed'])
-            self.assertTrue(measured['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
-            self.assertTrue(measured['qualification']['prerequisites']['startup_owner_complete'])
+            self.assertEqual(measured['assessment']['status'], 'qualified_frozen_timing')
+            reporter.require_claim(measured, reporter.ClaimKind.FROZEN_WORKLOAD_TIMING)
+            self.assertTrue(measured['assessment']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+            self.assertTrue(measured['assessment']['prerequisites']['startup_owner_complete'])
             self.assertTrue(measured['whole_physical_stream_reconciliation']['detailed_compiler_sample_records_truncated'])
 
             descriptor['environment']['TIDEPOOL_PREPARED_ROOT_ENTRY'] = '/different/root-entry'
@@ -1632,8 +1632,8 @@ class NativeQualificationTests(unittest.TestCase):
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
                 True, descriptor_path, requested_trace_profile="full")
-            self.assertEqual(refused_match['status'], 'partial')
-            self.assertFalse(refused_match['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+            self.assertEqual(refused_match['assessment']['status'], 'insufficient_observations')
+            self.assertFalse(refused_match['assessment']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
 
     def test_measurement_mutants_cannot_qualify_a_passing_frozen_case(self):
         from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
@@ -1733,11 +1733,11 @@ class NativeQualificationTests(unittest.TestCase):
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
                     True, descriptor_path, requested_trace_profile="minimal" if mutation == "wrong_requested_profile" else "full")
-                self.assertEqual(measured["completed"], mutation in ("control", "capacity_capped_grant"))
-                self.assertTrue(measured["qualification"]["prerequisites"]["counted_behavior_passed"])
+                self.assertEqual(measured["assessment"]["status"] == "qualified_frozen_timing", mutation in ("control", "capacity_capped_grant"))
+                self.assertTrue(measured["assessment"]["prerequisites"]["counted_behavior_passed"])
                 if refused_dimension:
-                    self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
-                    self.assertEqual(measured["status"], "partial")
+                    self.assertFalse(measured["assessment"]["prerequisites"][refused_dimension])
+                    self.assertEqual(measured["assessment"]["status"], "insufficient_observations")
 
     def test_prepared_persona_measurement_requires_consumed_route_and_complete_phase_roster(self):
         from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
@@ -1936,7 +1936,7 @@ class NativeQualificationTests(unittest.TestCase):
                         code = qualification.run_cohort(args)
                     report = json.loads((output / 'report.json').read_text())
                     self.assertEqual(code, expected)
-                    self.assertEqual(report['completed'], expected == 0)
+                    self.assertEqual(report['behavior_selection_completed'], expected == 0)
                     self.assertEqual(report['runner_exit_code'], 0)
                     self.assertEqual(report['executed_test_count'], 1)
                     self.assertTrue(report['tests'][0]['passed'])
@@ -2436,7 +2436,7 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertTrue(report['behavioral_completed'])
             self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0 or invalid_capture)
             self.assertEqual(report['trace_selection_confirmed'], not invalid_capture)
-            self.assertEqual(report['completed'], expected_code == 0)
+            self.assertEqual(report['behavior_selection_completed'], expected_code == 0)
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
         invalid = (['--foreground-jobs', '0'], ['--preparation-jobs', '-1'],

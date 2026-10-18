@@ -1,4 +1,6 @@
 import importlib.util
+import contextlib
+import io
 from datetime import datetime, timedelta, timezone
 import itertools
 import json
@@ -408,6 +410,70 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         aggregate = reporter.analyze(record)["workload_request_service_joins"]
         self.assertEqual(aggregate["logical_request_count"], 0)
         self.assertEqual(aggregate["unknown_logical_request_phase_count"], 0)
+
+    def test_source_timing_claim_does_not_require_frozen_preparation(self):
+        record = self.make_complete_case(trace_profile="minimal")
+        self.add_owner_summaries()
+        path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(path)
+        phases[0]["prepared_root_entry_supplied"] = False
+        self.write_jsonl(path, phases)
+        report = reporter.analyze(record)
+        assessment = reporter.require_claim(report, "workload_timing")
+        self.assertEqual(assessment["status"], "valid_workload_timing")
+        self.assertEqual(report["environment"]["frozen_catalog_qualification"], "not-established-by-this-counted-test")
+        with self.assertRaises(ValueError):
+            reporter.require_claim(report, "frozen_workload_timing")
+
+    def test_claims_distinguish_failed_body_missing_observations_and_empty_phases(self):
+        for mutation in ("failed_body", "failed_disposal", "unknown_cleanup", "no_phases"):
+            with self.subTest(mutation=mutation):
+                record = self.make_complete_case(trace_profile="minimal")
+                self.add_owner_summaries()
+                payload = json.loads(record.read_text())
+                if mutation == "failed_body":
+                    payload.update(passed=False)
+                    payload["execution"]["exit_code"] = 101
+                elif mutation == "failed_disposal":
+                    payload.update(passed=False)
+                    payload["execution"]["disposal"] = {"status": "failed"}
+                elif mutation == "unknown_cleanup":
+                    payload["execution"]["hosted_cleanup_status"] = "unknown"
+                else:
+                    path = self.root / "artifacts/phases.jsonl"
+                    self.write_jsonl(path, reporter.read_jsonl(path)[:1])
+                self.write_json(record, payload)
+                report = reporter.analyze(record)
+                expected = "failed_workload_diagnostics" if mutation.startswith("failed_") else "insufficient_observations"
+                self.assertEqual(report["assessment"]["status"], expected)
+                if mutation == "no_phases":
+                    self.assertEqual(report["phase_measurements"]["status"], "partial_or_unknown")
+                    self.assertIsNone(report["workload_request_service_joins"]["logical_request_count"])
+                with self.assertRaises(ValueError):
+                    reporter.require_claim(report, "workload_timing")
+
+    def test_claim_consumption_never_promotes_historical_or_missing_assessment(self):
+        for report in ({"schema": 1, "completed": True}, {"schema": True, "completed": True},
+                       {"schema": 2, "completed": True},
+                       {"schema": 2, "assessment": {"kind": "workload_timing", "status": "valid_workload_timing"}}):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                reporter.require_claim(report, "workload_timing")
+        self.assertEqual(reporter.claim_assessment({"schema": 1}, "workload_timing")["status"], "unassessed")
+        with self.assertRaises(ValueError):
+            reporter.require_claim({"schema": 2}, "unknown-kind")
+
+    def test_report_cli_serialization_and_requested_claim_have_distinct_outcomes(self):
+        record = self.make_case()
+        for options, expected in (([], 0), (["--require-claim", "workload_timing"], 1)):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(reporter.main([str(record), *options]), expected)
+            self.assertEqual(json.loads(stdout.getvalue())["assessment"]["status"], "insufficient_observations")
+        (self.root / "artifacts/phases.jsonl").unlink()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(reporter.main([str(record)]), 2)
+        self.assertEqual(json.loads(stdout.getvalue())["assessment"]["status"], "insufficient_observations")
 
     def make_complete_case(self, cohort="harness-eight-phase", trace_profile=None):
         record = self.make_case(trace_profile=trace_profile)

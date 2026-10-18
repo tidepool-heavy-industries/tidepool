@@ -2271,7 +2271,9 @@ def _run_cohort(args) -> int:
                 "requested_preparation_jobs": allowances["preparation_jobs"], "worker_processes": selected_workers}
             for record in records)
     behavioral_completed = result.returncode == 0 and confirmed
-    measurement = None
+    measurement = {"schema": 2, "assessment": {
+        "kind": "frozen_workload_timing", "status": "not_applicable",
+        "reason": "cohort has no measurement scope"}}
     if "measurement_reporter" in cohort:
         measurement = analyze_harness_performance(
             descriptor, records, record_paths, cohort, behavioral_completed, args.descriptor.absolute(),
@@ -2283,7 +2285,7 @@ def _run_cohort(args) -> int:
         compiler_trace_selection(record.get("execution") or {}, trace_profile) for record in records)
     completed = behavioral_completed and compiler_allowance_selection_confirmed and trace_selection_confirmed
     code = result.returncode if result.returncode else int(not completed)
-    report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
+    report = {"schema": 2, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
@@ -2301,7 +2303,7 @@ def _run_cohort(args) -> int:
               "behavioral_completed": behavioral_completed,
               "case_premises": case_premises,
               "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
-              "measurement": measurement, "completed": completed, "tests": records}
+              "measurement": measurement, "behavior_selection_completed": completed, "tests": records}
     case_cleanup = [{
         "test": record.get("test"),
         "status": (record.get("execution") or {}).get("status"),
@@ -2384,34 +2386,39 @@ def _run_cohort(args) -> int:
 
 def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path,
                                 compiler_allowance_selection_confirmed=True, requested_trace_profile=None):
-    # Runner records are adjacent to their artifact directories under tests/.
-    if not records or len(records) != 1:
-        return {"status": "refused", "completed": False,
-                "reason": "performance report requires exactly one retained runner record",
-                "runner_record_count": len(records), "reporter": cohort["measurement_reporter"]}
+    def unavailable(reason, **facts):
+        failed = (len(records) == 1 and records[0].get("passed") is False
+                  and type((records[0].get("execution") or {}).get("executed_test_count")) is int)
+        status = "failed_workload_diagnostics" if failed else "insufficient_observations"
+        return {"schema": 2, "assessment": {
+            "kind": "frozen_workload_timing",
+            "status": status, "reason": reason},
+            "workload_assessment": {"kind": "workload_timing", "status": status, "reason": reason},
+            "reporter": cohort["measurement_reporter"], **facts}
+
+    if len(records) != 1:
+        return unavailable("performance report requires exactly one retained runner record",
+                           runner_record_count=len(records))
     if len(record_paths) != 1:
-        return {"status": "refused", "completed": False,
-                "reason": "performance report requires exactly one retained runner record path",
-                "runner_record_path_count": len(record_paths), "reporter": cohort["measurement_reporter"]}
+        return unavailable("performance report requires exactly one retained runner record path",
+                           runner_record_path_count=len(record_paths))
     runner_record_path = record_paths[0]
     reporter_path = Path(programs(Path(descriptor["bundle_root"]))["harness_perf_reporter"])
     if not reporter_path.is_file():
-        return {"status": "refused", "completed": False,
-                "reason": "frozen bundle is missing its Harness performance reporter",
-                "reporter": cohort["measurement_reporter"]}
+        return unavailable("frozen bundle is missing its Harness performance reporter")
     spec = importlib.util.spec_from_file_location("frozen_harness_usecase_perf_report", reporter_path)
     if spec is None or spec.loader is None:
-        return {"status": "refused", "completed": False,
-                "reason": "frozen Harness performance reporter could not be loaded",
-                "reporter": cohort["measurement_reporter"]}
+        return unavailable("frozen Harness performance reporter could not be loaded")
     reporter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reporter)
     try:
         report = reporter.analyze(runner_record_path)
+        source_assessment = reporter.claim_assessment(report, reporter.ClaimKind.WORKLOAD_TIMING)
+        if source_assessment["status"] == reporter.AssessmentStatus.UNASSESSED.value:
+            return unavailable("historical observation schema is unassessed")
     except (OSError, ValueError, TypeError, KeyError) as error:
-        return {"status": "refused", "completed": False,
-                "reason": f"Harness performance evidence was rejected: {error}",
-                "runner_record": str(runner_record_path), "reporter": cohort["measurement_reporter"]}
+        return unavailable(f"Harness performance evidence was rejected: {error}",
+                           runner_record=str(runner_record_path))
     record = records[0]
     execution = record.get("execution") or {}
     phase_env = report.get("environment") or {}
@@ -2431,42 +2438,31 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
     workload_matches = (expected_roster is not None and coverage.get("cohort") == expected_workload
                         and coverage.get("expected_order") == list(expected_roster))
     prerequisites = {
+        **source_assessment["prerequisites"],
         "trace_profile_selection_matches_owner": requested_trace_profile in ("full", "minimal")
                                                  and execution.get("trace_profile") == requested_trace_profile,
-        "applied_trace_profile_confirmed": (report.get("trace_capture") or {}).get("status") == "complete",
-        "applicable_execution_observations_complete": (report.get("execution_observations") or {}).get("status") == "complete",
         "workload_contract_matches_selected_cohort": workload_matches,
-        "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") ==
-                                                  cohort.get("compiler_mode") == "owned-resident",
-        "phase_measurements_complete": (report.get("phase_measurements") or {}).get("status") == "complete",
         "selected_workspace_route_consumed": (cohort.get("required_workspace_route") is None or (
             (report.get("workspace_route") or {}).get("selected") == cohort["required_workspace_route"]
             and (report.get("workspace_route") or {}).get("verified") is True)),
         "whole_case_wall_complete": (cohort.get("required_workspace_route") is None
                                     or (report.get("whole_case_wall") or {}).get("status") == "complete"),
-        "counted_behavior_passed": behavioral_completed and record.get("passed") is True
-                                      and execution.get("executed_test_count") == 1
-                                      and execution.get("exit_code") == 0,
-        "artifacts_retained": execution.get("artifacts_retained_after_success") is True,
+        "counted_behavior_passed": source_assessment["prerequisites"]["counted_behavior_passed"]
+                                  and behavioral_completed,
         "prepared_frozen_root_entry_matches_descriptor": prepared_match,
         "frozen_native_inputs_match_descriptor": not observed_input_mismatches,
-        "phase_coverage_complete": (report.get("phase_coverage") or {}).get("complete") is True,
-        "workload_request_service_joins_complete": (report.get("workload_request_service_joins") or {}).get("status") == "complete",
-        "whole_physical_stream_reconciled": (report.get("whole_physical_stream_reconciliation") or {}).get("status") == "complete",
-        "all_physical_services_succeeded": (report.get("whole_physical_stream_reconciliation") or {}).get("physical_service_outcome_status") == "all_successful",
-        "raw_trace_capture_complete": (report.get("whole_physical_stream_reconciliation") or {}).get("raw_event_capture_status") == "complete",
-        "queue_evidence_complete": (report.get("queue_evidence") or {}).get("status") == "complete",
         "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
-        "compiler_job_grants_complete": (report.get("compiler_job_grants") or {}).get("status") in ("observed", "not_applicable_no_compiler_requests"),
-        "startup_owner_complete": (report.get("startup_scope") or {}).get("owner_status") == "complete",
-        "cleanup_confirmed": ((report.get("runner") or {}).get("cleanup") or {}).get("complete") is True,
-        "bounded_owner_observations_complete": (report.get("owned_artifact_observations") or {}).get("status") in ("observed", "native_only_no_compiler_requests"),
     }
     complete = all(prerequisites.values())
-    report["status"] = "qualified" if complete else "partial"
-    report["completed"] = complete
+    source_status = source_assessment["status"]
+    status = (reporter.AssessmentStatus.DIAGNOSTICS
+              if source_status == reporter.AssessmentStatus.DIAGNOSTICS.value else
+              reporter.AssessmentStatus.QUALIFIED if complete else reporter.AssessmentStatus.INSUFFICIENT)
+    report["workload_assessment"] = source_assessment
+    report["assessment"] = {"kind": reporter.ClaimKind.FROZEN_WORKLOAD_TIMING.value,
+                            "status": status.value, "scope": expected_workload,
+                            "prerequisites": prerequisites}
     report["reporter"] = str(reporter_path)
-    report["runner_record"] = str(runner_record_path)
     report["qualification"] = {
         "descriptor": str(descriptor_path), "descriptor_sha256": sha256(descriptor_path),
         "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
@@ -2475,9 +2471,6 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "startup_mode": descriptor["startup_mode"], "runner_record": str(runner_record_path),
         "runner_record_sha256": sha256(runner_record_path),
         "observed_input_mismatches": observed_input_mismatches,
-        "prerequisites": prerequisites,
-        "status": "qualified" if complete else "partial",
-        "completed": complete,
     }
     return report
 
