@@ -2595,7 +2595,7 @@ mod authored_tests {
             .product()
             .module_interface()
             .unwrap()
-            .interface_sha256();
+            .clone();
         let independent_interface = independent
             .recovery_products()
             .iter()
@@ -2603,7 +2603,7 @@ mod authored_tests {
             .unwrap()
             .module_interface()
             .unwrap()
-            .interface_sha256();
+            .clone();
         assert_ne!(
             first_interface, independent_interface,
             "the refusal control must carry two genuinely different issued canonical owners"
@@ -2641,7 +2641,7 @@ mod authored_tests {
                 .unwrap()
                 .module_interface()
                 .unwrap()
-                .interface_sha256(),
+                .clone(),
             first_interface,
             "the exact-context successor must carry its selected first canonical owner"
         );
