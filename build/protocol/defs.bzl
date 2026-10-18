@@ -24,3 +24,26 @@ protocol_generated = rule(
         "outputs": attrs.list(attrs.string()),
     },
 )
+
+def _snapshots_check_impl(ctx):
+    stamp = ctx.actions.declare_output("protocol-snapshots.checked")
+    ctx.actions.run(
+        cmd_args([
+            ctx.attrs.python[RunInfo], ctx.attrs.driver,
+            "--generated-root", ctx.attrs.generated,
+            "--source-root", ctx.attrs.snapshots,
+            "--check", "--stamp", stamp.as_output(),
+        ]),
+        category = "protocol_snapshots_check",
+    )
+    return [DefaultInfo(default_output = stamp)]
+
+protocol_snapshots_check = rule(
+    impl = _snapshots_check_impl,
+    attrs = {
+        "generated": attrs.source(),
+        "snapshots": attrs.source(),
+        "driver": attrs.source(default = "//scripts:protocol_snapshots_script"),
+        "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
+    },
+)

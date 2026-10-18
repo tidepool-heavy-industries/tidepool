@@ -643,6 +643,14 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertNotIn("tidepool/runtime/src/generated/forks.rs", mapping.values())
             self.assertEqual(mapping["//bridge/protocol:generated[tidepool_runtime_src_generated_mod_rs]"],
                              "tidepool/runtime/src/generated/mod.rs")
+        snapshots = self.rule("tidepool/runtime", "protocol_snapshot_sources", "filegroup")
+        mapping = eval(compile(ast.Expression(snapshots["srcs"]), "snapshot inputs", "eval"),
+                       {"glob": lambda patterns: sorted({str(path.relative_to(self.root / "tidepool/runtime"))
+                           for pattern in patterns for path in (self.root / "tidepool/runtime").glob(pattern)})})
+        self.assertEqual(mapping, {
+            "tidepool/runtime/src/generated/forks.rs": "src/generated/forks.rs",
+            "tidepool/runtime/src/generated/mod.rs": "src/generated/mod.rs",
+        })
 
     def test_all_integration_suites_use_existing_counted_isolated_runner(self):
         result = self.generate()

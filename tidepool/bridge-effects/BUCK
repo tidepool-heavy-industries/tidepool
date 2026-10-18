@@ -98,6 +98,12 @@ tidepool_rust_isolated_test(
 )
 
 filegroup(
+    name = "protocol_snapshot_sources",
+    srcs = {"tidepool/bridge-effects/" + source: source for source in glob(["src/generated/*"])},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "native_qualification_inputs",
     srcs = {
         "tidepool/bridge-effects/BUCK": "BUCK",

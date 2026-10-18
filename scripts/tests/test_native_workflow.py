@@ -210,10 +210,18 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertIn("root//bridge/haskell:control", buck.call_args_list[-1].args[1])
 
     def test_verify_refuses_empty_haskell_graph_selection(self):
-        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck, patch.object(workflow.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", return_value=0) as buck, patch.object(workflow.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
             with self.assertRaisesRegex(ValueError, "no valid owning targets"):
                 workflow.main(["verify"])
-            buck.assert_not_called()
+            buck.assert_called_once_with("build", ["//bridge/protocol:snapshots_check"], profile="fast-dev")
+
+    def test_verify_stops_before_discovery_or_other_work_when_protocol_mirrors_differ(self):
+        with patch.object(workflow, "roster", return_value=ROSTER), \
+             patch.object(workflow, "buck", return_value=1) as buck, \
+             patch.object(workflow.subprocess, "run") as query:
+            self.assertEqual(workflow.main(["verify"]), 1)
+        buck.assert_called_once_with("build", ["//bridge/protocol:snapshots_check"], profile="fast-dev")
+        query.assert_not_called()
 
     def test_standard_unittest_adapter_executes_control_and_refuses_zero(self):
         adapter_spec = importlib.util.spec_from_file_location("native_unittest", Path(__file__).parents[1] / "unittest-main.py")

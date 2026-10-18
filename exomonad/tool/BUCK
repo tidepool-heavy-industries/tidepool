@@ -73,6 +73,12 @@ tidepool_rust_isolated_test(
 )
 
 filegroup(
+    name = "protocol_snapshot_sources",
+    srcs = {"exomonad/tool/" + source: source for source in glob(["src/generated/*"])},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "native_qualification_inputs",
     srcs = {
         "exomonad/tool/BUCK": "BUCK",

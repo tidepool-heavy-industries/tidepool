@@ -293,6 +293,12 @@ export_file(
 )
 
 filegroup(
+    name = "protocol_snapshot_sources",
+    srcs = {"bridge/handlers/" + source: source for source in glob(["src/generated/*"])},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "native_qualification_inputs",
     srcs = {
         "bridge/handlers/BUCK": "BUCK",

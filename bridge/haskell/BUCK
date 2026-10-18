@@ -14,6 +14,17 @@ _PROTOCOL_LIBRARY_SOURCES = {
     "lib/Tidepool/Internal/ModelControl.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]",
 }
 
+# These literal source files validate mirrors; native consumers still use the
+# schema generator artifacts above.
+filegroup(
+    name = "protocol_snapshot_sources",
+    srcs = {"bridge/haskell/" + source: source for source in glob([
+        "lib/Tidepool/Effects/*",
+        "lib/Tidepool/Internal/*",
+    ])},
+    visibility = ["PUBLIC"],
+)
+
 # Source and fixture artifacts exposed to native actions that model these
 # dependencies explicitly.
 export_file(
