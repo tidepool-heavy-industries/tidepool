@@ -242,10 +242,17 @@ fn fixture_with_helper_version(
     (root, helper, publication)
 }
 
-fn restored(
+fn restored_graph_roles(
     context: &ExactDeclarationContext,
     roles: &[CompilerInputRole],
-) -> Result<ExactDeclarationContext, CompileError> {
+) -> Result<
+    (
+        tempfile::TempDir,
+        RecoveredArtifactInventory,
+        ExactDeclarationContext,
+    ),
+    CompileError,
+> {
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let (products, interfaces) = context
@@ -267,13 +274,20 @@ fn restored(
         &edges,
     )
     .unwrap();
-    // Authenticate the supplied wire roles first, including malformed-selection
-    // controls, before restoring the complete recorded owner from its expected root.
     let authenticated = inventory.context_with_graph_selection(
         &selection,
         roles,
         context.owner.facts.lexical.to_vec(),
     )?;
+    Ok((scratch, inventory, authenticated))
+}
+
+fn restored(
+    context: &ExactDeclarationContext,
+    roles: &[CompilerInputRole],
+) -> Result<ExactDeclarationContext, CompileError> {
+    // Authenticate the supplied wire before restoring the complete recorded owner.
+    let (_scratch, inventory, authenticated) = restored_graph_roles(context, roles)?;
     authenticated
         .compiler_source_support()
         .restore_snapshot_evidence(&context.snapshot())?;
@@ -302,7 +316,7 @@ fn property_config() -> proptest::test_runner::Config {
 
 #[test]
 fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
-    let (root, _, publication) = fixture(0);
+    let (root, helper, publication) = fixture(0);
     let context = publication.context();
     assert!(!context
         .published_source_original_selections()
@@ -338,11 +352,28 @@ fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
         projection.admit_role(owner, role).unwrap();
     }
     changed = changed.recover_fixture_projection(projection).unwrap();
-    assert!(changed.published_source_original_selections().is_err());
-    // Recovery authenticates the broad graph, but reopening still validates the
-    // selected publication's narrower compiler namespace.
-    let recovered = restored(&changed, &changed.compiler_input_roles()).unwrap();
-    assert!(recovered.published_source_original_selections().is_err());
+    let assert_missing_type_role = |context: &ExactDeclarationContext| {
+        let Err(CompileError::ArtifactInventory(error)) =
+            context.published_source_original_selections()
+        else {
+            panic!("incomplete publication must refuse its required type role")
+        };
+        assert_eq!(
+            error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                artifact: root.descriptor.id,
+                dependent: root.descriptor.owner.clone(),
+                required: helper.descriptor.owner.clone(),
+                dependency: crate::artifact_inventory::ArtifactDependency::Interface,
+            }
+        );
+    };
+    assert_missing_type_role(&changed);
+    // This deliberately malformed fixture authenticates graph/role evidence only;
+    // it is not a complete owner for compilation or snapshot continuation.
+    let (_scratch, _inventory, recovered) =
+        restored_graph_roles(&changed, &changed.compiler_input_roles()).unwrap();
+    assert_missing_type_role(&recovered);
 }
 
 #[test]
