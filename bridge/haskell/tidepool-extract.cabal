@@ -808,7 +808,7 @@ test-suite model-turn-test
   -- Buck compiles against the generated artifact providers. Local Cabal
   -- compatibility requires these explicit directories from the same outputs;
   -- missing generated modules are errors, never a skipped suite.
-  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib actors
+  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../.exomonad/workspace generated/jev/core generated/effects generated/protocol lib actors
   other-modules:
     PersonaSeedTest
     PersonaMemoryTest
@@ -837,7 +837,9 @@ test-suite model-turn-test
     JevPreparedTest
     JevRecordingTest
     LookupEvidenceTest
-    Examples.JevPreparedWorkflow
+    Fixture.JevPreparedWorkflow
+    Coordination
+    ContextWorkflow
     Examples.ModelCallWorkflow
     Examples.JevComposedWorkflow
     Project.EvidencePattern
@@ -845,7 +847,7 @@ test-suite model-turn-test
     Project.ConversationContext
     Tidepool.Lookup.Tools
     Jev.Recording
-    Examples.JevFormWorkflow
+    Fixture.JevFormWorkflow
     FormJevDialogueTest
     Jev.Core
     Jev.Core.Contract
@@ -1006,7 +1008,7 @@ test-suite automation-helper-contract
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          automation-helper-contract.hs
-  hs-source-dirs:   ../../exomonad/examples/workspace/.exomonad/checks ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib actors
+  hs-source-dirs:   ../../.exomonad/workspace/checks ../../.exomonad/workspace generated/jev/core generated/effects generated/protocol lib actors
   other-modules:
     Exomonad.Contrib.Types
     Jev.Core
@@ -1024,6 +1026,9 @@ test-suite automation-helper-contract
     Project.SlowCommandWatch
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Model
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Actors.Exomonad
@@ -1100,13 +1105,15 @@ test-suite browser-scenario-contract
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          browser-scenario-contract.hs
-  hs-source-dirs:   ../../exomonad/examples/workspace/.exomonad/checks ../../exomonad/examples/workspace/.exomonad generated/effects generated/protocol lib actors
+  hs-source-dirs:   ../../.exomonad/workspace/checks ../../.exomonad/workspace generated/effects generated/protocol lib actors
   other-modules:
     Exomonad.Contrib.Check.Cargo
     Project.BrowserScenario
     Project.TestEvidence
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1116,6 +1123,9 @@ test-suite browser-scenario-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
+    Tidepool.Agent.Contract
+    Tidepool.Agent.ToolEffects
+    Tidepool.Internal.ActorProfiles
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Scope.Internal
@@ -1173,6 +1183,8 @@ test-suite command-tools-contract
   other-modules:
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1239,7 +1251,7 @@ test-suite tool-profiles-contract
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ToolProfiles.hs
-  hs-source-dirs:   test-check generated/effects generated/protocol lib actors ../../exomonad/examples/workspace/.exomonad
+  hs-source-dirs:   test-check generated/effects generated/protocol lib actors ../../.exomonad/workspace
   other-modules:
     QuantitiesContract
     Tidepool.Actor
@@ -1250,6 +1262,8 @@ test-suite tool-profiles-contract
     LookupNavigationTest
     Project.RetainedLookupExample
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Source
     Tidepool.Aeson
     Tidepool.Aeson.FromJSON

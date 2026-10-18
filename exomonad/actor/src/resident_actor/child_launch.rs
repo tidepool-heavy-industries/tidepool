@@ -402,6 +402,8 @@ where
         // the behavior. There is no discard authority before publication.
         let mut child_session_startup = None;
         let crate::start::CapturedChildLaunch {
+            requested_effects: _,
+            model_permissions: _,
             lifetime,
             mut descriptor,
             spawn,
@@ -411,6 +413,9 @@ where
             seed,
             exit_destination,
         } = child;
+        descriptor
+            .validate_conversation_selection()
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let checkpoint_lease = checkpoint_admission
             .as_ref()
             .map(|(lease, _)| lease.clone());

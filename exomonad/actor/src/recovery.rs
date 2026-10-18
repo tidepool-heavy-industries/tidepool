@@ -13,9 +13,8 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{JsonlReadError, SyncPolicy, TailPolicy};
 
-// V10 distinguishes resumable host interruption from actor cancellation.
-// Earlier runs require their matching binaries.
-const VERSION: u32 = 11;
+// V12 retains exact immutable model authority. Earlier runs require their matching binaries.
+const VERSION: u32 = 12;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -202,6 +201,8 @@ pub struct DurableActorAdmission {
     pub context_parent: Option<ActorRef>,
     pub actor_path: Option<String>,
     pub effect_keys: Vec<crate::ActorEffectKey>,
+    pub model_permissions: crate::ModelPermissions,
+    pub conversation_permission: Option<crate::ConversationPermission>,
     #[serde(default)]
     pub descendant_depth: u16,
     #[serde(default)]
@@ -233,6 +234,8 @@ impl DurableActorAdmission {
             context_parent: descriptor.context_parent(),
             actor_path: descriptor.actor_path().map(ToString::to_string),
             effect_keys: capabilities.effect_keys().to_vec(),
+            model_permissions: capabilities.model_permissions().clone(),
+            conversation_permission: capabilities.conversation_permission().cloned(),
             descendant_depth: descendants.maximum_depth,
             descendant_active_children: descendants.maximum_active_children,
             model: descriptor.model_name().map(str::to_owned),
@@ -2038,39 +2041,17 @@ fn validate_initial_context_event(
 }
 
 fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>> {
-    let mut value: serde_json::Value = serde_json::from_str(line)?;
-    match value.get("version").and_then(serde_json::Value::as_u64) {
-        Some(10) => {
-            // Version 10 predates provider-qualified reasoning and was OpenAI-only.
-            // Normalize in memory; never rewrite the retained journal.
-            if let Some(admission) = value
-                .get_mut("admission")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                if admission.contains_key("reasoning") {
-                    return Err("version 10 admission contains nonhistorical reasoning".into());
-                }
-                let reasoning = match admission.remove("effort") {
-                    None | Some(serde_json::Value::Null) => serde_json::Value::Null,
-                    Some(serde_json::Value::String(effort)) => {
-                        let effort = match effort.as_str() {
-                            "low" => crate::OpenAIReasoning::OpenAILow,
-                            "medium" => crate::OpenAIReasoning::OpenAIMedium,
-                            "high" => crate::OpenAIReasoning::OpenAIHigh,
-                            _ => return Err("unknown version 10 OpenAI effort".into()),
-                        };
-                        serde_json::to_value(crate::Reasoning::OpenAIReasoning(effort))?
-                    }
-                    Some(_) => return Err("invalid version 10 OpenAI effort".into()),
-                };
-                admission.insert("reasoning".into(), reasoning);
-            }
-            value["version"] = VERSION.into();
-        }
-        Some(version) if version == u64::from(VERSION) => {}
-        _ => return Err("unsupported actor journal version; use its matching binary".into()),
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(VERSION)) {
+        return Err("unsupported actor journal version; use its matching binary".into());
     }
-    Ok(serde_json::from_value(value)?)
+    let row: Row = serde_json::from_value(value)?;
+    if let EventKind::Admitted { admission, .. } = &row.event {
+        admission
+            .model_permissions
+            .validate_declared_effects(&admission.effect_keys)?;
+    }
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -2222,12 +2203,12 @@ mod tests {
     }
 
     #[test]
-    fn version_ten_reasoning_is_explicitly_openai_without_rewriting_source() {
-        let actor = ActorRef {
-            id: ActorId(1),
-            incarnation: Incarnation(1),
-        };
-        let admission = DurableActorAdmission::capture(actor, &descriptor("legacy"), &[]);
+    fn recovery_refuses_older_versions_and_missing_model_authority() {
+        let admission = DurableActorAdmission::capture(
+            ActorRef::first(ActorId(1)),
+            &descriptor("authority"),
+            &[],
+        );
         let row = Row {
             version: VERSION,
             sequence: 1,
@@ -2236,68 +2217,47 @@ mod tests {
                 startup: None,
             },
         };
-        for (old, expected) in [
-            ("low", crate::OpenAIReasoning::OpenAILow),
-            ("medium", crate::OpenAIReasoning::OpenAIMedium),
-            ("high", crate::OpenAIReasoning::OpenAIHigh),
-        ] {
-            let mut value = serde_json::to_value(&row).unwrap();
-            value["version"] = 10.into();
-            let admission = value["admission"].as_object_mut().unwrap();
-            admission.remove("reasoning");
-            admission.insert("effort".into(), old.into());
-            let source = serde_json::to_string(&value).unwrap();
-            let normalized = parse_row(&source).unwrap();
-            let EventKind::Admitted { admission, .. } = normalized.event else {
-                panic!("admission")
-            };
-            assert_eq!(
-                admission.reasoning,
-                Some(crate::Reasoning::OpenAIReasoning(expected))
-            );
-            assert!(admission.model.is_none());
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&source).unwrap(),
-                value
-            );
-            value["admission"]["effort"] = "max".into();
-            assert!(parse_row(&serde_json::to_string(&value).unwrap()).is_err());
+        let current = serde_json::to_value(row).unwrap();
+        assert!(parse_row(&current.to_string()).is_ok());
+        for version in [10, 11] {
+            let mut older = current.clone();
+            older["version"] = version.into();
+            assert!(parse_row(&older.to_string()).is_err());
         }
-    }
-
-    #[tokio::test]
-    async fn version_ten_history_reopens_without_rewriting() {
-        // Source-derived v10 wire fixture, independent of the v11 writer.
-        let legacy = concat!(
-            "{\"version\":10,\"sequence\":1,\"event\":\"created\"}\n",
-            r#"{"version":10,"sequence":2,"event":"admitted","admission":{"actor":{"id":1,"incarnation":1},"label":null,"creator":null,"supervisor_parent":null,"context_parent":null,"actor_path":null,"effect_keys":[],"descendant_depth":8,"descendant_active_children":null,"model":null,"effort":"high","instructions":null,"launch_worktrees":[],"source_layer":[]},"startup":null}"#,
-            "\n",
-        );
-        let directory = Arc::new(tempfile::tempdir().unwrap());
-        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let path = directory.path().join("actors.jsonl");
-        std::fs::write(&path, legacy).unwrap();
-        let journal =
-            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
-                .await
-                .unwrap();
-        let records = journal.records().await.unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(records[0].admission.model.is_none());
-        assert_eq!(
-            records[0].admission.reasoning,
-            Some(crate::Reasoning::OpenAIReasoning(
-                crate::OpenAIReasoning::OpenAIHigh
-            ))
-        );
-        drop(journal);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+        let mut missing = current;
+        missing["admission"]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_permissions");
+        assert!(parse_row(&missing.to_string()).is_err());
     }
 
     #[test]
-    fn version_ten_refuses_nonhistorical_reasoning_encodings() {
+    fn recovery_refuses_grants_and_declared_effects_that_disagree() {
+        let model = crate::AdmittedModelIdentity::new(
+            "catalog".into(),
+            "flash".into(),
+            "provider".into(),
+            crate::Model::DeepSeekFlash,
+        )
+        .unwrap();
+        let permissions = crate::ModelPermissions::new(vec![crate::ModelGrant::new(
+            crate::ModelPermission {
+                operation: crate::ModelOperation::ModelCall,
+                family: crate::ModelFamily::DeepSeek,
+            },
+            model,
+            vec![crate::Reasoning::DeepSeekReasoning(
+                crate::DeepSeekReasoning::DeepSeekHigh,
+            )],
+        )
+        .unwrap()])
+        .unwrap();
+        let descriptor = descriptor("granted").with_capabilities(
+            crate::ActorCapabilities::default().with_model_permissions(permissions),
+        );
         let admission =
-            DurableActorAdmission::capture(ActorRef::first(ActorId(1)), &descriptor("legacy"), &[]);
+            DurableActorAdmission::capture(ActorRef::first(ActorId(1)), &descriptor, &[]);
         let row = Row {
             version: VERSION,
             sequence: 1,
@@ -2307,35 +2267,8 @@ mod tests {
             },
         };
         let mut value = serde_json::to_value(row).unwrap();
-        value["version"] = 10.into();
-        value["admission"]
-            .as_object_mut()
-            .unwrap()
-            .remove("reasoning");
-        for absent in [true, false] {
-            let mut optional = value.clone();
-            if !absent {
-                optional["admission"]["effort"] = serde_json::Value::Null;
-            }
-            let EventKind::Admitted { admission, .. } =
-                parse_row(&optional.to_string()).unwrap().event
-            else {
-                panic!("admission")
-            };
-            assert!(admission.reasoning.is_none());
-        }
-        for invalid in [
-            serde_json::json!("none"),
-            serde_json::json!("max"),
-            serde_json::json!(42),
-            serde_json::json!({}),
-            serde_json::json!([]),
-        ] {
-            value["admission"]["effort"] = invalid;
-            assert!(parse_row(&value.to_string()).is_err());
-        }
-        value["admission"]["effort"] = "high".into();
-        value["admission"]["reasoning"] = serde_json::Value::Null;
+        assert!(parse_row(&value.to_string()).is_ok());
+        value["admission"]["effect_keys"] = serde_json::json!([]);
         assert!(parse_row(&value.to_string()).is_err());
     }
 

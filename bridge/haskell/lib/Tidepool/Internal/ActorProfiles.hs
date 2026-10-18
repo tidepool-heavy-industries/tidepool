@@ -27,11 +27,14 @@ import Tidepool.Effects.Core (ActorContext)
 import Tidepool.Effects.Core (AgentControl)
 import Tidepool.Effects.Core (AgentInspection)
 import Tidepool.Effects.Core (AgentLaunch)
+import Tidepool.Effects.Core (Argon)
 import Tidepool.Effects.Core (AskUser)
 import Tidepool.Effects.Core (BoundWorktree)
 import Tidepool.Effects.Core (Commands)
 import Tidepool.Effects.Core (Console)
 import Tidepool.Effects.Core (ContextReadWrite)
+import Tidepool.Effects.Core (DeepSeek)
+import Tidepool.Effects.Core (ForkAgent)
 import Tidepool.Effects.Core (FsRead)
 import Tidepool.Effects.Core (FsWrite)
 import Tidepool.Effects.Core (Green)
@@ -40,25 +43,27 @@ import Tidepool.Effects.Core (Journal)
 import Tidepool.Effects.Core (Lookup)
 import Tidepool.Effects.Core (ModelCall)
 import Tidepool.Effects.Core (Notifications)
+import Tidepool.Effects.Core (OpenAI)
 import Tidepool.Effects.Core (Reflect)
 import Tidepool.Effects.Core (Reload)
 import Tidepool.Effects.Core (RepoEvent)
 import Tidepool.Effects.Core (ResourceScopes)
 import Tidepool.Effects.Core (Sleep)
 import Tidepool.Effects.Core (Source)
+import Tidepool.Effects.Core (SpawnAgent)
 import Tidepool.Effects.Core (Web)
 import Tidepool.Effects.Core (WorktreeAllocation)
 import Tidepool.Effects.Core (WorktreeIntegration)
 import Tidepool.Effects.Core (WorktreeRegistry)
 
 type ActorEffects =
-  '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, ModelCall, Commands, Console, AskUser, Green, Actor, Reflect, Lookup, Source, Journal, Web, FsRead, FsWrite, RepoEvent]
+  '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, Commands, Console, AskUser, Green, Actor, Reflect, Lookup, Source, Journal, Web, FsRead, FsWrite, RepoEvent]
 
 type CatalogueEffects =
-  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite]
+  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite]
 
 type CatalogueToolEffects =
-  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite, ContextReadWrite, Reload]
+  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite, ContextReadWrite, Reload]
 
 data ToolEffectKey = ActorEffect ActorEffectKey | InvocationContextReadWrite | InvocationReload
   deriving (Eq, Show)
@@ -83,7 +88,15 @@ actorEffectName key = case key of
   EffectGreen -> "Green"
   EffectNotifications -> "Notifications"
   EffectJev -> "Jev"
-  EffectModelCall -> "ModelCall"
+  EffectModelCallOpenAI -> "ModelCall.OpenAI"
+  EffectModelCallArgon -> "ModelCall.Argon"
+  EffectModelCallDeepSeek -> "ModelCall.DeepSeek"
+  EffectForkAgentOpenAI -> "ForkAgent.OpenAI"
+  EffectForkAgentArgon -> "ForkAgent.Argon"
+  EffectForkAgentDeepSeek -> "ForkAgent.DeepSeek"
+  EffectSpawnAgentOpenAI -> "SpawnAgent.OpenAI"
+  EffectSpawnAgentArgon -> "SpawnAgent.Argon"
+  EffectSpawnAgentDeepSeek -> "SpawnAgent.DeepSeek"
   EffectActor -> "Actor"
   EffectReflect -> "Reflect"
   EffectLookup -> "Lookup"

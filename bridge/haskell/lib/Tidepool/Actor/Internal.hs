@@ -23,6 +23,8 @@ module Tidepool.Actor.Internal
   , behavior
   , onShutdown
   , actorWorkspace
+  , actorModelPermissions
+  , withModelPermissions
   , actorSources
   , withSources
   , withLaunchWorkspace
@@ -44,6 +46,7 @@ import Tidepool.Effects.Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
 import Tidepool.Actor.Source (Source)
 import Tidepool.Effects.Row (Effects, effectKeys)
+import Tidepool.Model.Selection (ModelPermissions, noModelPermissions)
 
 -- | The witness fixes the child's exact available effects. Rust independently
 -- checks attenuation and concrete resource grants.
@@ -73,6 +76,7 @@ data ActorDefinition startup (protocol :: Type -> Type) exit where
        , internalBehavior :: startup -> initial -> Eff actorEffs exit
        , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
        , internalWorkspace :: Maybe WorkspaceHandle
+       , internalModelPermissions :: ModelPermissions
        , internalSources :: [Source protocol]
        , internalReplacement :: Maybe (exit -> Eff actorEffs exit)
        }
@@ -110,6 +114,7 @@ pattern ActorDefinition
         , internalBehavior = behavior
         , internalOnShutdown = onShutdown
         , internalWorkspace = Nothing
+        , internalModelPermissions = noModelPermissions
         , internalSources = []
         , internalReplacement = Nothing
         }
@@ -125,6 +130,16 @@ withLaunchWorkspace
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
 withLaunchWorkspace workspace definition = definition { internalWorkspace = Just workspace }
+
+-- | Explicit requests for the child's immutable admitted model permissions.
+actorModelPermissions :: ActorDefinition startup protocol exit -> ModelPermissions
+actorModelPermissions ActorDefinitionInternal { internalModelPermissions = permissions } = permissions
+
+withModelPermissions
+  :: ModelPermissions
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
+withModelPermissions permissions definition = definition { internalModelPermissions = permissions }
 
 actorSources :: ActorDefinition startup protocol exit -> [Source protocol]
 actorSources ActorDefinitionInternal { internalSources = sources } = sources

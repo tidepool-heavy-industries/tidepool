@@ -102,11 +102,15 @@ class WorkspaceGitResourceTests(unittest.TestCase):
             path: subprocess.check_output([
                 str(self.git), "-C", str(workspace), "show", f'{self.record["revision"]}:{path}',
             ])
-            for path in resource.PROJECTED_SOURCES
+            for path in resource.selected_source_paths(source, str(self.git))
         }
         self.run_git(workspace, "checkout", "--detach", self.record["revision"] + "^")
         for path in selected:
+            (workspace / path).parent.mkdir(parents=True, exist_ok=True)
             (workspace / path).write_bytes(b"mutable checkout is not the selected source\n")
+        (workspace / "Project/Untracked.hs").write_text("module Project.Untracked where\n")
+        (workspace / "Project/Work.hs").unlink()
+        self.assertEqual(resource.selected_source_paths(source, str(self.git)), tuple(sorted(selected)))
         output = self.root / "resource"
         resource.provision(source, output, str(self.git))
         for path, expected in selected.items():
@@ -114,21 +118,24 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         self.assertEqual(
             {path.relative_to(output / "source").as_posix()
              for path in (output / "source").rglob("*") if path.is_file()},
-            set(resource.PROJECTED_SOURCES),
+            set(selected),
         )
 
-    def test_provision_refuses_missing_selected_source_before_output(self):
+    def test_provision_refuses_a_symbolic_link_source_before_output(self):
         source, workspace = self.source()
-        self.run_git(workspace, "rm", resource.PROJECTED_SOURCES[0])
+        projected = "Examples/ModelCallWorkflow.hs"
+        self.run_git(workspace, "rm", projected)
+        (workspace / projected).symlink_to("../Project/Work.hs")
+        self.run_git(workspace, "add", projected)
         self.run_git(workspace, "-c", "user.name=Resource test", "-c", "user.email=resource@example.invalid",
-                     "commit", "--quiet", "-m", "Remove projected source")
+                     "commit", "--quiet", "-m", "Replace projected source with symlink")
         revision = self.run_git(workspace, "rev-parse", "HEAD")
         qualification.write_json(source / "build/native-workspace-gitlink.json", self.record | {"revision": revision})
         self.run_git(source, "add", "build/native-workspace-gitlink.json")
         self.run_git(source, "update-index", "--cacheinfo", f'160000,{revision},.exomonad/workspace')
         self.run_git(source, "-c", "user.name=Resource test", "-c", "user.email=resource@example.invalid",
-                     "commit", "--quiet", "-m", "Select missing source")
-        with self.assertRaises(subprocess.CalledProcessError):
+                     "commit", "--quiet", "-m", "Select symlink source")
+        with self.assertRaisesRegex(ValueError, "not an ordinary committed file"):
             resource.provision(source, self.root / "resource", str(self.git))
         self.assertFalse((self.root / "resource").exists())
 

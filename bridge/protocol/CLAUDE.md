@@ -27,3 +27,10 @@ not identify the declaration producer; real GHC reflection validates emission.
 The legacy Rust `Forks` spelling remains decodable/re-encodable for retained
 contracts, but has no nominal Haskell identity, witness, default membership or
 installed interpreter. Authored launch uses AgentLaunch.
+
+ModelCall, ForkAgent and SpawnAgent have one nominal entry per applied model
+family. Catalogue identity includes the defining nominal arguments; rendered
+row text is a compiler input, never an authority key. Core's indexed
+`FamilyWitness` is nominal and every family operation carries it through the
+erased STG boundary. The shared Rust decoder supplies explicit family metadata
+to the runtime owner, which checks concrete model grants.

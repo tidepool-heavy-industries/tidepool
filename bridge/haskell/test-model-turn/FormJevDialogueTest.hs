@@ -21,7 +21,7 @@ import Tidepool.Effects.Core
   (AskUser(..), Jev(..), JevCallError(..), Console(..), FormLease(..), FormAttemptId(..), FormAttempt(..), FormTransition(..))
 import qualified Jev.Operators as J
 
-import qualified Examples.JevFormWorkflow as Workflow
+import qualified Fixture.JevFormWorkflow as Workflow
 
 data Event = Opened | Awaited | Committed | Closed | Inferred | Displayed Value deriving (Eq,Show)
 data Script = Script { answers :: [FormAttempt], events :: [Event], nextMount :: Int, leases :: [FormLease], currentAttempt :: Maybe FormAttemptId }

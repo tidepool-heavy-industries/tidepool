@@ -4,6 +4,7 @@
 #[must_use]
 pub fn worktree_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Worktree",
         description: "Managed git worktrees: create an isolated worktree from a clean source (or, explicitly, from a dirty-source snapshot), look a retained one back up by durable id, and list what exists. Retain-first — there is no release or delete verb in v1, deliberately. Git WORKFLOW (rebase, merge, cherry-pick, conflict resolution) is absent by design: that work belongs to coding agents with their native tools, and Tidepool observes what the repository became through `Tidepool.Event`.",
         prompt_card: None,

@@ -663,8 +663,20 @@ pub struct ActorHostConfig {
     pub jev: Option<exomonad_actor::JevBackendHandle>,
 }
 
-fn operator_capabilities() -> exomonad_actor::ActorCapabilities {
-    exomonad_actor::ActorCapabilities::default()
+fn admitted_capabilities(
+    workspace: Option<&crate::exomonad::workspace::FrozenWorkspace>,
+) -> Result<exomonad_actor::ActorCapabilities, String> {
+    workspace
+        .and_then(|workspace| workspace.model_catalog.as_ref())
+        .map(|catalog| {
+            catalog.root_capabilities(
+                exomonad_actor::ActorCapabilities::default()
+                    .effect_keys()
+                    .to_vec(),
+            )
+        })
+        .transpose()
+        .map(|capabilities| capabilities.unwrap_or_default())
 }
 
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
@@ -880,55 +892,6 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
             exomonad_actor::failed_jev_client_setup(error.to_string())
         }
     }
-}
-
-/// Resolve an authored model only within the run's fixed backend.
-pub(crate) fn resolve_model(
-    config: &ActorHostConfig,
-    model: &exomonad_actor::Model,
-) -> std::result::Result<String, String> {
-    if let Some(catalog) = config
-        .workspace_inputs
-        .as_ref()
-        .and_then(|workspace| workspace.model_catalog.as_ref())
-    {
-        let primary = &catalog.models[&catalog.primary].model;
-        if primary.backend() == exomonad_actor::Backend::GeminiInteractions && model != primary {
-            return Err(
-                "the Argon conversational model is fixed; select helpers through Tidepool.Model"
-                    .into(),
-            );
-        }
-        if !catalog
-            .models
-            .values()
-            .any(|selected| &selected.model == model)
-        {
-            return Err("model is not admitted by the run profile".into());
-        }
-    }
-    if model.backend() != config.model.backend() {
-        return Err("model backend differs from the admitted run backend".into());
-    }
-    if model.value().trim().is_empty() {
-        return Err("model must be nonempty".into());
-    }
-    if model.backend() == exomonad_actor::Backend::GeminiInteractions
-        && model.value() != "gemini-4-argon"
-    {
-        return Err("Gemini Interactions supports only gemini-4-argon".into());
-    }
-    Ok(model.value().to_owned())
-}
-
-pub(crate) fn resolve_reasoning(
-    config: &ActorHostConfig,
-    reasoning: &exomonad_actor::Reasoning,
-) -> Result<harness::model::Effort, String> {
-    if reasoning.backend() != config.model.backend() {
-        return Err("reasoning backend differs from the admitted run backend".into());
-    }
-    Ok(reasoning_effort(reasoning))
 }
 
 fn reasoning_effort(reasoning: &exomonad_actor::Reasoning) -> harness::model::Effort {
@@ -2334,7 +2297,9 @@ async fn run_owned(
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
-    let operator_role = operator_capabilities();
+    let operator_role = admitted_capabilities(config.workspace_inputs.as_ref())
+        .map_err(runtime_error)?
+        .with_conversation_permission(None);
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -3011,8 +2976,7 @@ pub(crate) fn validate_workspace_program(
     )
 }
 
-/// Typecheck the exact selected spec installation for each static launchable
-/// public child profile. GHC expands aliases and checks the selected entry's actual
+/// Typecheck the selected spec with the catalog-issued root effect list. GHC expands aliases and checks the selected entry's actual
 /// type, so this also covers requirements that are not spelled in its
 /// signature. This is an authored-row check; runtime handler availability is
 /// resolved later when an actor's workbench is installed.
@@ -3047,7 +3011,7 @@ pub(crate) fn spec_effect_preflight(
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
     {
-        let capabilities = exomonad_actor::ActorCapabilities::default();
+        let capabilities = admitted_capabilities(Some(workspace)).map_err(runtime_error)?;
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, capabilities.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
@@ -3649,6 +3613,20 @@ fn compile_root(
         tracing::info_span!(target: "tidepool::actor_host::startup", "prepare_startup_entry")
             .in_scope(|| machine.prepare_startup_entry(compiled.code()))?;
     machine.seal_recovery_initialization_scope(lexical_scope)?;
+    let capabilities =
+        admitted_capabilities(config.workspace_inputs.as_ref()).map_err(runtime_error)?;
+    let root_model = capabilities
+        .conversation_permission()
+        .map(|permission| permission.model().model().clone())
+        .unwrap_or_else(|| config.model.clone());
+    if capabilities
+        .conversation_permission()
+        .is_some_and(|permission| !permission.permits(permission.model(), config.reasoning))
+    {
+        return Err(runtime_error(
+            "root reasoning effort differs from its admitted conversation permission",
+        ));
+    }
     let mut descriptor = ActorDescriptor::new(
         "exomonad-root",
         ActorPlacement {
@@ -3659,7 +3637,9 @@ fn compile_root(
     )
     .with_actor_path(root_declaration_recovery::root_path())
     .with_persistence_policy(exomonad_actor::ActorPersistencePolicy::Durable)
-    .with_capabilities(exomonad_actor::ActorCapabilities::default());
+    .with_model(Some(root_model))
+    .with_reasoning(Some(config.reasoning))
+    .with_capabilities(capabilities);
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
             exomonad_actor::ActorSourceLayers::layer_include_for(layers.as_ref(), "run")
@@ -3667,6 +3647,9 @@ fn compile_root(
         );
     }
     descriptor = prompt_composition::install(descriptor, config, source.cloned());
+    descriptor
+        .validate_conversation_selection()
+        .map_err(runtime_error)?;
     let source = host_workbench_source(config, preamble, include, toolset_support)?;
     Ok(CompiledRoot {
         source,
@@ -3754,7 +3737,8 @@ pub(crate) async fn prepare_workspace_toolsets(
     Box<dyn std::error::Error>,
 > {
     let authored = inputs.config()?;
-    let requested_effects = exomonad_actor::ActorCapabilities::default()
+    let requested_effects = admitted_capabilities(Some(&inputs))
+        .map_err(runtime_error)?
         .effect_keys()
         .to_vec();
     let settings = authored
@@ -4205,7 +4189,10 @@ fn orient_launch_instructions(
         let effects = tool
             .effect_keys()
             .iter()
-            .map(|effect| effect.haskell_name())
+            .map(|effect| match effect {
+                exomonad_tool::ToolEffectKey::Actor(actor) => actor.haskell_row_entry(),
+                effect => effect.haskell_name(),
+            })
             .collect::<Vec<_>>();
         instructions.push_str(&format!(
             "\nNotebook {} effects: {}.",

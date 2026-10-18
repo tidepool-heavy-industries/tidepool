@@ -289,6 +289,80 @@ impl ExomonadConfig {
     }
 }
 
+/// Author the exact catalog used by scripted fixtures before source capture.
+/// Provider attachment remains scripted; these credentials are never opened.
+#[cfg(test)]
+pub(crate) fn author_scripted_model_catalog(project: &mut ExomonadConfig) {
+    use std::collections::BTreeMap;
+
+    use model_catalog::{InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig};
+    if project.inference.is_some() {
+        return;
+    }
+    let backend = project.defaults.model.backend();
+    let reasoning = project.defaults.reasoning;
+    let primary = project.defaults.model.clone();
+    let mut models = BTreeMap::new();
+    let mut add = |key: &str, model: &str| {
+        models.insert(
+            key.into(),
+            ModelConfig {
+                provider: "scripted".into(),
+                model: model.into(),
+                effort: reasoning.value().into(),
+                allowed_efforts: match backend {
+                    exomonad_actor::Backend::OpenAIPlan => {
+                        vec!["low".into(), "medium".into(), "high".into()]
+                    }
+                    exomonad_actor::Backend::DeepSeek => {
+                        vec!["low".into(), "high".into(), "max".into()]
+                    }
+                    exomonad_actor::Backend::GeminiInteractions => {
+                        vec!["low".into(), "medium".into(), "high".into()]
+                    }
+                },
+            },
+        );
+    };
+    add("primary", primary.value());
+    for (key, model) in &project.models {
+        assert_eq!(
+            model.backend(),
+            backend,
+            "fixture alias retains the provider family"
+        );
+        add(key, model.value());
+    }
+    if backend == exomonad_actor::Backend::OpenAIPlan {
+        add("sol", "gpt-6-sol");
+        add("luna", "gpt-6-luna");
+        add("child-preparation-model", "child-preparation-model");
+    }
+    let allowed = models.keys().cloned().collect();
+    project.inference = Some(InferenceConfig {
+        profile: "scripted".into(),
+        providers: BTreeMap::from([(
+            "scripted".into(),
+            ProviderConfig {
+                backend,
+                credential_file: Some("/tmp/tidepool-scripted-unread-credential".into()),
+                credential_env: None,
+                endpoint: None,
+                inference_limits: Default::default(),
+            },
+        )]),
+        models,
+        profiles: BTreeMap::from([(
+            "scripted".into(),
+            ProfileConfig {
+                default: "primary".into(),
+                allowed,
+            },
+        )]),
+    });
+    project.apply_inference().unwrap();
+}
+
 /// Valid fixture configurations use the production schema and its defaults.
 #[cfg(test)]
 pub(crate) fn write_fixture_project_config(
@@ -312,6 +386,7 @@ pub(crate) fn write_fixture_project_config(
         prompts: workspace::PromptConfig::default(),
     };
     configure(&mut config);
+    author_scripted_model_catalog(&mut config);
     write_fixture_config(authored, &config);
 }
 
@@ -3242,6 +3317,76 @@ mod tests {
     }
 
     #[test]
+    fn fixture_constructor_authors_catalog_after_custom_defaults() {
+        for (backend, model, reasoning) in [
+            (
+                Backend::OpenAIPlan,
+                "fixture-openai-model",
+                Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAIHigh),
+            ),
+            (
+                Backend::GeminiInteractions,
+                "gemini-4-argon",
+                Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortMedium),
+            ),
+            (
+                Backend::DeepSeek,
+                "fixture-deepseek-model",
+                Reasoning::DeepSeekReasoning(exomonad_actor::DeepSeekReasoning::DeepSeekMax),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let authored = root.path().join(".exomonad");
+            let expected = Model::for_backend(backend, model);
+            write_fixture_project_config(&authored, "constructor-default", |project| {
+                project.defaults.model = expected.clone();
+                project.defaults.reasoning = reasoning;
+                project.models.insert("custom".into(), expected.clone());
+            });
+            let parsed: ExomonadConfig =
+                toml::from_str(&std::fs::read_to_string(authored.join("config.toml")).unwrap())
+                    .unwrap();
+            assert_eq!(parsed.defaults.model, expected);
+            assert_eq!(parsed.defaults.reasoning, reasoning);
+            let catalog = parsed.resolved_catalog().unwrap().unwrap();
+            let primary = &catalog.models[&catalog.primary];
+            assert_eq!(primary.model, expected);
+            assert_eq!(primary.reasoning, reasoning);
+            assert!(primary.allowed_efforts.contains(&reasoning));
+            assert_eq!(catalog.models["custom"].model, expected);
+            assert_eq!(catalog.providers[&primary.provider].backend, backend);
+        }
+    }
+
+    #[test]
+    fn fixture_constructor_preserves_explicit_inference_profile() {
+        let mut explicit: ExomonadConfig = toml::from_str(include_str!(
+            "../../../exomonad/examples/persona/.exomonad/config.argon.toml"
+        ))
+        .unwrap();
+        explicit.apply_inference().unwrap();
+        let expected = explicit.inference.unwrap();
+        let expected_json = serde_json::to_value(&expected).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join(".exomonad");
+        write_fixture_project_config(&authored, "constructor-default", |project| {
+            project.defaults = explicit.defaults;
+            project.inference = Some(expected);
+        });
+        let parsed: ExomonadConfig =
+            toml::from_str(&std::fs::read_to_string(authored.join("config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed.inference.as_ref().unwrap()).unwrap(),
+            expected_json
+        );
+        let catalog = parsed.resolved_catalog().unwrap().unwrap();
+        let primary = &catalog.models[&catalog.primary];
+        assert_eq!(primary.model, parsed.defaults.model);
+        assert_eq!(primary.reasoning, parsed.defaults.reasoning);
+    }
+
+    #[test]
     fn config_effort_defaults_low_and_preserves_explicit_values() {
         let absent: ExomonadConfig = toml::from_str("[defaults]\nmodel = \"test\"\n").unwrap();
         assert_eq!(
@@ -4538,9 +4683,9 @@ mod tests {
                 "excluded": {"backend": "deepseek", "credential_env": "EXCLUDED_KEY"}
             },
             "models": {
-                "primary": {"provider": "present", "model": "deepseek-flash", "constructor": "Primary", "effort": "high"},
-                "other": {"provider": "absent", "model": "deepseek-pro", "constructor": "Other", "effort": "high"},
-                "excluded": {"provider": "excluded", "model": "deepseek-flash", "constructor": "Excluded", "effort": "high"}
+                "primary": {"provider": "present", "model": "deepseek-flash", "effort": "high"},
+                "other": {"provider": "absent", "model": "deepseek-pro", "effort": "high"},
+                "excluded": {"provider": "excluded", "model": "deepseek-flash", "effort": "high"}
             },
             "profiles": {"work": {"default": "primary", "allowed": ["primary", "other"]}}
         })).unwrap();

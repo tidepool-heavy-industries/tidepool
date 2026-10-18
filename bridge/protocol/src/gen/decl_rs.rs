@@ -31,6 +31,10 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
                 .filter_map(|reference| reference.core_import())
         })
         .collect();
+    contents.push_str(&format!(
+        "\npub(crate) const MODEL_FAMILY_VOCABULARY: &str = {};\n",
+        rust_string_literal(&crate::actor_profiles::family_vocabulary())
+    ));
     contents.push_str("\npub(crate) const CORE_IMPORTS: &[&str] = &[\n");
     for import in imports {
         contents.push_str(&format!("    {},\n", rust_string_literal(&import)));
@@ -189,7 +193,7 @@ fn body(e: &Effect) -> String {
     ));
     out.push_str("#[must_use]\n");
     out.push_str(&format!("pub fn {}() -> crate::EffectDecl {{\n", e.decl_fn));
-    out.push_str("    crate::EffectDecl {\n");
+    out.push_str("    crate::EffectDecl {\n        model_permission: None,\n");
     out.push_str(&format!(
         "        type_name: {},\n",
         rust_string_literal(e.name)

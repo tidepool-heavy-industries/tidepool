@@ -21,7 +21,7 @@ import qualified Jev.Operators as J
 import Jev.Tidepool ()
 
 import Tidepool.Actors.Exomonad
-import Tidepool.Agent.Context
+import Tidepool.Agent.Context hiding (Model)
 import qualified Tidepool.Agent.Context as C
 import Tidepool.Agent.Contract (AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects)
 import Tidepool.Effects.Core (ContextReadWrite, Jev)
@@ -89,19 +89,19 @@ data ContextDelegation
   deriving (Show)
 
 delegateCuratedContext
-  :: ( Member AgentLaunch effects, Member Replies effects
+  :: ( KnownFamily modelFamily, Member (ForkAgent modelFamily) effects, Member AgentLaunch effects, Member Replies effects
      , KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects
      , HasInstalledAgentApi tools childEffects
      )
-  => AgentSpec tools childEffects
+  => Model modelFamily -> AgentSpec tools childEffects
   -> Eff effects (Either CheckpointRefusal ([ContextDelegation], Either CheckpointRefusal ()))
-delegateCuratedContext actualSpec = do
-  captured <- checkpoint "curated context"
+delegateCuratedContext model actualSpec = do
+  captured <- checkpoint model "curated context"
   case captured of
     Left issue -> pure (Left issue)
     Right context -> do
       idle <- mapM (\name -> spawnSubagent (ForkCtx context) SameDir
-        ((defaultSpawnOptions actualSpec) { spawnLabel = Just name }))
+        ((defaultSpawnOptions model actualSpec) { spawnLabel = Just name }))
         ["review-api", "review-tests"]
       admitted <- mapM activate (zip idle
         ["Review the API against: " <> sharedFinding, "Review the tests against: " <> sharedFinding])

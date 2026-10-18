@@ -9,6 +9,7 @@
 fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_protocol::Effect) {
     // Exhaustive destructuring: adding a field to EffectDecl breaks this line.
     let tidepool_mcp::EffectDecl {
+        model_permission,
         type_name,
         description,
         prompt_card,
@@ -20,6 +21,10 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
         default_row_args,
     } = decl;
 
+    assert_eq!(
+        *model_permission, None,
+        "schema declarations acquire authority only from a selected nominal key"
+    );
     assert_eq!(*type_name, eff.name, "type_name");
     assert_eq!(*description, eff.description_text(), "description");
     assert_eq!(

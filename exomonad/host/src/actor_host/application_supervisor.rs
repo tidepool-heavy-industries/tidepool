@@ -620,14 +620,19 @@ pub(super) async fn run_interactive_applications(
                             }
                             let is_root = actor == root_identity;
 
-                            let model = match installation
-                                .model
-                                .as_ref()
-                                .map(|model| resolve_model(&launch_context.config, model))
-                                .transpose()
-                            {
-                                Ok(Some(model)) => model,
-                                Ok(None) => launch_context.config.model.value().to_owned(),
+                            let inference = (|| {
+                                let permission = installation.capabilities.conversation_permission()
+                                    .ok_or("model actor has no admitted conversation permission")?;
+                                let reasoning = installation.reasoning
+                                    .ok_or("model actor has no admitted reasoning effort")?;
+                                if !permission.permits(permission.model(), reasoning) {
+                                    return Err("actor effort is outside its conversation permission".to_owned());
+                                }
+                                let auth = service.runtime.conversation_auth(permission)?;
+                                Ok((permission.model().model().value().to_owned(), super::reasoning_effort(&reasoning), auth))
+                            })();
+                            let (model, effort, actor_auth) = match inference {
+                                Ok(selection) => selection,
                                 Err(error) => {
                                     if is_root { break Some(error); }
                                     if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
@@ -635,17 +640,6 @@ pub(super) async fn run_interactive_applications(
                                     }
                                     continue;
                                 },
-                            };
-                            let effort = match super::resolve_reasoning(&launch_context.config,
-                                &installation.reasoning.unwrap_or(launch_context.config.reasoning)) {
-                                Ok(effort) => effort,
-                                Err(error) => {
-                                    if is_root { break Some(error); }
-                                    if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
-                                        break Some(error.to_string());
-                                    }
-                                    continue;
-                                }
                             };
                             let mut instructions = developer_instructions_selected(
                                 &installation.capabilities,
@@ -700,7 +694,7 @@ pub(super) async fn run_interactive_applications(
                                     }
                                 };
                                 let spawn_admission = installation.spawn_admission.clone();
-                                let projection_target = if !is_root && selected_parent.is_none() { Some(match service.projection_target(model.clone()) {
+                                let projection_target = if !is_root && selected_parent.is_none() { Some(match service.projection_target(model.clone(), actor_auth.clone()) {
                                     Ok(target) => target,
                                     Err(error) => {
                                         if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
@@ -776,14 +770,14 @@ pub(super) async fn run_interactive_applications(
                                             embedded_service::drive_conversation(
                                                 embedded.driver, runtime, &settings, model, effort,
                                                 instructions, embedded.cancellation_rx,
-                                                embedded_lifecycle, actor,
+                                                embedded_lifecycle, actor, actor_auth,
                                             ).await
                                         };
                                         #[cfg(not(test))]
                                         let result = embedded_service::drive_conversation(
                                             embedded.driver, runtime, &settings, model, effort,
                                             instructions, embedded.cancellation_rx,
-                                            embedded_lifecycle, actor,
+                                            embedded_lifecycle, actor, actor_auth,
                                         ).await;
                                         result
                                     }.await;

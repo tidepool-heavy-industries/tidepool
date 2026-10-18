@@ -21,10 +21,23 @@ pub enum ModelBoundaryError {
 #[allow(clippy::enum_variant_names)]
 #[derive(FromHaskell)]
 pub enum ModelReq {
-    ModelStartWith(crate::effect_glue::JsonArg),
-    ModelResumeWith(String, String, crate::effect_glue::JsonArg),
-    ModelAnnotateWith(String, String, crate::effect_glue::JsonArg),
-    ModelCloseWith(String),
+    ModelStartWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        crate::effect_glue::JsonArg,
+    ),
+    ModelResumeWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        String,
+        String,
+        crate::effect_glue::JsonArg,
+    ),
+    ModelAnnotateWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        String,
+        String,
+        crate::effect_glue::JsonArg,
+    ),
+    ModelCloseWith(tidepool_bridge_effects::ModelFamilyWitness, String),
 }
 
 impl tidepool_mcp::DescribeEffect for ModelHandler {
@@ -42,14 +55,16 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
-            ModelReq::ModelStartWith(request) => self.model_start(cx, request),
-            ModelReq::ModelResumeWith(invocation, call_id, answer) => {
-                self.model_resume(cx, invocation, call_id, answer)
+            ModelReq::ModelStartWith(family, request) => self.model_start(cx, family, request),
+            ModelReq::ModelResumeWith(family, invocation, call_id, answer) => {
+                self.model_resume(cx, family, invocation, call_id, answer)
             }
-            ModelReq::ModelAnnotateWith(invocation, operation, annotation) => {
-                self.model_annotate(cx, invocation, operation, annotation)
+            ModelReq::ModelAnnotateWith(family, invocation, operation, annotation) => {
+                self.model_annotate(cx, family, invocation, operation, annotation)
             }
-            ModelReq::ModelCloseWith(invocation) => self.model_close(cx, invocation),
+            ModelReq::ModelCloseWith(family, invocation) => {
+                self.model_close(cx, family, invocation)
+            }
         }
     }
 

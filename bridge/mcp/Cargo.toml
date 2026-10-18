@@ -16,6 +16,7 @@ path = "src/bin/tidepool-effects-gen.rs"
 test = false
 
 [dependencies]
+exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true
@@ -25,7 +26,6 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 blake3.workspace = true
 
 [dev-dependencies]
-exomonad-tool.workspace = true
 tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-effect.workspace = true

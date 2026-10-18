@@ -10,7 +10,7 @@ installedOriginalEpoch :: Member RecipeCheck effects => Eff effects ()
 installedOriginalEpoch = do
   owner <- root
   void $ turn owner
-    "import Data.Text (Text)\nimport Tidepool.Actors.Exomonad\nimport Project.Work (workspaceAgentSpec)\nRight worker <- spawnSubagent (FreshCtx \"Answer the typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (OpenAIModel Gpt6Luna) })"
+    "import Data.Text (Text)\nimport Tidepool.Actors.Exomonad\nimport Project.Work (workspaceAgentSpec)\nRight worker <- spawnSubagent (FreshCtx \"Answer the typed request.\") SameDir (defaultSpawnOptions currentModel workspaceAgentSpec)"
   void $ turn owner
     "Right pending <- request @Text worker (\"epoch request\" :: Text) defaultRequestOptions"
   worker <- activation

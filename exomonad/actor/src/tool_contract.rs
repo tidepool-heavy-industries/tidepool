@@ -379,7 +379,10 @@ fn admit_installation_for(
                                 .nominal_identity()
                                 .expect("admission requires a nominal effect owner");
                             imports.extend_text(&format!("qualified {}", identity.module));
-                            format!("{}.{}", identity.module, identity.name)
+                            for argument in identity.arguments {
+                                imports.extend_text(&format!("qualified {}", argument.module));
+                            }
+                            identity.render()
                         })
                         .collect::<Vec<_>>();
                     tidepool_runtime::session::HaskellTypeSource::new(
@@ -574,6 +577,30 @@ mod tests {
     ) -> Result<(), ToolContractError> {
         validate_installation(&[tool], &[], &BTreeMap::new(), granted, support)
     }
+
+    #[test]
+    fn endpoint_compilation_preserves_selected_family_applications_and_order() {
+        let granted = [
+            ActorEffectKey::ModelCallDeepSeek,
+            ActorEffectKey::Commands,
+            ActorEffectKey::ForkAgentOpenAI,
+            ActorEffectKey::SpawnAgentArgon,
+        ];
+        let keys: Vec<_> = granted.into_iter().map(ToolEffectKey::Actor).collect();
+        let installation = SpecInstallation {
+            tools: vec![native(ToolScheduling::Async, keys.clone())],
+            slots: vec![],
+            slot_effect_keys: BTreeMap::new(),
+        };
+        let admitted = admit_installation(
+            installation,
+            &granted,
+            &keys,
+            &tidepool_runtime::session::HaskellTypeSource::from("InstallerRow"),
+        )
+        .unwrap();
+        assert_eq!(admitted.endpoints[0].execution_effects.expression(), "'[Tidepool.Effects.Core.ModelCall Tidepool.Effects.Core.DeepSeek, Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.ForkAgent Tidepool.Effects.Core.OpenAI, Tidepool.Effects.Core.SpawnAgent Tidepool.Effects.Core.Argon]");
+    }
     #[test]
     fn reply_endpoint_is_reserved_and_overlay_admission_is_narrow() {
         let keys = ToolEffectKey::ALL
@@ -713,29 +740,25 @@ mod tests {
                 ..valid.clone()
             },
         ] {
-            assert!(
-                admit_installation(
-                    make(invalid, vec![], BTreeMap::new()),
-                    &[jev],
-                    &support,
-                    &dispatcher
-                )
-                .is_err()
-            );
-        }
-        assert!(
-            admit_installation(
-                make(
-                    valid,
-                    vec![],
-                    BTreeMap::from([("afterTool".into(), vec![jev.into()])])
-                ),
+            assert!(admit_installation(
+                make(invalid, vec![], BTreeMap::new()),
                 &[jev],
                 &support,
                 &dispatcher
             )
-            .is_err()
-        );
+            .is_err());
+        }
+        assert!(admit_installation(
+            make(
+                valid,
+                vec![],
+                BTreeMap::from([("afterTool".into(), vec![jev.into()])])
+            ),
+            &[jev],
+            &support,
+            &dispatcher
+        )
+        .is_err());
     }
 
     #[test]
@@ -746,16 +769,14 @@ mod tests {
         )
         .is_err());
         let installation=decode_installation(serde_json::json!({"tools":[],"slots":["afterTool"],"slotEffectKeys":{"afterTool":["Jev"]}})).unwrap();
-        assert!(
-            validate_installation(
-                &installation.tools,
-                &installation.slots,
-                &installation.slot_effect_keys,
-                &[ActorEffectKey::Jev],
-                &[ActorEffectKey::Jev.into()]
-            )
-            .is_ok()
-        );
+        assert!(validate_installation(
+            &installation.tools,
+            &installation.slots,
+            &installation.slot_effect_keys,
+            &[ActorEffectKey::Jev],
+            &[ActorEffectKey::Jev.into()]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -800,14 +821,12 @@ mod tests {
                 effect: ActorEffectKey::Jev
             })
         );
-        assert!(
-            validate(
-                native(ToolScheduling::BeforeNextInference, vec![context, jev]),
-                &[ActorEffectKey::Jev],
-                &[context, jev]
-            )
-            .is_ok()
-        );
+        assert!(validate(
+            native(ToolScheduling::BeforeNextInference, vec![context, jev]),
+            &[ActorEffectKey::Jev],
+            &[context, jev]
+        )
+        .is_ok());
     }
     #[test]
     fn compiled_metadata_must_match_the_same_installer_row() {
@@ -880,36 +899,30 @@ mod tests {
                 .chain([actor.into()])
                 .collect::<Vec<_>>();
             assert_eq!(selected.endpoints[0].plan().effect_keys(), expected);
-            assert!(
-                selected.endpoints[0]
-                    .execution_effects()
-                    .expression()
-                    .contains("Tidepool.Effects.Core.Reload")
-            );
+            assert!(selected.endpoints[0]
+                .execution_effects()
+                .expression()
+                .contains("Tidepool.Effects.Core.Reload"));
         }
         let missing_reload = support
             .iter()
             .copied()
             .filter(|effect| *effect != ToolEffectKey::Reload)
             .collect::<Vec<_>>();
-        assert!(
-            admit_installation(
-                installation(vec![actor.into()]),
-                &[actor],
-                &missing_reload,
-                &"UnusedDispatcher".into()
-            )
-            .is_err()
-        );
-        assert!(
-            admit_installation(
-                installation(vec![ActorEffectKey::Web.into()]),
-                &[actor],
-                &support,
-                &"UnusedDispatcher".into()
-            )
-            .is_err()
-        );
+        assert!(admit_installation(
+            installation(vec![actor.into()]),
+            &[actor],
+            &missing_reload,
+            &"UnusedDispatcher".into()
+        )
+        .is_err());
+        assert!(admit_installation(
+            installation(vec![ActorEffectKey::Web.into()]),
+            &[actor],
+            &support,
+            &"UnusedDispatcher".into()
+        )
+        .is_err());
     }
 
     #[test]

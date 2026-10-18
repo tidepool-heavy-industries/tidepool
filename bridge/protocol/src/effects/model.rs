@@ -22,8 +22,8 @@ pub fn model() -> Effect {
             "A decoded result establishes its schema, not the truth of its claims: retain evidence and validate task-specific invariants before acting.",
         ],
         prompt_card: None,
-        type_params: &[],
-        default_row_args: &[],
+        type_params: crate::effects::agent_launch::MODEL_FAMILY_PARAMS,
+        default_row_args: &["OpenAI"],
         extra_imports: &["import Tidepool.Model"],
         type_defs: vec![],
         external_types: &[],
@@ -68,7 +68,9 @@ fn verb(ctor: &'static str, method: &'static str, args: Vec<Arg>, ret: HsType) -
     Verb {
         ctor,
         method,
-        args,
+        args: std::iter::once(crate::effects::agent_launch::family_witness_arg())
+            .chain(args)
+            .collect(),
         ret,
         errors: Some("ModelBoundaryError"),
         handling: HandlingClass::OuterDispatch(OuterEffect::Model),

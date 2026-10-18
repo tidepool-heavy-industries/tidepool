@@ -4,6 +4,7 @@
 #[must_use]
 pub fn journal_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Journal",
         description: "Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb. `trace stage key payload` appends ONE observability entry to the run's sibling TRACE stream instead, timestamped at the handler for decision narration and telemetry; timestamps can be correlated with journal entries.",
         prompt_card: None,

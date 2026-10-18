@@ -4,6 +4,7 @@
 #[must_use]
 pub fn exec_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Exec",
         description: "Run shell commands and capture output.",
         prompt_card: None,

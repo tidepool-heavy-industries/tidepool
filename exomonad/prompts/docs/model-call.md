@@ -11,20 +11,20 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 `Tidepool.Model.invokeModel`, `textTurn`, `withModel` and `withLimits`. Its
 `noToolsTurn` uses `defaultSpec { specTools = NoTools }` and narrows
 `defaultLimits` to `requestLimit = Just 1` and `toolLimit = Just 0`.
-The recipe takes a choice from the frozen `Exomonad.Models` module and returns
-`ModelResult Text`. Each generated model constructor takes its provider's typed
-options, keeping model and reasoning effort together. `Models.allowedModels`
-lists the admitted choices with their configured defaults; `Models.primaryModel`
-is the launch profile's conversational default. Selecting a choice for a bounded
-call does not change the conversational model. A turn without `withModel`
-inherits the parent conversation's effective selection instead.
+`invokeWithModel model input` returns `ModelResult Text` using an explicit
+`Model modelFamily`. The library exports static `OpenAI`, `Argon` and `DeepSeek`
+family types. The effect row must contain `ModelCall modelFamily`; Rust checks
+the exact catalog entry and effort against the actor's immutable permissions.
+A bounded helper can use a different provider from its parent conversation.
+The notebook's `currentModel` has type `Model OpenAI`, `Model Argon` or
+`Model DeepSeek` for its selected conversation. Use these published family names
+in signatures; reusable helpers quantify `modelFamily` and state
+`KnownFamily modelFamily` where needed.
 
-The registered notebook cell imports `Examples.ModelCallWorkflow` as
-`ModelExample` and `Exomonad.Models` as `Models`, then uses
-`ModelExample.synchronousWithModel` with `Models.primaryModel` and explicit
-input. Ordinary asynchronous programs use `ModelExample.invokeWithModel` with
-the same choice and input. The synchronous helper lifts that ordinary program
-through `raiseSync` while retaining the caller's ambient effect row.
+In an ordinary asynchronous program, call
+`ModelExample.invokeWithModel model input`. In a synchronous notebook, use
+`synchronousWithModel model input`, which lifts the ordinary program through
+`raiseSync` while retaining the caller's ambient effect row.
 The shared source module lists its imports and extensions. Load it from the
 selected source root before running the registered cells. Each invocation is
 fresh model work; selecting another admitted choice and invoking again makes
@@ -40,8 +40,10 @@ receipt can accompany budget exhaustion, provider failure or a malformed final
 answer. Preserve the typed failure for control flow, including
 `ModelBudgetExceeded`, `ModelBoundary` and `ModelCleanupFailed`.
 
-The cell's host limits still bound this narrower turn and aggregate nested
-invocations. Reported token usage is observed after a response, and missing
+The owning notebook cell or native actor request's host limits bound this
+narrower turn and aggregate nested invocations. A persistent Record actor gets
+a fresh allowance for its next native request; existing model continuations
+retain their original allowance. Reported token usage is observed after a response, and missing
 usage is counted separately; a token breaker is not a precharged cost ceiling.
 NoTools exposes zero callbacks. A refusal or exhausted budget is an outcome to
 inspect, not permission to retry repeatedly or widen the actor's authority.

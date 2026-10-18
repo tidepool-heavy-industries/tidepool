@@ -30,7 +30,7 @@ module Tidepool.Actor.Record
   , on, progress, progressSited, settlement, settlementSited, lifecycle, command, attach
   , get, gets, put, modify'
   , start, startSited, client, send, trySend, call, finish, finishSited, replace, replaceSited
-  , definition, withWorkspace
+  , definition, withWorkspace, withModelPermissions
   , self, sender, ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardResultSited, forwardingExit
   -- Named by exported signatures ('definition', 'self', 'sender',
@@ -61,6 +61,7 @@ import qualified Tidepool.Effects.Core as Core
 import Tidepool.Effects.Row (knownEffects)
 import qualified Tidepool.Internal.ActorRef as Internal
 import Tidepool.Internal.RequestSite (RequestSite)
+import Tidepool.Model.Selection (ModelPermissions, noModelPermissions)
 
 data State (s :: Type)
 data Call (input :: Type) (reply :: Type)
@@ -327,6 +328,7 @@ data ActorSpec api effects = ActorSpec
   { specLabel :: Text
   , specProfile :: EffectProfile (Message api) effects
   , specRecord :: api (Definition (Handler (ActorState api) effects))
+  , specModelPermissions :: ModelPermissions
   , specWorkspace :: Maybe Core.WorkspaceHandle
   }
 
@@ -335,12 +337,16 @@ definition
   -> EffectProfile (Message api) effects
   -> api (Definition (Handler (ActorState api) effects))
   -> ActorSpec api effects
-definition label profile record = ActorSpec label profile record Nothing
+definition label profile record = ActorSpec label profile record noModelPermissions Nothing
 
 -- | Select an opaque workspace grant for startup. Its actual access is
 -- inherited by the new actor; behavior replacement keeps the existing attachment.
 withWorkspace :: Core.WorkspaceHandle -> ActorSpec api effects -> ActorSpec api effects
 withWorkspace workspace spec = spec { specWorkspace = Just workspace }
+
+-- | Request explicit child model operations; omission grants none.
+withModelPermissions :: ModelPermissions -> ActorSpec api effects -> ActorSpec api effects
+withModelPermissions permissions spec = spec { specModelPermissions = permissions }
 
 type Derive api effects =
   ( Generic (api Shape)
@@ -366,14 +372,14 @@ lower
   :: forall api effects. Derive api effects
   => ActorSpec api effects
   -> (Actor.ActorDefinition (ActorState api) (Message api) (ActorState api), ActorState api)
-lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record, specWorkspace = workspace } =
+lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record, specModelPermissions = permissions, specWorkspace = workspace } =
   let spec = View (from record)
       step :: forall result. ActorState api -> Message api result
            -> Eff effects (result, ActorState api)
       step state message = S.runState state (dispatch message spec)
       hold = maybe id ActorInternal.withLaunchWorkspace workspace
-      actor = hold (Actor.withSources (sources @api @(Schema api) spec id)
-        (Actor.stateful label profile step))
+      actor = hold (Actor.withModelPermissions permissions (Actor.withSources (sources @api @(Schema api) spec id)
+        (Actor.stateful label profile step)))
   in case states @api @(Schema api) spec of
     [initial] -> (actor, initial)
     _ -> error "record derivation violated the single State field invariant"

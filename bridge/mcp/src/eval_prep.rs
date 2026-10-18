@@ -153,6 +153,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     // warning. This is the home every eval + repl session imports (via the
     // stable authored facade's re-export).
     out.push_str("{-# OPTIONS_GHC -Wno-orphans #-}\n");
+    out.push_str("{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE EmptyDataDecls #-}\n");
     out.push_str("module Tidepool.Effects.Core where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
@@ -194,6 +195,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     out.push_str("liftEither :: P.Show e => Either e a -> Eff effs a\nliftEither = either (error . T.pack . P.show) pure\n");
     out.push('\n');
 
+    out.push_str(crate::generated::MODEL_FAMILY_VOCABULARY);
     for eff in &effects {
         eff.type_defs.iter().for_each(|td| {
             out.push_str(td);
@@ -941,6 +943,7 @@ mod tests {
     fn test_build_effect_stack_type() {
         let effects = vec![
             EffectDecl {
+                model_permission: None,
                 type_name: "Console",
                 description: "",
                 constructors: &[],
@@ -952,6 +955,7 @@ mod tests {
                 prompt_card: None,
             },
             EffectDecl {
+                model_permission: None,
                 type_name: "KV",
                 description: "",
                 constructors: &[],
@@ -963,6 +967,7 @@ mod tests {
                 prompt_card: None,
             },
             EffectDecl {
+                model_permission: None,
                 type_name: "Fs",
                 description: "",
                 constructors: &[],

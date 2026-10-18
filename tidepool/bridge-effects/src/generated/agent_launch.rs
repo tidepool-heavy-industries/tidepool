@@ -97,3 +97,23 @@ pub enum Reasoning {
     #[haskell(module = "Tidepool.Effects.Core")]
     ArgonReasoning(ArgonEffort),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
+pub enum ModelFamilyWitness {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    OpenAIWitness,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ArgonWitness,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    DeepSeekWitness,
+}
+
+impl From<ModelFamilyWitness> for exomonad_tool::ModelFamily {
+    fn from(value: ModelFamilyWitness) -> Self {
+        match value {
+            ModelFamilyWitness::OpenAIWitness => Self::OpenAI,
+            ModelFamilyWitness::ArgonWitness => Self::Argon,
+            ModelFamilyWitness::DeepSeekWitness => Self::DeepSeek,
+        }
+    }
+}

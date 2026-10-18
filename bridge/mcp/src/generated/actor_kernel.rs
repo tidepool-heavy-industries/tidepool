@@ -4,6 +4,7 @@
 #[must_use]
 pub fn actor_kernel_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ActorKernel",
         description: "Kernel-private actor control boundary. Trusted Tidepool.Actor wrappers use it for readiness and hidden mailbox settlement; authored code has no operation here.",
         prompt_card: None,

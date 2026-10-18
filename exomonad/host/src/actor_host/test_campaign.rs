@@ -641,6 +641,22 @@ impl TestCampaign {
         store: &harness::store::Store,
         future: F,
     ) -> F::Output {
+        self.drive_operation(store, future, false).await
+    }
+
+    /// Act as the model-free host while an operation admits native children.
+    /// Exact installation events remain available to the scenario's observers.
+    pub async fn drive_native_admission<F: std::future::Future>(&mut self, future: F) -> F::Output {
+        let store = super::display_output::open_run_store(self.session_root.path()).unwrap();
+        self.drive_operation(&store, future, true).await
+    }
+
+    async fn drive_operation<F: std::future::Future>(
+        &mut self,
+        store: &harness::store::Store,
+        future: F,
+        acknowledge_native: bool,
+    ) -> F::Output {
         let run = super::runtime_namespace(self.session_root.path());
         let mut index = 0;
         while index < self.pending.len() {
@@ -655,6 +671,11 @@ impl TestCampaign {
                 };
                 super::display_output::publish(&self.forest, store, &run, None, None, &request);
             } else {
+                if acknowledge_native {
+                    if let LocalResidentDeployment::PolicyInstalled(child) = &self.pending[index] {
+                        self.acknowledge_pending_native_spawn(child);
+                    }
+                }
                 index += 1;
             }
         }
@@ -666,9 +687,29 @@ impl TestCampaign {
                     LocalResidentDeployment::DisplayPublished(request) => {
                         super::display_output::publish(&self.forest, store, &run, None, None, &request);
                     }
-                    event => self.pending.push_back(event),
+                    event => {
+                        if acknowledge_native {
+                            if let LocalResidentDeployment::PolicyInstalled(child) = &event {
+                                self.acknowledge_pending_native_spawn(child);
+                            }
+                        }
+                        self.pending.push_back(event);
+                    }
                 }
             }
+        }
+    }
+
+    fn acknowledge_pending_native_spawn(&self, child: &exomonad_actor::LocalResidentInstallation) {
+        let Some(admission) = &child.spawn_admission else {
+            return;
+        };
+        match admission.outcome() {
+            exomonad_actor::SpawnAdmissionOutcome::Pending => self.acknowledge_native_spawn(child),
+            exomonad_actor::SpawnAdmissionOutcome::Ready(actor) => {
+                assert_eq!(actor, child.actor.identity());
+            }
+            exomonad_actor::SpawnAdmissionOutcome::Failed { .. } => {}
         }
     }
 
@@ -995,6 +1036,7 @@ impl TestCampaign {
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
+        configure_scripted_model_catalog(&mut config);
         let super::model_free::ModelFreeSession {
             session_root,
             host_incarnation,
@@ -1612,8 +1654,8 @@ pub(super) async fn dispatch_status(
     dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
 }
 
-/// Return the package containing the declared authored workspace resource.
-pub(super) fn declared_workspace_package() -> std::path::PathBuf {
+/// Locate the declared test flake lock; shared modules come from the scaffold.
+fn declared_workspace_package() -> std::path::PathBuf {
     let authored = std::env::var_os("TIDEPOOL_RECIPE_WORKSPACE")
         .map(std::path::PathBuf::from)
         .expect("TIDEPOOL_RECIPE_WORKSPACE must name the declared authored workspace resource");
@@ -1621,6 +1663,68 @@ pub(super) fn declared_workspace_package() -> std::path::PathBuf {
         .parent()
         .expect("the declared authored workspace resource has a package parent")
         .to_path_buf()
+}
+
+struct DeclaredWorkspaceLock(std::path::PathBuf);
+
+impl crate::exomonad::FlakeLock for DeclaredWorkspaceLock {
+    fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::copy(&self.0, workspace.join("flake.lock"))?;
+        Ok(())
+    }
+}
+
+/// Construct the shipped workspace through the production scaffold owner.
+/// Local fixture modules may then shadow its recorded shared-source root.
+pub(super) fn scaffold_workspace(workspace: &Path) {
+    crate::exomonad::new(crate::exomonad::NewOptions {
+        path: Some(workspace.to_path_buf()),
+        lock: Box::new(DeclaredWorkspaceLock(
+            declared_workspace_package().join("flake.lock"),
+        )),
+    })
+    .unwrap();
+    let declared: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("EXOMONAD_WORKSPACE_GITLINK").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let revision = exomonad_worktree::GitCli::new()
+        .try_read(
+            &workspace.join(".exomonad/workspace"),
+            &["rev-parse", "HEAD"],
+        )
+        .unwrap();
+    assert_eq!(
+        revision.trimmed(),
+        declared["revision"].as_str().unwrap(),
+        "the hosted workspace must compile the recorded shared source"
+    );
+}
+
+/// Select ordinary scripted fixtures once; supplied frozen inputs stay authoritative.
+pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
+    if config.workspace_inputs.is_some() {
+        return;
+    }
+    let authored = config.workspace.join(".exomonad");
+    if !authored.join("config.toml").exists() {
+        crate::exomonad::write_fixture_project_config(&authored, config.model.value(), |project| {
+            project.defaults.model = config.model.clone();
+            project.defaults.reasoning = config.reasoning;
+        });
+    }
+    crate::exomonad::edit_fixture_project_config(
+        &authored,
+        crate::exomonad::author_scripted_model_catalog,
+    );
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("freeze the scripted model catalog before root admission"),
+    );
 }
 
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
@@ -1638,20 +1742,17 @@ pub(super) fn pinned_jev_workspace_with(
     config: &mut ActorHostConfig,
     configure: impl FnOnce(&mut crate::exomonad::ExomonadConfig),
 ) {
-    let package = declared_workspace_package();
+    scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![package.join(".exomonad")];
+        project.haskell.source_roots = vec!["workspace".into()];
         project
             .haskell
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
         configure(project);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(

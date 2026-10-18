@@ -35,8 +35,21 @@ pub enum ModelBoundaryError {
               that exists only here and is never reused"
 )]
 pub enum ModelReq {
-    ModelStartWith(tidepool_bridge::HaskellValue),
-    ModelResumeWith(String, String, tidepool_bridge::HaskellValue),
-    ModelAnnotateWith(String, String, tidepool_bridge::HaskellValue),
-    ModelCloseWith(String),
+    ModelStartWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        tidepool_bridge::HaskellValue,
+    ),
+    ModelResumeWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        String,
+        String,
+        tidepool_bridge::HaskellValue,
+    ),
+    ModelAnnotateWith(
+        tidepool_bridge_effects::ModelFamilyWitness,
+        String,
+        String,
+        tidepool_bridge::HaskellValue,
+    ),
+    ModelCloseWith(tidepool_bridge_effects::ModelFamilyWitness, String),
 }

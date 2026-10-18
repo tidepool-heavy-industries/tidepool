@@ -4,6 +4,7 @@
 #[must_use]
 pub fn recipe_check_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "RecipeCheck",
         description: "Isolated, model-free resident recipe checks; unavailable to ordinary actors.",
         prompt_card: None,

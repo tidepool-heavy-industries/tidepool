@@ -300,10 +300,44 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
         preamble,
         "qualified Tidepool.Agent.Ref.Internal as TidepoolAgentRef",
     );
-    format!(
+    let mut rendered = format!(
         "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
         context.actor.id.0, context.actor.incarnation.0
-    )
+    );
+    if let Some((identity, reasoning)) = &context.current_model {
+        let (family, constructor, options, prefix) = match identity.model().backend() {
+            crate::Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
+            crate::Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
+            crate::Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
+        };
+        let effort = match reasoning {
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortLow)
+            | crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekLow) => "Low",
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAIMedium)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium) => "Medium",
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAIHigh)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortHigh)
+            | crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh) => "High",
+            crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekNone) => "None",
+            crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekMax) => "Max",
+        };
+        let literal = |text: &str| {
+            format!(
+                "\"{}\"",
+                tidepool_runtime::session::escape_workbench_haskell_string(text)
+            )
+        };
+        rendered = insert_preamble_imports(
+            &rendered,
+            "qualified Tidepool.Model.Selection as TidepoolModelSelection",
+        );
+        rendered.push_str(&format!(
+            "\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
+            literal(identity.catalog_identity()), literal(identity.key()),
+        ));
+    }
+    rendered
 }
 
 // This header belongs to the trusted generated template, never authored cell text.
@@ -4119,6 +4153,7 @@ pub(crate) enum ContextCheckpointBoundary {
     },
     Checkpoint {
         continuation: ResidentHole,
+        family: crate::ModelFamily,
         name: String,
     },
 }
@@ -4339,7 +4374,11 @@ macro_rules! resident_request_roster {
         enum ResidentRequest { $($variant($request),)* }
 
         pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
-            [$($key,)*].into_iter().flatten().collect()
+            let mut keys: Vec<_> = [$($key,)*].into_iter().flatten().collect();
+            keys.extend(exomonad_tool::ActorEffectKey::ALL.iter().copied()
+                .filter(|key| key.model_permission().is_some())
+                .map(exomonad_tool::ToolEffectKey::Actor));
+            keys
         }
     };
 }
@@ -4353,7 +4392,9 @@ resident_request_roster! {
     Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
     Notifications(crate::generated::notifications::NotificationsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Notifications)),
     Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
-    Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
+    Model(crate::generated::model_call::ModelReq) => None,
+    ForkAgent(crate::generated::fork_agent::ForkAgentReq) => None,
+    SpawnAgent(crate::generated::spawn_agent::SpawnAgentReq) => None,
     Context(crate::ContextReq) => None,
     Reload(crate::generated::reload::ReloadReq) => Some(exomonad_tool::ToolEffectKey::Reload),
     Source(crate::generated::source::SourceReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Source)),
@@ -4412,6 +4453,11 @@ impl ResidentRequest {
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
+        try_member!(Self::ForkAgent, crate::generated::fork_agent::ForkAgentReq);
+        try_member!(
+            Self::SpawnAgent,
+            crate::generated::spawn_agent::SpawnAgentReq
+        );
         try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Source, crate::generated::source::SourceReq);
         try_member!(Self::Reload, crate::generated::reload::ReloadReq);
@@ -4524,13 +4570,10 @@ impl ResidentRequest {
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
             ) => "replaceSpec",
-            Self::AgentLaunch(
-                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(..),
-            ) => "spawnSubagent",
+            Self::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentSpawnWith(..))
+            | Self::SpawnAgent(_) => "spawnSubagent",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchValidateSpecWith(..)) => "validateAgentSpec",
-            Self::AgentLaunch(
-                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(..),
-            ) => "checkpoint",
+            Self::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentCheckpointWith(..)) => "checkpoint",
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(..),
             ) => "checkCheckpoint",
@@ -9902,6 +9945,10 @@ where
                         });
                     }
                 }
+                let launch_operation = match &decoded {
+                    ResidentRequest::ForkAgent(_) => crate::ModelOperation::ForkAgent,
+                    _ => crate::ModelOperation::SpawnAgent,
+                };
                 match decoded {
                     ResidentRequest::Sleep(crate::generated::sleep::SleepReq::SleepWith(
                         duration,
@@ -9969,12 +10016,22 @@ where
                         metadata: tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0),
                         effects: effects.into_iter().map(Into::into).collect(),
                     }),
-                    ResidentRequest::AgentLaunch(
-                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
-                            spawn_context, _, workspace, effects, label, model, effort,
+                    ResidentRequest::ForkAgent(
+                        crate::generated::fork_agent::ForkAgentReq::ForkAgentSpawnWith(
+                            family, _, spawn_context, workspace, effects, permissions, label, selection,
+                            instructions, lifetime, limits, metadata,
+                        ),
+                    ) | ResidentRequest::SpawnAgent(
+                        crate::generated::spawn_agent::SpawnAgentReq::SpawnAgentSpawnWith(
+                            family, _, spawn_context, workspace, effects, permissions, label, selection,
                             instructions, lifetime, limits, metadata,
                         ),
                     ) => {
+                        let permission = crate::ModelPermission { operation: launch_operation, family: family.into() };
+                        let selection = serde_json::from_value(tidepool_runtime::value_to_json(&selection, session.data_con_table(), 0))
+                            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("invalid model selection: {error}")))?;
+                        let permissions = serde_json::from_value(tidepool_runtime::value_to_json(&permissions, session.data_con_table(), 0))
+                            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("invalid model permissions: {error}")))?;
                         let metadata = tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0);
                         let selected_effects = effects.iter().cloned().map(Into::into).collect::<Vec<_>>();
                         let mut support = source.installed_effect_support().to_vec();
@@ -9982,11 +10039,11 @@ where
                         crate::tool_contract::preflight_spec_metadata(metadata, &selected_effects, &support, source.tool_surface_validator.as_deref())
                             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
                         crate::ResidentActorStart::capture_spawn(
-                            session, hole, spawn_context, workspace, effects, label, model,
-                            effort, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
+                            session, hole, spawn_context, workspace, effects, label, permission,
+                            selection, permissions, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
                             .map_err(ResidentActorWorkbenchError::StartCapture)
                     },
-                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
+                    ResidentRequest::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentCheckpointWith(family, name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, family: family.into(), name })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { continuation: hole, token })),
                     ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(target, message)) => {
@@ -10507,70 +10564,79 @@ where
                             recoverable: false,
                         },
                     )),
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, plan)) => {
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
-                        let _ = callback;
-                        Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
-                            entry,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(label, plan)) => {
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(plan)) => {
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::AwaitWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchAwait(WatchPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after)) => {
-                        Ok(ResidentActorBoundary::WatchProgressPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch)?,
-                            path: crate::request_effect::projection_path(path)?,
-                            request: crate::request_effect::request_id(request)?,
-                            after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchResponseWith(_, watch, path, node)) => {
-                        Ok(ResidentActorBoundary::WatchResponsePoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch)?,
-                            path: crate::request_effect::projection_path(path)?,
-                            node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
-                                "negative response projection node".into()
-                            ))?,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
-                        Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, path, job)) => {
-                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ReleaseAwaitWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchForget(WatchForget {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
+                    ResidentRequest::Watches(request) => match request {
+                        WatchesReq::RegisterRouteWith(label, callback, plan) => {
+                            let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
+                            let _ = callback;
+                            Ok(ResidentActorBoundary::RouteRegistration {
+                                registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                                entry,
+                            })
+                        }
+                        WatchesReq::ObserveRouteWith(watch_id) => {
+                            Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::ListRoutesWith => Ok(ResidentActorBoundary::RouteList(hole)),
+                        WatchesReq::RegisterWatchWith(label, plan) => {
+                            Ok(ResidentActorBoundary::WatchRegistration(
+                                WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                            ))
+                        }
+                        WatchesReq::RegisterAwaitWith(plan) => {
+                            Ok(ResidentActorBoundary::WatchRegistration(
+                                WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
+                            ))
+                        }
+                        WatchesReq::ObserveWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::AwaitWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchAwait(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after) => {
+                            Ok(ResidentActorBoundary::WatchProgressPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch)?,
+                                path: crate::request_effect::projection_path(path)?,
+                                request: crate::request_effect::request_id(request)?,
+                                after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
+                            })
+                        }
+                        WatchesReq::ObserveWatchResponseWith(_, watch, path, node) => {
+                            Ok(ResidentActorBoundary::WatchResponsePoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch)?,
+                                path: crate::request_effect::projection_path(path)?,
+                                node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                                    "negative response projection node".into()
+                                ))?,
+                            })
+                        }
+                        WatchesReq::ObserveWatchDecisionWith(watch, path) => {
+                            Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
+                        }
+                        WatchesReq::ObserveWatchCommandWith(watch, path, job) => {
+                            Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
+                        }
+                        WatchesReq::ReleaseAwaitWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
+                        }
+                        WatchesReq::ForgetWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchForget(WatchForget {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                    },
                     ResidentRequest::AgentSession(
                         crate::generated::agent_session::AgentSessionReq::AgentAttachWith(
                             initial_user_message,
@@ -13852,6 +13918,55 @@ mod tool_dispatch_tests;
 pub(crate) mod request_tests {
     use super::*;
 
+    #[test]
+    fn current_model_preamble_uses_published_static_family_types() {
+        let descriptor = crate::ActorDescriptor::new(
+            "model preamble",
+            crate::ActorPlacement {
+                session: tidepool_repr::SessionId(17),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+        );
+        let mut context = descriptor.session_context(crate::ActorRef::first(crate::ActorId(7)));
+        for (model, reasoning, family) in [
+            (
+                crate::Model::OpenAIModel(crate::OpenAIModel::Gpt61Sol),
+                crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow),
+                "OpenAI",
+            ),
+            (
+                crate::Model::GeminiArgon,
+                crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
+                "Argon",
+            ),
+            (
+                crate::Model::DeepSeekFlash,
+                crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh),
+                "DeepSeek",
+            ),
+        ] {
+            context.current_model = Some((
+                crate::AdmittedModelIdentity::new(
+                    "catalog".into(),
+                    "selected".into(),
+                    "provider".into(),
+                    model,
+                )
+                .unwrap(),
+                reasoning,
+            ));
+            let rendered = actor_preamble("module Expr where\n", &context);
+            assert!(rendered.contains(&format!(
+                "currentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\n"
+            )));
+            assert!(
+                !rendered.contains("CurrentModelFamily"),
+                "currentModel metadata must not issue a scaffold-owned type alias"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bound_source_rebinding_preserves_exact_issuer_pending_state() {
         with_test_compiler_owner(|client| async move {
@@ -14135,6 +14250,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         (
@@ -14356,6 +14472,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         (
@@ -15913,6 +16030,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: "'[]".into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         let projection = ActorContextProjection {

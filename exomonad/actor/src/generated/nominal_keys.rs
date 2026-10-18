@@ -31,8 +31,6 @@ pub enum ActorEffectKeyWire {
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectJev,
     #[haskell(module = "Tidepool.Effects.Core")]
-    EffectModelCall,
-    #[haskell(module = "Tidepool.Effects.Core")]
     EffectCommands,
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectConsole,
@@ -58,6 +56,24 @@ pub enum ActorEffectKeyWire {
     EffectFsRead,
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectFsWrite,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectModelCallOpenAI,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectModelCallArgon,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectModelCallDeepSeek,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectForkAgentOpenAI,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectForkAgentArgon,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectForkAgentDeepSeek,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectSpawnAgentOpenAI,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectSpawnAgentArgon,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectSpawnAgentDeepSeek,
 }
 
 impl ActorEffectKeyWire {
@@ -80,7 +96,15 @@ impl ActorEffectKeyWire {
         Self::EffectGreen,
         Self::EffectNotifications,
         Self::EffectJev,
-        Self::EffectModelCall,
+        Self::EffectModelCallOpenAI,
+        Self::EffectModelCallArgon,
+        Self::EffectModelCallDeepSeek,
+        Self::EffectForkAgentOpenAI,
+        Self::EffectForkAgentArgon,
+        Self::EffectForkAgentDeepSeek,
+        Self::EffectSpawnAgentOpenAI,
+        Self::EffectSpawnAgentArgon,
+        Self::EffectSpawnAgentDeepSeek,
         Self::EffectActor,
         Self::EffectReflect,
         Self::EffectLookup,
@@ -108,7 +132,6 @@ impl ActorEffectKeyWire {
             Self::EffectSleep => "EffectSleep",
             Self::EffectNotifications => "EffectNotifications",
             Self::EffectJev => "EffectJev",
-            Self::EffectModelCall => "EffectModelCall",
             Self::EffectCommands => "EffectCommands",
             Self::EffectConsole => "EffectConsole",
             Self::EffectAskUser => "EffectAskUser",
@@ -122,6 +145,15 @@ impl ActorEffectKeyWire {
             Self::EffectWeb => "EffectWeb",
             Self::EffectFsRead => "EffectFsRead",
             Self::EffectFsWrite => "EffectFsWrite",
+            Self::EffectModelCallOpenAI => "EffectModelCallOpenAI",
+            Self::EffectModelCallArgon => "EffectModelCallArgon",
+            Self::EffectModelCallDeepSeek => "EffectModelCallDeepSeek",
+            Self::EffectForkAgentOpenAI => "EffectForkAgentOpenAI",
+            Self::EffectForkAgentArgon => "EffectForkAgentArgon",
+            Self::EffectForkAgentDeepSeek => "EffectForkAgentDeepSeek",
+            Self::EffectSpawnAgentOpenAI => "EffectSpawnAgentOpenAI",
+            Self::EffectSpawnAgentArgon => "EffectSpawnAgentArgon",
+            Self::EffectSpawnAgentDeepSeek => "EffectSpawnAgentDeepSeek",
         }
     }
 }
@@ -143,7 +175,6 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectSleep => Self::Sleep,
             ActorEffectKeyWire::EffectNotifications => Self::Notifications,
             ActorEffectKeyWire::EffectJev => Self::Jev,
-            ActorEffectKeyWire::EffectModelCall => Self::ModelCall,
             ActorEffectKeyWire::EffectCommands => Self::Commands,
             ActorEffectKeyWire::EffectConsole => Self::Console,
             ActorEffectKeyWire::EffectAskUser => Self::AskUser,
@@ -157,6 +188,15 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectWeb => Self::Web,
             ActorEffectKeyWire::EffectFsRead => Self::FsRead,
             ActorEffectKeyWire::EffectFsWrite => Self::FsWrite,
+            ActorEffectKeyWire::EffectModelCallOpenAI => Self::ModelCallOpenAI,
+            ActorEffectKeyWire::EffectModelCallArgon => Self::ModelCallArgon,
+            ActorEffectKeyWire::EffectModelCallDeepSeek => Self::ModelCallDeepSeek,
+            ActorEffectKeyWire::EffectForkAgentOpenAI => Self::ForkAgentOpenAI,
+            ActorEffectKeyWire::EffectForkAgentArgon => Self::ForkAgentArgon,
+            ActorEffectKeyWire::EffectForkAgentDeepSeek => Self::ForkAgentDeepSeek,
+            ActorEffectKeyWire::EffectSpawnAgentOpenAI => Self::SpawnAgentOpenAI,
+            ActorEffectKeyWire::EffectSpawnAgentArgon => Self::SpawnAgentArgon,
+            ActorEffectKeyWire::EffectSpawnAgentDeepSeek => Self::SpawnAgentDeepSeek,
         }
     }
 }

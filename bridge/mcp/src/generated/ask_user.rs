@@ -4,6 +4,7 @@
 #[must_use]
 pub fn askuser_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "AskUser",
         description: "Present an applicative Tidepool.Form to the human operator. One continuation owns one mounted form through validation retries; final answer publication precedes returning Submitted. Dismissal and infrastructure closure remain typed outcomes.",
         prompt_card: None,

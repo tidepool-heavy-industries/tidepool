@@ -245,10 +245,6 @@ impl exomonad_actor::JevBackend for BatchBackend {
 
 #[tokio::test]
 async fn installed_batch_notebook_example_executes_against_mocked_provider() {
-    let source = std::fs::read_to_string(
-        test_campaign::declared_workspace_package().join(".exomonad/checks/jev-batch-example.hs"),
-    )
-    .expect("canonical installed batch notebook source");
     let backend = Arc::new(BatchBackend::default());
     let owned_backend = Arc::clone(&backend);
     let campaign = TestCampaign::start_with_conversation(
@@ -262,6 +258,13 @@ async fn installed_batch_notebook_example_executes_against_mocked_provider() {
         })),
     )
     .await;
+    let source = std::fs::read_to_string(
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/workspace/checks/jev-batch-example.hs"),
+    )
+    .expect("canonical installed batch notebook source");
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {

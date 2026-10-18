@@ -1746,6 +1746,20 @@ impl HostedTestRuntime {
             jev: None,
         };
         configure(&mut config);
+        // Scripted inference still enters production admission through an authored,
+        // frozen catalog. Prepared selections already own their immutable inputs;
+        // invalid workspaces must reach the production startup refusal unchanged.
+        let prepared_inputs = config
+            .workspace_inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.prepared_toolset.is_some());
+        if !prepared_inputs
+            && exomonad_worktree::GitCli::new()
+                .try_run(&config.workspace, &["rev-parse", "--git-dir"])
+                .is_ok()
+        {
+            super::test_campaign::configure_scripted_model_catalog(&mut config);
+        }
         let mut preparation_elapsed = None;
         if prepare {
             let started = std::time::Instant::now();

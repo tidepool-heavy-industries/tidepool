@@ -3001,3 +3001,418 @@ async fn worker_transfer_refuses_another_parent_in_the_same_run() {
     assert!(worker.terminal().get().is_none());
     fixture.finish().await;
 }
+
+#[derive(Default)]
+struct InvocationModel {
+    prepared: Mutex<Vec<(&'static str, tidepool_repr::PrincipalId)>>,
+    started: Arc<AtomicUsize>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    settling: AtomicUsize,
+    request_budgets: AtomicUsize,
+    settlement_entered: tokio::sync::Notify,
+    settlement_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    settlement_failure: std::sync::atomic::AtomicBool,
+}
+
+impl crate::CellModelBinding for InvocationModel {
+    fn begin_request_budget(&self) {
+        self.request_budgets.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn prepare(
+        &self,
+        request: crate::ModelReq,
+        principal: tidepool_repr::PrincipalId,
+        table: tidepool_repr::DataConTable,
+    ) -> tidepool_effect::DeferredEffect {
+        assert_eq!(
+            table.field_labels_of(tidepool_repr::DataConId(73)),
+            Some(["original table".to_owned()].as_slice())
+        );
+        let verb = match request {
+            crate::ModelReq::ModelStartWith(..) => "start",
+            crate::ModelReq::ModelResumeWith(..) => "resume",
+            crate::ModelReq::ModelAnnotateWith(..) => "annotate",
+            crate::ModelReq::ModelCloseWith(..) => "close",
+        };
+        self.prepared.lock().push((verb, principal));
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
+        tidepool_effect::DeferredEffect::blocking(move || {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(tidepool_effect::error::EffectError::Handler(
+                    "model invocation is closed".into(),
+                ));
+            }
+            started.fetch_add(1, Ordering::SeqCst);
+            Ok(tidepool_effect::Response::new(()))
+        })
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn settle(&self) -> BoxFuture<'_, Result<(), tidepool_effect::error::EffectError>> {
+        Box::pin(async move {
+            self.settling.fetch_add(1, Ordering::SeqCst);
+            self.settlement_entered.notify_one();
+            let gate = self.settlement_gate.lock().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if self.settlement_failure.swap(false, Ordering::SeqCst) {
+                return Err(tidepool_effect::error::EffectError::Handler(
+                    "controlled model settlement failure".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
+struct InvocationModelFactory {
+    binding: Arc<InvocationModel>,
+    bound: Mutex<Vec<(WorkbenchExecutionId, tidepool_repr::PrincipalId)>>,
+}
+
+impl crate::CellModelFactory for InvocationModelFactory {
+    fn bind(
+        &self,
+        execution: &WorkbenchExecutionId,
+        principal: tidepool_repr::PrincipalId,
+        _: &crate::ActorDescriptor,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
+    ) -> Arc<dyn crate::CellModelBinding> {
+        assert!(
+            context.is_none(),
+            "ordinary invocations acquire no hosted context mutation authority"
+        );
+        self.bound.lock().push((execution.clone(), principal));
+        self.binding.clone()
+    }
+}
+
+fn model_descriptor(operation: exomonad_tool::ModelOperation) -> crate::ActorDescriptor {
+    let identity = crate::AdmittedModelIdentity::new(
+        "catalog".into(),
+        "deepseek".into(),
+        "provider".into(),
+        crate::Model::DeepSeekFlash,
+    )
+    .unwrap();
+    let grant = crate::ModelGrant::new(
+        crate::ModelPermission {
+            operation,
+            family: crate::ModelFamily::DeepSeek,
+        },
+        identity,
+        vec![crate::Reasoning::DeepSeekReasoning(
+            crate::DeepSeekReasoning::DeepSeekHigh,
+        )],
+    )
+    .unwrap();
+    crate::ActorDescriptor::new(
+        "ordinary model invocation",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(17),
+            resource_scope: RealmId::ROOT,
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    )
+    .with_capabilities(
+        crate::ActorCapabilities::default()
+            .with_model_permissions(crate::ModelPermissions::new(vec![grant]).unwrap()),
+    )
+}
+
+#[test]
+fn ordinary_model_binding_requires_grant_and_original_active_owner() {
+    let actor = ActorRef::first(crate::ActorId(17));
+    let factory = InvocationModelFactory::default();
+    let work = InvocationWork::new(actor, reservation());
+    assert!(work
+        .bind_model(
+            Some(&factory),
+            &model_descriptor(exomonad_tool::ModelOperation::SpawnAgent)
+        )
+        .is_none());
+    assert!(factory.bound.lock().is_empty());
+    let descriptor = model_descriptor(exomonad_tool::ModelOperation::ModelCall);
+    let first = work.bind_model(Some(&factory), &descriptor).unwrap();
+    assert!(Arc::ptr_eq(
+        &first,
+        &work.bind_model(Some(&factory), &descriptor).unwrap()
+    ));
+    assert_eq!(
+        *factory.bound.lock(),
+        [(WorkbenchExecutionId::from_digest([7; 16]), actor.into())]
+    );
+    work.close();
+    assert!(factory.binding.cancelled.load(Ordering::SeqCst));
+    assert!(work.bind_model(Some(&factory), &descriptor).is_none());
+    assert_eq!(factory.bound.lock().len(), 1);
+    assert!(Arc::strong_count(&first) > 1);
+    drop(work);
+    assert!(factory.binding.cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn actor_and_record_model_steps_borrow_one_invocation_binding() {
+    let fixture = Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let descriptor = model_descriptor(exomonad_tool::ModelOperation::ModelCall);
+    let context = descriptor.session_context(actor);
+    for tool in [false, true] {
+        let factory = InvocationModelFactory::default();
+        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let retained = work.bind_model(Some(&factory), &descriptor).unwrap();
+        let base = if tool {
+            CurrentEffectOwner::Tool {
+                issued_snapshot: None,
+                work: work.clone(),
+                publication: CheckpointPublication::Resident,
+                control: crate::WorkbenchExecutionControl::untracked(),
+            }
+        } else {
+            CurrentEffectOwner::Actor {
+                callback_scope: None,
+                issued_snapshot: None,
+                ephemeral_work: work.clone(),
+                publication: CheckpointPublication::Resident,
+                reservation_owner: None,
+                control: None,
+            }
+        };
+        let scope = work.new_scope().unwrap();
+        assert!(scope.bind_model(Some(&factory), &descriptor).is_none());
+        let owner = CurrentEffectOwner::Scoped {
+            base: Box::new(base),
+            scope: scope.clone(),
+            wait_control: None,
+        };
+        let value = || tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(73), Vec::new());
+        let family = tidepool_bridge_effects::ModelFamilyWitness::DeepSeekWitness;
+        for request in [
+            crate::ModelReq::ModelStartWith(family, value()),
+            crate::ModelReq::ModelResumeWith(family, "invocation".into(), "call".into(), value()),
+            crate::ModelReq::ModelAnnotateWith(
+                family,
+                "invocation".into(),
+                "operation".into(),
+                value(),
+            ),
+            crate::ModelReq::ModelCloseWith(family, "invocation".into()),
+        ] {
+            let mut table = tidepool_repr::DataConTable::new();
+            table.set_field_labels(tidepool_repr::DataConId(73), vec!["original table".into()]);
+            let ResidentActorBoundary::External { work: effect, .. } = prepare_execution_effect(
+                &context,
+                &owner,
+                ResidentActorBoundary::Model {
+                    continuation: ResidentHole::plain("model"),
+                    request,
+                    table,
+                },
+            ) else {
+                panic!("ordinary model operations use the existing continuation route")
+            };
+            let tidepool_effect::DeferredEffect::Blocking(effect) = effect else {
+                panic!("controlled model operation")
+            };
+            effect.into_inner().unwrap()().unwrap();
+        }
+        assert_eq!(
+            *factory.binding.prepared.lock(),
+            ["start", "resume", "annotate", "close"].map(|verb| (verb, actor.into()))
+        );
+        assert_eq!(factory.binding.started.load(Ordering::SeqCst), 4);
+        assert_eq!(factory.bound.lock().len(), 1);
+        fixture.cleanup(&scope).await;
+        assert!(
+            !factory.binding.cancelled.load(Ordering::SeqCst),
+            "nested scope cleanup does not end its outer invocation's model"
+        );
+        fixture.cleanup(&work).await;
+        assert!(factory.binding.cancelled.load(Ordering::SeqCst));
+        assert_eq!(factory.binding.settling.load(Ordering::SeqCst), 1);
+        let mut table = tidepool_repr::DataConTable::new();
+        table.set_field_labels(tidepool_repr::DataConId(73), vec!["original table".into()]);
+        let ResidentActorBoundary::External { work: refused, .. } = prepare_execution_effect(
+            &context,
+            &owner,
+            ResidentActorBoundary::Model {
+                continuation: ResidentHole::plain("closed-model"),
+                request: crate::ModelReq::ModelStartWith(family, value()),
+                table,
+            },
+        ) else {
+            panic!("closed model refusal uses the ordinary continuation route")
+        };
+        let tidepool_effect::DeferredEffect::Blocking(refused) = refused else {
+            panic!("controlled closed model operation")
+        };
+        assert!(refused.into_inner().unwrap()().is_err());
+        assert_eq!(
+            factory.binding.started.load(Ordering::SeqCst),
+            4,
+            "a retained closed binding cannot start another provider operation"
+        );
+
+        assert!(Arc::strong_count(&retained) > 1);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invocation_model_cleanup_awaits_retained_binding_and_preserves_uncertainty() {
+    let fixture = Fixture::start().await;
+    let factory = InvocationModelFactory::default();
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let retained = work
+        .bind_model(
+            Some(&factory),
+            &model_descriptor(exomonad_tool::ModelOperation::ModelCall),
+        )
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *factory.binding.settlement_gate.lock() = Some(gate.clone());
+    factory
+        .binding
+        .settlement_failure
+        .store(true, Ordering::SeqCst);
+    let refused = {
+        let settling = work.cleanup(&fixture.environment, &fixture.kernel);
+        tokio::pin!(settling);
+        tokio::select! {
+            _ = factory.binding.settlement_entered.notified() => {}
+            completed = &mut settling => panic!("cleanup completed before held model settlement: {completed:?}"),
+        }
+        assert!(futures_util::poll!(&mut settling).is_pending());
+        assert!(factory.binding.cancelled.load(Ordering::SeqCst));
+        assert_eq!(factory.binding.settling.load(Ordering::SeqCst), 1);
+        assert!(
+            work.cleanup_observation().is_none(),
+            "cancellation has not established settlement"
+        );
+        *factory.binding.settlement_gate.lock() = None;
+        gate.notify_waiters();
+        settling.await
+    };
+    assert!(refused
+        .uncertainty()
+        .unwrap()
+        .contains("controlled model settlement failure"));
+    assert!(work.cleanup_observation().unwrap().uncertainty().is_some());
+    fixture.cleanup(&work).await;
+    assert_eq!(factory.binding.settling.load(Ordering::SeqCst), 2);
+    fixture.cleanup(&work).await;
+    assert_eq!(
+        factory.binding.settling.load(Ordering::SeqCst),
+        2,
+        "confirmed owner cleanup is reused"
+    );
+    assert!(Arc::strong_count(&retained) > 1);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn invocation_model_settlement_timeout_retains_its_original_owner() {
+    let fixture = Fixture::start().await;
+    let factory = InvocationModelFactory::default();
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let retained = work
+        .bind_model(
+            Some(&factory),
+            &model_descriptor(exomonad_tool::ModelOperation::ModelCall),
+        )
+        .unwrap();
+    *factory.binding.settlement_gate.lock() = Some(Arc::new(tokio::sync::Notify::new()));
+    let cleanup = {
+        let cleanup = work.cleanup(&fixture.environment, &fixture.kernel);
+        tokio::pin!(cleanup);
+        tokio::select! {
+            _ = factory.binding.settlement_entered.notified() => {}
+            completed = &mut cleanup => panic!("cleanup completed before held model settlement: {completed:?}"),
+        }
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        assert!(work.cleanup_observation().is_none());
+        tokio::time::advance(RELEASE_WAIT).await;
+        cleanup.await
+    };
+    assert!(cleanup
+        .uncertainty()
+        .unwrap()
+        .contains("model cleanup remains unconfirmed after 20s observation budget"));
+    assert!(factory.binding.cancelled.load(Ordering::SeqCst));
+    assert!(Arc::ptr_eq(&retained, &work.model().unwrap()));
+    assert_eq!(factory.bound.lock().len(), 1);
+    *factory.binding.settlement_gate.lock() = None;
+    fixture.cleanup(&work).await;
+    assert_eq!(factory.binding.settling.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "settlement retry cannot rebind or renew the invocation allowance"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn native_rpc_model_budget_ingress_preserves_existing_execution_allowances() {
+    let fixture = Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let factory = Arc::new(InvocationModelFactory::default());
+    let mut environment = fixture.environment.clone();
+    environment.cell_model_factory = Some(factory.clone());
+    let descriptor = model_descriptor(exomonad_tool::ModelOperation::ModelCall);
+    let mut behavior = ResidentKernelBehavior::with_boot(
+        descriptor.clone(),
+        environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.bound.lock().len(), 1);
+    crate::resident_workbench::with_execution_control(
+        crate::WorkbenchExecutionControl::untracked(),
+        async {
+            behavior.begin_native_request_model_budget(actor);
+        },
+    )
+    .await;
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    behavior.active_route_reservation_owner =
+        Some(RequestReservationOwner::Route(crate::WatchId(701)));
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "borrowed execution boundaries cannot allocate another model binding"
+    );
+    behavior.active_route_reservation_owner = None;
+    behavior.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "the next RPC refreshes its allowance on the retained service"
+    );
+    let denied = ResidentKernelBehavior::with_boot(
+        descriptor.with_capabilities(crate::ActorCapabilities::default()),
+        environment,
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    denied.begin_native_request_model_budget(actor);
+    assert_eq!(factory.binding.request_budgets.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.bound.lock().len(),
+        1,
+        "an ungranted native request cannot bind a model service"
+    );
+    fixture.finish().await;
+}

@@ -8,10 +8,11 @@ do
             }
         }
   let Right prepared = prepareAgentSpec actualSpec
-  started <- send (Core.AgentLaunchSpawnWith
-    (Core.CapturedSpawn "CHECKPOINT_TOKEN") (\_ -> installPreparedSpec prepared >> Agents.installRequestReceiver)
-    (Core.ForkDirectory Core.CurrentCheckout) [] (Just "CHILD_LABEL")
-    Nothing Nothing Nothing CHILD_LIFETIME Nothing (preparedAgentSpecMetadata prepared))
+  started <- send (Core.ForkAgentSpawnWith Core.OpenAIWitness
+    (\_ -> installPreparedSpec prepared >> Agents.installRequestReceiver) (Core.CapturedSpawn "CHECKPOINT_TOKEN")
+    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON (Selection.modelPermissionRequests Selection.noModelPermissions)) (Just "CHILD_LABEL")
+    (toJSON (Selection.modelSelection (Selection.openAI "capture-catalog" "reader" (Selection.OpenAIOptions Selection.OpenAILow))))
+    Nothing CHILD_LIFETIME Nothing (preparedAgentSpecMetadata prepared))
   case started of
     Left failure -> Tidepool.Effects.error (tshow failure) >> pure False
     Right _ -> pure True

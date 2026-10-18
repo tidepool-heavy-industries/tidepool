@@ -29,6 +29,7 @@ enum InvocationWorkPhase {
 #[derive(Default)]
 struct InvocationWorkState {
     phase: InvocationWorkPhase,
+    model: Option<Arc<dyn crate::CellModelBinding>>,
     scopes: Vec<Arc<InvocationWork>>,
     compilers: Vec<crate::termination::CompilerWorkRegistration>,
     launch_revision: u64,
@@ -227,6 +228,45 @@ impl InvocationWork {
             state: Mutex::new(Default::default()),
             cleanup_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Bind once under the invocation admission fence. The factory starts no
+    /// provider work; every continuation later borrows this same binding.
+    pub(super) fn bind_model(
+        &self,
+        factory: Option<&dyn crate::CellModelFactory>,
+        descriptor: &crate::ActorDescriptor,
+    ) -> Option<Arc<dyn crate::CellModelBinding>> {
+        if self.scope_id.is_some() {
+            return None;
+        }
+        if !descriptor
+            .capabilities()
+            .model_permissions()
+            .grants()
+            .iter()
+            .any(|grant| grant.permission().operation == exomonad_tool::ModelOperation::ModelCall)
+        {
+            return None;
+        }
+        let factory = factory?;
+        self.with_admission_state(|state| {
+            state
+                .model
+                .get_or_insert_with(|| {
+                    let execution = match &self.reservation {
+                        RequestReservationOwner::Workbench { execution, .. } => execution.clone(),
+                        _ => WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()),
+                    };
+                    factory.bind(&execution, self.owner.into(), descriptor, None)
+                })
+                .clone()
+        })
+        .ok()
+    }
+
+    pub(super) fn model(&self) -> Option<Arc<dyn crate::CellModelBinding>> {
+        self.state.lock().model.clone()
     }
 
     pub(super) fn new_scope(self: &Arc<Self>) -> Result<Arc<Self>, String> {
@@ -972,11 +1012,18 @@ impl InvocationWork {
     }
 
     pub(super) fn close(&self) {
-        let (scopes, compilers) = {
+        let (scopes, compilers, model) = {
             let mut state = self.state.lock();
             state.phase = InvocationWorkPhase::Closing;
-            (state.scopes.clone(), state.compilers.clone())
+            (
+                state.scopes.clone(),
+                state.compilers.clone(),
+                state.model.clone(),
+            )
         };
+        if let Some(model) = model {
+            model.cancel();
+        }
         for compiler in compilers {
             compiler.request_cancellation();
         }
@@ -1392,6 +1439,17 @@ impl InvocationWork {
                 )),
             }
         }
+        if let Some(model) = self.model() {
+            match tokio::time::timeout(RELEASE_WAIT, model.settle()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => cleanup
+                    .failures
+                    .push(format!("model cleanup remains unconfirmed: {error}")),
+                Err(_) => cleanup.failures.push(format!(
+                    "model cleanup remains unconfirmed after {RELEASE_WAIT:?} observation budget"
+                )),
+            }
+        }
         let mut state = self.state.lock();
         if state.launch_revision != launch_revision {
             cleanup
@@ -1400,6 +1458,16 @@ impl InvocationWork {
         }
         state.cleanup = Some(cleanup.clone());
         cleanup
+    }
+}
+
+impl Drop for InvocationWork {
+    fn drop(&mut self) {
+        // A retained service reference does not extend its invocation's right
+        // to run provider work. Only cleanup can establish settlement.
+        if let Some(model) = &self.state.get_mut().model {
+            model.cancel();
+        }
     }
 }
 

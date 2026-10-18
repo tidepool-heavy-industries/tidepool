@@ -17,7 +17,6 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::Sleep,
     ActorEffectKey::Notifications,
     ActorEffectKey::Jev,
-    ActorEffectKey::ModelCall,
     ActorEffectKey::Commands,
     ActorEffectKey::Console,
     ActorEffectKey::AskUser,

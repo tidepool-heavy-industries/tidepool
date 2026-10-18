@@ -109,6 +109,11 @@ fn generated_model_control_codecs_execute_and_preserve_callback_value() {
 }
 
 #[test]
+fn generic_model_family_row_witnesses_select_exact_fixed_keys() {
+    Surface::new().execute("GenericModelFamilies.hs");
+}
+
+#[test]
 fn compiled_default_actor_row_matches_generated_rust_order() {
     use exomonad_tool::{ActorEffectKey, ToolEffectKey, DEFAULT_ACTOR_EFFECTS};
 
@@ -127,7 +132,7 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
         let identity = key
             .nominal_identity()
             .expect("active catalogue keys have nominal owners");
-        format!("{}.{}", identity.module, identity.name)
+        identity.render()
     };
     let expected = vec![
         named(
@@ -215,4 +220,23 @@ fn synchronous_reload_profile_and_async_source_inspection_compile() {
 #[test]
 fn reload_defaults_and_structured_receipts_execute() {
     Surface::new().execute("ReloadCodec.hs");
+}
+
+#[test]
+fn indexed_model_witnesses_reject_wrong_family_and_coercion() {
+    let surface = Surface::new();
+    let valid = surface.compile("ModelFamilyControl.hs", false);
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    for fixture in ["WrongModelFamily.hs", "CoercedModelFamily.hs"] {
+        let refused = surface.compile(fixture, false);
+        assert!(
+            !refused.status.success(),
+            "{fixture} admitted a different family after valid control"
+        );
+        assert!(!refused.stderr.is_empty());
+    }
 }

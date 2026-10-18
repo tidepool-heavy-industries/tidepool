@@ -30,11 +30,13 @@ main = do
      "reasoning" .= object ["tag" .= ("ArgonReasoning" :: Text),
        "contents" .= ("EffortMedium" :: Text)]])
     "catalog selection lost exact identity, key or typed reasoning"
-  roundtrip (ModelRequestEnvelope "instructions" "input" Nothing Nothing
-    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing True (Just chosen))
-  mapM_ (\selection -> roundtrip (ModelRequestEnvelope "instructions" "input" (Just selection) Nothing
-    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing False Nothing))
-    [DeepSeekFlash, DeepSeekPro, OpenAIModel Gpt61Sol, GeminiArgon, CustomModel DeepSeek "registered-custom"]
+  roundtrip (ModelRequestEnvelope "instructions" "input"
+    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing True chosen)
+  roundtrip (ModelGrantRequest ModelCall "catalog-hash" "argon" [ArgonReasoning EffortMedium])
+  assert (toJSON (ModelGrantRequest ForkAgent "catalog-hash" "argon" [ArgonReasoning EffortHigh]) == object
+    ["operation" .= ("fork_agent" :: Text), "catalog_identity" .= ("catalog-hash" :: Text),
+     "key" .= ("argon" :: Text), "efforts" .= [ArgonReasoning EffortHigh]])
+    "child model grant lost operation, catalog key or allowed efforts"
   mapM_ roundtrip [DeepSeekReasoning DeepSeekHigh, OpenAIReasoning OpenAIMedium, ArgonReasoning EffortHigh]
   assert (toJSON GeminiArgon == object ["tag" .= ("GeminiArgon" :: Text)]) "Argon model selector shape changed"
   assert (toJSON (CustomModel DeepSeek "registered-custom") == object

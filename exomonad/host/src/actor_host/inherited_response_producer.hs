@@ -7,7 +7,7 @@ import Tidepool.Actors.Exomonad
 
 Right workerAgent <- spawnSubagent (FreshCtx "Return the requested value and increment function.")
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "worker", spawnLifetime = ActorOwned })
 Right worker <- request @((Text, [Int]), Int -> Int) workerAgent ("custody" :: Text)
   (defaultRequestOptions { requestLabel = Just "worker" })

@@ -246,7 +246,7 @@ impl JevBackend for LookupScoreJev {
 }
 
 fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
@@ -268,10 +268,10 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
         "checks/usage-examples.json",
         "Project/BackgroundCommandExample.hs",
     ] {
-        std::fs::copy(package.join(".exomonad").join(path), authored.join(path)).unwrap();
+        std::fs::copy(authored.join("workspace").join(path), authored.join(path)).unwrap();
     }
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["LookupFixture".into(), "Project.Lookup".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -279,9 +279,6 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -911,11 +908,11 @@ async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign
 }
 
 pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Shell".into(), "Project.Sift".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -923,9 +920,6 @@ pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -1723,16 +1717,12 @@ noted call result
 /// (this workspace's own `.exomonad`, and the pinned package's), so a module
 /// under either root can `import qualified Jev.Operators as J` itself.
 fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
-    // Everything `pinned_jev_workspace` does, inlined rather than called: that
-    // helper ends by calling `FrozenWorkspace::load`, which memoizes its
-    // result at `run_root/workspace/selection.json` and would otherwise hand
-    // a SECOND call here the stale pre-authored selection instead of
-    // re-reading the config and files written below. One workspace, one load.
-    let package = super::test_campaign::declared_workspace_package();
+    // Configure the local tool modules before capturing the workspace once.
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -1746,9 +1736,6 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     )
     .unwrap();
     std::fs::write(authored.join("AgentSpec.hs"), AGENT_SPEC_JEV_SPEC_MODULE).unwrap();
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     // `nix flake archive` reads only tracked files, and a child worktree
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
@@ -1863,9 +1850,9 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
 }
 
 // ---------------------------------------------------------------------------
-// A parent's watchdog: `Project.Watchdog` (the shipped worked example, read
-// verbatim from this repository's own `exomonad/examples/workspace/.exomonad`,
-// exactly as `Jev.Operators` is) asks one packet of heuristics about a
+// A parent's watchdog: `Project.Watchdog` (the shipped worked example, selected
+// with `Jev.Operators` from the scaffold's recorded shared source) asks one
+// packet of heuristics about a
 // child's finished tool call. A tripped `Nudge` writes advice straight onto
 // the child's own result and sends nothing; a tripped `Escalate` sends the
 // parent one message naming the reason and the child's actor address and
@@ -1977,11 +1964,11 @@ monitorsFor path
 /// a second source root, beside a per-test `AgentSpec.hs` and `Project/Tools.hs`
 /// that install `Watchdog.watchBy` as the after-tool slot.
 fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -1991,9 +1978,6 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
     });
     std::fs::write(authored.join("Project/Tools.hs"), WATCHDOG_TOOLS_MODULE).unwrap();
     std::fs::write(authored.join("AgentSpec.hs"), WATCHDOG_SPEC_MODULE).unwrap();
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     // `nix flake archive` reads only tracked files, and a child worktree
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
@@ -2013,9 +1997,9 @@ fn watchdog_child_script(label: &str) -> String {
          import Tidepool.Effects.Core (Commands, Lookup, ActorContext, Jev, Notifications, Reflect)\n\
          import qualified AgentSpec as Spec\n\
          import qualified Project.Tools as Tools\n\
-         Right seed <- checkpoint \"watchdog child context\"\n\
+         Right seed <- checkpoint currentModel \"watchdog child context\"\n\
          Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-           ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec Tools.WatchdogTools '[Replies, Commands, Lookup, BoundWorktree, Jev, ActorContext, Notifications, Reflect]))\n\
+           ((defaultSpawnOptions currentModel (Spec.agentSpec :: A.AgentSpec Tools.WatchdogTools '[Replies, Commands, Lookup, BoundWorktree, Jev, ActorContext, Notifications, Reflect]))\n\
              {{ spawnLabel = Just \"{label}\", spawnLifetime = ActorOwned\n\
              , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" }})\n\
          Right worker <- request @Text child () (defaultRequestOptions {{ requestLabel = Just \"{label}\" }})\n"

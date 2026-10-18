@@ -1,10 +1,16 @@
 # Typed agent work
 
 Create one idle hosted child with `spawnSubagent context workspace
-(defaultSpawnOptions actualSpec)`. The child receives the actual typed
+(defaultSpawnOptions currentModel actualSpec)`. The child receives the actual typed
 `AgentSpec`; a successful spawn returns an `AgentRef` after its tools, workspace,
 captured context, and provider attachment are ready. It does not start inference.
 The first typed request or a human message activates it.
+
+Capture with `checkpoint currentModel name`; the returned checkpoint retains its
+provider family. Captured spawning requires `ForkAgent family`; fresh spawning
+requires `SpawnAgent family`. Each actor receives its own typed `currentModel`.
+Child model operations default to none: request the required exact selections
+through `spawnPermissions`, and include the matching family effects in its spec.
 
 Choose `ForkCtx checkpoint` to reuse a retained context snapshot or `FreshCtx
 prompt` to start from an explicit prompt. Fresh context does not include ambient

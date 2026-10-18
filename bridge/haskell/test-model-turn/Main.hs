@@ -42,53 +42,46 @@ import Tidepool.Internal.ModelControl qualified as Control
 import Tidepool.Effects.Core qualified as Core
 import Tidepool.Effects.Core (Console (..), say, ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
 
--- Test-only choices exercise the shared class without claiming catalog authority.
-data TestModel = Flash DeepSeekOptions | Pro DeepSeekOptions
+-- These exact entries are interpreted by the fake admitted catalog below.
+flashChoice :: Model DeepSeek
+flashChoice = deepSeek "test-catalog" "flash" (DeepSeekOptions DeepSeekHigh)
 
-instance ModelChoice TestModel where
-  modelSelection (Flash options) = Control.ModelSelectionEnvelope "test-catalog" "flash"
-    (Core.DeepSeekReasoning (deepSeekEffort options))
-  modelSelection (Pro options) = Control.ModelSelectionEnvelope "test-catalog" "pro"
-    (Core.DeepSeekReasoning (deepSeekEffort options))
-
-flashChoice :: TestModel
-flashChoice = Flash (DeepSeekOptions DeepSeekHigh)
-
-proChoice :: TestModel
-proChoice = Pro (DeepSeekOptions DeepSeekMax)
+proChoice :: Model DeepSeek
+proChoice = deepSeek "test-catalog" "pro" (DeepSeekOptions DeepSeekMax)
 
 data Tools mode = Tools { echo :: mode :- Call Text Text } deriving Generic
 data Reply = Reply { count :: Int, optional :: Maybe Text }
   deriving (Generic, FromJSON, ToJSON, JsonSchema, Show)
 
-program :: Eff '[ModelCall, State [Text]] (ModelResult Reply)
-program = invokeModel (typedTurn @Reply (defaultSpec
+program :: Eff '[ModelCall DeepSeek, State [Text]] (ModelResult Reply)
+program = invokeModel (typedTurn @Reply flashChoice (defaultSpec
   { specTools = Tools (presentWith (const "model-visible") (tool "Echo with a caller effect" (\text -> modify (<> [text]) >> pure text)))
   , afterTool = Just (\_ result -> modify (<> [toolResultHandle result, if toolResultValue result == String "called" then "semantic" else "missing"]) >> pure (Annotated "checked"))
   }) "Return a typed result after echoing") "hello"
 
-handleModel :: ModelCall a -> Eff '[State [Text]] a
-handleModel (ModelStartWith _) = pure (Right (toJSON
+handleModel :: ModelCall DeepSeek a -> Eff '[State [Text]] a
+handleModel (ModelStartWith _ _) = pure (Right (toJSON
   (Control.ModelCallback "i" "c" "echo" (String "called"))))
-handleModel (ModelResumeWith token call answer)
+handleModel (ModelResumeWith _ token call answer)
   | token == "i" && call == "c" && answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = pure (Right (toJSON
       (Control.ModelHook token "op" "echo" (String "called") "retained:1" 1 (String "called") "called")))
   | otherwise = error "callback identity/output changed"
-handleModel (ModelAnnotateWith token op annotation)
+handleModel (ModelAnnotateWith _ token op annotation)
   | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (toJSON
       (Control.ModelFinished (Control.ModelReceiptEnvelope token "cell" ["request"]
         [Control.ModelRequestObservationEnvelope "request" "deep_seek" "actual-model" (Just 7) (Just 0) Nothing Nothing 12] 23
         (Control.ModelUsageEnvelope 2 1 42 0) (Control.ModelUsageEnvelope 2 1 42 0)
         (Control.ModelTypedOutcome (toJSON (Reply 3 Nothing)))))))
   | otherwise = error "hook identity/annotation changed"
-handleModel (ModelCloseWith _) = modify (<> (["closed"] :: [Text])) >> pure (Right ())
+handleModel (ModelCloseWith _ _) = modify (<> (["closed"] :: [Text])) >> pure (Right ())
 
 main :: IO ()
 main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [testCase "NoTools model examples preserve selectors limits and receipts" noToolsExample
+  [testCase "model permissions carry exact operation catalog key and effort" permissionExample
+  , testCase "NoTools model examples preserve selectors limits and receipts" noToolsExample
   , testCase "synchronous model helpers compose in the Persona notebook with Console and display" personaNotebookExample
   , testGroup "model invocation cleanup"
       [ testCase "resume failure closes the acquired callback token once" (cleanupExample ResumeFailure)
@@ -96,6 +89,18 @@ tests = testGroup "test-model-turn"
       , testCase "malformed continuation returns typed failure and closes once" (cleanupExample MalformedResume)
       ]
   , testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+
+permissionExample :: IO ()
+permissionExample = do
+  unless (null (modelPermissionRequests noModelPermissions))
+    (error "omitted child permissions granted model authority")
+  let selected = Core.DeepSeekReasoning DeepSeekHigh
+      actual = modelPermissionRequests (modelPermissions
+        [allowModelCall flashChoice, allowForkAgent flashChoice, allowSpawnAgent flashChoice])
+      expected = [Control.ModelGrantRequest operation "test-catalog" "flash" [selected]
+                 | operation <- [Control.ModelCall, Control.ForkAgent, Control.SpawnAgent]]
+  unless (actual == expected)
+    (error "typed model permission changed its exact catalog, entry, effort or operation")
 
 scenario :: IO ()
 scenario = do
@@ -167,14 +172,12 @@ noToolsExample = do
     (Left _, Nothing) -> pure ()
     other -> error ("missing receipt or failure changed: " ++ show other)
   where
-    handleText :: Control.ModelSelectionEnvelope -> ModelCall a -> Eff '[] a
-    handleText expected (ModelStartWith value) =
+    handleText :: Control.ModelSelectionEnvelope -> ModelCall DeepSeek a -> Eff '[] a
+    handleText expected (ModelStartWith _ value) =
       case fromJSON value of
-        Success (Control.ModelRequestEnvelope _ input model reasoning limits tools _ hook selection)
+        Success (Control.ModelRequestEnvelope _ input limits tools _ hook selection)
           | input == "bounded input"
-          , model == Nothing
-          , reasoning == Nothing
-          , selection == Just expected
+          , selection == expected
           , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
           , tools == toJSON ([] :: [Value])
           , not hook -> pure (Right (toJSON (Control.ModelFinished
@@ -185,8 +188,10 @@ noToolsExample = do
     handleText _ _ = error "NoTools recipe attempted callback, hook or close"
 
 -- This is the installed Persona notebook row, including its invocation-only
--- effects. A helper fixed to SyncEffects '[ModelCall] cannot inhabit this cell.
-personaNotebook :: Eff (SyncEffects Persona.PersonaEffects)
+-- effects. A helper fixed to SyncEffects '[ModelCall DeepSeek] cannot inhabit this cell.
+type ModelPersonaEffects = ModelCall DeepSeek ': Persona.PersonaEffects
+
+personaNotebook :: Eff (SyncEffects ModelPersonaEffects)
   (ModelResult Text, ModelResult Text, (Int, Int, Int), (Int, Int, Int))
 personaNotebook = do
   say "before model calls"
@@ -207,12 +212,12 @@ data NotebookEvent
 
 -- Handle the two effects this real-row program is expected to request. Reject
 -- every other Persona effect instead of changing the program to a sparse row.
-runPersonaNotebook :: Eff (SyncEffects Persona.PersonaEffects) a -> (a, [NotebookEvent])
+runPersonaNotebook :: Eff (SyncEffects ModelPersonaEffects) a -> (a, [NotebookEvent])
 runPersonaNotebook = go 1
   where
-    go :: Int -> Eff (SyncEffects Persona.PersonaEffects) b -> (b, [NotebookEvent])
+    go :: Int -> Eff (SyncEffects ModelPersonaEffects) b -> (b, [NotebookEvent])
     go _ (Val value) = (value, [])
-    go next (E effect continuation) = case prj @ModelCall effect of
+    go next (E effect continuation) = case prj @(ModelCall DeepSeek) effect of
       Just request -> let (answer, event) = modelStep request
         in prepend event (go next (qApp continuation answer))
       Nothing -> case prj @Console effect of
@@ -227,17 +232,15 @@ runPersonaNotebook = go 1
         Just _ -> error "Persona model example requested an unexpected Console operation"
         Nothing -> error "Persona model example requested an unrelated effect"
     prepend event (answer, events) = (answer, event : events)
-    modelStep :: ModelCall b -> (b, NotebookEvent)
-    modelStep (ModelStartWith value) = case fromJSON value of
-      Success (Control.ModelRequestEnvelope _ input model reasoning limits tools _ hook selection)
-        | model == Nothing
-        , reasoning == Nothing
-        , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
+    modelStep :: ModelCall DeepSeek b -> (b, NotebookEvent)
+    modelStep (ModelStartWith _ value) = case fromJSON value of
+      Success (Control.ModelRequestEnvelope _ input limits tools _ hook selection)
+        | limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
         , tools == toJSON ([] :: [Value])
         , not hook ->
             let label
-                  | selection == Just (modelSelection flashChoice) = "DeepSeekFlash"
-                  | selection == Just (modelSelection proChoice) = "DeepSeekPro"
+                  | selection == modelSelection flashChoice = "DeepSeekFlash"
+                  | selection == modelSelection proChoice = "DeepSeekPro"
                   | otherwise = error "Persona model example changed its catalog identity, key or reasoning"
             in (Right (toJSON (Control.ModelFinished
                   (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"] [] 0
@@ -302,20 +305,20 @@ cleanupExample script = do
       | not (Text.null detail) -> pure ()
     _ -> error ("invokeModel lost the primary or cleanup failure: " ++ show result)
   where
-    cleanupHost :: ModelCall a -> Eff '[State [Text]] a
-    cleanupHost (ModelStartWith _) = do
+    cleanupHost :: ModelCall DeepSeek a -> Eff '[State [Text]] a
+    cleanupHost (ModelStartWith _ _) = do
       modify @[Text] (<> ["start"])
       pure (Right (toJSON (Control.ModelCallback "cleanup-token" "cleanup-call" "echo" (String "called"))))
-    cleanupHost (ModelResumeWith token call answer)
+    cleanupHost (ModelResumeWith _ token call answer)
       | token == "cleanup-token" && call == "cleanup-call"
       , answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = do
           modify @[Text] (<> ["resume"])
           pure (if script == MalformedResume then Right (Bool True)
             else Left (ModelTransportFailed "resume transport failed"))
       | otherwise = error "cleanup test resumed a different callback or result"
-    cleanupHost (ModelCloseWith token)
+    cleanupHost (ModelCloseWith _ token)
       | token == "cleanup-token" = do
           modify @[Text] (<> ["close:" <> token])
           pure (if script == CloseFailure then Left (ModelRejected "close refused") else Right ())
       | otherwise = error "cleanup used a token other than the acquired invocation"
-    cleanupHost (ModelAnnotateWith _ _ _) = error "failed continuation reached its after-tool hook"
+    cleanupHost (ModelAnnotateWith _ _ _ _) = error "failed continuation reached its after-tool hook"

@@ -426,7 +426,7 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(10) {
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(11) {
                 return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
             let mut frozen: Self = serde_json::from_value(selection).map_err(|error| {
@@ -693,7 +693,7 @@ impl FrozenWorkspace {
         }
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 10,
+            version: 11,
             identity,
             include,
             modules: config.haskell.modules,
@@ -2098,7 +2098,7 @@ mod tests {
         let manifest = directory.path().join("workspace/selection.json");
         let mut selected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        for version in [4, 5, 6, 7, 8] {
+        for version in [4, 5, 6, 7, 8, 9, 10] {
             selected["version"] = serde_json::json!(version);
             // An old completed inventory must be refused by its version,
             // before decoding its missing current coverage fields.
@@ -2409,7 +2409,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 10);
+        assert_eq!(selection["version"], 11);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();

@@ -412,7 +412,7 @@ impl ActorRuntimeObservation {
         let effects = capabilities
             .effect_keys()
             .iter()
-            .map(|effect| effect.haskell_name())
+            .map(|effect| effect.haskell_row_entry())
             .collect::<Vec<_>>()
             .join(", ");
         Some(format!(

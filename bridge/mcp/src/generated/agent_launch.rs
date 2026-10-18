@@ -4,14 +4,13 @@
 #[must_use]
 pub fn agent_launch_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "AgentLaunch",
-        description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+        description: "Validate or replace compiled agent tools and inspect or release retained checkpoints.",
         prompt_card: None,
         constructors: &[
-            "AgentLaunchSpawnWith :: SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Maybe Text -> Maybe Model -> Maybe Reasoning -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> AgentLaunch (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
             "AgentLaunchValidateSpecWith :: Value -> [ActorEffectKey] -> AgentLaunch (Either SpecValidationError SpecValidationReceipt)",
             "AgentLaunchReplaceSpecWith :: (Int, Int) -> (Int -> Eff childEffs ()) -> [ActorEffectKey] -> AgentLaunch (Either SpecReplacementError ())",
-            "AgentLaunchCheckpointWith :: Text -> AgentLaunch (Either CheckpointRefusal Text)",
             "AgentLaunchCheckCheckpointWith :: Text -> AgentLaunch (Either CheckpointRefusal ())",
             "AgentLaunchReleaseCheckpointWith :: Text -> AgentLaunch (Either CheckpointRefusal ())",
         ],
@@ -25,7 +24,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
             "data Reasoning = DeepSeekReasoning DeepSeekReasoning | OpenAIReasoning OpenAIReasoning | ArgonReasoning ArgonEffort deriving (Show, Eq, Generic)",
             "data WorkerLifetime = InvocationOwned | ActorOwned | RunOwned | InScope Scope deriving (Show, Eq)",
             "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | ReleasedCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
-            "data ActorEffectKey = EffectResourceScopes | EffectReplies | EffectWatches | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectSleep | EffectCommands | EffectConsole | EffectAskUser | EffectGreen | EffectNotifications | EffectJev | EffectModelCall | EffectActor | EffectReflect | EffectLookup | EffectRepoEvent | EffectSource | EffectJournal | EffectWeb | EffectFsRead | EffectFsWrite deriving (Show, Eq)",
+            "data ActorEffectKey = EffectResourceScopes | EffectReplies | EffectWatches | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectSleep | EffectCommands | EffectConsole | EffectAskUser | EffectGreen | EffectNotifications | EffectJev | EffectModelCallOpenAI | EffectModelCallArgon | EffectModelCallDeepSeek | EffectForkAgentOpenAI | EffectForkAgentArgon | EffectForkAgentDeepSeek | EffectSpawnAgentOpenAI | EffectSpawnAgentArgon | EffectSpawnAgentDeepSeek | EffectActor | EffectReflect | EffectLookup | EffectRepoEvent | EffectSource | EffectJournal | EffectWeb | EffectFsRead | EffectFsWrite deriving (Show, Eq)",
             "data SpecValidationError = SpecPreparationFailed Text | SpecMetadataInvalid Text | SpecEffectMismatch Text | SpecInterpreterUnavailable Text | SpecInputSchemaInvalid Text | SpecProviderProjectionInvalid Text deriving (Show, Eq, Generic)",
             "data SpecProvenance = SpecProvenanceUnavailable { specProvenanceReason :: Text } deriving (Show, Eq, Generic)",
             "data SpecProviderValidation = SpecProviderNotChecked | SpecProviderChecked deriving (Show, Eq, Generic)",

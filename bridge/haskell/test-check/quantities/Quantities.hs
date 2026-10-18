@@ -9,6 +9,7 @@ import Data.List (isInfixOf)
 import Numeric.Natural (Natural)
 import Tidepool.Agent.Contract (AgentSpec, AsyncHaskellTools, defaultAsyncWorkbenchSpec)
 import qualified Tidepool.Actors.Spawn as Spawn
+import qualified Tidepool.Model.Selection as Model
 import qualified Tidepool.Duration as Duration
 import qualified Tidepool.Effects.Core as Core
 
@@ -28,16 +29,21 @@ limits depth active = Spawn.SpawnLimits
   (either (error . show) id (Spawn.activeDescendants active))
 
 probeWire :: Maybe (Int, Int) -> Maybe Spawn.SpawnLimits -> Bool
-probeWire expected requested = case run (interpret host admission) of
+probeWire expected requested = case run (interpret host (interpret admin admission)) of
   Left (Spawn.SpawnRefused "observed limits") -> True
   _ -> False
   where
     options = (Spawn.defaultSpawnOptions
+      (Model.openAI "test-catalog" "primary" (Model.OpenAIOptions Model.OpenAILow))
       (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[]))
       { Spawn.spawnLimits = requested }
     admission = Spawn.spawnSubagent (Spawn.FreshCtx "idle") Spawn.SameDir options
-    host :: Core.AgentLaunch a -> Eff '[] a
-    host (Core.AgentLaunchSpawnWith _ _ _ _ _ _ _ _ _ actual)
+    admin :: Core.AgentLaunch a -> Eff '[Core.SpawnAgent Core.OpenAI] a
+    admin (Core.AgentLaunchValidateSpecWith _ _) = pure (Right
+      (Core.SpecValidationReceipt [] [] (Core.SpecProvenanceUnavailable "fixture") Core.SpecProviderNotChecked))
+    admin _ = error "unexpected administrative operation"
+    host :: Core.SpawnAgent Core.OpenAI a -> Eff '[] a
+    host (Core.SpawnAgentSpawnWith _ _ _ _ _ _ _ _ _ _ actual _)
       | actual == expected = pure (Left (Core.SpawnRefused "observed limits"))
       | otherwise = error "spawn limits changed at the generated boundary"
     host _ = error "unexpected launch operation"

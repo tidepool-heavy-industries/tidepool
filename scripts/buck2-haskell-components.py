@@ -4,6 +4,8 @@ import argparse
 from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
+import importlib.util
+import os
 import json
 from pathlib import Path
 import re
@@ -11,7 +13,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "bridge/haskell"
-WORKSPACE = ROOT / "exomonad/examples/workspace/.exomonad"
+WORKSPACE = ROOT / ".exomonad/workspace"
 EFFECTS = {"Tidepool.Effects", "Tidepool.Effects.Core", "Tidepool.Effects.Authored"}
 PROTOCOL_MODULES = {
     "Tidepool.Effects.Row",
@@ -139,15 +141,46 @@ def normalized_path(path):
     return re.sub(r"[/.-]", "_", path)
 
 
+def workspace_source_paths():
+    owner = ROOT / "scripts/workspace-git-resource.py"
+    spec = importlib.util.spec_from_file_location("workspace_git_resource", owner)
+    resource = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resource)
+    return resource.selected_source_paths(ROOT, "git")
+
+
+def absolute_path(path):
+    return Path(os.path.abspath(path))
+
+
+def workspace_path(path):
+    return absolute_path(path).is_relative_to(WORKSPACE)
+
+
+def declared_source(path, workspace_sources=None):
+    path = absolute_path(path)
+    if workspace_path(path):
+        selected = workspace_source_paths() if workspace_sources is None else workspace_sources
+        return path.relative_to(WORKSPACE).as_posix() in selected
+    return path.is_file()
+
+
+def resource_paths(root, workspace_sources):
+    root = absolute_path(root)
+    if workspace_path(root):
+        return [WORKSPACE / relative for relative in workspace_sources
+                if (WORKSPACE / relative).is_relative_to(root)]
+    return [path for path in sorted(root.rglob("*"))
+            if path.is_file() and path.suffix in {".hs", ".hs-boot", ".json", ".cbor", ".txt"}]
+
+
 def source_location(path):
-    path = path.resolve()
+    path = absolute_path(path)
     if path.is_relative_to(PACKAGE.resolve()):
         return path.relative_to(PACKAGE.resolve()).as_posix()
     if path.is_relative_to(WORKSPACE):
         relative = path.relative_to(WORKSPACE).as_posix()
-        if relative == "Examples/ModelCallWorkflow.hs":
-            return "//build/rust:workspace_model_call_source"
-        return "//exomonad/examples/workspace:authored_haskell_" + normalized_path(relative)
+        return "toolchains//:workspace_git_resource[source_" + normalized_path(relative) + "]"
     persona = ROOT / "exomonad/examples/persona/.exomonad"
     if path.is_relative_to(persona):
         return "//exomonad/examples/persona:authored_haskell_" + normalized_path(path.relative_to(persona).as_posix())
@@ -158,20 +191,18 @@ def is_jev_core(module):
     return module == "Jev.Core" or module.startswith("Jev.Core.")
 
 
-def source(module, roots):
+def source(module, roots, workspace_sources=None):
     path = module.replace(".", "/") + ".hs"
     if module in EFFECTS:
         return path, "//bridge/mcp:effects_generated[" + path.replace("/", "_").replace(".", "_") + "]"
     if module in PROTOCOL_MODULES:
         return path, "//bridge/protocol:generated[" + normalized_path("bridge/haskell/lib/" + path) + "]"
-    if module == "Examples.ModelCallWorkflow" and "../../exomonad/examples/workspace/.exomonad" in roots:
-        return path, "//build/rust:workspace_model_call_source"
     if module == "Project.Checks" and "generated/pinned" in roots:
         return path, "//exomonad/host:workspace_pinned_check_source"
     if is_jev_core(module) and "generated/jev/core" in roots:
         return path, "toolchains//:jev_sources[" + normalized_path("core/" + path) + "]"
     candidates = [PACKAGE / root / path for root in roots if not root.startswith("generated/")]
-    found = [source_location(candidate) for candidate in candidates if candidate.is_file()]
+    found = [source_location(candidate) for candidate in candidates if declared_source(candidate, workspace_sources)]
     if len(found) != 1:
         raise ValueError(f"module {module} needs one declared source under {roots}: {found}")
     return path, found[0]
@@ -227,21 +258,21 @@ def native_library_link_order(libraries, roster, package_name):
     return [name for name in reversed(ordered) if name in direct]
 
 
-def fields_for(component, roster, package_name):
+def fields_for(component, roster, package_name, workspace_sources=None):
     roots = component.source_dirs
     srcs = {}
     if component.kind != ComponentKind.LIBRARY:
         if not component.main or Path(component.main).suffix != ".hs":
             raise ValueError(f"{component.name} needs an implemented native Haskell main source")
         candidates = [PACKAGE / root / component.main for root in roots if not root.startswith("generated/")]
-        found = [source_location(candidate) for candidate in candidates if candidate.is_file()]
+        found = [source_location(candidate) for candidate in candidates if declared_source(candidate, workspace_sources)]
         if len(found) != 1:
             raise ValueError(f"component {component.name} needs one declared main-is: {found}")
         srcs["Main.hs"] = found[0]
     elif component.main is not None:
         raise ValueError(f"library {component.name} cannot have an executable main")
     for module in component.modules:
-        path, target = source(module, roots)
+        path, target = source(module, roots, workspace_sources)
         if path in srcs:
             raise ValueError(f"duplicate native source module in {component.name}: {module}")
         srcs[path] = target
@@ -254,13 +285,13 @@ def fields_for(component, roster, package_name):
     return roots, srcs, packages, dependencies, flags
 
 
-def native_catalog_cohort(roster):
+def native_catalog_cohort(roster, workspace_sources=None):
     """Project runtime source owners; compiler closure owns emitted inventory."""
     selected = {}
     components = set()
     for component in roster.values():
         for module in component.modules:
-            path, target = source(module, component.source_dirs)
+            path, target = source(module, component.source_dirs, workspace_sources)
             if module in EFFECTS:
                 relative = "effects/" + path
             elif module in PROTOCOL_MODULES:
@@ -291,19 +322,25 @@ def render(metadata=None):
         for module in component.modules
         if is_jev_core(module)
     })
+    workspace_sources = (workspace_source_paths() if any(
+        workspace_path(PACKAGE / root)
+        for component in roster.values() for root in component.source_dirs
+        if not root.startswith("generated/")
+    ) else ())
     lines = ['# @generated by scripts/buck2-haskell-components.py from pinned Cabal component metadata.',
              'load("@prelude//:rules.bzl", "filegroup", "haskell_binary", "haskell_library", "sh_test")',
              'load("//build/haskell:defs.bzl", "haskell_component_flags", "haskell_component_link_flags")', '',
-             "JEV_SOURCE_PATHS = " + literal(jev_sources), '']
+             "JEV_SOURCE_PATHS = " + literal(jev_sources), '',
+             "WORKSPACE_SOURCE_PATHS = " + literal(["source/" + path for path in workspace_sources]), '']
     if "native-helper-contract" in roster:
-        lines += ["NATIVE_CATALOG_COHORT = " + literal(native_catalog_cohort(roster)), '']
+        lines += ["NATIVE_CATALOG_COHORT = " + literal(native_catalog_cohort(roster, workspace_sources)), '']
     elif package_name == "tidepool-extract":
         raise ValueError("native catalog requires its metadata-owned helper cohort")
     lines += ['def declare_haskell_components():']
     for component in roster.values():
         if component.tools and component.kind != ComponentKind.TEST_SUITE:
             raise ValueError(f"{component.name} needs a native build-tool implementation")
-        roots, srcs, packages, dependencies, flags = fields_for(component, roster, package_name)
+        roots, srcs, packages, dependencies, flags = fields_for(component, roster, package_name, workspace_sources)
         link_packages = installed_link_packages(component, roster, package_name)
         name = component.name.replace("-", "_")
         suite = component.kind == ComponentKind.TEST_SUITE
@@ -339,16 +376,15 @@ def render(metadata=None):
         for root in sorted(set(roots) | {"lib", "actors"}):
             if root.startswith("generated/"):
                 continue
-            for path in sorted((PACKAGE / root).rglob("*")):
-                if path.is_file() and path.suffix in {".hs", ".hs-boot", ".json", ".cbor", ".txt"}:
-                    resolved = path.resolve()
-                    relative = ("workspace/.exomonad/" + resolved.relative_to(WORKSPACE).as_posix()
-                                if resolved.is_relative_to(WORKSPACE)
-                                else "persona/.exomonad/" + resolved.relative_to(ROOT / "exomonad/examples/persona/.exomonad").as_posix()
-                                if resolved.is_relative_to(ROOT / "exomonad/examples/persona/.exomonad")
-                                else resolved.relative_to(PACKAGE.resolve()).as_posix())
-                    if "Prelude_cbor" not in path.parts:
-                        resources[relative] = source_location(path)
+            for path in resource_paths(PACKAGE / root, workspace_sources):
+                resolved = absolute_path(path)
+                relative = ("workspace/.exomonad/" + resolved.relative_to(WORKSPACE).as_posix()
+                            if resolved.is_relative_to(WORKSPACE)
+                            else "persona/.exomonad/" + resolved.relative_to(ROOT / "exomonad/examples/persona/.exomonad").as_posix()
+                            if resolved.is_relative_to(ROOT / "exomonad/examples/persona/.exomonad")
+                            else resolved.relative_to(PACKAGE.resolve()).as_posix())
+                if "Prelude_cbor" not in path.parts:
+                    resources[relative] = source_location(path)
         for module in sorted(PROTOCOL_MODULES):
             path, producer = source(module, ["generated/protocol"])
             resources["lib/" + path] = producer

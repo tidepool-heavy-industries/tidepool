@@ -4,6 +4,7 @@
 #[must_use]
 pub fn agent_inspection_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "AgentInspection",
         description: "Private exact-incarnation lifecycle inspection substrate.",
         prompt_card: None,

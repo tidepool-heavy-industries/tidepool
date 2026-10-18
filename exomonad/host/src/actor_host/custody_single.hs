@@ -7,7 +7,7 @@ import Tidepool.Actors.Exomonad
 
 Right workerAgent <- spawnSubagent (FreshCtx "Complete the custody test assignment.")
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "worker", spawnLifetime = ActorOwned })
 Right worker <- request @Text workerAgent ("custody" :: Text)
   (defaultRequestOptions { requestLabel = Just "worker" })

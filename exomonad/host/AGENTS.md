@@ -7,7 +7,7 @@ For launch and prompt changes, use focused owning tests such as
 `actor_host::documentation_tests::published_notebook_sources_match_authored_fixtures`,
 `actor_host::documentation_tests::published_request_example_retains_success_and_target_cancellation`, and
 `exomonad::tests::config_effort_defaults_low_and_preserves_explicit_values` and
-`actor_host::cell_model::tests::cell_model_policy_matches_admitted_embedded_alias_and_effort` in the `exomonad-host`
+`actor_host::cell_model::tests::typed_cell_model_selection_checks_actor_grants_before_provider_work` in the `exomonad-host`
 library. When changing launch configuration or tool contracts, update the
 scripted-provider fixtures, check exact test selections actually ran, and
 compile changed consumers.
@@ -70,7 +70,14 @@ Notebook inspection feedback may be a binding handle. Behavioral assertions
 must follow the existing output or inspection owner to the evaluated value;
 immediate feedback text is not itself proof of the result. `display` publishes
 through the ordinary output coordinator. Hosted tests follow its receipt into
-the Store, and component campaigns use their existing actor-output driver.
+the Store. Component campaigns use `TestCampaign::drive_actor_output` while
+awaiting any operation that can publish output, including named authored tool
+handlers.
+
+Model-free `TestCampaign` setup that spawns native children must await the
+operation through `drive_native_admission`. It acknowledges native installations,
+retains their deployment events for assertions, and drives output. Tests of
+admission barriers keep explicit acknowledgement ownership.
 
 Recipe activation messages present the typed request; they are separate from
 the fresh context seed supplied during provider attachment. Assert payload

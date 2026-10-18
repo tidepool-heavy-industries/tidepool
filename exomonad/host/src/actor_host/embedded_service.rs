@@ -47,12 +47,6 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
     }
 }
 
-pub(super) fn responses_client(
-    runtime: &EmbeddedHarnessRuntime,
-) -> ResponsesClient<super::run_auth::RunAuth> {
-    ResponsesClient::new(runtime.inference_auth().clone())
-}
-
 pub(super) struct EmbeddedService {
     pub(super) _owner: Arc<super::HostIncarnationLease>,
     pub(super) settings: EmbeddedLaunchConfig,
@@ -259,15 +253,16 @@ impl EmbeddedService {
     pub(super) fn projection_target(
         &self,
         model: String,
+        auth: super::run_auth::RunAuth,
     ) -> Result<harness::context::ContextProjectionTarget, String> {
         use harness::engine::ResponsesTransport;
         #[cfg(test)]
         let selection = match &self.test_transport {
             Some(transport) => transport.prepare_submission(),
-            None => responses_client(&self.runtime).prepare_submission(),
+            None => ResponsesClient::new(auth.clone()).prepare_submission(),
         };
         #[cfg(not(test))]
-        let selection = responses_client(&self.runtime).prepare_submission();
+        let selection = ResponsesClient::new(auth).prepare_submission();
         let selection = selection.map_err(|error| error.to_string())?;
         Ok(harness::context::ContextProjectionTarget::for_transport(
             model, &selection,
@@ -817,8 +812,9 @@ pub(super) async fn drive_conversation(
     cancellation: watch::Receiver<bool>,
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
+    auth: super::run_auth::RunAuth,
 ) -> Result<(), EmbeddedDriverError> {
-    let transport = responses_client(&runtime);
+    let transport = ResponsesClient::new(auth);
     drive_conversation_with_transport::<super::run_auth::RunAuth, _>(
         embedded,
         runtime,

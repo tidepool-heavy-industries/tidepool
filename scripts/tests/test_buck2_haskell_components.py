@@ -86,28 +86,18 @@ class ComponentProjectionTests(unittest.TestCase):
                     configurations=[dict(phase=phase, flags={"test-tools": phase != "production", "benchmarks": phase == "benchmarks"}, components=list(values))
                                     for phase, values in zip(("production", "tests", "benchmarks"), (production, tests, benchmarks))])
 
-    def test_workspace_runtime_resources_have_owning_native_exports(self):
-        workspace_package = G.WORKSPACE.parent
-        exports = []
-        environment = {
-            "load": lambda *args: None,
-            "export_file": lambda **rule: exports.append(rule),
-            "filegroup": lambda **rule: None,
-            "native_source_snapshot": lambda **rule: None,
-            "sh_test": lambda **rule: None,
-            "read_root_config": lambda *args: "",
-            "glob": lambda patterns: sorted({
-                path.relative_to(workspace_package).as_posix()
-                for pattern in patterns for path in workspace_package.glob(pattern)
-                if path.is_file()
-            }),
-        }
-        for filename in ("authored_sources.bzl", "BUCK"):
-            path = workspace_package / filename
-            exec(compile(path.read_text(), str(path), "exec"), environment)
-        declared = {"//exomonad/examples/workspace:" + rule["name"]: rule for rule in exports}
+    def test_workspace_compilation_and_runtime_resources_share_the_pinned_producer(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        workspace = Path(temporary.name)
+        (workspace / "Project").mkdir()
+        (workspace / "Project/Unselected.hs").write_text("module Project.Unselected where\n")
+        patch.object(G, "WORKSPACE", workspace).start()
+        patch.object(G, "workspace_source_paths", return_value=(
+            "Project/Work.hs", "checks/automation-helper-contract.hs", "checks/usage-examples.json",
+        )).start()
         suite = component("workspace-resources", "test-suite", "tests",
-                          (str(G.WORKSPACE),), (), main="checks/automation-helper-contract.hs")
+                          (str(G.WORKSPACE),), ("Project.Work",), main="checks/automation-helper-contract.hs")
         rendered = ast.parse(G.render(self.metadata(tests=[suite])))
         resource_call = next(node for node in ast.walk(rendered)
                              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -117,15 +107,23 @@ class ComponentProjectionTests(unittest.TestCase):
                                      for keyword in node.keywords))
         resources = ast.literal_eval(next(keyword.value for keyword in resource_call.keywords
                                           if keyword.arg == "srcs"))
-        selected = {relative: target for relative, target in resources.items()
-                    if target.startswith("//exomonad/examples/workspace:")}
-        self.assertIn("workspace/.exomonad/checks/usage-examples.json", selected)
-        for relative, target in selected.items():
-            with self.subTest(resource=relative):
-                path = G.WORKSPACE / relative.removeprefix("workspace/.exomonad/")
-                export = declared[target]
-                self.assertEqual(export["src"], path.relative_to(workspace_package).as_posix())
-                self.assertEqual(export["out"], path.name)
+        self.assertEqual(resources["workspace/.exomonad/Project/Work.hs"],
+                         "toolchains//:workspace_git_resource[source_Project_Work_hs]")
+        self.assertEqual(G.source("Project.Work", [str(G.WORKSPACE)])[1],
+                         resources["workspace/.exomonad/Project/Work.hs"])
+        self.assertEqual(resources["workspace/.exomonad/checks/usage-examples.json"],
+                         "toolchains//:workspace_git_resource[source_checks_usage_examples_json]")
+        self.assertFalse(any(target.startswith("//exomonad/examples/workspace:")
+                             for target in resources.values()))
+        projections = next(ast.literal_eval(statement.value) for statement in rendered.body
+                           if isinstance(statement, ast.Assign)
+                           and any(isinstance(target, ast.Name) and target.id == "WORKSPACE_SOURCE_PATHS"
+                                   for target in statement.targets))
+        self.assertIn("source/Project/Work.hs", projections)
+        self.assertIn("source/checks/usage-examples.json", projections)
+        self.assertNotIn("workspace/.exomonad/Project/Unselected.hs", resources)
+        with self.assertRaisesRegex(ValueError, "needs one declared source"):
+            G.source("Project.Unselected", [str(G.WORKSPACE)])
 
     def test_project_libraries_are_edges_and_installed_packages_are_roots(self):
         library = component("internal", dependencies=[dependency("ghc"), dependency("cryptohash-sha256")])
@@ -274,9 +272,12 @@ class ComponentProjectionTests(unittest.TestCase):
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")
         self.assertEqual(G.source("Project.Checks", ["generated/pinned"])[1],
                          "//exomonad/host:workspace_pinned_check_source")
-        self.assertEqual(G.source("Examples.ModelCallWorkflow",
-                                  ["../../exomonad/examples/workspace/.exomonad"])[1],
-                         "//build/rust:workspace_model_call_source")
+        with patch.object(G, "workspace_source_paths", return_value=("Examples/ModelCallWorkflow.hs",)):
+            self.assertEqual(G.source("Examples.ModelCallWorkflow", [str(G.WORKSPACE)])[1],
+                             "toolchains//:workspace_git_resource[source_Examples_ModelCallWorkflow_hs]")
+        with self.assertRaisesRegex(ValueError, "owning native source export"):
+            G.source("Examples.ModelCallWorkflow",
+                     [str(SCRIPT.parents[1] / "exomonad/examples/workspace/.exomonad")])
         self.assertEqual(G.source("Jev.Core.Schema", ["generated/jev/core"])[1],
                          "toolchains//:jev_sources[core_Jev_Core_Schema_hs]")
         with tempfile.TemporaryDirectory() as directory:
@@ -286,9 +287,9 @@ class ComponentProjectionTests(unittest.TestCase):
             source.write_text("module Project.Control where\n")
             with patch.object(G, "WORKSPACE", workspace):
                 self.assertEqual(G.source_location(source),
-                                 "//exomonad/examples/workspace:authored_haskell_Project_Control_hs")
+                                 "toolchains//:workspace_git_resource[source_Project_Control_hs]")
                 self.assertEqual(G.source_location(workspace / "Examples/ModelCallWorkflow.hs"),
-                                 "//build/rust:workspace_model_call_source")
+                                 "toolchains//:workspace_git_resource[source_Examples_ModelCallWorkflow_hs]")
 
     def test_bootstrap_uses_declared_target_without_ambient_parser(self):
         with patch.object(G.subprocess, "run") as run:

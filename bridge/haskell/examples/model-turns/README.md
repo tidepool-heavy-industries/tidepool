@@ -12,7 +12,10 @@ handoff, and inspect retained failure output. Supply project-specific callbacks;
 only those tools are available. Keep important authority in the callback owner.
 The examples deliberately expose no shell or rerun operation.
 
-Build a reusable `textTurn` or `typedTurn`, then call `invokeModel turn input`.
+Build a reusable `textTurn model` or `typedTurn model` with an explicit
+`Model family`, then call `invokeModel turn input`. The program requires
+`Member (ModelCall family) effects`; the runtime checks its exact model and
+effort against the actor's admitted permissions.
 Tool records, argument/result schemas and optional after-tool hooks are the same
 `AgentSpec` surface. This initial adapter accepts JSON function tools with object
 inputs; raw custom tools and scalar inputs are refused before provider admission.
@@ -82,7 +85,10 @@ returning to exactly the same content permits that version again.
 
 Only an explicitly synchronous profile admits `ContextReadWrite`. After the
 editing cell commits, capture the context for delegation separately;
-`ContextWorkflow.delegateCuratedContext` uses that completed projection.
+`ContextWorkflow.delegateCuratedContext model actualSpec` uses that completed
+projection. Its model value pins the captured context's family and selects the
+child's exact model and effort. It requires `ForkAgent family`; the runtime checks
+those choices before allocating a child.
 `getInitialContext` reports historical startup evidence, so refresh selects its
 exact reference in a new inspection and stages a targeted replacement.
 `inspectOriginalText reference selector` observes an authorized retained original,

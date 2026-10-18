@@ -805,7 +805,7 @@ rust_filegroup(
         "src/actor_host/fixtures/captured_context_original_owner_setup.hs": "exomonad/host/src/actor_host/fixtures/captured_context_original_owner_setup.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs",
-        "src/actor_host/fixtures/child_backend_refusal.hs": "exomonad/host/src/actor_host/fixtures/child_backend_refusal.hs",
+        "src/actor_host/fixtures/child_model_grant_refusal.hs": "exomonad/host/src/actor_host/fixtures/child_model_grant_refusal.hs",
         "src/actor_host/fixtures/choice_probe.hs": "exomonad/host/src/actor_host/fixtures/choice_probe.hs",
         "src/actor_host/fixtures/coherent_recovery_bind_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "src/actor_host/fixtures/coherent_recovery_extra_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs",
@@ -862,6 +862,10 @@ rust_filegroup(
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "src/actor_host/fixtures/recipe_unbound_restart.hs": "exomonad/host/src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "src/actor_host/fixtures/record_model_denied.hs": "exomonad/host/src/actor_host/fixtures/record_model_denied.hs",
+        "src/actor_host/fixtures/record_model_first.hs": "exomonad/host/src/actor_host/fixtures/record_model_first.hs",
+        "src/actor_host/fixtures/record_model_retire.hs": "exomonad/host/src/actor_host/fixtures/record_model_retire.hs",
+        "src/actor_host/fixtures/record_model_second.hs": "exomonad/host/src/actor_host/fixtures/record_model_second.hs",
         "src/actor_host/fixtures/review_fresh_consumer.hs": "exomonad/host/src/actor_host/fixtures/review_fresh_consumer.hs",
         "src/actor_host/fixtures/review_fresh_consumer_reply.hs": "exomonad/host/src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "src/actor_host/fixtures/review_named_final_acceptance.hs": "exomonad/host/src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -909,6 +913,7 @@ rust_filegroup(
         "src/actor_host/fixtures/terminal_transfer_setup.hs": "exomonad/host/src/actor_host/fixtures/terminal_transfer_setup.hs",
         "src/actor_host/fixtures/three_actor_workload_roster.json": "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json",
         "src/actor_host/fixtures/watchdog_history_probe.hs": "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs",
+        "src/actor_host/fixtures/workflow_examples_checks.hs": "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs",
         "src/actor_host/form_output.rs": "exomonad/host/src/actor_host/form_output.rs",
         "src/actor_host/fresh_child_tests.rs": "exomonad/host/src/actor_host/fresh_child_tests.rs",
         "src/actor_host/harness_usecase_performance.rs": "exomonad/host/src/actor_host/harness_usecase_performance.rs",
@@ -1172,7 +1177,7 @@ tidepool_rust_test_cases(
         "exomonad::tests::launch_version_and_selection_shape_must_agree",
         "actor_host::display_output::transport_admission_tests::preadmitted_transport_requires_unopened_store_and_preserves_existing_state",
         "actor_host::display_output::transport_admission_tests::preadmitted_transport_does_not_treat_uninspectable_store_as_fresh",
-        "actor_host::cell_model::tests::cell_model_policy_resolves_only_the_fixed_backend_before_provider_work",
+        "actor_host::cell_model::tests::typed_cell_model_selection_checks_actor_grants_before_provider_work",
         "actor_host::run_auth::tests::injected_contract_refuses_backend_and_limits_before_startup_work",
     ],
     expected_count = 8,
@@ -2779,7 +2784,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/captured_context_original_owner_setup.hs": "src/actor_host/fixtures/captured_context_original_owner_setup.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
-        "exomonad/host/src/actor_host/fixtures/child_backend_refusal.hs": "src/actor_host/fixtures/child_backend_refusal.hs",
+        "exomonad/host/src/actor_host/fixtures/child_model_grant_refusal.hs": "src/actor_host/fixtures/child_model_grant_refusal.hs",
         "exomonad/host/src/actor_host/fixtures/choice_probe.hs": "src/actor_host/fixtures/choice_probe.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs": "src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs": "src/actor_host/fixtures/coherent_recovery_extra_b.hs",
@@ -2836,6 +2841,10 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_unbound_restart.hs": "src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_denied.hs": "src/actor_host/fixtures/record_model_denied.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_first.hs": "src/actor_host/fixtures/record_model_first.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_retire.hs": "src/actor_host/fixtures/record_model_retire.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_second.hs": "src/actor_host/fixtures/record_model_second.hs",
         "exomonad/host/src/actor_host/fixtures/review_fresh_consumer.hs": "src/actor_host/fixtures/review_fresh_consumer.hs",
         "exomonad/host/src/actor_host/fixtures/review_fresh_consumer_reply.hs": "src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "exomonad/host/src/actor_host/fixtures/review_named_final_acceptance.hs": "src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -2883,6 +2892,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/terminal_transfer_setup.hs": "src/actor_host/fixtures/terminal_transfer_setup.hs",
         "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json": "src/actor_host/fixtures/three_actor_workload_roster.json",
         "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs": "src/actor_host/fixtures/watchdog_history_probe.hs",
+        "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs": "src/actor_host/fixtures/workflow_examples_checks.hs",
         "exomonad/host/src/actor_host/form_output.rs": "src/actor_host/form_output.rs",
         "exomonad/host/src/actor_host/fresh_child_tests.rs": "src/actor_host/fresh_child_tests.rs",
         "exomonad/host/src/actor_host/harness_usecase_performance.rs": "src/actor_host/harness_usecase_performance.rs",
@@ -3503,9 +3513,9 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6261636b656e645f7265667573616c2e6873",
-    src = "src/actor_host/fixtures/child_backend_refusal.hs",
-    out = "child_backend_refusal.hs",
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6d6f64656c5f6772616e745f7265667573616c2e6873",
+    src = "src/actor_host/fixtures/child_model_grant_refusal.hs",
+    out = "child_model_grant_refusal.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -4098,6 +4108,41 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c2e6873",
+    src = "src/actor_host/fixtures/record_model.hs",
+    out = "record_model.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f64656e6965642e6873",
+    src = "src/actor_host/fixtures/record_model_denied.hs",
+    out = "record_model_denied.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f66697273742e6873",
+    src = "src/actor_host/fixtures/record_model_first.hs",
+    out = "record_model_first.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f7265746972652e6873",
+    src = "src/actor_host/fixtures/record_model_retire.hs",
+    out = "record_model_retire.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f7365636f6e642e6873",
+    src = "src/actor_host/fixtures/record_model_second.hs",
+    out = "record_model_second.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726571756573745f72656c6f61645f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/request_reload_agent_spec.hs",
     out = "request_reload_agent_spec.hs",
@@ -4535,6 +4580,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7761746368646f675f686973746f72795f70726f62652e6873",
     src = "src/actor_host/fixtures/watchdog_history_probe.hs",
     out = "watchdog_history_probe.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f776f726b666c6f775f6578616d706c65735f636865636b732e6873",
+    src = "src/actor_host/fixtures/workflow_examples_checks.hs",
+    out = "workflow_examples_checks.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f776f726b73706163655f7175616e7469746965732e6873",
+    src = "src/actor_host/fixtures/workspace_quantities.hs",
+    out = "workspace_quantities.hs",
     visibility = ["PUBLIC"],
 )
 

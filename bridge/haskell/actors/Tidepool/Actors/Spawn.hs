@@ -1,6 +1,10 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -9,6 +13,8 @@
 -- | Independent idle subagents with explicit context, tools and ownership.
 module Tidepool.Actors.Spawn
   ( SpawnContext (..)
+  , Captured, Fresh
+  , SpawnEffect
   , ContextCheckpoint
   , checkpoint
   , releaseCheckpoint
@@ -22,7 +28,7 @@ module Tidepool.Actors.Spawn
   , currentWorkspace
   , SpawnOptions
   , spawnModel
-  , spawnReasoning
+  , spawnPermissions
   , spawnInstructions
   , spawnLabel
   , spawnLifetime
@@ -52,13 +58,14 @@ module Tidepool.Actors.Spawn
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
-import Tidepool.Aeson (Value, ToJSON)
+import Tidepool.Aeson (Value, ToJSON, toJSON)
+import Tidepool.Model.Selection
 import Tidepool.Aeson.Schema (JsonSchema)
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import Prelude
 import Tidepool.Agent.Contract
-  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec
+  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, SyncEffects, installSpec
   , PreparedAgentSpec, prepareAgentSpec, preparedAgentSpecMetadata, installPreparedSpec
   , renderToolCompileError )
 import Tidepool.Agent.Launch hiding (workspaceWire)
@@ -67,7 +74,7 @@ import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
 import Tidepool.Actors.Internal.Agent (installRequestReceiver)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
-  ( AgentLaunch (..), CheckpointRefusal, Model, Reasoning
+  ( AgentLaunch (..), ForkAgent (..), SpawnAgent (..), KnownFamily (familyWitness), CheckpointRefusal
   , WorkerLifetime (..), SpawnContextWire (..)
   , SpawnCleanup (..)
   , SpecReplacementError (..), SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..), SpecProviderValidation (..)
@@ -76,16 +83,39 @@ import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Runtime-issued exact provider and Haskell capture, never a source string.
-newtype ContextCheckpoint = ContextCheckpoint Text
+type role ContextCheckpoint nominal
+newtype ContextCheckpoint modelFamily = ContextCheckpoint Text
   deriving (Show, Eq)
 
-data SpawnContext = ForkCtx ContextCheckpoint | FreshCtx Text
-  deriving (Show, Eq)
+data Captured
+data Fresh
 
-checkpoint :: Member AgentLaunch effects => Text -> Eff effects (Either CheckpointRefusal ContextCheckpoint)
-checkpoint name = fmap ContextCheckpoint <$> send (AgentLaunchCheckpointWith name)
+-- | The context mode selects the required effect, and a capture retains its
+-- nominal family even when the child chooses another exact model or effort.
+data SpawnContext mode modelFamily where
+  ForkCtx :: ContextCheckpoint modelFamily -> SpawnContext Captured modelFamily
+  FreshCtx :: Text -> SpawnContext Fresh modelFamily
 
-releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint -> Eff effects (Either CheckpointRefusal ())
+instance Show (SpawnContext mode modelFamily) where
+  showsPrec precedence (ForkCtx capture) = showParen (precedence > 10)
+    (showString "ForkCtx " . showsPrec 11 capture)
+  showsPrec precedence (FreshCtx prompt) = showParen (precedence > 10)
+    (showString "FreshCtx " . showsPrec 11 prompt)
+
+instance Eq (SpawnContext mode modelFamily) where
+  ForkCtx left == ForkCtx right = left == right
+  FreshCtx left == FreshCtx right = left == right
+
+type family SpawnEffect mode modelFamily where
+  SpawnEffect Captured modelFamily = ForkAgent modelFamily
+  SpawnEffect Fresh modelFamily = SpawnAgent modelFamily
+
+-- | Capture the caller's actual conversation. The model value pins only the
+-- family; it does not switch the conversation to another model or effort.
+checkpoint :: forall modelFamily effects. (KnownFamily modelFamily, Member (ForkAgent modelFamily) effects) => Model modelFamily -> Text -> Eff effects (Either CheckpointRefusal (ContextCheckpoint modelFamily))
+checkpoint _ name = fmap ContextCheckpoint <$> send @(ForkAgent modelFamily) (ForkAgentCheckpointWith (familyWitness @modelFamily) name)
+
+releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint modelFamily -> Eff effects (Either CheckpointRefusal ())
 releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpointWith token)
 
 -- | A partial admission retains usable runtime-issued handles for cleanup.
@@ -135,10 +165,10 @@ limitsWire :: SpawnLimits -> (Int, Int)
 limitsWire (SpawnLimits (DescendantDepth depth) (ActiveDescendants active)) = (depth, active)
 
 -- | The real typed spec is retained with all its compiled closure dependencies.
-data SpawnOptions tools childEffects = SpawnOptions
+data SpawnOptions modelFamily tools childEffects = SpawnOptions
   { selectedSpawnSpec :: SpawnSpec tools childEffects
-  , spawnModel :: Maybe Model
-  , spawnReasoning :: Maybe Reasoning
+  , spawnModel :: Model modelFamily
+  , spawnPermissions :: ModelPermissions
   , spawnInstructions :: Maybe Text
   , spawnLabel :: Maybe Text
   , spawnLifetime :: WorkerLifetime
@@ -146,8 +176,8 @@ data SpawnOptions tools childEffects = SpawnOptions
   , spawnLimits :: Maybe SpawnLimits
   }
 
-defaultSpawnOptions :: AgentSpec tools childEffects -> SpawnOptions tools childEffects
-defaultSpawnOptions spec = SpawnOptions (RawSpawnSpec spec) Nothing Nothing Nothing Nothing ActorOwned Nothing
+defaultSpawnOptions :: Model modelFamily -> AgentSpec tools childEffects -> SpawnOptions modelFamily tools childEffects
+defaultSpawnOptions model spec = SpawnOptions (RawSpawnSpec spec) model noModelPermissions Nothing Nothing ActorOwned Nothing
 
 data SpawnSpec tools effects
   = RawSpawnSpec (AgentSpec tools effects)
@@ -169,8 +199,8 @@ validatedAgentSpecReport (ValidatedAgentSpec prepared receipt) =
 
 -- | Reuse the exact prepared value. Spawn still rechecks current admission;
 -- editing draft source cannot substitute another spec into this value.
-defaultValidatedSpawnOptions :: ValidatedAgentSpec tools effects -> SpawnOptions tools effects
-defaultValidatedSpawnOptions validated = SpawnOptions (ValidatedSpawnSpec validated) Nothing Nothing Nothing Nothing ActorOwned Nothing
+defaultValidatedSpawnOptions :: Model modelFamily -> ValidatedAgentSpec tools effects -> SpawnOptions modelFamily tools effects
+defaultValidatedSpawnOptions model validated = SpawnOptions (ValidatedSpawnSpec validated) model noModelPermissions Nothing Nothing ActorOwned Nothing
 
 -- | Inspect this concrete value's declarations on the current host without
 -- allocating a child or running authored handlers, startup or after-tool code.
@@ -195,10 +225,10 @@ validatePreparedSpec prepared = do
 -- | Return only after workspace, tools and provider attachment are ready.
 -- Fresh seed text creates context; it does not activate inference.
 spawnSubagent
-  :: forall tools childEffects effects.
-     ( Member AgentLaunch effects, HasInstalledAgentApi tools childEffects
+  :: forall mode modelFamily tools childEffects effects.
+     ( KnownFamily modelFamily, Member (SpawnEffect mode modelFamily) effects, Member AgentLaunch effects, HasInstalledAgentApi tools childEffects
      , KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects )
-  => SpawnContext -> Workspace -> SpawnOptions tools childEffects
+  => SpawnContext mode modelFamily -> Workspace -> SpawnOptions modelFamily tools childEffects
   -> Eff effects (Either SpawnError AgentRef)
 spawnSubagent context workspace options = do
   validation <- case selectedSpawnSpec options of
@@ -208,24 +238,30 @@ spawnSubagent context workspace options = do
     Left failure -> pure (Left (SpawnInvalidSpec failure))
     Right (ValidatedAgentSpec prepared _) -> launch prepared
   where
+    launch :: PreparedAgentSpec tools childEffects -> Eff effects (Either SpawnError AgentRef)
     launch prepared = do
-     admitted <- send (AgentLaunchSpawnWith
-      (contextWire context)
-      (\_ -> do
-        installPreparedSpec prepared
-        installRequestReceiver)
-      (Launch.workspaceWire workspace)
-      (effectKeys (knownEffects @childEffects))
-      (spawnLabel options)
-      (spawnModel options)
-      (spawnReasoning options)
-      (spawnInstructions options)
-      (spawnLifetime options)
-      (limitsWire <$> spawnLimits options)
-      (preparedAgentSpecMetadata prepared))
-     pure $ case admitted of
-      Left failure -> Left (spawnError failure)
-      Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
+      admitted <- case context of
+        ForkCtx _ -> send @(ForkAgent modelFamily) (ForkAgentSpawnWith (familyWitness @modelFamily)
+          (entry prepared) (contextWire context) (Launch.workspaceWire workspace)
+          (effectKeys (knownEffects @childEffects))
+          (toJSON (modelPermissionRequests (spawnPermissions options)))
+          (spawnLabel options) (toJSON (modelSelection (spawnModel options)))
+          (spawnInstructions options) (spawnLifetime options)
+          (limitsWire <$> spawnLimits options) (preparedAgentSpecMetadata prepared))
+        FreshCtx _ -> send @(SpawnAgent modelFamily) (SpawnAgentSpawnWith (familyWitness @modelFamily)
+          (entry prepared) (contextWire context) (Launch.workspaceWire workspace)
+          (effectKeys (knownEffects @childEffects))
+          (toJSON (modelPermissionRequests (spawnPermissions options)))
+          (spawnLabel options) (toJSON (modelSelection (spawnModel options)))
+          (spawnInstructions options) (spawnLifetime options)
+          (limitsWire <$> spawnLimits options) (preparedAgentSpecMetadata prepared))
+      pure $ case admitted of
+        Left failure -> Left (spawnError failure)
+        Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
+    entry :: PreparedAgentSpec tools childEffects -> Int -> Eff (Core.AgentTools ': SyncEffects childEffects) ()
+    entry prepared _ = do
+      installPreparedSpec prepared
+      installRequestReceiver
 
 -- These identities come only from the interpreter's admission receipt.
 admittedAgent :: Int -> Int -> Maybe Core.WorktreeHandle -> AgentRef
@@ -242,7 +278,7 @@ retainedResources (Core.SpawnRetainedWorkspace workspace) = SpawnRetainedWorkspa
 retainedResources (Core.SpawnRetainedActor (actor, incarnation) workspace) =
   SpawnRetainedActor (admittedAgent actor incarnation workspace)
 
-contextWire :: SpawnContext -> SpawnContextWire
+contextWire :: SpawnContext mode modelFamily -> SpawnContextWire
 contextWire (ForkCtx (ContextCheckpoint token)) = CapturedSpawn token
 contextWire (FreshCtx prompt) = FreshSpawn prompt
 

@@ -4,6 +4,7 @@
 #[must_use]
 pub fn introspection_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Introspection",
         description: "Read-only, GHC-authoritative structured inspection of the executing resident scope or an explicitly named public module.",
         prompt_card: Some("Use qualified `Tidepool.Introspection.info`/`typeOf` for structured Haskell API inspection."),

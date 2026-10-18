@@ -201,6 +201,7 @@ pub fn actor() -> Effect {
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
+                    Arg { name: "model_grants", ty: HsType::Value, rust: RustBinding::JsonValue },
                     Arg {
                         name: "workspace",
                         ty: HsType::Maybe(Box::new(HsType::Named("WorkspaceHandle"))),
@@ -357,6 +358,7 @@ pub fn actor() -> Effect {
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
+                    Arg { name: "model_grants", ty: HsType::Value, rust: RustBinding::JsonValue },
                 ],
                 ret: address_type(),
                 errors: None,

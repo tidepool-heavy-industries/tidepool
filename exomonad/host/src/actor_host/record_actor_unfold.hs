@@ -26,15 +26,16 @@ data Launcher mode = Launcher
   , readReply :: mode :- Call () (R.Reply (Maybe Text))
   } deriving Generic
 
-launchDefinition =
-  R.definition "launch-review" (Actor.Selected (knownEffects @'[AgentLaunch, Replies, Actor])) Launcher
+launchDefinition model selected =
+  R.withModelPermissions (modelPermissions [allowSpawnAgent model]) $
+  R.definition "launch-review" (Actor.Selected selected) Launcher
     { launcherState = Nothing
     , saveReply = \result -> R.put (Just (either (const "unavailable") responseValue result))
     , readReply = \() -> R.get
     , launchAndAwait = \() -> do
         Right workerAgent <- spawnSubagent (FreshCtx "Return the requested typed result.")
           (ForkWorktree currentCheckout)
-          ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+          ((defaultSpawnOptions model (A.defaultWorkbenchSpec @'[Replies]))
             { spawnLabel = Just "review", spawnLifetime = ActorOwned })
         Right worker <- request @Text workerAgent ("reply once" :: Text)
           (defaultRequestOptions { requestLabel = Just "review" })

@@ -4,6 +4,7 @@
 #[must_use]
 pub fn actor_local_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ActorLocal",
         description: "Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol index ties requests to the installed program. The enclosing ActorDefinition separately fixes successful exit.",
         prompt_card: None,

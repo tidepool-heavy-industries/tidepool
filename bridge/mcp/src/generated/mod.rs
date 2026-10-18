@@ -15,6 +15,7 @@ pub mod commands;
 pub mod console;
 pub mod context_read_write;
 pub mod exec;
+pub mod fork_agent;
 pub mod green;
 pub mod introspection;
 pub mod jev;
@@ -30,6 +31,7 @@ pub mod repo_event;
 pub mod resource_scopes;
 pub mod sleep;
 pub mod source;
+pub mod spawn_agent;
 pub mod web;
 pub mod worktree;
 pub mod worktree_allocation;
@@ -51,6 +53,7 @@ pub use commands::*;
 pub use console::*;
 pub use context_read_write::*;
 pub use exec::*;
+pub use fork_agent::*;
 pub use green::*;
 pub use introspection::*;
 pub use jev::*;
@@ -66,11 +69,14 @@ pub use repo_event::*;
 pub use resource_scopes::*;
 pub use sleep::*;
 pub use source::*;
+pub use spawn_agent::*;
 pub use web::*;
 pub use worktree::*;
 pub use worktree_allocation::*;
 pub use worktree_integration::*;
 pub use worktree_registry::*;
+
+pub(crate) const MODEL_FAMILY_VOCABULARY: &str = "data OpenAI\ndata Argon\ndata DeepSeek\ntype role FamilyWitness nominal\ndata FamilyWitness modelFamily where\n  OpenAIWitness :: FamilyWitness OpenAI\n  ArgonWitness :: FamilyWitness Argon\n  DeepSeekWitness :: FamilyWitness DeepSeek\nclass KnownFamily modelFamily where\n  familyWitness :: FamilyWitness modelFamily\ninstance KnownFamily OpenAI where familyWitness = OpenAIWitness\ninstance KnownFamily Argon where familyWitness = ArgonWitness\ninstance KnownFamily DeepSeek where familyWitness = DeepSeekWitness\n";
 
 pub(crate) const CORE_IMPORTS: &[&str] = &[
     "import Tidepool.Duration (Duration)",
@@ -106,6 +112,8 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         jev_decl(),
         agent_inspection_decl(),
         agent_launch_decl(),
+        spawn_agent_decl(),
+        fork_agent_decl(),
         agent_tools_decl(),
         agent_session_decl(),
         reflect_decl(),
@@ -135,6 +143,8 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Jev",
     "AgentInspection",
     "AgentLaunch",
+    "SpawnAgent",
+    "ForkAgent",
     "AgentTools",
     "AgentSession",
     "ModelCall",
@@ -591,7 +601,15 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "EffectGreen",
             "EffectNotifications",
             "EffectJev",
-            "EffectModelCall",
+            "EffectModelCallOpenAI",
+            "EffectModelCallArgon",
+            "EffectModelCallDeepSeek",
+            "EffectForkAgentOpenAI",
+            "EffectForkAgentArgon",
+            "EffectForkAgentDeepSeek",
+            "EffectSpawnAgentOpenAI",
+            "EffectSpawnAgentArgon",
+            "EffectSpawnAgentDeepSeek",
             "EffectActor",
             "EffectReflect",
             "EffectLookup",
@@ -645,13 +663,16 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "SpecReplacementUnauthorized",
             "SpecReplacementSurfaceChanged",
             "SpecReplacementFailed",
-            "AgentLaunchSpawnWith",
             "AgentLaunchValidateSpecWith",
             "AgentLaunchReplaceSpecWith",
-            "AgentLaunchCheckpointWith",
             "AgentLaunchCheckCheckpointWith",
             "AgentLaunchReleaseCheckpointWith",
         ],
+    ),
+    ("SpawnAgent", &["SpawnAgentSpawnWith"]),
+    (
+        "ForkAgent",
+        &["ForkAgentSpawnWith", "ForkAgentCheckpointWith"],
     ),
     (
         "AgentTools",
@@ -1014,12 +1035,13 @@ pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
     "SpawnCleanup(..)",
     "SpawnErrorWire(..)",
     "SpecReplacementError(..)",
-    "AgentLaunchSpawnWith",
     "AgentLaunchValidateSpecWith",
     "AgentLaunchReplaceSpecWith",
-    "AgentLaunchCheckpointWith",
     "AgentLaunchCheckCheckpointWith",
     "AgentLaunchReleaseCheckpointWith",
+    "SpawnAgentSpawnWith",
+    "ForkAgentSpawnWith",
+    "ForkAgentCheckpointWith",
     "AgentToolsInstallWith",
     "AgentToolsInstallReceiverWith",
     "AgentToolsInputWith",

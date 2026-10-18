@@ -201,7 +201,10 @@ pub fn installation_expression(
                 match effect.nominal_identity() {
                     Some(identity) => {
                         imports.extend_text(&format!("qualified {}", identity.module));
-                        format!("{}.{}", identity.module, identity.name)
+                        for argument in identity.arguments {
+                            imports.extend_text(&format!("qualified {}", argument.module));
+                        }
+                        identity.render()
                     }
                     // Legacy wire keys have no nominal owner. Keeping the bare
                     // spelling lets the compiler refuse an unsupported row.
@@ -220,6 +223,24 @@ pub fn installation_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installation_expression_preserves_nominal_family_arguments_and_order() {
+        let installation = installation_expression(
+            "AgentSpec.agentSpec",
+            &[
+                crate::ActorEffectKey::SpawnAgentArgon,
+                crate::ActorEffectKey::Commands,
+                crate::ActorEffectKey::ModelCallDeepSeek,
+                crate::ActorEffectKey::ForkAgentOpenAI,
+            ],
+        );
+        assert_eq!(installation.effect_row.expression(), "'[Tidepool.Effects.Core.SpawnAgent Tidepool.Effects.Core.Argon, Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.ModelCall Tidepool.Effects.Core.DeepSeek, Tidepool.Effects.Core.ForkAgent Tidepool.Effects.Core.OpenAI]");
+        assert!(installation
+            .dispatcher_effect_row()
+            .expression()
+            .contains(installation.effect_row.expression()));
+    }
 
     #[test]
     fn installation_expression_renders_the_exact_effect_row_and_entry() {

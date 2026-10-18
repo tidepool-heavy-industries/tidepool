@@ -350,6 +350,8 @@ where
             }
         };
         let crate::start::CapturedChildLaunch {
+            requested_effects,
+            model_permissions,
             lifetime: _,
             mut descriptor,
             spawn: _,
@@ -359,6 +361,31 @@ where
             seed,
             exit_destination,
         } = definition.child;
+        let permissions = self
+            .descriptor
+            .capabilities()
+            .model_permissions()
+            .admit_child_requests(&model_permissions)
+            .map_err(|error| reject(&error.to_string()))?;
+        permissions
+            .validate_declared_effects(&requested_effects)
+            .map_err(|error| reject(&error.to_string()))?;
+        let current_permissions = self.descriptor.capabilities().model_permissions();
+        if !permissions.is_subset_of(current_permissions)
+            || !current_permissions.is_subset_of(&permissions)
+            || requested_effects != self.descriptor.capabilities().effect_keys()
+        {
+            return Err(reject(
+                "replacement must preserve the actor's immutable permissions",
+            ));
+        }
+        descriptor = descriptor
+            .with_capabilities(self.descriptor.capabilities().clone())
+            .with_model(self.descriptor.model().cloned())
+            .with_reasoning(self.descriptor.reasoning());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| reject(&error))?;
         if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",

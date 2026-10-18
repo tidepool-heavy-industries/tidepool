@@ -15,6 +15,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Actors.Exomonad hiding (Call, (:-))
 import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Command as Cmd
+import qualified Exomonad.Models as Models
 
 data LifetimeProbe = LifetimeProbe { topic :: Text }
   deriving (Generic, FromJSON, JsonSchema)
@@ -25,23 +26,23 @@ data LifetimeTools effects mode = LifetimeTools
   }
   deriving Generic
 
-agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member AgentLaunch effects, Member Cmd.Commands effects)
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member AgentLaunch effects, Member (SpawnAgent Models.PrimaryModelFamily) effects, Member Cmd.Commands effects)
           => AgentSpec (LifetimeTools effects) effects
 agentSpec = defaultSpec
   { specTools = LifetimeTools
       { lifetimeProbe = presentWith id $ tool "Exercise the invocation lifetime boundary." (\_ -> pure "original-result")
       , notebook = haskellTools
       }
-  , afterTool = Just afterProbe
+  , afterTool = Just (afterProbe Models.primaryModel)
   }
 
-afterProbe :: (Member AgentLaunch effects, Member Cmd.Commands effects)
-           => ToolCall -> ToolResult -> Eff effects Annotation
-afterProbe call _
+afterProbe :: (KnownFamily modelFamily, Member AgentLaunch effects, Member (SpawnAgent modelFamily) effects, Member Cmd.Commands effects)
+           => Model modelFamily -> ToolCall -> ToolResult -> Eff effects Annotation
+afterProbe model call _
   | toolCallName call /= "lifetime_probe" = pure NoAnnotation
   | otherwise = do
       _ <- spawnSubagent (FreshCtx "invocation deadline child") SameDir
-        ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+        ((defaultSpawnOptions model (A.defaultWorkbenchSpec @'[Replies]))
           { spawnLabel = Just "invocation-deadline-child", spawnLifetime = InvocationOwned })
       _ <- Cmd.quiet (Cmd.run (Cmd.argv ["printf", "unreachable-slot-result"]))
       pure (Annotated "slot-finished")

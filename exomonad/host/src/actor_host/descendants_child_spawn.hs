@@ -7,7 +7,7 @@ import Tidepool.Actors.Exomonad
 
 Right grandchildAgent <- spawnSubagent (FreshCtx "Complete the grandchild assignment.")
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "descendants-grandchild", spawnLifetime = ActorOwned })
 Right grandchildResponse <- request @Int grandchildAgent (2 :: Int)
   (defaultRequestOptions { requestLabel = Just "descendants-grandchild" })

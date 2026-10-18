@@ -109,6 +109,11 @@ pub struct CheckpointLease {
 }
 
 impl CheckpointLease {
+    /// The retained issuer snapshot remains authoritative after issuer retirement.
+    pub fn issuer_conversation_permission(&self) -> Option<&crate::ConversationPermission> {
+        self.issuer_capabilities.conversation_permission()
+    }
+
     pub(crate) fn retained_scope(
         &self,
     ) -> Result<&Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, CheckpointRefusal> {

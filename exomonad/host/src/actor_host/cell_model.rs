@@ -3,7 +3,8 @@ use std::{marker::PhantomData, sync::Arc};
 
 use super::run_auth::RunAuth;
 use exomonad_actor::{
-    ActorDescriptor, CellModelBinding, CellModelFactory, Model, ModelReq, Reasoning,
+    ActorDescriptor, AdmittedModelIdentity, CellModelBinding, CellModelFactory, ModelPermissions,
+    ModelReq,
 };
 use harness::{
     engine::ResponsesTransport, invocation::Limits, model::Effort, store::Store, transport::Auth,
@@ -17,18 +18,15 @@ use tidepool_runtime::session::WorkbenchExecutionId;
 use super::{embedded_service::EmbeddedService, ActorHostConfig};
 use crate::{
     exomonad::EmbeddedLaunchConfig,
-    model_turn::{CellModelService, ModelPolicy, ModelResolver},
+    model_turn::{CellModelService, ModelPolicy},
 };
 
 pub(super) struct EmbeddedCellModelFactory<A, C> {
     runtime: tokio::runtime::Handle,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
-    default_model: Model,
-    default_reasoning: Reasoning,
     launch_config: Option<Arc<ActorHostConfig>>,
-    transport: Arc<dyn Fn() -> C + Send + Sync>,
-    selection: Option<Arc<crate::model_turn::SelectedTransport<C>>>,
+    selection: Arc<crate::model_turn::SelectedTransport<C>>,
     auth: PhantomData<fn() -> A>,
 }
 
@@ -36,87 +34,36 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
     pub(super) fn new(
         store: Arc<Store>,
         scheduler: Arc<JobScheduler>,
-        default_model: Model,
-        default_reasoning: Reasoning,
-        transport: Arc<dyn Fn() -> C + Send + Sync>,
+        selection: Arc<crate::model_turn::SelectedTransport<C>>,
     ) -> Self {
         Self {
             runtime: tokio::runtime::Handle::current(),
             store,
             scheduler,
-            default_model,
-            default_reasoning,
             launch_config: None,
-            transport,
-            selection: None,
+            selection,
             auth: PhantomData,
         }
     }
-    fn policy(
+    fn selected_transport(
         &self,
         descriptor: &ActorDescriptor,
-        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
-    ) -> Result<ModelPolicy, String> {
-        let backend = self.default_model.backend();
-        let config = self.launch_config.clone();
-        let resolve_model: Arc<ModelResolver> = Arc::new(move |model| match config.as_ref() {
-            Some(config) => super::resolve_model(config, model),
-            None if model.backend() == backend && !model.value().trim().is_empty() => {
-                Ok(model.value().to_owned())
-            }
-            None => Err("model differs from the fixed inference backend".into()),
-        });
-        let config = self.launch_config.clone();
-        let resolve_reasoning: Arc<dyn Fn(&Reasoning) -> Result<Effort, String> + Send + Sync> =
-            Arc::new(move |reasoning| match config.as_ref() {
-                Some(config) => super::resolve_reasoning(config, reasoning),
-                None if reasoning.backend() == backend => Ok(super::reasoning_effort(reasoning)),
-                None => Err("reasoning differs from the fixed inference backend".into()),
-            });
-        let model = descriptor
-            .model()
-            .cloned()
-            .unwrap_or_else(|| self.default_model.clone());
-        let reasoning = descriptor.reasoning().unwrap_or(self.default_reasoning);
-        // Validate admitted defaults before allocating the bounded invocation.
-        resolve_model(&model)?;
-        resolve_reasoning(&reasoning)?;
-        let inherited_model = resolve_model.clone();
-        let inherited_reasoning = resolve_reasoning.clone();
-        let inherit_selection = Arc::new(move || {
-            let effective = context
-                .as_ref()
-                .map(|binding| binding.effective_inference())
-                .transpose()
-                .map_err(|error| error.to_string())?
-                .flatten();
-            let (model, reasoning) = effective.unwrap_or_else(|| (model.clone(), reasoning));
-            Ok((inherited_model(&model)?, inherited_reasoning(&reasoning)?))
-        });
-        Ok(ModelPolicy {
-            inherit_selection,
-            resolve_model,
-            resolve_reasoning,
-            limits: Limits::default(),
-        })
+    ) -> Result<Arc<crate::model_turn::SelectedTransport<C>>, String> {
+        let selection = self.selection.clone();
+        let catalog = self
+            .launch_config
+            .as_ref()
+            .and_then(|config| config.workspace_inputs.as_ref())
+            .and_then(|workspace| workspace.model_catalog.clone())
+            .ok_or("no frozen model catalog is admitted")?;
+        let permissions = descriptor.capabilities().model_permissions().clone();
+        Ok(Arc::new(move |choice| {
+            admitted_catalog_model(&catalog, &permissions, choice)?;
+            selection(choice)
+        }))
     }
     fn with_launch_config(mut self, config: &ActorHostConfig) -> Self {
         self.launch_config = Some(Arc::new(config.clone()));
-        if let Some(catalog) = config
-            .workspace_inputs
-            .as_ref()
-            .and_then(|workspace| workspace.model_catalog.clone())
-        {
-            let transport = self.transport.clone();
-            self.selection = Some(Arc::new(move |selection| {
-                let selected = catalog_model(&catalog, selection)?;
-                Ok((
-                    transport(),
-                    selected.model.value().to_owned(),
-                    super::reasoning_effort(&selection.reasoning),
-                ))
-            }));
-        }
         self
     }
 }
@@ -129,10 +76,10 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelFactory
         execution: &WorkbenchExecutionId,
         principal: PrincipalId,
         descriptor: &ActorDescriptor,
-        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
+        _context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding> {
-        let policy = match self.policy(descriptor, context) {
-            Ok(policy) => policy,
+        let selection = match self.selected_transport(descriptor) {
+            Ok(selection) => selection,
             Err(reason) => return Arc::new(RefusedCellModelBinding(reason)),
         };
         Arc::new(EmbeddedCellModelBinding(Arc::new(
@@ -142,10 +89,11 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelFactory
                 execution.as_str().to_owned(),
                 self.store.clone(),
                 self.scheduler.clone(),
-                policy,
-                self.transport.clone(),
-            )
-            .with_selection(self.selection.clone()),
+                ModelPolicy {
+                    limits: Limits::default(),
+                },
+                selection,
+            ),
         )))
     }
 }
@@ -168,20 +116,30 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelBinding
             // Responses retain the schema-owned failure and original result shape.
             // The actor resumes the original hole under its observed constructor table.
             Ok(match request {
-                ModelReq::ModelStartWith(request) => {
-                    Response::new(service.start(principal, json(&request)))
+                ModelReq::ModelStartWith(family, request) => {
+                    Response::new(service.start(principal, family.into(), json(&request)))
                 }
-                ModelReq::ModelResumeWith(invocation, call, answer) => {
-                    Response::new(service.resume(principal, &invocation, &call, json(&answer)))
-                }
-                ModelReq::ModelAnnotateWith(invocation, operation, annotation) => Response::new(
-                    service.annotate(principal, &invocation, &operation, json(&annotation)),
+                ModelReq::ModelResumeWith(family, invocation, call, answer) => Response::new(
+                    service.resume(principal, family.into(), &invocation, &call, json(&answer)),
                 ),
-                ModelReq::ModelCloseWith(invocation) => {
-                    Response::new(service.close(principal, &invocation))
+                ModelReq::ModelAnnotateWith(family, invocation, operation, annotation) => {
+                    Response::new(service.annotate(
+                        principal,
+                        family.into(),
+                        &invocation,
+                        &operation,
+                        json(&annotation),
+                    ))
+                }
+                ModelReq::ModelCloseWith(family, invocation) => {
+                    Response::new(service.close(principal, family.into(), &invocation))
                 }
             })
         })
+    }
+
+    fn begin_request_budget(&self) {
+        self.0.begin_request_budget();
     }
 
     fn cancel(&self) {
@@ -212,11 +170,12 @@ impl CellModelBinding for RefusedCellModelBinding {
             let error =
                 tidepool_handlers::handlers::model::ModelBoundaryError::ModelRejected(reason);
             Ok(match request {
-                ModelReq::ModelCloseWith(_) => Response::new(Err::<(), _>(error)),
+                ModelReq::ModelCloseWith(..) => Response::new(Err::<(), _>(error)),
                 _ => Response::new(Err::<serde_json::Value, _>(error)),
             })
         })
     }
+    fn begin_request_budget(&self) {}
     fn cancel(&self) {}
     fn settle(
         &self,
@@ -232,13 +191,27 @@ pub(super) fn admitted_factory(
 ) -> Arc<dyn CellModelFactory> {
     #[cfg(test)]
     if let Some(transport) = service.test_transport() {
+        let catalog = config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|workspace| workspace.model_catalog.clone());
         return Arc::new(
             EmbeddedCellModelFactory::<RunAuth, _>::new(
                 service.runtime.store(),
                 service.runtime.scheduler(),
-                config.model.clone(),
-                config.reasoning,
-                Arc::new(move || transport.clone()),
+                Arc::new(move |choice| {
+                    let selected = catalog_model(
+                        catalog
+                            .as_ref()
+                            .ok_or("no frozen model catalog is admitted")?,
+                        choice,
+                    )?;
+                    Ok((
+                        transport.clone(),
+                        selected.model.value().to_owned(),
+                        super::reasoning_effort(&choice.reasoning),
+                    ))
+                }),
             )
             .with_launch_config(config),
         );
@@ -252,27 +225,29 @@ pub(super) fn admitted_runtime_factory(
     config: &ActorHostConfig,
 ) -> Arc<dyn CellModelFactory> {
     let _ = settings;
-    let auth = runtime.inference_auth().clone();
-    let mut factory = EmbeddedCellModelFactory::<RunAuth, _>::new(
-        runtime.store(),
-        runtime.scheduler(),
-        config.model.clone(),
-        config.reasoning,
-        Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
+    let catalog = config
+        .workspace_inputs
+        .as_ref()
+        .and_then(|workspace| workspace.model_catalog.clone());
+    let providers = runtime.inference_providers().cloned();
+    Arc::new(
+        EmbeddedCellModelFactory::<RunAuth, _>::new(
+            runtime.store(),
+            runtime.scheduler(),
+            Arc::new(move |choice| {
+                catalog_transport(
+                    catalog
+                        .as_ref()
+                        .ok_or("no frozen model catalog is admitted")?,
+                    providers
+                        .as_ref()
+                        .ok_or("no provider registry is admitted")?,
+                    choice,
+                )
+            }),
+        )
+        .with_launch_config(config),
     )
-    .with_launch_config(config);
-    if let (Some(catalog), Some(providers)) = (
-        config
-            .workspace_inputs
-            .as_ref()
-            .and_then(|workspace| workspace.model_catalog.clone()),
-        runtime.inference_providers().cloned(),
-    ) {
-        factory.selection = Some(Arc::new(move |selection| {
-            catalog_transport(&catalog, &providers, selection)
-        }));
-    }
-    Arc::new(factory)
 }
 
 fn catalog_transport(
@@ -303,8 +278,31 @@ fn catalog_model<'a>(
         .models
         .get(&selection.key)
         .ok_or("model is not admitted by this profile")?;
-    if selection.reasoning.backend() != selected.model.backend() {
-        return Err("model options select a different provider".into());
+    if !selected.allowed_efforts.contains(&selection.reasoning) {
+        return Err("model effort is not admitted by this profile".into());
+    }
+    Ok(selected)
+}
+
+fn admitted_catalog_model<'a>(
+    catalog: &'a crate::exomonad::model_catalog::ResolvedCatalog,
+    permissions: &ModelPermissions,
+    selection: &tidepool_bridge_effects::ModelSelectionEnvelope,
+) -> Result<&'a crate::exomonad::model_catalog::ResolvedModel, String> {
+    let selected = catalog_model(catalog, selection)?;
+    let identity = AdmittedModelIdentity::new(
+        catalog.identity.clone(),
+        selection.key.clone(),
+        selected.provider.clone(),
+        selected.model.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    if !permissions.permits(
+        exomonad_tool::ModelOperation::ModelCall,
+        &identity,
+        selection.reasoning,
+    ) {
+        return Err("model call is not permitted for this actor".into());
     }
     Ok(selected)
 }

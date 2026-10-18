@@ -9,6 +9,55 @@ use crate::{
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFamily {
+    OpenAI,
+    Argon,
+    DeepSeek,
+}
+
+impl ModelFamily {
+    pub const ALL: [Self; 3] = [Self::OpenAI, Self::Argon, Self::DeepSeek];
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OpenAI => "OpenAI",
+            Self::Argon => "Argon",
+            Self::DeepSeek => "DeepSeek",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelOperation {
+    ModelCall,
+    ForkAgent,
+    SpawnAgent,
+}
+
+impl ModelOperation {
+    pub const ALL: [Self; 3] = [Self::ModelCall, Self::ForkAgent, Self::SpawnAgent];
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::ModelCall => "model_call",
+            Self::ForkAgent => "fork_agent",
+            Self::SpawnAgent => "spawn_agent",
+        }
+    }
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ModelCall => "ModelCall",
+            Self::ForkAgent => "ForkAgent",
+            Self::SpawnAgent => "SpawnAgent",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelPermission {
+    pub operation: ModelOperation,
+    pub family: ModelFamily,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectScope {
     Delegable,
     InvocationOnly,
@@ -42,6 +91,8 @@ impl HandwrittenCoreEffect {
 /// classification and independent stable orders for each existing projection.
 #[derive(Clone, Copy, Debug)]
 pub struct NominalEffect {
+    pub arguments: &'static [ExternalType],
+    pub model_permission: Option<ModelPermission>,
     pub identity: ExternalType,
     pub origin: DeclarationOrigin,
     pub constructor: &'static str,
@@ -50,6 +101,15 @@ pub struct NominalEffect {
     pub default_order: Option<usize>,
     pub rust_order: usize,
     pub bridge_order: usize,
+}
+
+impl NominalEffect {
+    fn row_entry(&self) -> String {
+        std::iter::once(self.identity.haskell_name)
+            .chain(self.arguments.iter().map(|a| a.haskell_name))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 macro_rules! nominal {
@@ -66,6 +126,8 @@ macro_rules! nominal {
     };
     ($name:ident, $constructor:ident, $default:expr, $rust:expr, $bridge:expr, $module:expr, $origin:expr) => {
         NominalEffect {
+            arguments: &[],
+            model_permission: None,
             identity: ExternalType {
                 haskell_name: stringify!($name),
                 rust_wire: stringify!($name),
@@ -178,14 +240,14 @@ pub const EFFECTS: &[NominalEffect] = &[
     nominal!(
         Commands,
         EffectCommands,
-        15,
+        14,
         16,
         15,
         "Tidepool.Effects.Core"
     ),
-    nominal!(Console, EffectConsole, 16, 17, 16, "Tidepool.Effects.Core"),
-    nominal!(AskUser, EffectAskUser, 17, 18, 17, "Tidepool.Effects.Core"),
-    nominal!(Green, EffectGreen, 18, 19, 18, "Tidepool.Effects.Core"),
+    nominal!(Console, EffectConsole, 15, 17, 16, "Tidepool.Effects.Core"),
+    nominal!(AskUser, EffectAskUser, 16, 18, 17, "Tidepool.Effects.Core"),
+    nominal!(Green, EffectGreen, 17, 19, 18, "Tidepool.Effects.Core"),
     nominal!(
         Notifications,
         EffectNotifications,
@@ -195,32 +257,231 @@ pub const EFFECTS: &[NominalEffect] = &[
         "Tidepool.Effects.Core"
     ),
     nominal!(Jev, EffectJev, 13, 14, 13, "Tidepool.Effects.Core"),
-    nominal!(
-        ModelCall,
-        EffectModelCall,
-        14,
-        15,
-        14,
-        "Tidepool.Effects.Core"
-    ),
-    nominal!(Actor, EffectActor, 19, 20, 19, "Tidepool.Effects.Core"),
-    nominal!(Reflect, EffectReflect, 20, 21, 20, "Tidepool.Effects.Core"),
-    nominal!(Lookup, EffectLookup, 21, 22, 21, "Tidepool.Effects.Core"),
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ModelCall",
+            rust_wire: "ModelCallOpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "OpenAI",
+            rust_wire: "OpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ModelCall,
+            family: ModelFamily::OpenAI,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectModelCallOpenAI",
+        wire_name: "ModelCall.OpenAI",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 31,
+        bridge_order: 30,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ModelCall",
+            rust_wire: "ModelCallArgon",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "Argon",
+            rust_wire: "Argon",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ModelCall,
+            family: ModelFamily::Argon,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectModelCallArgon",
+        wire_name: "ModelCall.Argon",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 32,
+        bridge_order: 31,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ModelCall",
+            rust_wire: "ModelCallDeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "DeepSeek",
+            rust_wire: "DeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ModelCall,
+            family: ModelFamily::DeepSeek,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectModelCallDeepSeek",
+        wire_name: "ModelCall.DeepSeek",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 33,
+        bridge_order: 32,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ForkAgent",
+            rust_wire: "ForkAgentOpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "OpenAI",
+            rust_wire: "OpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ForkAgent,
+            family: ModelFamily::OpenAI,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectForkAgentOpenAI",
+        wire_name: "ForkAgent.OpenAI",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 34,
+        bridge_order: 33,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ForkAgent",
+            rust_wire: "ForkAgentArgon",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "Argon",
+            rust_wire: "Argon",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ForkAgent,
+            family: ModelFamily::Argon,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectForkAgentArgon",
+        wire_name: "ForkAgent.Argon",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 35,
+        bridge_order: 34,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ForkAgent",
+            rust_wire: "ForkAgentDeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "DeepSeek",
+            rust_wire: "DeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::ForkAgent,
+            family: ModelFamily::DeepSeek,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectForkAgentDeepSeek",
+        wire_name: "ForkAgent.DeepSeek",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 36,
+        bridge_order: 35,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "SpawnAgent",
+            rust_wire: "SpawnAgentOpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "OpenAI",
+            rust_wire: "OpenAI",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::SpawnAgent,
+            family: ModelFamily::OpenAI,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectSpawnAgentOpenAI",
+        wire_name: "SpawnAgent.OpenAI",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 37,
+        bridge_order: 36,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "SpawnAgent",
+            rust_wire: "SpawnAgentArgon",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "Argon",
+            rust_wire: "Argon",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::SpawnAgent,
+            family: ModelFamily::Argon,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectSpawnAgentArgon",
+        wire_name: "SpawnAgent.Argon",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 38,
+        bridge_order: 37,
+    },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "SpawnAgent",
+            rust_wire: "SpawnAgentDeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        arguments: &[ExternalType {
+            haskell_name: "DeepSeek",
+            rust_wire: "DeepSeek",
+            core_module: Some("Tidepool.Effects.Core"),
+        }],
+        model_permission: Some(ModelPermission {
+            operation: ModelOperation::SpawnAgent,
+            family: ModelFamily::DeepSeek,
+        }),
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "EffectSpawnAgentDeepSeek",
+        wire_name: "SpawnAgent.DeepSeek",
+        scope: EffectScope::Delegable,
+        default_order: None,
+        rust_order: 39,
+        bridge_order: 38,
+    },
+    nominal!(Actor, EffectActor, 18, 20, 19, "Tidepool.Effects.Core"),
+    nominal!(Reflect, EffectReflect, 19, 21, 20, "Tidepool.Effects.Core"),
+    nominal!(Lookup, EffectLookup, 20, 22, 21, "Tidepool.Effects.Core"),
     nominal!(
         RepoEvent,
         EffectRepoEvent,
-        27,
+        26,
         23,
         22,
         "Tidepool.Effects.Core"
     ),
-    nominal!(Source, EffectSource, 22, 28, 23, "Tidepool.Effects.Core"),
-    nominal!(Journal, EffectJournal, 23, 24, 24, "Tidepool.Effects.Core"),
-    nominal!(Web, EffectWeb, 24, 25, 25, "Tidepool.Effects.Core"),
+    nominal!(Source, EffectSource, 21, 28, 23, "Tidepool.Effects.Core"),
+    nominal!(Journal, EffectJournal, 22, 24, 24, "Tidepool.Effects.Core"),
+    nominal!(Web, EffectWeb, 23, 25, 25, "Tidepool.Effects.Core"),
     nominal!(
         FsRead,
         EffectFsRead,
-        25,
+        24,
         26,
         26,
         "Tidepool.Effects.Core",
@@ -229,13 +490,15 @@ pub const EFFECTS: &[NominalEffect] = &[
     nominal!(
         FsWrite,
         EffectFsWrite,
-        26,
+        25,
         27,
         27,
         "Tidepool.Effects.Core",
         DeclarationOrigin::HandwrittenCore(HandwrittenCoreEffect::FsWrite)
     ),
     NominalEffect {
+        arguments: &[],
+        model_permission: None,
         identity: ExternalType {
             haskell_name: "ContextReadWrite",
             rust_wire: "ContextReadWrite",
@@ -250,6 +513,8 @@ pub const EFFECTS: &[NominalEffect] = &[
         bridge_order: 28,
     },
     NominalEffect {
+        arguments: &[],
+        model_permission: None,
         identity: ExternalType {
             haskell_name: "Reload",
             rust_wire: "Reload",
@@ -294,8 +559,15 @@ fn validate(effects: &[NominalEffect]) -> Result<(), String> {
     let mut ranks = BTreeSet::new();
     let mut bridge_orders = BTreeSet::new();
     for effect in effects {
-        if !names.insert(effect.identity.haskell_name)
-            || !constructors.insert(effect.constructor)
+        if !names.insert((
+            effect.identity.core_module,
+            effect.identity.haskell_name,
+            effect
+                .arguments
+                .iter()
+                .map(|a| (a.core_module, a.haskell_name))
+                .collect::<Vec<_>>(),
+        )) || !constructors.insert(effect.constructor)
             || !wires.insert(effect.wire_name)
             || !orders.insert(effect.rust_order)
             || !bridge_orders.insert(effect.bridge_order)
@@ -310,7 +582,8 @@ fn validate(effects: &[NominalEffect]) -> Result<(), String> {
             .core_module
             .ok_or_else(|| format!("missing defining module: {}", effect.wire_name))?;
         let generated = declarations.iter().any(|declaration| {
-            declaration.name == effect.identity.haskell_name && declaration.type_params.is_empty()
+            declaration.name == effect.identity.haskell_name
+                && declaration.type_params.len() == effect.arguments.len()
         });
         let valid_origin = match effect.origin {
             DeclarationOrigin::GeneratedCore => module == "Tidepool.Effects.Core" && generated,
@@ -326,6 +599,18 @@ fn validate(effects: &[NominalEffect]) -> Result<(), String> {
                 "declaration origin {:?} does not issue {}.{}",
                 effect.origin, module, effect.identity.haskell_name
             ));
+        }
+        if let Some(permission) = effect.model_permission {
+            if effect.identity.haskell_name != permission.operation.name()
+                || effect.arguments.len() != 1
+                || effect.arguments[0].haskell_name != permission.family.name()
+                || effect.arguments[0].core_module != Some("Tidepool.Effects.Core")
+            {
+                return Err(format!(
+                    "model permission disagrees with nominal application: {}",
+                    effect.wire_name
+                ));
+            }
         }
         if let Some(rank) = effect.default_order {
             if effect.scope != EffectScope::Delegable || !ranks.insert(rank) {
@@ -377,6 +662,9 @@ fn imports(effects: &[NominalEffect]) -> String {
     let mut imports = BTreeSet::new();
     for effect in effects {
         imports.insert(effect.identity.core_import().expect("validated module"));
+        for argument in effect.arguments {
+            imports.insert(argument.core_import().expect("argument module"));
+        }
     }
     imports.into_iter().collect::<Vec<_>>().join("\n")
 }
@@ -388,7 +676,20 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         .filter(|effect| effect.scope == EffectScope::InvocationOnly)
         .collect::<Vec<_>>();
     let mut rust = crate::gen::header("//! ", "Nominal effect identities");
-    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellEffectIdentity {\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ActorEffectKey {\n");
+    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ModelFamily {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!("    {},\n", family.name()));
+    }
+    rust.push_str("}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ModelOperation {\n");
+    for operation in ModelOperation::ALL {
+        rust.push_str(&format!(
+            "    #[serde(rename = \"{}\")]\n    {},\n",
+            operation.wire_name(),
+            operation.name()
+        ));
+    }
+    rust.push_str("}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub struct ModelPermission {\n    pub operation: ModelOperation,\n    pub family: ModelFamily,\n}\n");
+    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellTypeIdentity {\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellEffectIdentity {\n    pub arguments: &'static [HaskellTypeIdentity],\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\nimpl HaskellEffectIdentity {\n    pub fn render(self) -> String {\n        let mut rendered = format!(\"{}.{}\", self.module, self.name);\n        for argument in self.arguments {\n            rendered.push_str(&format!(\" {}.{}\", argument.module, argument.name));\n        }\n        rendered\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ActorEffectKey {\n");
     let mut rust_keys = actor
         .iter()
         .map(|effect| {
@@ -422,6 +723,17 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             .map_or(*name, |effect| effect.identity.haskell_name);
         rust.push_str(&format!("            Self::{name} => \"{nominal}\",\n"));
     }
+    rust.push_str("        }\n    }\n\n    pub const fn haskell_row_entry(self) -> &'static str {\n        match self {\n");
+    for effect in &actor {
+        rust.push_str(&format!(
+            "            Self::{} => \"{}\",\n",
+            effect.identity.rust_wire,
+            effect.row_entry()
+        ));
+    }
+    for (name, _) in LEGACY_ACTOR_KEYS {
+        rust.push_str(&format!("            Self::{name} => \"{name}\",\n"));
+    }
     rust.push_str("        }\n    }\n\n    pub const fn wire_name(self) -> &'static str {\n        match self {\n");
     for (name, wire, _) in &rust_keys {
         rust.push_str(&format!("            Self::{name} => \"{wire}\",\n"));
@@ -447,7 +759,32 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     for (name, _) in LEGACY_ACTOR_KEYS {
         rust.push_str(&format!("            Self::{name} => None,\n"));
     }
-    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n            }),\n            None => None,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum ToolEffectKey {\n    Actor(ActorEffectKey),\n");
+    rust.push_str("        }\n    }\n");
+    rust.push_str("\n    pub const fn haskell_arguments(self) -> &'static [HaskellTypeIdentity] {\n        match self {\n");
+    for effect in &actor {
+        rust.push_str(&format!(
+            "            Self::{} => &[",
+            effect.identity.rust_wire
+        ));
+        for (index, arg) in effect.arguments.iter().enumerate() {
+            if index > 0 {
+                rust.push_str(", ");
+            }
+            rust.push_str(&format!("HaskellTypeIdentity {{\n                module: \"{}\",\n                name: \"{}\",\n            }}", arg.core_module.unwrap(), arg.haskell_name));
+        }
+        rust.push_str("],\n");
+    }
+    for (name, _) in LEGACY_ACTOR_KEYS {
+        rust.push_str(&format!("            Self::{name} => &[],\n"));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn model_permission(self) -> Option<ModelPermission> {\n        match self {\n");
+    for effect in &actor {
+        if let Some(permission) = effect.model_permission {
+            rust.push_str(&format!("            Self::{} => Some(ModelPermission {{\n                operation: ModelOperation::{},\n                family: ModelFamily::{},\n            }}),\n", effect.identity.rust_wire, permission.operation.name(), permission.family.name()));
+        }
+    }
+    rust.push_str("            _ => None,\n");
+    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n                arguments: self.haskell_arguments(),\n            }),\n            None => None,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum ToolEffectKey {\n    Actor(ActorEffectKey),\n");
     for effect in &invocation {
         rust.push_str(&format!("    {},\n", effect.identity.rust_wire));
     }
@@ -490,7 +827,8 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             effect.identity.rust_wire
         ));
     }
-    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n            }),\n            None => None,\n        }\n    }\n}\n\nimpl From<ActorEffectKey> for ToolEffectKey {\n    fn from(key: ActorEffectKey) -> Self {\n        Self::Actor(key)\n    }\n}\n\nimpl serde::Serialize for ToolEffectKey {\n    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {\n        serializer.serialize_str(self.wire_name())\n    }\n}\n\nimpl<'de> serde::Deserialize<'de> for ToolEffectKey {\n    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {\n        let name = <String as serde::Deserialize>::deserialize(deserializer)?;\n        match name.as_str() {\n");
+    rust.push_str("        }\n    }\n\n    pub const fn haskell_arguments(self) -> &'static [HaskellTypeIdentity] {\n        match self {\n            Self::Actor(key) => key.haskell_arguments(),\n            _ => &[],\n");
+    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n                arguments: self.haskell_arguments(),\n            }),\n            None => None,\n        }\n    }\n}\n\nimpl From<ActorEffectKey> for ToolEffectKey {\n    fn from(key: ActorEffectKey) -> Self {\n        Self::Actor(key)\n    }\n}\n\nimpl serde::Serialize for ToolEffectKey {\n    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {\n        serializer.serialize_str(self.wire_name())\n    }\n}\n\nimpl<'de> serde::Deserialize<'de> for ToolEffectKey {\n    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {\n        let name = <String as serde::Deserialize>::deserialize(deserializer)?;\n        match name.as_str() {\n");
     for effect in &invocation {
         rust.push_str(&format!(
             "            \"{}\" => Ok(Self::{}),\n",
@@ -549,7 +887,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     hs.push_str(
         &defaults(effects)
             .iter()
-            .map(|effect| effect.identity.haskell_name)
+            .map(|effect| effect.row_entry())
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -557,7 +895,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     hs.push_str(
         &actor
             .iter()
-            .map(|effect| effect.identity.haskell_name)
+            .map(|effect| effect.row_entry())
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -565,7 +903,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     hs.push_str(
         &effects
             .iter()
-            .map(|effect| effect.identity.haskell_name)
+            .map(|effect| effect.row_entry())
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -606,20 +944,54 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         hs.push_str(&format!("  AsyncEffects ({} ': effects) =\n    TypeError ('Text \"{} cannot be used by an asynchronous tool, model callback, or hook.\")\n", effect.identity.haskell_name, effect.identity.haskell_name));
     }
     hs.push_str("  AsyncEffects (effect ': effects) = AsyncEffects effects\n");
-    let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
+    let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n{-# LANGUAGE TypeApplications #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
     row.push_str(&crate::gen::header("-- ", "Effect row witnesses"));
-    row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\n");
+    row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..), FamilyWitness (..), KnownFamily (familyWitness))\n");
     row.push_str(&imports(
-        &actor.iter().map(|effect| **effect).collect::<Vec<_>>(),
+        &actor
+            .iter()
+            .map(|effect| NominalEffect {
+                arguments: if effect.model_permission.is_some() {
+                    &[]
+                } else {
+                    effect.arguments
+                },
+                ..**effect
+            })
+            .collect::<Vec<_>>(),
     ));
     row.push_str("\n\n");
     row.push_str(ROW_WITNESS_INFRASTRUCTURE);
-    for effect in &actor {
+    for effect in actor
+        .iter()
+        .filter(|effect| effect.model_permission.is_none())
+    {
         row.push_str(&format!(
-            "instance KnownEffect {} where effectWitness = EffectWitness {}\n",
-            effect.identity.haskell_name, effect.constructor
+            "instance KnownEffect ({}) where effectWitness = EffectWitness {}\n",
+            effect.row_entry(),
+            effect.constructor
         ));
     }
+
+    for operation in ModelOperation::ALL {
+        row.push_str(&format!(
+            "instance forall modelFamily. KnownFamily modelFamily => KnownEffect ({} modelFamily) where\n  effectWitness = case familyWitness @modelFamily of\n",
+            operation.name()
+        ));
+        for effect in actor.iter().filter(|effect| {
+            effect
+                .model_permission
+                .is_some_and(|permission| permission.operation == operation)
+        }) {
+            let permission = effect.model_permission.expect("filtered family operation");
+            row.push_str(&format!(
+                "    {}Witness -> EffectWitness {}\n",
+                permission.family.name(),
+                effect.constructor
+            ));
+        }
+    }
+
     vec![
         GeneratedFile {
             path: "exomonad/actor/src/generated/nominal_keys.rs".into(),
@@ -736,6 +1108,8 @@ mod tests {
     fn invocation_catalogue_mutation_generates_witnesses_and_async_refusal_without_delegation() {
         let mut changed = EFFECTS.to_vec();
         changed.push(NominalEffect {
+            arguments: &[],
+            model_permission: None,
             identity: ExternalType {
                 haskell_name: "InvocationProbe",
                 rust_wire: "InvocationProbe",
@@ -804,6 +1178,8 @@ mod tests {
         let original = render(EFFECTS);
         // A nominal external entry can be added without a second Core declaration.
         let added = NominalEffect {
+            arguments: &[],
+            model_permission: None,
             identity: ExternalType {
                 haskell_name: "Probe",
                 rust_wire: "Probe",
@@ -888,6 +1264,83 @@ mod tests {
                 "{} retained removal",
                 file.path
             );
+        }
+    }
+}
+
+/// Indexed witness retains the family through the erased STG request boundary.
+pub fn family_vocabulary() -> String {
+    let families = ModelFamily::ALL;
+    let mut hs = String::new();
+    for family in families {
+        hs.push_str(&format!("data {}\n", family.name()));
+    }
+    hs.push_str("type role FamilyWitness nominal\ndata FamilyWitness modelFamily where\n");
+    for family in families {
+        hs.push_str(&format!(
+            "  {}Witness :: FamilyWitness {}\n",
+            family.name(),
+            family.name()
+        ));
+    }
+    hs.push_str(
+        "class KnownFamily modelFamily where\n  familyWitness :: FamilyWitness modelFamily\n",
+    );
+    for family in families {
+        hs.push_str(&format!(
+            "instance KnownFamily {} where familyWitness = {}Witness\n",
+            family.name(),
+            family.name()
+        ));
+    }
+    hs
+}
+
+pub fn family_witness_rust() -> String {
+    let mut rust = String::from("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ModelFamilyWitness {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!(
+            "    #[haskell(module = \"Tidepool.Effects.Core\")]\n    {}Witness,\n",
+            family.name()
+        ));
+    }
+    rust.push_str("}\n\nimpl From<ModelFamilyWitness> for exomonad_tool::ModelFamily {\n    fn from(value: ModelFamilyWitness) -> Self {\n        match value {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!(
+            "            ModelFamilyWitness::{}Witness => Self::{},\n",
+            family.name(),
+            family.name()
+        ));
+    }
+    rust.push_str("        }\n    }\n}\n");
+    rust
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    #[test]
+    fn family_applications_have_distinct_nominal_arguments_and_typed_permissions() {
+        let qualified = EFFECTS
+            .iter()
+            .filter(|effect| effect.model_permission.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(qualified.len(), 9);
+        assert!(validate(EFFECTS).is_ok());
+        for target in qualified {
+            let mut changed = EFFECTS.to_vec();
+            let index = changed
+                .iter()
+                .position(|effect| effect.wire_name == target.wire_name)
+                .unwrap();
+            changed[index].model_permission.as_mut().unwrap().family =
+                match target.model_permission.unwrap().family {
+                    ModelFamily::OpenAI => ModelFamily::Argon,
+                    _ => ModelFamily::OpenAI,
+                };
+            assert!(validate(&changed)
+                .unwrap_err()
+                .contains("model permission disagrees"));
         }
     }
 }

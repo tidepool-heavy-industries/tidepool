@@ -1,10 +1,10 @@
 import qualified Tidepool.Agent.Contract as A
 
-Right originalOwnerSeed <- checkpoint "original-nominal-owner"
+Right originalOwnerSeed <- checkpoint currentModel "original-nominal-owner"
 Right originalOwnerWorker <- spawnSubagent
   (ForkCtx originalOwnerSeed)
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))
     { spawnLabel = Just "original-owner-child"
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just "Inspect the assigned DeferredInput and return its corresponding DeferredReply."

@@ -64,6 +64,7 @@ pub use request_reply_tool::{
     HostedInputStage, HostedInvocationRole, HostedInvocationState, HostedPendingInvocation,
     RequestReplyActivation, RequestReplyAdmissionError,
 };
+mod model_permissions;
 mod resident_actor;
 mod resident_interactive;
 mod resident_tools;
@@ -107,6 +108,7 @@ pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
 
+pub use exomonad_tool::{ModelFamily, ModelOperation, ModelPermission};
 pub use fork_workspace::{
     PreparedWorkspaceAttachment, SpawnWorkspaceWire, WorkspaceAdmission, WorkspaceAdmissionError,
     WorkspaceAdmissionFuture, WorkspaceCustody, WorkspaceSeedWire, WorkspaceSelection,
@@ -139,6 +141,10 @@ pub use local_actor::{
     WorkbenchAbandonGuard, WorkbenchAdvance, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
+pub use model_permissions::{
+    AdmittedModelIdentity, ConversationPermission, ModelGrant, ModelPermissionError,
+    ModelPermissions,
+};
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, ActorSourceRoots,

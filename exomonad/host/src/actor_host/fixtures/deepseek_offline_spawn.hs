@@ -5,17 +5,20 @@ import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
 import Project.Work (WorkspaceEffects)
 import Tidepool.Actors.Exomonad
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
 
-let offlineWorkerOptions :: Text -> SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
-    offlineWorkerOptions marker = (defaultSpawnOptions Installed.agentSpec)
+let fixtureDeepSeek key options = Selection.deepSeek Models.catalogIdentity key options
+
+let offlineWorkerOptions :: Text -> SpawnOptions DeepSeek (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
+    offlineWorkerOptions marker = (defaultSpawnOptions currentModel Installed.agentSpec)
       { spawnLifetime = ActorOwned
       , spawnLabel = Just marker
       , spawnInstructions = Just "Use the installed tools for the assigned file, then respond to the typed request."
       }
 Right offlineEditor <- spawnSubagent (FreshCtx "deepseek-offline-worker-editor") SameDir
   ((offlineWorkerOptions "offline-editor")
-    { spawnModel = Just DeepSeekPro
-    , spawnReasoning = Just (DeepSeekReasoning DeepSeekHigh)
+    { spawnModel = fixtureDeepSeek "pro" (Selection.DeepSeekOptions Selection.DeepSeekHigh)
     })
 Right offlineTester <- spawnSubagent (FreshCtx "deepseek-offline-worker-tester") SameDir
   (offlineWorkerOptions "offline-tester")

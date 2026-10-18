@@ -1,4 +1,8 @@
 import qualified Tidepool.Agent.Contract as A
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
+
+let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 let curatedHelper value = retainedHelper value + 2 :: Int
 retainedValue <- pure (40 :: Int)
 
@@ -9,10 +13,10 @@ do
     else pure ()
   C.ContextStaged _ <- C.stageContext (C.contextPatch [C.appendNote "parent-curated" []])
   C.setNextModel (C.CustomModel C.OpenAIPlan "parent-curated-model")
-  Right captured <- checkpoint "curated parent snapshot"
+  Right captured <- checkpoint currentModel "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
-    ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
-      { spawnModel = Just (CustomModel OpenAIPlan "child-preparation-model"), spawnLabel = Just name }))
+    ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))
+      { spawnModel = fixtureOpenAI "child-preparation-model" (Selection.OpenAIOptions Selection.OpenAILow), spawnLabel = Just name }))
     ["first", "second"]
   workers <- mapM (\admitted -> case admitted of
     Left issue -> error (ContextText.pack (show issue))

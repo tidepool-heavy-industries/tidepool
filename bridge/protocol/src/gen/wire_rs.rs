@@ -73,7 +73,11 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
 pub fn file(e: &Effect) -> GeneratedFile {
     GeneratedFile {
         path: path(e),
-        contents: body(e),
+        contents: if e.name == "AgentLaunch" {
+            body(e) + &crate::actor_profiles::family_witness_rust()
+        } else {
+            body(e)
+        },
     }
 }
 

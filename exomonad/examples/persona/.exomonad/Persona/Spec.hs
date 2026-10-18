@@ -15,7 +15,7 @@ import qualified Persona.FileTools as Files
 import qualified Tidepool.Lookup.Tools as LookupTools
 import qualified Tidepool.Command.Tools as CommandTools
 import Tidepool.Effects.Core
-  ( AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
+  ( AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
   , Actor, ActorContext, AgentLaunch, AgentInspection
   , AgentControl, Notifications, ResourceScopes, BoundWorktree )
 import Tidepool.Agent.Reply (Replies)
@@ -25,7 +25,7 @@ import qualified Persona.Orientation as Orientation
 -- These base rows are delegable. Sync supplies invocation-only context editing
 -- and reload; child grants retain only the effects listed here.
 type PersonaEffects =
-  '[AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
+  '[AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
    , Actor, ActorContext, AgentLaunch, AgentInspection
    , AgentControl, Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Helpers can explore, compose and curate their own context. Findings return
@@ -41,14 +41,14 @@ data WriteFileInput = WriteFileInput { operation :: Files.WriteInput }
 instance FromJSON WriteFileInput
 instance JsonSchema WriteFileInput
 
-data PersonaTools mode = PersonaTools
+data PersonaTools effects mode = PersonaTools
   { read_file :: mode :- Sync (Call Files.ReadInput (Either Files.FileToolError Files.ReadReceipt))
   , write_file :: mode :- Sync (Call WriteFileInput (Either FsError File.CommitOutcome))
   , edit_file :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError File.CommitOutcome))
   , preview_edit :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError Files.PreviewReceipt))
   , shell :: CommandTools.ShellTools mode
   , lookup :: LookupTools.LookupTools mode
-  , haskell :: mode :- Sync (HaskellCell PersonaEffects)
+  , haskell :: mode :- Sync (HaskellCell effects)
   , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
   }
   deriving (Generic)
@@ -60,8 +60,8 @@ data PersonaTools mode = PersonaTools
 -- A Jev/Reflect-using hook needs those effects in this signature's constraints.
 -- Save the implementation in a module, connect it here, then reload. You can
 -- add or replace the hook without adding a new registered tool.
-agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[Commands, FsRead, FsWrite, Lookup, Console] effects)
-  => AgentSpec PersonaTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Subset effects (SyncEffects effects), Members '[Commands, FsRead, FsWrite, Lookup, Console] effects)
+  => AgentSpec (PersonaTools effects) effects
 agentSpec = defaultSpec { specTools = PersonaTools
   { read_file = presentWith presentJson $ syncTool
       "Read a workspace file and its version. Optional expectedVersion detects drift; range uses inclusive 1-based lines."
@@ -81,9 +81,10 @@ agentSpec = defaultSpec { specTools = PersonaTools
   , reload = standardReload }
   , initialContext = Just Orientation.startup }
 
-data HelperTools mode = HelperTools
-  { haskell :: mode :- Sync (HaskellCell HelperEffects) }
+data HelperTools effects mode = HelperTools
+  { haskell :: mode :- Sync (HaskellCell effects) }
   deriving (Generic)
-helperSpec :: AgentSpec HelperTools HelperEffects
+helperSpec :: (KnownToolEffects effects, AsyncEffects effects, Subset effects (SyncEffects effects))
+  => AgentSpec (HelperTools effects) effects
 helperSpec = defaultSpec { specTools = HelperTools
   { haskell = haskellTool "Compose an investigation in Haskell. Retain evidence, distinguish uncertainty, and return findings through the typed request. Curate your own context as useful; the companion owns durable memory edits and human-facing forms." } }

@@ -1,13 +1,21 @@
 _ <- do
   result <- Workflow.dialogue
-  response <- case Workflow.retainedResponse result of
+  evaluation <- case Workflow.retainedResponse result of
     Just original -> pure original
     Nothing -> error "authored dialogue lost retained successful response"
+  response <- case J.result evaluation of
+    Right packet -> pure packet
+    Left _ -> error "authored dialogue retained a failed evaluation"
+  envelope <- case J.observations evaluation of
+    [observation] -> case J.observationResult observation of
+      Right original -> pure original
+      Left _ -> error "authored dialogue retained a failed observation"
+    _ -> error "authored dialogue lost its single response observation"
   let chosen = Workflow.chooseRouteUnder J.careful response
-      inspected = displayWith 8192 response
-      metadata = J.resolvedModel response == "authored-fixture"
-        && J.usage response == J.Usage (Just 0) (Just 0)
-        && J.diagnostics response == []
+      inspected = displayWith 8192 evaluation
+      metadata = J.resolvedModel envelope == "authored-fixture"
+        && J.usage envelope == J.Usage (Just 0) (Just 0)
+        && J.diagnostics envelope == []
       matched = case Workflow.outcome result of
         Workflow.Finished Workflow.JevSelected (Workflow.Delivery Workflow.Express)
           (Workflow.DeliveryPrepared Workflow.Express "A delivery" "Retained note") ->

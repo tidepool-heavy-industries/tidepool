@@ -17,7 +17,13 @@ pub fn installed_intrinsic_effect_support(
         .filter(|effect| match effect {
             ToolEffectKey::Actor(ActorEffectKey::Source) => source_layers.is_some(),
             ToolEffectKey::Actor(ActorEffectKey::Jev) => jev.is_installed(),
-            ToolEffectKey::Actor(ActorEffectKey::ModelCall) => models.is_some(),
+            ToolEffectKey::Actor(key)
+                if key.model_permission().is_some_and(|permission| {
+                    permission.operation == crate::ModelOperation::ModelCall
+                }) =>
+            {
+                models.is_some()
+            }
             ToolEffectKey::Actor(ActorEffectKey::Reflect) => conversation.is_some(),
             _ => true,
         })
@@ -82,5 +88,44 @@ where
             .runner
             .with_handler_effect_support(observer);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnusedModelFactory;
+    impl crate::CellModelFactory for UnusedModelFactory {
+        fn bind(
+            &self,
+            _: &tidepool_runtime::session::WorkbenchExecutionId,
+            _: tidepool_repr::PrincipalId,
+            _: &crate::ActorDescriptor,
+            _: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
+        ) -> std::sync::Arc<dyn crate::CellModelBinding> {
+            unreachable!("support observation never allocates an execution binding")
+        }
+    }
+
+    #[test]
+    fn model_interpreter_support_covers_each_installed_family() {
+        let factory: std::sync::Arc<dyn crate::CellModelFactory> =
+            std::sync::Arc::new(UnusedModelFactory);
+        for models in [None, Some(&factory)] {
+            let supported =
+                installed_intrinsic_effect_support(None, &crate::unconfigured_jev(), models, None);
+            let model_keys = [
+                ActorEffectKey::ModelCallOpenAI,
+                ActorEffectKey::ModelCallArgon,
+                ActorEffectKey::ModelCallDeepSeek,
+            ];
+            for key in model_keys {
+                assert_eq!(
+                    supported.contains(&ToolEffectKey::Actor(key)),
+                    models.is_some()
+                );
+            }
+        }
     }
 }

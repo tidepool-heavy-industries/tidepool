@@ -3710,7 +3710,8 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.model(),
 
             Self::Workbench(execution) => execution.model.clone(),
-            Self::Actor { .. } | Self::Tool { .. } => None,
+            Self::Actor { ephemeral_work, .. } => ephemeral_work.model(),
+            Self::Tool { work, .. } => work.model(),
         }
     }
 
@@ -4435,12 +4436,32 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
         let control = crate::resident_workbench::execution_control();
-        let ephemeral_work = match &self.active_route_reservation_owner {
-            Some(reservation) => self
-                .workbench_executions
+        let reservation_owner = control
+            .as_ref()
+            .and_then(|control| control.reservation_owner(actor))
+            .or_else(|| self.active_route_reservation_owner.clone());
+        let retained_work = control.as_ref().and_then(|control| {
+            self.workbench_executions
                 .lock()
-                .callback_root(actor, reservation.clone()),
-            None => self.workbench_executions.lock().actor_scope_root(actor),
+                .admitted_invocation_work(&control.execution_id(actor), control.invocation.as_ref())
+        });
+        let ephemeral_work = match retained_work {
+            // Existing admission owns its binding; borrowing cannot mint a second allowance.
+            Some(work) => work,
+            None => {
+                let work = match &reservation_owner {
+                    Some(reservation) => self
+                        .workbench_executions
+                        .lock()
+                        .callback_root(actor, reservation.clone()),
+                    None => self.workbench_executions.lock().actor_scope_root(actor),
+                };
+                let _ = work.bind_model(
+                    self.environment.cell_model_factory.as_deref(),
+                    &self.descriptor,
+                );
+                work
+            }
         };
         CurrentEffectOwner::Actor {
             callback_scope: self
@@ -4454,11 +4475,19 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .or_else(|| self.actor_program_snapshot.clone()),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
-            reservation_owner: control
-                .as_ref()
-                .and_then(|control| control.reservation_owner(actor))
-                .or_else(|| self.active_route_reservation_owner.clone()),
+            reservation_owner,
             control,
+        }
+    }
+
+    fn begin_native_request_model_budget(&self, actor: ActorRef) {
+        if crate::resident_workbench::execution_control().is_some()
+            || self.active_route_reservation_owner.is_some()
+        {
+            return;
+        }
+        if let Some(model) = self.actor_effect_owner(actor).model() {
+            model.begin_request_budget();
         }
     }
 
@@ -5592,6 +5621,8 @@ where
             placement_registration.map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
+                requested_effects,
+                model_permissions,
                 lifetime,
                 mut descriptor,
                 spawn,
@@ -5627,50 +5658,32 @@ where
                     ))
                 })?;
             }
-            let effective_parent = effect_owner
-                .context_binding()
-                .map(|binding| binding.effective_inference())
-                .transpose()
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-                .flatten();
-            let parent_model = effective_parent
-                .as_ref()
-                .map(|(model, _)| model.clone())
-                .or_else(|| self.descriptor.model().cloned());
-            let parent_reasoning = effective_parent
-                .as_ref()
-                .map(|(_, reasoning)| *reasoning)
-                .or(self.descriptor.reasoning());
-            if descriptor.model().is_none() {
-                let checkpoint_model = checkpoint_lease
-                    .as_ref()
-                    .and_then(|lease| lease.issuer_model.clone());
-                descriptor = descriptor.with_model(checkpoint_model.or(parent_model.clone()));
+            let capabilities = match &spawn {
+                Some(spawn) => self.descriptor.capabilities().admit_model_child(
+                    spawn.permission,
+                    &spawn.selection,
+                    requested_effects.clone(),
+                    &model_permissions,
+                    descriptor.fork_budget(),
+                    checkpoint_lease,
+                ),
+                None => self.descriptor.capabilities().admit_record_child(
+                    requested_effects.clone(),
+                    &model_permissions,
+                    descriptor.fork_budget(),
+                ),
             }
-            if descriptor.reasoning().is_none() {
-                let checkpoint_effort = checkpoint_lease
-                    .as_ref()
-                    .and_then(|lease| lease.issuer_reasoning);
-                descriptor = descriptor.with_reasoning(checkpoint_effort.or(parent_reasoning));
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            if let Some(spawn) = &spawn {
+                let conversation = capabilities.conversation_permission().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "model child has no admitted conversation".into(),
+                    )
+                })?;
+                descriptor = descriptor
+                    .with_model(Some(conversation.model().model().clone()))
+                    .with_reasoning(Some(spawn.selection.reasoning));
             }
-            if let Some(parent_backend) = parent_model.as_ref().map(crate::Model::backend) {
-                if descriptor
-                    .model()
-                    .is_some_and(|model| model.backend() != parent_backend)
-                    || descriptor
-                        .reasoning()
-                        .is_some_and(|reasoning| reasoning.backend() != parent_backend)
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "child model and reasoning must match the run backend".into(),
-                    ));
-                }
-            }
-            let capabilities = self
-                .descriptor
-                .capabilities()
-                .preview_child(descriptor.capabilities().clone(), descriptor.fork_budget())
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_capabilities(capabilities);
             let mut checkpoint_admission = None;
             let mut spawn_admission = None;
@@ -5729,6 +5742,8 @@ where
             let inherited_source = Some(source);
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
+                    requested_effects,
+                    model_permissions,
                     lifetime,
                     descriptor,
                     spawn,
@@ -7080,9 +7095,29 @@ where
 
             ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint {
                 continuation,
+                family,
                 name,
             }) => Box::pin(async move {
                 let result: Result<String, crate::CheckpointRefusal> = async {
+                    let capabilities = self.descriptor.capabilities();
+                    let issued = capabilities
+                        .conversation_permission()
+                        .ok_or(crate::CheckpointRefusal::CaptureFailed)?;
+                    if issued.model().family() != family
+                        || !capabilities
+                            .model_permissions()
+                            .grants()
+                            .iter()
+                            .any(|grant| {
+                                grant.permission()
+                                    == crate::ModelPermission {
+                                        operation: crate::ModelOperation::ForkAgent,
+                                        family,
+                                    }
+                            })
+                    {
+                        return Err(crate::CheckpointRefusal::CaptureFailed);
+                    }
                     let effective = effect_owner
                         .context_binding()
                         .map(|binding| binding.effective_inference())
@@ -12419,6 +12454,7 @@ where
                     self.checkpoint_publication = CheckpointPublication::Resident;
                     let context = self.context(kernel.identity());
                     self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
+                    self.begin_native_request_model_budget(context.actor);
                     let (_, step) = self
                         .run_receiver(
                             kernel,
@@ -12449,6 +12485,7 @@ where
                     self.checkpoint_publication = CheckpointPublication::Resident;
                     let context = self.context(kernel.identity());
                     self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
+                    self.begin_native_request_model_budget(context.actor);
                     let (reply, step) = self
                         .run_receiver(kernel, &context, Some(caller), &ancestry, request)
                         .await
@@ -12564,6 +12601,10 @@ where
             control
                 .reservation_owner(actor)
                 .expect("admitted tool reservation"),
+        );
+        let _ = work.bind_model(
+            self.environment.cell_model_factory.as_deref(),
+            &self.descriptor,
         );
         self.workbench_executions.lock().retain_invocation_work(
             work.clone(),
@@ -14994,6 +15035,9 @@ where
     {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| refuse(&error))?;
         let journal = self
             .environment
             .recovery
@@ -15194,6 +15238,9 @@ where
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| refuse(&error))?;
         if descriptor.placement().session != self.session
             || descriptor.supervisor_parent().is_some()
             || descriptor.context_parent().is_some()

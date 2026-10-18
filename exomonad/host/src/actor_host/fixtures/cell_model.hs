@@ -28,8 +28,8 @@ data EchoTools mode = EchoTools { echo :: mode :- Call EchoArgs Text }
   deriving Generic
 
 callbackTurn :: (Member Sleep effects, Member Console effects)
-             => ModelTurn EchoTools effects Text
-callbackTurn = withModel Models.primaryModel $ textTurn (AgentSpec
+             => ModelTurn Models.PrimaryModelFamily EchoTools effects Text
+callbackTurn = textTurn Models.primaryModel (AgentSpec
   { specTools = EchoTools (presentWith id $ tool "Echo with the caller's effects" (\args -> do
       send (SleepWith (milliseconds 1))
       send (Print "model callback")
@@ -40,40 +40,40 @@ callbackTurn = withModel Models.primaryModel $ textTurn (AgentSpec
       pure (Annotated "checked"))
   }) "callback"
 
-callbackCell :: (Member ModelCall effects, AsyncEffects effects, Member Sleep effects, Member Console effects)
+callbackCell :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects, Member Sleep effects, Member Console effects)
              => Eff effects (Either ModelFailure Text, Maybe ModelUsage)
 callbackCell = do
   result <- invokeModel callbackTurn "hello"
   pure (modelOutcome result, fmap invocationUsage (modelReceipt result))
 
-nestedTurn :: (Member ModelCall effects, AsyncEffects effects) => ModelTurn EchoTools effects Text
-nestedTurn = textTurn (AgentSpec
+nestedTurn :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects) => ModelTurn Models.PrimaryModelFamily EchoTools effects Text
+nestedTurn = textTurn Models.primaryModel (AgentSpec
   { specTools = EchoTools (presentWith id $ tool "Invoke a nested model in this cell" (\_ -> do
-      result <- invokeModel (textTurn defaultSpec "nested") "inner"
+      result <- invokeModel (textTurn Models.primaryModel defaultSpec "nested") "inner"
       pure (either (const "nested failed") id (modelOutcome result))))
   , afterTool = Nothing
   }) "nested-outer"
 
-nestedCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
+nestedCell :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
 nestedCell = modelOutcome <$> invokeModel nestedTurn "outer"
 
-nestedBudgetCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
+nestedBudgetCell :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
 nestedBudgetCell = modelOutcome <$> invokeModel
   (withLimits (defaultLimits { requestLimit = Just 1 }) nestedTurn) "outer"
 
-budgetTurn :: ModelTurn NoTools effects Text
+budgetTurn :: ModelTurn Models.PrimaryModelFamily NoTools effects Text
 budgetTurn = withLimits (defaultLimits { requestLimit = Just 1 })
-  (textTurn defaultSpec "budget")
+  (textTurn Models.primaryModel defaultSpec "budget")
 
-budgetCell :: (Member ModelCall effects, AsyncEffects effects)
+budgetCell :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects)
            => Eff effects (Int, Either ModelFailure Text)
 budgetCell = do
   results <- replicateM 17 (invokeModel budgetTurn "one")
   let successes = length [() | result <- results, Right _ <- [modelOutcome result]]
   pure (successes, modelOutcome (last results))
 
-parkedCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
-parkedCell = modelOutcome <$> invokeModel (textTurn defaultSpec "parked") "park"
+parkedCell :: (Member (ModelCall Models.PrimaryModelFamily) effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
+parkedCell = modelOutcome <$> invokeModel (textTurn Models.primaryModel defaultSpec "parked") "park"
 
 modelCapabilityKeys :: [ActorEffectKey]
-modelCapabilityKeys = effectKeys (knownEffects @'[ModelCall])
+modelCapabilityKeys = effectKeys (knownEffects @'[ModelCall Models.PrimaryModelFamily])

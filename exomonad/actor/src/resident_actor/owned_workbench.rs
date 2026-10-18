@@ -3070,6 +3070,7 @@ mod authority_tests {
             live_payload: Default::default(),
             source_imports: Default::default(),
             haskell_effects_alias: String::new().into(),
+            current_model: None,
             source_layer: vec![PathBuf::from("original-root")].into(),
         }
     }

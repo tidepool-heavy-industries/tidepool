@@ -8,14 +8,19 @@ import Tidepool.Effects.Core (Commands, Lookup)
 import qualified Tidepool.Effects as Effects
 import Tidepool.Prelude (tshow)
 import Tidepool.Actors.Exomonad
+import qualified Tidepool.Model.Selection as Selection
+import qualified Tidepool.Internal.ModelControl as Control
+
+let fixtureOpenAIEffort options = case Selection.modelSelection currentModel of
+      Control.ModelSelectionEnvelope identity key _ -> Selection.openAI identity key options
 
 Right selectedTree <- boundWorktree
 Right selectedState <- observeSubmission (worktreeId selectedTree)
 let selectedTask = Work.task "typed-source" "keep the original task" ["README.md"] "return the same source and obligation" (headOid (submittedHead selectedState))
 selectedSpawn <- spawnSubagent (FreshCtx (Work.taskContext selectedTask))
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
-    { spawnLabel = Just "worker", spawnReasoning = Just (OpenAIReasoning OpenAIMedium)
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "worker", spawnModel = fixtureOpenAIEffort (Selection.OpenAIOptions Selection.OpenAIMedium)
     , spawnInstructions = Just (Work.projectPrompt "task"), spawnLifetime = ActorOwned })
 selectedAgent <- case selectedSpawn of
   Left failure -> Effects.error (tshow failure)

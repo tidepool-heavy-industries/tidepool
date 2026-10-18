@@ -1,1 +1,1 @@
-checkpoint "embedded hosted checkpoint" >>= \result -> pure (either (const False) (const True) result)
+checkpoint currentModel "embedded hosted checkpoint" >>= \result -> pure (either (const False) (const True) result)

@@ -6,7 +6,10 @@ use crate::schema::{
     TypeDef, TypeShape, VariantFields, Verb, WireDerive, WireDerives,
 };
 
-/// Admit an idle persistent actor with explicit context, directory and tools.
+pub(crate) const MODEL_FAMILY_PARAMS: &[crate::schema::TypeParam] =
+    &[crate::schema::TypeParam::value("modelFamily")];
+
+/// Validate or replace installations and inspect or release checkpoints.
 #[must_use]
 pub fn agent_launch() -> Effect {
     Effect {
@@ -17,7 +20,7 @@ pub fn agent_launch() -> Effect {
         req_enum: "AgentLaunchReq",
         decl_fn: "agent_launch_decl",
         description: &[
-            "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+            "Validate or replace compiled agent tools and inspect or release retained checkpoints.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -49,68 +52,24 @@ pub fn agent_launch() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
-                ctor: "AgentLaunchSpawnWith",
-                method: "agent_launch_spawn_with",
+                ctor: "AgentLaunchValidateSpecWith",
+                method: "agent_launch_validate_spec_with",
                 args: vec![
                     Arg {
-                        name: "context",
-                        ty: HsType::Named("SpawnContextWire"),
-                        rust: RustBinding::Path("crate::start::SpawnContextWire"),
-                    },
-                    installer_arg(),
-                    Arg {
-                        name: "workspace",
-                        ty: HsType::Named("SpawnWorkspaceWire"),
-                        rust: RustBinding::Path("crate::fork_workspace::SpawnWorkspaceWire"),
+                        name: "spec_metadata",
+                        ty: HsType::Value,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "effects",
                         ty: HsType::list(HsType::Named("ActorEffectKey")),
                         rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
                     },
-                    optional_arg("label", HsType::Text, RustBinding::Derived),
-                    optional_arg(
-                        "model",
-                        HsType::Named("Model"),
-                        RustBinding::Path("Option<crate::Model>"),
-                    ),
-                    optional_arg(
-                        "reasoning",
-                        HsType::Named("Reasoning"),
-                        RustBinding::Path("Option<crate::Reasoning>"),
-                    ),
-                    optional_arg("instructions", HsType::Text, RustBinding::Derived),
-                    Arg {
-                        name: "lifetime",
-                        ty: HsType::Named("WorkerLifetime"),
-                        rust: RustBinding::Path("crate::WorkerLifetime"),
-                    },
-                    optional_arg(
-                        "limits",
-                        HsType::Tuple(vec![HsType::Int, HsType::Int]),
-                        RustBinding::Path("Option<(i64, i64)>"),
-                    ),
-                    Arg { name: "spec_metadata", ty: HsType::Value, rust: RustBinding::HaskellValue },
                 ],
                 ret: HsType::either(
-                    HsType::Named("SpawnErrorWire"),
-                    HsType::Tuple(vec![
-                        HsType::Int,
-                        HsType::Int,
-                        HsType::maybe(HsType::Named("WorktreeHandle")),
-                    ]),
+                    HsType::Named("SpecValidationError"),
+                    HsType::Named("SpecValidationReceipt"),
                 ),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
-                ctor: "AgentLaunchValidateSpecWith",
-                method: "agent_launch_validate_spec_with",
-                args: vec![
-                    Arg { name: "spec_metadata", ty: HsType::Value, rust: RustBinding::HaskellValue },
-                    Arg { name: "effects", ty: HsType::list(HsType::Named("ActorEffectKey")), rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>") },
-                ],
-                ret: HsType::either(HsType::Named("SpecValidationError"), HsType::Named("SpecValidationReceipt")),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -131,18 +90,6 @@ pub fn agent_launch() -> Effect {
                     },
                 ],
                 ret: HsType::either(HsType::Named("SpecReplacementError"), HsType::Unit),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
-                ctor: "AgentLaunchCheckpointWith",
-                method: "agent_launch_checkpoint_with",
-                args: vec![Arg {
-                    name: "name",
-                    ty: HsType::Text,
-                    rust: RustBinding::Path("String"),
-                }],
-                ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Text),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -264,7 +211,7 @@ fn named_spec_type(
     definition
 }
 
-fn spawn_types() -> Vec<TypeDef> {
+pub(crate) fn spawn_types() -> Vec<TypeDef> {
     let mut types = context_types();
     types.extend(vec![
         spec_type(
@@ -498,4 +445,136 @@ fn context_types() -> Vec<TypeDef> {
         },
         crate::actor_profiles::actor_key_definition(),
     ]
+}
+
+/// Fresh-conversation admission, qualified by the selected model family.
+pub fn spawn_agent() -> Effect {
+    let mut effect = agent_launch();
+    effect.name = "SpawnAgent";
+    effect.description = &["Admit an idle agent with a fresh conversation, explicit model selection, tools, workspace and child model grants."];
+    effect.req_enum = "SpawnAgentReq";
+    effect.decl_fn = "spawn_agent_decl";
+    effect.type_params = MODEL_FAMILY_PARAMS;
+    effect.default_row_args = &["OpenAI"];
+    effect.type_defs.clear();
+    effect.verbs = vec![Verb {
+        ctor: "SpawnAgentSpawnWith",
+        method: "spawn_agent_spawn_with",
+        args: vec![
+            // The prepended family witness occupies field 0. The runtime's
+            // Haskell live-value convention retains the installer at field 1.
+            installer_arg(),
+            Arg {
+                name: "context",
+                ty: HsType::Named("SpawnContextWire"),
+                rust: RustBinding::Path("crate::start::SpawnContextWire"),
+            },
+            Arg {
+                name: "workspace",
+                ty: HsType::Named("SpawnWorkspaceWire"),
+                rust: RustBinding::Path("crate::fork_workspace::SpawnWorkspaceWire"),
+            },
+            Arg {
+                name: "effects",
+                ty: HsType::list(HsType::Named("ActorEffectKey")),
+                rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
+            },
+            Arg {
+                name: "modelGrants",
+                ty: HsType::Value,
+                rust: RustBinding::JsonValue,
+            },
+            optional_arg("label", HsType::Text, RustBinding::Derived),
+            Arg {
+                name: "selection",
+                ty: HsType::Value,
+                rust: RustBinding::JsonValue,
+            },
+            optional_arg("instructions", HsType::Text, RustBinding::Derived),
+            Arg {
+                name: "lifetime",
+                ty: HsType::Named("WorkerLifetime"),
+                rust: RustBinding::Path("crate::WorkerLifetime"),
+            },
+            optional_arg(
+                "limits",
+                HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                RustBinding::Path("Option<(i64, i64)>"),
+            ),
+            Arg {
+                name: "spec_metadata",
+                ty: HsType::Value,
+                rust: RustBinding::HaskellValue,
+            },
+        ],
+        ret: HsType::either(
+            HsType::Named("SpawnErrorWire"),
+            HsType::Tuple(vec![
+                HsType::Int,
+                HsType::Int,
+                HsType::maybe(HsType::Named("WorktreeHandle")),
+            ]),
+        ),
+        errors: None,
+        handling: HandlingClass::Actor,
+    }];
+    for verb in &mut effect.verbs {
+        verb.args.insert(0, family_witness_arg());
+    }
+    effect
+}
+
+/// Captured-conversation admission and checkpoint issuance for one model family.
+pub fn fork_agent() -> Effect {
+    let mut effect = spawn_agent();
+    effect.name = "ForkAgent";
+    effect.description = &["Capture a conversation checkpoint or admit an idle agent from captured context with explicit model selection and child model grants."];
+    effect.req_enum = "ForkAgentReq";
+    effect.decl_fn = "fork_agent_decl";
+    effect.verbs[0].ctor = "ForkAgentSpawnWith";
+    effect.verbs[0].method = "fork_agent_spawn_with";
+    effect.verbs.push(Verb {
+        ctor: "ForkAgentCheckpointWith",
+        method: "fork_agent_checkpoint_with",
+        args: vec![
+            family_witness_arg(),
+            Arg {
+                name: "name",
+                ty: HsType::Text,
+                rust: RustBinding::Path("String"),
+            },
+        ],
+        ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Text),
+        errors: None,
+        handling: HandlingClass::Actor,
+    });
+    effect
+}
+
+pub(crate) fn family_witness_arg() -> Arg {
+    Arg {
+        name: "family",
+        ty: HsType::app(HsType::Named("FamilyWitness"), HsType::Var("modelFamily")),
+        rust: RustBinding::Path("tidepool_bridge_effects::ModelFamilyWitness"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_spawn_installers_keep_the_haskell_live_value_field() {
+        for effect in [spawn_agent(), fork_agent()] {
+            let spawn = &effect.verbs[0];
+            let installer = spawn
+                .args
+                .iter()
+                .position(|argument| argument.name == "install");
+            assert_eq!(installer, Some(1), "{}", spawn.ctor);
+            assert_eq!(spawn.args[0].name, "family");
+            assert_eq!(spawn.args[2].name, "context");
+            assert!(matches!(spawn.args[1].rust, RustBinding::HaskellValue));
+        }
+    }
 }

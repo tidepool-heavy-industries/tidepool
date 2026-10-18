@@ -11,9 +11,9 @@ do
   C.ContextStaged _ <- C.stageContext patch
   C.setNextModel (C.CustomModel C.OpenAIPlan "must-not-publish-model")
   C.setNextReasoning (C.OpenAIReasoning C.OpenAIHigh)
-  Right captured <- checkpoint "failure snapshot"
+  Right captured <- checkpoint currentModel "failure snapshot"
   Right worker <- spawnSubagent (ForkCtx captured) SameDir
-    ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+    ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))
       { spawnLabel = Just "survives-parent-failure" })
   Right reply <- request @Text worker ("retained request" :: Text) defaultRequestOptions
   sleep (seconds 30)

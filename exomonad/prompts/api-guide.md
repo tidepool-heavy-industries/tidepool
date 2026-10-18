@@ -99,10 +99,12 @@ Use ordinary functions for a straight pipeline and actors for ongoing interactio
 both can reuse the same data, functions and judgments. See `exomonad-workbench`,
 `exomonad-define-actors` and `exomonad-jev` for the composing vocabulary.
 
-Where the actor admits `ModelCall`, `Tidepool.Model` provides
-`invokeModel turn input` with `textTurn` or `typedTurn @Reply` and supplied
+Where the actor admits `ModelCall modelFamily`, `Tidepool.Model` provides
+`invokeModel turn input` with `textTurn model` or `typedTurn @Reply model` and supplied
 `AgentSpec` tools. Callbacks use your available effects; ambient tools and hooks
-are not inherited. Calls in one cell share its model budget. Match `modelOutcome`,
+are not inherited. Calls in one notebook cell or native actor request share a model budget.
+Later native requests receive a fresh allowance; retained continuations keep
+their original allowance. Match `modelOutcome`,
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
@@ -123,16 +125,23 @@ invoke this hook.
 ## Agent work
 
 Create one idle child with `spawnSubagent context workspace
-(defaultSpawnOptions actualSpec)`. The context is a captured `ForkCtx checkpoint`
+(defaultSpawnOptions currentModel actualSpec)`. The context is a captured `ForkCtx checkpoint`
 or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
 `ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
-The options carry the actual typed `AgentSpec`, model and reasoning choices,
-instructions, an optional ordinary text label, lifetime, and limits. Omitted
-model and reasoning choices inherit the parent's current effective selection.
-Use `DeepSeekFlash` or `DeepSeekPro` for DeepSeek, `OpenAIModel Gpt61Sol` for
-OpenAI, or `CustomModel backend name` for an explicit backend-qualified ID.
-`spawnReasoning` accepts provider-qualified reasoning. Both selections must
-match the run's fixed startup backend. Labels are
+The options carry the actual typed `AgentSpec`, an explicit `Model modelFamily`,
+instructions, an optional ordinary text label, lifetime, and limits. Each actor's
+`currentModel` is its actor-local default selection: the fixed model and launch
+effort. Later conversational effort changes do not rewrite this value.
+`Exomonad.Models.primaryModel` is the root profile default. Construct other exact
+catalog selections with `openAI`, `argon`, or `deepSeek`, using
+`Exomonad.Models.catalogIdentity`, a catalog key, and that family's typed options.
+A captured context requires `ForkAgent modelFamily`; a fresh context requires
+`SpawnAgent modelFamily`. Capture with `checkpoint currentModel name`. Child model
+operations default to none; request each required operation explicitly through
+`spawnPermissions = modelPermissions [allowModelCall model, allowForkAgent model,
+allowSpawnAgent model]` and include its family effect in the child's effects.
+Runtime admission checks the exact model and effort for each requested grant.
+Labels are
 descriptive only; they do not identify actors, workspaces, or groups. `spawnLimits`
 is an optional `SpawnLimits` record whose `maximumDescendantDepth` and
 `maximumActiveDescendants` fields use opaque `DescendantDepth` and
@@ -149,7 +158,7 @@ returns an `Either RequestError (Request Text)`; `requestWithProgress` also
 returns an independent typed progress handle.
 
 ```haskell source=request
-Right worker <- spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions spec)
+Right worker <- spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions currentModel spec)
 Right pending <- request @Text worker input defaultRequestOptions
 Right answer <- await (result pending)
 display answer
@@ -173,7 +182,7 @@ issuing timed model yields to poll the request handles. Use `yield` to observe
 the enclosing Haskell tool call if it is pending, or another pending outer
 operation when that is the next result you need.
 
-`spawnSubagent context workspace (defaultSpawnOptions actualSpec)` returns
+`spawnSubagent context workspace (defaultSpawnOptions currentModel actualSpec)` returns
 `Either SpawnError AgentRef`. `request @Answer agent rawInput defaultRequestOptions`
 returns `Either RequestError (Request Answer)`. `requestWithProgress @Progress
 @Answer agent rawInput defaultRequestOptions` returns an `Either RequestError`

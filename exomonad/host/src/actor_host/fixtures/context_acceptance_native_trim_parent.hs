@@ -15,10 +15,10 @@ do
       let updated = trimResult (C.targetText target), updated /= C.targetText target])
   C.setNextModel (C.CustomModel C.OpenAIPlan "test-model")
   C.setNextReasoning (C.OpenAIReasoning C.OpenAIHigh)
-  Right captured <- checkpoint "curated parent snapshot"
+  Right captured <- checkpoint currentModel "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
-    ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
-      { spawnModel = Just (CustomModel OpenAIPlan "test-model"), spawnLabel = Just name }))
+    ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))
+      { spawnLabel = Just name }))
     ["first", "second"]
   workers <- mapM (\admitted -> case admitted of
     Left issue -> error (ContextText.pack (show issue))

@@ -4,6 +4,7 @@
 #[must_use]
 pub fn jev_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Jev",
         description: "Compose semantic judgment with ordinary Haskell: Jev choices can carry domain values, closures or effectful continuations into the next stage of a program. Use `Jev.Operators` (`exomonad-jev` skill), not the private JSON request constructor. `J.state` supplies the evidence; `J.ask` batches questions that can be answered from that same packet. Choose `J.choice` for one winner, `J.each` with `J.noul` for independently qualifying items, and `J.score` for an ordered rubric. `J.handle` dispatches a choice to handlers receiving its original typed payload; `J.settle` adds a policy-controlled doubt branch. Build semantic predicates, selectors and interpreters from these parts. Inside a record actor, combine its state and incoming event with a judgment, then run the selected continuation: update state, gather evidence or commission typed agent work. Use deterministic code for exact checks and known transitions; use Jev where meaning changes the next action. Distinguish call failure, doubt, and an explicit insufficient-evidence alternative; each can select its own recovery, next read or handback. Retain packets, decisions and independently checked outcomes when comparing policy behavior; confidence is not a substitute for outcome calibration.",
         prompt_card: None,

@@ -10,7 +10,7 @@ import Prelude
 import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (unpack)
-import Data.Typeable (Typeable, typeRep, typeRepTyCon, tyConModule, tyConName)
+import Data.Typeable (Typeable, typeRep, splitTyConApp, tyConModule, tyConName)
 import Tidepool.Agent.ToolEffects (toolEffectNames, SyncEffects)
 import Tidepool.Effects.Row (effectKeys, knownEffects)
 import Tidepool.Internal.ActorProfiles (ActorEffects, CatalogueEffects, CatalogueToolEffects, actorEffectName)
@@ -22,8 +22,9 @@ instance Nominals '[] where
   nominals _ = []
 instance (Typeable effect, Nominals effects) => Nominals (effect ': effects) where
   nominals _ =
-    let ctor = typeRepTyCon (typeRep (Proxy @effect))
-    in (tyConModule ctor ++ "." ++ tyConName ctor) : nominals (Proxy @effects)
+    let render rep = let (ctor, args) = splitTyConApp rep
+                     in unwords ((tyConModule ctor ++ "." ++ tyConName ctor) : map render args)
+    in render (typeRep (Proxy @effect)) : nominals (Proxy @effects)
 
 main :: IO ()
 main = print

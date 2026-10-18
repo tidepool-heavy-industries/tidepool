@@ -2,7 +2,6 @@
 load("@prelude//:rules.bzl", "export_file")
 
 def declare_rust_test_inputs():
-    export_file(name = "rust_input_examples_model_turns_Examples_JevFormWorkflow_hs", src = "examples/model-turns/Examples/JevFormWorkflow.hs", out = "JevFormWorkflow.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_src_Tidepool_HarnessSource_hs", src = "src/Tidepool/HarnessSource.hs", out = "HarnessSource.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_BadAssociated_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/BadAssociated.hs", out = "BadAssociated.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_BadClass_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/BadClass.hs", out = "BadClass.hs", visibility = ["PUBLIC"])
@@ -17,6 +16,7 @@ def declare_rust_test_inputs():
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_NextConsumer_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/NextConsumer.hs", out = "NextConsumer.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Old_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Old.hs", out = "Old.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Public_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Public.hs", out = "Public.hs", visibility = ["PUBLIC"])
+    export_file(name = "rust_input_test_model_turn_Fixture_JevFormWorkflow_hs", src = "test-model-turn/Fixture/JevFormWorkflow.hs", out = "JevFormWorkflow.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_FreerResumeExpectations_json", src = "test-prepared-stg/FreerResumeExpectations.json", out = "FreerResumeExpectations.json", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_ModuleProductA_hs", src = "test-prepared-stg/ModuleProductA.hs", out = "ModuleProductA.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_ModuleProductB_hs", src = "test-prepared-stg/ModuleProductB.hs", out = "ModuleProductB.hs", visibility = ["PUBLIC"])

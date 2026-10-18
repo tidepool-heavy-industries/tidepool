@@ -8,7 +8,10 @@ mod installed_support;
 mod public_profiles;
 pub use installed_support::InstalledEffectSupport;
 pub mod surface;
-pub use effects::{ActorEffectKey, HaskellEffectIdentity, ToolEffectKey};
+pub use effects::{
+    ActorEffectKey, HaskellEffectIdentity, HaskellTypeIdentity, ModelFamily, ModelOperation,
+    ModelPermission, ToolEffectKey,
+};
 pub use public_profiles::DEFAULT_ACTOR_EFFECTS;
 
 /// When this invocation must settle relative to the caller's next inference.

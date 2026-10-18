@@ -19,7 +19,7 @@ import qualified Jev.Operators as J
 import qualified Jev.Recording as Recording
 import Project.EvidencePattern (Evidence (..))
 -- Keep the response-retaining public API example in this suite's compile gate.
-import qualified Examples.JevPreparedWorkflow as Workflow
+import qualified Fixture.JevPreparedWorkflow as Workflow
 import qualified Examples.JevComposedWorkflow as Composed
 
 -- Successful response decoding belongs to the native codec gate. These host

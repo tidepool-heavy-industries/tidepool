@@ -102,76 +102,77 @@ fn published_notebook_sources_match_authored_fixtures() {
     );
 }
 
-#[tokio::test]
-async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
-    for (primary, effort_type, invalid, expected_option) in [
-        (
-            "argon",
-            "ArgonEffort",
-            "Models.Argon (Models.DeepSeekOptions Models.DeepSeekHigh)",
-            "ArgonOptions",
-        ),
-        (
-            "flash",
-            "DeepSeekReasoning",
-            "Models.Flash (Models.OpenAIOptions Models.OpenAILow)",
-            "DeepSeekOptions",
-        ),
-        (
-            "sol",
-            "OpenAIReasoning",
-            "Models.Sol (Models.ArgonOptions Models.EffortLow)",
-            "OpenAIOptions",
-        ),
-    ] {
-        let campaign = TestCampaign::start_with_config(
-            |admission| admission,
-            |config| {
-                use crate::exomonad::model_catalog::{ModelConfig, ProviderConfig};
-                let authored = config.workspace.join(".exomonad");
-                std::fs::create_dir_all(&authored).unwrap();
-                let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
-                    "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
-                )).unwrap();
-                let inference = project.inference.as_mut().unwrap();
-                inference.providers.insert("openai".into(), ProviderConfig {
+async fn check_frozen_static_model_selection(
+    primary: &'static str,
+    invalid: &'static str,
+    expected_option: &'static str,
+) {
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            use crate::exomonad::model_catalog::{ModelConfig, ProviderConfig};
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
+                "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
+            ))
+            .unwrap();
+            let inference = project.inference.as_mut().unwrap();
+            inference.providers.insert(
+                "openai".into(),
+                ProviderConfig {
                     backend: exomonad_actor::Backend::OpenAIPlan,
                     credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
-                    credential_env: None, endpoint: None, inference_limits: Default::default(),
-                });
-                inference.models.insert("sol".into(), ModelConfig {
-                    provider: "openai".into(), model: "gpt-6.1-sol".into(),
-                    constructor: "Sol".into(), effort: "high".into(),
-                });
-                let profile = inference.profiles.get_mut("argon").unwrap();
-                profile.default = primary.into();
-                profile.allowed.push("sol".into());
-                project.haskell = crate::exomonad::workspace::HaskellConfig {
-                    source_roots: vec![".".into()],
-                    modules: vec!["GeneratedModelChecks".into()],
-                    ..Default::default()
-                };
-                project.prompts = Default::default();
-                project.apply_inference().unwrap();
-                config.model = project.defaults.model.clone();
-                config.reasoning = project.defaults.reasoning;
-                std::fs::write(authored.join("config.toml"), toml::to_string(&project).unwrap()).unwrap();
-                let fixture = tidepool_testing::fixture_source(
-                    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs"
-                );
-                std::fs::write(authored.join("GeneratedModelChecks.hs"), format!(
-                    "{fixture}\nstagePrimary :: Member Core.ContextReadWrite effects => Models.{effort_type} -> Eff effects ()\nstagePrimary = Models.setNextEffort\n"
-                )).unwrap();
-                super::test_campaign::commit_workspace(&config.workspace);
-                config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace, &config.run_directory.path()
-                ).unwrap());
-            },
-        ).await;
-        campaign.run_scenario(|campaign| Box::pin(async move {
+                    credential_env: None,
+                    endpoint: None,
+                    inference_limits: Default::default(),
+                },
+            );
+            inference.models.insert(
+                "sol".into(),
+                ModelConfig {
+                    provider: "openai".into(),
+                    model: "gpt-6.1-sol".into(),
+                    effort: "high".into(),
+                    allowed_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                },
+            );
+            let profile = inference.profiles.get_mut("argon").unwrap();
+            profile.default = primary.into();
+            profile.allowed.push("sol".into());
+            project.haskell = crate::exomonad::workspace::HaskellConfig {
+                source_roots: vec![".".into()],
+                modules: vec!["GeneratedModelChecks".into()],
+                ..Default::default()
+            };
+            project.prompts = Default::default();
+            project.apply_inference().unwrap();
+            config.model = project.defaults.model.clone();
+            config.reasoning = project.defaults.reasoning;
+            std::fs::write(
+                authored.join("config.toml"),
+                toml::to_string(&project).unwrap(),
+            )
+            .unwrap();
+            let fixture = tidepool_testing::fixture_source(
+                "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs",
+            );
+            std::fs::write(authored.join("GeneratedModelChecks.hs"), fixture).unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
             let root = campaign.root_installation.policy.clone();
             let source = format!(
-                "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\ndisplay (GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Models.ModelSelectionEnvelope identity _ _ -> identity))"
+                "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\nimport qualified Tidepool.Internal.ModelControl as Control\ndisplay (Models.modelSelection currentModel == Models.modelSelection Models.primaryModel && GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Control.ModelSelectionEnvelope identity _ _ -> identity))"
             );
             let result = displayed(campaign, root.as_ref(), &source).await;
             assert_eq!(super::test_campaign::committed_display_text(&result), "True");
@@ -182,7 +183,36 @@ async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
             assert_eq!(refusal["items"][0]["failureLayer"], "compile", "{primary}: {refusal}");
             assert!(refusal.to_string().contains(expected_option), "{primary}: {refusal}");
         })).await;
-    }
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_argon_primary() {
+    check_frozen_static_model_selection(
+        "argon",
+        "Models.argon \"catalog\" \"argon\" (Models.DeepSeekOptions Models.DeepSeekHigh)",
+        "ArgonOptions",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_deepseek_primary() {
+    check_frozen_static_model_selection(
+        "flash",
+        "Models.deepSeek \"catalog\" \"flash\" (Models.OpenAIOptions Models.OpenAILow)",
+        "DeepSeekOptions",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_openai_primary() {
+    check_frozen_static_model_selection(
+        "sol",
+        "Models.openAI \"catalog\" \"sol\" (Models.ArgonOptions Models.EffortLow)",
+        "OpenAIOptions",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -274,6 +304,16 @@ async fn committed(
     let result = dispatch_haskell_script(policy, source).await;
     assert_eq!(result["status"], "committed", "{result:?}");
     result
+}
+
+async fn native_setup(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    campaign
+        .drive_native_admission(committed(policy, source))
+        .await
 }
 
 async fn displayed(
@@ -800,7 +840,7 @@ async fn notebook_cell_infers_response_results() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let response = displayed(
+                let response = native_setup(
                     campaign,
                     root.as_ref(),
                     &tidepool_testing::fixture_source(
@@ -823,12 +863,13 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
             "import qualified Tidepool.Agent.Contract as A\n",
             "Right worker <- spawnSubagent (FreshCtx \"notebook reply worker\") SameDir ",
-            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n",
+            "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n",
         ),
                 )
                 .await;
@@ -957,7 +998,7 @@ async fn record_actor_launch_publishes_and_routes_child_reply() {
 import Tidepool.Worktree (workspaceFor)
 Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
 Right launcherWorkspace <- workspaceFor launcherTree
-launcher <- R.start (R.withWorkspace launcherWorkspace launchDefinition)"#,
+launcher <- R.start (R.withWorkspace launcherWorkspace (launchDefinition currentModel (knownEffects @'[AgentLaunch, SpawnAgent OpenAI, Replies, Actor])))"#,
                 )
                 .await;
                 committed(
@@ -1575,13 +1616,14 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
                 let mut child = None;
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
             "import qualified Tidepool.Agent.Contract as A\n",
             "data Report = Report Int deriving Show\n",
             "Right worker <- spawnSubagent (FreshCtx \"activation preview worker\") SameDir ",
-            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+            "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
         ),
                 )
                 .await;
@@ -1665,13 +1707,19 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
                         .message
                         .contains("`reportProgress` is unavailable"));
                     if label == "preview-text" {
-                        let unavailable = dispatch_lookup(
+                        let unavailable = dispatch_haskell_script(
                             child.as_ref().unwrap().policy.as_ref(),
-                            &["reportProgress"],
+                            "reportProgress",
                         )
                         .await;
+                        assert_eq!(unavailable["status"], "rejected", "{unavailable}");
+                        assert_eq!(
+                            unavailable["items"][0]["failureLayer"], "compile",
+                            "{unavailable}"
+                        );
                         assert!(
-                            unavailable.to_string().contains("no match"),
+                            unavailable.to_string().contains("reportProgress")
+                                && unavailable.to_string().contains("not in scope"),
                             "{unavailable}"
                         );
                     }
@@ -1735,7 +1783,8 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
+                native_setup(
+                    campaign,
                     root.as_ref(),
                     &tidepool_testing::fixture_source(
                         "exomonad/host/src/actor_host/quiet_observation_setup.hs",
@@ -1846,12 +1895,13 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
                     .unwrap()
                     .unwrap()
                     .len();
-                let spawned = committed(
+                let spawned = native_setup(
+                    campaign,
                     root.as_ref(),
                     concat!(
                         "import qualified Tidepool.Agent.Contract as A\n",
                         "Right spawned <- spawnSubagent (FreshCtx \"observe once\") SameDir ",
-                        "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+                        "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
                     ),
                 )
                 .await;
@@ -1893,13 +1943,10 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/fixtures/model_context.hs",
-                    ),
-                )
-                .await;
+                let source = tidepool_testing::fixture_source(
+                    "exomonad/host/src/actor_host/fixtures/model_context.hs",
+                );
+                native_setup(campaign, root.as_ref(), &source).await;
                 let mut children = Vec::new();
                 let mut bindings = Vec::new();
                 {
@@ -1933,6 +1980,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                         }
                     }
                 }
+                assert_eq!(children.len(), 2);
                 for child in &children {
                     assert_eq!(
                         child.model,
@@ -1958,8 +2006,15 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                                 exomonad_actor::OpenAIReasoning::OpenAIMedium
                             ))
                         );
-                        let missing = dispatch_lookup(child.policy.as_ref(), &["parentOnly"]).await;
-                        assert!(missing.to_string().contains("no match"), "{missing}");
+                        let missing =
+                            dispatch_haskell_script(child.policy.as_ref(), "parentOnly").await;
+                        assert_eq!(missing["status"], "rejected", "{missing}");
+                        assert_eq!(missing["items"][0]["failureLayer"], "compile", "{missing}");
+                        assert!(
+                            missing.to_string().contains("parentOnly")
+                                && missing.to_string().contains("not in scope"),
+                            "{missing}"
+                        );
                     }
                     let reply =
                         dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput")
@@ -1976,7 +2031,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    displayed(
+    native_setup(
         campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source("exomonad/host/src/actor_host/fixtures/route.hs"),
@@ -2019,18 +2074,20 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         .iter()
         .find(|child| child.label == "producer")
         .unwrap();
-    dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
-    dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput").await;
+    let consumer_reply = campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
+    assert_eq!(consumer_reply["status"], "replied", "{consumer_reply}");
+    let producer_reply = campaign.drive_native_admission(dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput")).await;
+    assert_eq!(producer_reply["status"], "replied", "{producer_reply}");
     let reviewer = {
         enum ReviewArrival {
             Child(Box<exomonad_actor::LocalResidentInstallation>),
-            Ready { message: String },
+            Ready { actor: exomonad_actor::ActorRef },
             RouteFailure { detail: String },
         }
         let owner = campaign.actor.identity();
         let mut reviewer = None;
         let mut forwarded = false;
-        let mut review_ready = false;
+        let mut review_ready = None;
         let mut failure_notified = false;
         loop {
             let arrival = campaign
@@ -2043,7 +2100,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                         }
                         LocalResidentDeployment::SessionReady { activation } => {
                             Ok(ReviewArrival::Ready {
-                                message: activation.message,
+                                actor: activation.id.actor(),
                             })
                         }
                         LocalResidentDeployment::WatchChanged { notification }
@@ -2062,16 +2119,24 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 .await;
             match arrival {
                 ReviewArrival::Child(child) => {
+                    campaign.acknowledge_native_spawn(&child);
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model, Some(exomonad_actor::Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Sol)));
+                    if let Some(ready_actor) = review_ready {
+                        assert_eq!(ready_actor, child.actor.identity());
+                    }
                     bindings.push(open_test_workspace(campaign, &child));
                     reviewer = Some(child);
                 }
-                ReviewArrival::Ready { message } => {
-                    if message.contains("review-candidate") {
+                ReviewArrival::Ready { actor } => {
+                    if actor == consumer.actor.identity() {
+                        assert!(!forwarded, "consumer activated twice");
                         forwarded = true;
                     } else {
-                        review_ready = true;
+                        assert!(review_ready.replace(actor).is_none(), "reviewer activated twice");
+                        if let Some(child) = &reviewer {
+                            assert_eq!(actor, child.actor.identity());
+                        }
                     }
                 }
                 ReviewArrival::RouteFailure { detail } => {
@@ -2080,9 +2145,9 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                     failure_notified = true;
                 }
             }
-            if forwarded && review_ready && failure_notified {
-                if let Some(reviewer) = reviewer.take() {
-                    break reviewer;
+            if forwarded && failure_notified {
+                if reviewer.as_ref().is_some_and(|child| review_ready == Some(child.actor.identity())) {
+                    break reviewer.take().unwrap();
                 }
             }
         }
@@ -2113,15 +2178,26 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     )
     .await;
     assert_eq!(explicit_display_texts(&foreign)[0], "0", "{foreign}");
-    let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
+    let reply = campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
     assert_eq!(reply["status"], "replied", "{reply}");
+    native_setup(campaign, root.as_ref(), "Right unavailable <- request @Text (responseActor producer) (\"lost target\" :: Text) defaultRequestOptions\nhandled <- route (settlement unavailable) (\\settled -> case settled of { Left (ResponseTargetCancelled _) -> pure (); Left failure -> error (T.pack (show failure)); Right _ -> error \"unexpected success\" })").await;
+    campaign.next_deployment(
+        "producer pending request activation",
+        Duration::from_secs(120),
+        |event| match event {
+            LocalResidentDeployment::SessionReady { activation }
+                if activation.id.actor() == producer.actor.identity() => Ok(()),
+            other => Err(other),
+        },
+    ).await;
     displayed(
         campaign,
         root.as_ref(),
         "stopAgent (responseActor producer)",
     )
     .await;
-    displayed(campaign, root.as_ref(), "Right unavailable <- request @Text (responseActor producer) (\"lost target\" :: Text) defaultRequestOptions\nhandled <- route (settlement unavailable) (\\settled -> case settled of { Left _ -> pure (); Right _ -> error \"unexpected success\" })").await;
+    let refused = displayed(campaign, root.as_ref(), "refused <- request @Text (responseActor producer) (\"already stopped\" :: Text) defaultRequestOptions\n_ <- display (case refused of { Left _ -> True; Right _ -> False })").await;
+    assert_eq!(explicit_display_texts(&refused)[0], "True", "{refused}");
     let handled = displayed(
         campaign, root.as_ref(),
         "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
@@ -2280,12 +2356,17 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
         |config| {
             config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
-            crate::exomonad::workspace::copy_authored(
-                &super::test_campaign::declared_workspace_package(),
-                &config.workspace,
-            )
-            .unwrap();
+            super::test_campaign::scaffold_workspace(&config.workspace);
+            crate::exomonad::edit_fixture_project_config(&authored, |project| {
+                project.defaults.model = config.model.clone();
+                project.defaults.reasoning = config.reasoning;
+                project.models.clear();
+            });
             configure(&authored);
+            crate::exomonad::edit_fixture_project_config(
+                &authored,
+                crate::exomonad::author_scripted_model_catalog,
+            );
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
@@ -2335,7 +2416,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                 let result = displayed(
                     campaign,
                     policy.as_ref(),
-                    "observed <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
+                    "import qualified Project.SkillChecks\nimport qualified Project.RecursiveSpec\nobserved <- snapshot\ndisplay (show (swarmUsage observed))",
                 )
                 .await;
                 assert!(
@@ -2362,18 +2443,24 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                     "{candidate}"
                 );
                 assert!(!candidate.contains("GitOid"), "{candidate}");
-                let lookup = dispatch_lookup(
-                    policy.as_ref(),
-                    &[
-                        "implement",
-                        "reviewCandidate",
-                        "requestReview",
-                        "repair",
-                        "withDecision",
-                        "workspaceAgentSpec",
-                    ],
-                )
-                .await;
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let lookup = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_lookup(
+                            policy.as_ref(),
+                            &[
+                                "implement",
+                                "reviewCandidate",
+                                "requestReview",
+                                "repair",
+                                "withDecision",
+                                "workspaceAgentSpec",
+                            ],
+                        ),
+                    )
+                    .await;
                 assert_eq!(lookup["status"], "committed", "{lookup}");
             })
         })
@@ -2464,7 +2551,7 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         concat!(
             "rejected <- spawnSubagent (FreshCtx \"bad seed control\") ",
             "(ForkWorktree (atRef (GitRef \"refs/heads/tidepool-missing-seed\"))) ",
-            "(defaultSpawnOptions workspaceAgentSpec)\n",
+            "(defaultSpawnOptions currentModel workspaceAgentSpec)\n",
             "display (show rejected)",
         ),
     )
@@ -2480,13 +2567,13 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         matches!(event, LocalResidentDeployment::PolicyInstalled(_))
     });
 
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         concat!(
             "let parentOnly = 41 :: Int\n",
-            "Right captured <- checkpoint \"independent fork context\"\n",
+            "Right captured <- checkpoint currentModel \"independent fork context\"\n",
             "Right peer <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead) ",
-            "((defaultSpawnOptions workspaceAgentSpec) { spawnLifetime = RunOwned, ",
+            "((defaultSpawnOptions currentModel workspaceAgentSpec) { spawnLifetime = RunOwned, ",
             "spawnLabel = Just \"run-owned-peer\" })",
         ),
     )
@@ -2561,7 +2648,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source(
             "exomonad/host/src/actor_host/fixtures/independent_worker_setup.hs",
@@ -2578,7 +2665,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let result =
         dispatch_haskell_script(worker.policy.as_ref(), "respond (\"ready\" :: Text)").await;
     assert_eq!(result["status"], "replied", "{result}");
-    committed(
+    native_setup(campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source(
             "exomonad/host/src/actor_host/fixtures/independent_peer_setup.hs",
@@ -2738,6 +2825,12 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 #[tokio::test]
 async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
     let campaign = workspace_campaign_with(|authored| {
+        std::fs::create_dir_all(authored.join("Fixture")).unwrap();
+        std::fs::write(
+            authored.join("Fixture/WorkflowExamplesChecks.hs"),
+            include_str!("fixtures/workflow_examples_checks.hs"),
+        )
+        .unwrap();
         crate::exomonad::edit_fixture_project_config(authored, |project| {
             project.haskell.modules = vec!["Project.Work".into()];
         });
@@ -2749,7 +2842,51 @@ async fn candidate_reports_preserve_admissions_receipts_and_observation_failures
                 let root = campaign.root_installation.policy.clone();
                 committed(
                     root.as_ref(),
-                    "import Project.WorkflowExamplesChecks\nworkflowContracts",
+                    "import Fixture.WorkflowExamplesChecks\nworkflowContracts",
+                )
+                .await;
+                let (setup, child) = campaign
+                    .dispatch_native_spawn_setup(
+                        "candidate receipt worker",
+                        "(receiptWorker, producedRequest) <- startReceiptWorker currentModel",
+                        Duration::from_secs(180),
+                    )
+                    .await;
+                assert_eq!(setup["status"], "committed", "{setup}");
+                campaign
+                    .await_native_activation(
+                        child.actor.identity(),
+                        "produced candidate request",
+                        Duration::from_secs(120),
+                    )
+                    .await;
+                let produced = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "import Fixture.WorkflowExamplesChecks\nrespond producedOutcome",
+                )
+                .await;
+                assert_eq!(produced["status"], "replied", "{produced}");
+                committed(
+                    root.as_ref(),
+                    "blockedRequest <- requestBlocked receiptWorker",
+                )
+                .await;
+                campaign
+                    .await_native_activation(
+                        child.actor.identity(),
+                        "blocked candidate request",
+                        Duration::from_secs(120),
+                    )
+                    .await;
+                let blocked = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "import Fixture.WorkflowExamplesChecks\nrespond blockedOutcome",
+                )
+                .await;
+                assert_eq!(blocked["status"], "replied", "{blocked}");
+                committed(
+                    root.as_ref(),
+                    "successfulSettlements receiptWorker producedRequest blockedRequest",
                 )
                 .await;
             })
@@ -2937,11 +3074,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
         &["config", "user.email", "recipe-check@localhost"],
     )
     .unwrap();
-    crate::exomonad::workspace::copy_authored(
-        &super::test_campaign::declared_workspace_package(),
-        repository.path(),
-    )
-    .unwrap();
+    super::test_campaign::scaffold_workspace(repository.path());
     if let Some(checks) = checks {
         crate::exomonad::edit_fixture_project_config(
             &repository.path().join(".exomonad"),
@@ -3146,8 +3279,8 @@ async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects(
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs"
+        &tidepool_testing::fixture_source(
+            "exomonad/host/src/actor_host/fixtures/workspace_quantities.hs",
         ),
     )
     .await;

@@ -103,28 +103,30 @@ fn usage_summaries_have_provider_scope_completeness_and_shared_inspection_fields
 }
 
 #[test]
-fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration() {
-    let effect = agent_launch();
+fn family_spawn_retains_live_spec_and_explicit_model_permissions() {
+    let effect = tidepool_protocol::effects::agent_launch::spawn_agent();
     assert!(effect.validate().is_ok());
     let spawn = effect
         .verbs
         .iter()
-        .find(|verb| verb.ctor == "AgentLaunchSpawnWith")
+        .find(|verb| verb.ctor == "SpawnAgentSpawnWith")
         .unwrap();
     let argument = |name| spawn.args.iter().find(|arg| arg.name == name).unwrap();
     assert_eq!(
         spawn.args.iter().map(|arg| arg.name).collect::<Vec<_>>(),
         [
-            "context",
+            "family",
             "install",
+            "context",
             "workspace",
             "effects",
+            "modelGrants",
             "label",
-            "model",
-            "effort",
+            "selection",
             "instructions",
             "lifetime",
             "limits",
+            "spec_metadata",
         ]
     );
     assert_eq!(argument("context").ty, HsType::Named("SpawnContextWire"));
@@ -148,10 +150,11 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
     );
     assert_eq!(argument("install").rust, RustBinding::HaskellValue);
     assert_eq!(argument("label").ty, HsType::maybe(HsType::Text));
-    assert_eq!(argument("model").ty, HsType::maybe(HsType::Named("Model")));
+    assert_eq!(argument("selection").ty, HsType::Value);
+    assert_eq!(argument("modelGrants").ty, HsType::Value);
     assert_eq!(
-        argument("reasoning").ty,
-        HsType::maybe(HsType::Named("Reasoning"))
+        argument("family").ty,
+        HsType::app(HsType::Named("FamilyWitness"), HsType::Var("modelFamily"))
     );
     assert_eq!(argument("instructions").ty, HsType::maybe(HsType::Text));
     assert_eq!(
@@ -170,7 +173,8 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
             ]),
         )
     );
-    let errors = effect
+    let owner = agent_launch();
+    let errors = owner
         .type_defs
         .iter()
         .find(|ty| ty.name == "SpawnErrorWire")
@@ -454,4 +458,23 @@ fn inference_model_and_reasoning_wire_shapes_are_provider_qualified() {
             ("OpenAIHigh", vec![]),
         ]
     );
+}
+
+#[test]
+fn administrative_launch_has_no_spawn_or_checkpoint_creation_path() {
+    let admin = agent_launch();
+    assert!(admin.verbs.iter().all(|verb| !matches!(
+        verb.ctor,
+        "AgentLaunchSpawnWith" | "AgentLaunchCheckpointWith"
+    )));
+    for effect in [
+        tidepool_protocol::effects::agent_launch::fork_agent(),
+        tidepool_protocol::effects::agent_launch::spawn_agent(),
+        tidepool_protocol::effects::model::model(),
+    ] {
+        assert!(effect.validate().is_ok());
+        for verb in &effect.verbs {
+            assert_eq!(verb.args[0].name, "family", "{}", verb.ctor);
+        }
+    }
 }

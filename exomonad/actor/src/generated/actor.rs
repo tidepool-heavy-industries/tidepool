@@ -26,6 +26,7 @@ pub enum ActorReq {
         i64,
         tidepool_bridge::HaskellValue,
         crate::ActorEffectProfileWire,
+        tidepool_bridge::HaskellValue,
         Option<tidepool_bridge_effects::WtWorkspaceHandle>,
     ),
     ActorWaitWith(i64, (i64, i64)),
@@ -41,5 +42,6 @@ pub enum ActorReq {
         tidepool_bridge::HaskellValue,
         String,
         crate::ActorEffectProfileWire,
+        tidepool_bridge::HaskellValue,
     ),
 }

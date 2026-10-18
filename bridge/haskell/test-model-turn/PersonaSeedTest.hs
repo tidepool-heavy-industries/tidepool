@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 module PersonaSeedTest (personaSeedTests) where
 import Prelude
 import Data.Text (Text)
@@ -15,6 +16,7 @@ import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Test.Tasty.HUnit (assertEqual, assertBool)
 import Tidepool.Aeson
 import Tidepool.Effects.Core (FsWrite(..), FsWriteReceipt(..), FsPublication(..), Web(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
+import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorProfiles (ActorEffects, actorEffectName)
 import Tidepool.Form.Wire (prepareForm, decodeSubmission)
 import qualified Tidepool.Form as F
@@ -23,6 +25,8 @@ import qualified Persona.Memory as M
 import qualified Persona.Web as W
 import qualified Persona.Spec as Spec
 import qualified Tidepool.Agent.Contract as Contract
+
+type CompanionModelEffects = Core.ModelCall Core.DeepSeek ': Spec.PersonaEffects
 
 writeHost :: FsWrite a -> Eff '[State (Map.Map Text Text)] a
 writeHost (FsWrite file body) = modify (Map.insert file body) >> pure (Right ())
@@ -110,12 +114,12 @@ personaSeedTests = testGroup "persona seed"
           "[recent conversation unavailable: ReflectUnbound]" (W.contextUsed selection)
         Left err -> fail (show err)
   , testCase "companion enables commands while helper retains its investigation profile" $ do
-      let companion = toolEffectNames (Proxy @(Contract.SyncEffects Spec.PersonaEffects))
+      let companion = toolEffectNames (Proxy @(Contract.SyncEffects CompanionModelEffects))
           helper = toolEffectNames (Proxy @(Contract.SyncEffects Spec.HelperEffects))
-          companionBase = toolEffectNames (Proxy @Spec.PersonaEffects)
+          companionBase = toolEffectNames (Proxy @CompanionModelEffects)
           helperBase = toolEffectNames (Proxy @Spec.HelperEffects)
       mapM_ (\effect -> assertBool ("companion: " ++ show effect) (effect `elem` companion))
-        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser", "ModelCall", "Commands"]
+        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser", "ModelCall.DeepSeek", "Commands"]
       mapM_ (\effect -> assertBool ("helper: " ++ show effect) (effect `elem` helper))
         ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "Web", "Jev"]
       mapM_ (\effect -> assertBool ("excluded: " ++ show effect) (effect `notElem` companion && effect `notElem` helper))
@@ -125,7 +129,13 @@ personaSeedTests = testGroup "persona seed"
       assertBool "default helper returns findings rather than writing shared memory or mounting human forms"
         ("FsWrite" `notElem` helper && "AskUser" `notElem` helper)
       assertBool "bounded model calls are enabled for the companion only"
-        ("ModelCall" `elem` companionBase && "ModelCall" `notElem` helperBase)
+        ("ModelCall.DeepSeek" `elem` companionBase && "ModelCall.DeepSeek" `notElem` helperBase)
+      let leafCompanion = toolEffectNames (Proxy @Spec.PersonaEffects)
+      mapM_ (\effect -> assertBool ("leaf rows do not issue model permission: " ++ show effect)
+        (effect `notElem` leafCompanion && effect `notElem` helperBase))
+        ["ModelCall.OpenAI", "ModelCall.Argon", "ModelCall.DeepSeek",
+         "ForkAgent.OpenAI", "ForkAgent.Argon", "ForkAgent.DeepSeek",
+         "SpawnAgent.OpenAI", "SpawnAgent.Argon", "SpawnAgent.DeepSeek"]
       mapM_ (\effect -> assertBool ("invocation-only: " ++ show effect)
         (effect `notElem` companionBase && effect `notElem` helperBase))
         ["ContextReadWrite", "Reload"]

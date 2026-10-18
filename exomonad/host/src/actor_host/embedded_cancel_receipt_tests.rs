@@ -308,8 +308,8 @@ async fn cancelled_prefix_with_order(order: Option<CancellationOrder>) {
                     issuer: campaign.actor.identity(),
                     snapshot: Arc::new(installation.request_snapshot().unwrap()),
                     store: store.clone(),
-                    inference_defaults: installation.inference_defaults(),
-                    context_models: Arc::new(OnceLock::new()),
+                    initial_reasoning: installation.inference_reasoning(),
+                    conversation_permission: installation.conversation_permission().cloned(),
                 });
                 let dispatched = Arc::new(AtomicU64::new(0));
                 let dropped = Arc::new(AtomicBool::new(false));

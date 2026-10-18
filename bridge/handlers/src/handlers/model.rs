@@ -2,6 +2,7 @@
 //! evidence, cancellation and shared budget; this handler owns none of them.
 use crate::effect_glue::JsonArg;
 pub use crate::generated::model_call::{ModelBoundaryError, ModelReq};
+use exomonad_tool::ModelFamily;
 use serde_json::Value;
 use std::sync::Arc;
 use tidepool_effect::{
@@ -16,10 +17,16 @@ use tidepool_repr::PrincipalId;
 /// Implementations must bind opaque invocation identities to this cell and its
 /// principal, and retain a callback result before offering its after-tool hook.
 pub trait ModelService: Send + Sync {
-    fn start(&self, caller: PrincipalId, request: Value) -> Result<Value, ModelBoundaryError>;
+    fn start(
+        &self,
+        caller: PrincipalId,
+        family: ModelFamily,
+        request: Value,
+    ) -> Result<Value, ModelBoundaryError>;
     fn resume(
         &self,
         caller: PrincipalId,
+        family: ModelFamily,
         invocation: &str,
         call_id: &str,
         answer: Value,
@@ -27,11 +34,17 @@ pub trait ModelService: Send + Sync {
     fn annotate(
         &self,
         caller: PrincipalId,
+        family: ModelFamily,
         invocation: &str,
         operation: &str,
         annotation: Value,
     ) -> Result<Value, ModelBoundaryError>;
-    fn close(&self, caller: PrincipalId, invocation: &str) -> Result<(), ModelBoundaryError>;
+    fn close(
+        &self,
+        caller: PrincipalId,
+        family: ModelFamily,
+        invocation: &str,
+    ) -> Result<(), ModelBoundaryError>;
 }
 
 /// Cloning preserves the cell service, including its aggregate budget.
@@ -54,45 +67,59 @@ impl ModelHandler {
     pub(crate) fn model_start(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
+        family: tidepool_bridge_effects::ModelFamilyWitness,
         request: JsonArg,
     ) -> Result<Response, EffectError> {
         cx.respond(
             self.service()
-                .and_then(|service| service.start(cx.principal(), request.0)),
+                .and_then(|service| service.start(cx.principal(), family.into(), request.0)),
         )
     }
     pub(crate) fn model_resume(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
+        family: tidepool_bridge_effects::ModelFamilyWitness,
         invocation: String,
         call_id: String,
         answer: JsonArg,
     ) -> Result<Response, EffectError> {
-        cx.respond(
-            self.service().and_then(|service| {
-                service.resume(cx.principal(), &invocation, &call_id, answer.0)
-            }),
-        )
+        cx.respond(self.service().and_then(|service| {
+            service.resume(
+                cx.principal(),
+                family.into(),
+                &invocation,
+                &call_id,
+                answer.0,
+            )
+        }))
     }
     pub(crate) fn model_annotate(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
+        family: tidepool_bridge_effects::ModelFamilyWitness,
         invocation: String,
         operation: String,
         annotation: JsonArg,
     ) -> Result<Response, EffectError> {
         cx.respond(self.service().and_then(|service| {
-            service.annotate(cx.principal(), &invocation, &operation, annotation.0)
+            service.annotate(
+                cx.principal(),
+                family.into(),
+                &invocation,
+                &operation,
+                annotation.0,
+            )
         }))
     }
     pub(crate) fn model_close(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
+        family: tidepool_bridge_effects::ModelFamilyWitness,
         invocation: String,
     ) -> Result<Response, EffectError> {
         cx.respond(
             self.service()
-                .and_then(|service| service.close(cx.principal(), &invocation)),
+                .and_then(|service| service.close(cx.principal(), family.into(), &invocation)),
         )
     }
 }
