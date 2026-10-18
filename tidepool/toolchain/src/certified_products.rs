@@ -12190,6 +12190,137 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn completed_new_product_request_preserves_input_group_permissions() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeArtifactDemand,
+            NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
+        };
+        let producer_bytes = b"completed-request-input-permissions";
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_bytes,
+        );
+        let dependency = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "RequestInput",
+                vec![(3, vec![]), (7, vec![])],
+                21,
+                &BTreeMap::new(),
+                b"RequestInput interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let fresh = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "RequestFresh",
+                vec![(
+                    11,
+                    vec![PendingImportOwner::Source {
+                        owner: dependency.owner().clone(),
+                        original_ordinal: 3,
+                        binder: testing::identity("RequestInput", "entry_3"),
+                    }],
+                )],
+                22,
+                &BTreeMap::new(),
+                b"RequestFresh interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let products = recovered_witness_fixtures(&[dependency, fresh]);
+        let dependency = &products[0].product;
+        let fresh = &products[1].product;
+        let input =
+            Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+        let fresh_entry =
+            Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+        for (ordinals, permitted) in [
+            (vec![3, 7], true),
+            (vec![3], true),
+            (vec![7], false),
+            (vec![], false),
+        ] {
+            let inventory = ArtifactInventory::default();
+            let selected = ordinals
+                .iter()
+                .map(|ordinal| NativeGroupKey {
+                    artifact: input.descriptor.id,
+                    original_ordinal: *ordinal,
+                })
+                .collect();
+            let view = inventory
+                .admit_recovery_selection(&inventory.empty_view(), vec![input.clone()], &selected)
+                .unwrap();
+            let owner = input.descriptor.owner.clone();
+            let context = ExactDeclarationContext::from_authenticated_execution(
+                producer.sha256(),
+                &view,
+                CompilerInputProjection::from_issued_entries(&[input.clone()]).unwrap(),
+                vec![],
+                owner,
+                &[],
+            )
+            .unwrap();
+            let request = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap();
+            let row = request.native_availability(input.descriptor.id).unwrap();
+            assert_eq!(row.permits(3), permitted);
+            assert_eq!(
+                row.offers().any(|offer| offer.is_full()),
+                ordinals.len() == 2
+            );
+            let operation = InventoryOperation::new(Default::default());
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+                &request,
+                &request.metadata,
+                &operation,
+            )
+            .unwrap();
+            selection
+                .admit_current(
+                    fresh.owner(),
+                    ProductOrigin::RetainedCore,
+                    fresh.module_interface().unwrap(),
+                    &operation,
+                )
+                .unwrap();
+            let physical = request
+                .artifacts()
+                .inventory()
+                .admit_shared_with_demand(
+                    request.artifacts(),
+                    vec![fresh_entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+            assert_eq!(result.is_ok(), permitted);
+            if permitted {
+                let completed = result.unwrap();
+                assert!(completed.native_offers().iter().any(|offer| {
+                    offer.original() == fresh_entry.descriptor.id && offer.is_full()
+                }));
+                assert!(completed
+                    .issued_artifacts()
+                    .selected_native_groups()
+                    .iter()
+                    .all(|key| key.artifact != fresh_entry.descriptor.id));
+            } else {
+                assert!(
+                    matches!(result, Err(crate::CompileError::ArtifactInventory(error))
+                    if matches!(error.failure,
+                        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact, original_ordinal: 3,
+                        } if artifact == input.descriptor.id))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn full_original_availability_is_read_only_and_checks_selected_authority() {
         let operation = InventoryOperation::new(Default::default());
         let original = full_native_fixture("Available", vec![(8, vec![]), (11, vec![])], 7);
