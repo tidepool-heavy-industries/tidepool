@@ -1007,11 +1007,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .unwrap();
     let other_interface = other_support.artifacts().clone();
     for selected in [&other, &other_interface] {
-        let mismatch = left
-            .merge_fixture_selections(selected)
-            .unwrap()
-            .retain_original_custody(selected)
-            .unwrap();
+        let mismatch = selected.retain_custody(&left).unwrap();
         assert!(left_proof.issued_groups(&mismatch).is_ok());
         assert!(left_proof
             .qualify_availability(&mismatch)
