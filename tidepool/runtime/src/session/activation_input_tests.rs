@@ -1574,11 +1574,11 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let realm = destination.parked_realm(&activation).unwrap();
     let retained_context = &original.authenticated_inputs[&site].types;
     let certification = fixture.producer.certification.as_ref().unwrap();
-    let compiler_context = certification
+    let compiler_source = certification
         .original_compile_input
         .as_ref()
         .unwrap()
-        .original_source(
+        .validated_original_source(
             &fixture.producer.prepared(),
             &certification.groups,
             &certification.target_owners,
@@ -1587,6 +1587,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             &fixture.producer.asks,
         )
         .unwrap();
+    let compiler_context = compiler_source.execution_context();
     let site_metadata = &original.sites[&site];
     assert_eq!(site_metadata.inputs.len(), 2);
     let input_witness = site_metadata.input_type_witnesses[0].as_ref().unwrap();
@@ -1594,14 +1595,14 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     assert!(result_witness.signature().names().iter().any(|name| {
         name.module() == "Tidepool.Agent.Reply.Internal" && name.occurrence() == "ResponseResult"
     }));
-    let package_types = compiler_context
+    let package_types = compiler_source
         .project_type_interfaces(&[input_witness], &[])
         .unwrap();
     assert!(
         package_types.compiler_input_roles().is_empty(),
         "Int -> Int requires only package interfaces"
     );
-    let expected_types = compiler_context
+    let expected_types = compiler_source
         .project_type_interfaces(&[result_witness], &[])
         .unwrap();
     assert!(
@@ -1616,9 +1617,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     assert_interface_only_roles_without_native_selection(&retained_context);
     assert!(retained_context.lexical_graph().is_empty());
-    let producer = compiler_context
-        .execution_context()
-        .toolchain_identity_sha256();
+    let producer = compiler_context.toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
     assert_eq!(retained_context.toolchain_identity_sha256(), producer);
     assert_eq!(
@@ -1652,7 +1651,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     conflicting.authenticated_inputs.insert(
         site,
         AuthenticatedInputContext::capture(
-            compiler_context.clone(),
+            Arc::new(package_types),
             original.authenticated_inputs[&site].execution.clone(),
         ),
     );

@@ -226,7 +226,6 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
 
     drop(original);
     drop(execution);
-    drop(interfaces);
     drop(frozen);
     retained.close().unwrap();
     std::fs::remove_file(&owner_source).unwrap();
