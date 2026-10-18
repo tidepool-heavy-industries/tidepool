@@ -13954,8 +13954,27 @@ mod tests {
                     })
                     .collect::<BTreeSet<_>>();
                 assert_eq!(expected_namespace.len(), 2);
+                let expected_original = entries
+                    .values()
+                    .find(|entry| {
+                        entry.descriptor.owner == owners[root_index]
+                            && matches!(entry.payload, ArtifactPayload::Original(_))
+                    })
+                    .unwrap()
+                    .descriptor
+                    .id;
                 let mut expected_bindings = expected_namespace.clone();
                 let mut expected_edges = BTreeSet::new();
+                assert_eq!(issued.compiler_source_support().native_offers().len(), 2);
+                assert_eq!(
+                    issued
+                        .compiler_source_support()
+                        .native_offers()
+                        .iter()
+                        .map(|offer| offer.snapshot_facts().owner)
+                        .collect::<BTreeSet<_>>(),
+                    owners.iter().cloned().collect(),
+                );
                 // Empty input offers retain their own carrier/interface pair as
                 // custody, independently of publication's narrower namespace.
                 for offer in issued.compiler_source_support().native_offers() {
@@ -14028,11 +14047,16 @@ mod tests {
                 );
                 assert!(selected.artifact_view().selected_native_groups().is_empty());
                 assert_eq!(selected.compiler_input_roles().len(), 1);
-                assert!(selected
+                let selected_rows = selected
                     .compiler_source_support()
                     .native_availability()
                     .rows()
-                    .all(|row| { row.original.descriptor.owner == owners[root_index] }));
+                    .collect::<Vec<_>>();
+                assert_eq!(selected_rows.len(), 1);
+                assert_eq!(selected_rows[0].original.descriptor.id, expected_original);
+                assert_eq!(selected_rows[0].mode, NativeTransportMode::IssuedGroups);
+                assert!(!selected_rows[0].permits(0));
+                assert!(!selected_rows[0].permits(9001));
                 let selected_edges = selected.artifact_view().binding_dependencies();
                 assert!(expected_edges
                     .iter()
