@@ -68,7 +68,10 @@ through the existing conversation seam so the root admits `Reflect`.
 
 Notebook inspection feedback may be a binding handle. Behavioral assertions
 must follow the existing output or inspection owner to the evaluated value;
-immediate feedback text is not itself proof of the result. `display` publishes
+immediate feedback text is not itself proof of the result. When assertion
+branches display different types, discard each typed display handle before
+joining the branches. Render Show-only outcomes explicitly with `show` so
+failure pages retain their constructors and details. `display` publishes
 through the ordinary output coordinator. Hosted tests follow its receipt into
 the Store. Component campaigns use `TestCampaign::drive_actor_output` while
 awaiting any operation that can publish output, including named authored tool
