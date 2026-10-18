@@ -2682,9 +2682,7 @@ mod tests {
                 vec![selected.clone(), excluded.clone()],
             )
             .unwrap();
-        let narrowed = full
-            .select_roots(BTreeSet::from([selected.descriptor.id]))
-            .unwrap();
+        let narrowed = full.select_roots(vec![selected.descriptor.id]).unwrap();
         assert!(narrowed
             .lease
             .payloads
