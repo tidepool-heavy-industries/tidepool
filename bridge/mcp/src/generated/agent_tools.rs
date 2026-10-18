@@ -4,6 +4,7 @@
 #[must_use]
 pub fn agent_tools_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "AgentTools",
         description: "Private resident-policy boundary for tools exposed to an attached agent. Authored code uses `serveTools`; Rust owns host projection while Haskell owns declarations and dispatch.",
         prompt_card: None,

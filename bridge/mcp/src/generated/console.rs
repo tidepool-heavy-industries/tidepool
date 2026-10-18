@@ -4,6 +4,7 @@
 #[must_use]
 pub fn console_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Console",
         description: "Suspend to the driver's console/operator feed (decode-only schema).",
         prompt_card: None,

@@ -32,6 +32,8 @@ pub struct HelperDecl {
 /// implements `DescribeEffect` to provide its Haskell-side type declaration.
 #[derive(Debug, Clone, Copy)]
 pub struct EffectDecl {
+    /// Exact operation and family issued by the selected nominal row key.
+    pub model_permission: Option<exomonad_tool::ModelPermission>,
     /// Haskell GADT type name, e.g. `"Console"`.
     pub type_name: &'static str,
     /// Human-readable description of what this effect does — the long-form
@@ -73,6 +75,30 @@ pub struct EffectDecl {
     /// length as `type_params`, empty when there are none. These arguments
     /// must match each parameter's kind, as with `ActorLocal Maybe`.
     pub default_row_args: &'static [&'static str],
+}
+
+impl EffectDecl {
+    /// Specialize one family-qualified declaration from an issued nominal key.
+    #[must_use]
+    pub fn for_model_permission(mut self, permission: exomonad_tool::ModelPermission) -> Self {
+        use exomonad_tool::{ModelFamily, ModelOperation};
+        let expected = match permission.operation {
+            ModelOperation::ModelCall => "ModelCall",
+            ModelOperation::ForkAgent => "ForkAgent",
+            ModelOperation::SpawnAgent => "SpawnAgent",
+        };
+        assert_eq!(
+            self.type_name, expected,
+            "model permission must match its operation declaration"
+        );
+        self.default_row_args = match permission.family {
+            ModelFamily::OpenAI => &["OpenAI"],
+            ModelFamily::Argon => &["Argon"],
+            ModelFamily::DeepSeek => &["DeepSeek"],
+        };
+        self.model_permission = Some(permission);
+        self
+    }
 }
 
 /// The type arguments a single compile applies to the parameterized effects in
@@ -140,7 +166,10 @@ impl RowArgs {
 #[must_use]
 pub fn row_entry(decl: &EffectDecl, row: &RowArgs) -> String {
     let mut out = String::from(decl.type_name);
-    match row.get(decl.type_name) {
+    match row
+        .get(decl.type_name)
+        .filter(|_| decl.model_permission.is_none())
+    {
         Some(args) => {
             debug_assert_eq!(
                 args.len(),

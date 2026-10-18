@@ -421,6 +421,7 @@ macro_rules! effect_decl_projection {
     ) => {
         pub fn $decl_fn() -> $crate::EffectDecl {
             $crate::EffectDecl {
+                model_permission: None,
                 type_name: stringify!($eff),
                 description: concat!($($desc),*),
                 prompt_card: crate::effect_defs::opt_prompt_card_or_none!($($pc)?),
@@ -497,6 +498,7 @@ macro_rules! effect_decl_projection {
     ) => {
         pub fn $decl_fn() -> $crate::EffectDecl {
             $crate::EffectDecl {
+                model_permission: None,
                 type_name: stringify!($eff),
                 description: concat!($($desc),*),
                 prompt_card: crate::effect_defs::opt_prompt_card_or_none!($($pc)?),

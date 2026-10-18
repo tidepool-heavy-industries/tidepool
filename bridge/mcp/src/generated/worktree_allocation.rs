@@ -4,6 +4,7 @@
 #[must_use]
 pub fn worktree_allocation_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "WorktreeAllocation",
         description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,

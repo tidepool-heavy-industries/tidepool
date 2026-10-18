@@ -4,6 +4,7 @@
 #[must_use]
 pub fn resource_scopes_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ResourceScopes",
         description: "Use Tidepool.Scope.withScope to bound explicitly scoped resources in reusable Haskell functions. The runtime registers cleanup ownership before running the callback and finalizes it on return, failure or cancellation. Resources select InScope explicitly; defaults keep their existing ownership. Returning a handle does not transfer lifetime. Body and cleanup outcomes remain independent; uncertain external cleanup retains its finalization obligation.",
         prompt_card: None,

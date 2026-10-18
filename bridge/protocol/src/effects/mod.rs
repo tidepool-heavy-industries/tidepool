@@ -92,6 +92,8 @@ pub fn all() -> Vec<Effect> {
         jev::jev(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),
+        agent_launch::spawn_agent(),
+        agent_launch::fork_agent(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
         reflect::reflect(),

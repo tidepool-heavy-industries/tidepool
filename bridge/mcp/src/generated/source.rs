@@ -4,6 +4,7 @@
 #[must_use]
 pub fn source_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Source",
         description: "Inspect source from the executing request's immutable generation. Source inspection does not publish edited files; synchronous Reload owns publication.",
         prompt_card: None,

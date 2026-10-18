@@ -4,6 +4,7 @@
 #[must_use]
 pub fn reflect_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Reflect",
         description: "Read your own recent conversation as data. `reflect n` returns your latest n turns including the active turn, oldest first, each carrying the recorded messages, tool calls and tool results that belong to it. `turnState` records response progress independently of optional timestamps; pending results are never invented. Fewer than n turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own conversation — there is no argument naming another actor or a file. `Left ReflectUnbound` means this context has no bound conversation to read, which an operator proxy and a recreated host both are; the root's conversation is never substituted for a caller's. Because it is an ordinary effect, an authored function can fetch its own recent context once and reuse it across a whole sequence of later calls.",
         prompt_card: None,
@@ -17,7 +18,8 @@ pub fn reflect_decl() -> crate::EffectDecl {
             "data ConversationRole = RoleSystem | RoleDeveloper | RoleUser | RoleAssistant deriving (Show, Eq)",
             "data TurnItem = TurnMessage ConversationRole Text | TurnToolCall Text Text Text | TurnToolResult Text Text deriving (Show, Eq)",
             "data ConversationTurnState = TurnInProgress | TurnCompleted (Maybe Text) | TurnInterrupted | TurnUnknown deriving (Show, Eq)",
-            "data ConversationTurn = ConversationTurn { turnIdentity :: Text, turnState :: ConversationTurnState, turnStartedAt :: Maybe Text, turnCompletedAt :: Maybe Text, turnItems :: [TurnItem] } deriving (Show, Eq)",
+            "data TurnObservation = TurnObservation { observationEventId :: Int, observationProvider :: Maybe Text, observationModel :: Maybe Text, observationInputTokens :: Maybe Int, observationCachedTokens :: Maybe Int, observationOutputTokens :: Maybe Int, observationReasoningTokens :: Maybe Int, observationDurationMs :: Maybe Int } deriving (Show, Eq)",
+            "data ConversationTurn = ConversationTurn { turnIdentity :: Text, turnState :: ConversationTurnState, turnObservations :: [TurnObservation], turnStartedAt :: Maybe Text, turnCompletedAt :: Maybe Text, turnItems :: [TurnItem] } deriving (Show, Eq)",
             "data ReflectError = ReflectUnbound | ReflectUnreadable Text deriving (Show, Eq)",
             "instance ToJSON ResultReference\ninstance FromJSON ResultReference\ninstance JsonSchema ResultReference",
         ],

@@ -4,14 +4,15 @@
 #[must_use]
 pub fn model_call_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ModelCall",
         description: "Run a bounded model subroutine with an explicit tool record and typed or textual result through `Tidepool.Model`. Use it when a local reasoning step needs its own instructions and tool loop; use Jev for a finite semantic judgment over supplied evidence, and a child agent when work needs independent context, checkout or lifecycle. Haskell constructs the tool capabilities, input and result decoder, then pattern matches the outcome to continue. Callbacks execute in the caller's effect row; every invocation shares the admitted cell's model budget. A decoded result establishes its schema, not the truth of its claims: retain evidence and validate task-specific invariants before acting.",
         prompt_card: None,
         constructors: &[
-            "ModelStartWith :: Value -> ModelCall (Either ModelBoundaryError Value)",
-            "ModelResumeWith :: Text -> Text -> Value -> ModelCall (Either ModelBoundaryError Value)",
-            "ModelAnnotateWith :: Text -> Text -> Value -> ModelCall (Either ModelBoundaryError Value)",
-            "ModelCloseWith :: Text -> ModelCall (Either ModelBoundaryError ())",
+            "ModelStartWith :: FamilyWitness family -> Value -> ModelCall family (Either ModelBoundaryError Value)",
+            "ModelResumeWith :: FamilyWitness family -> Text -> Text -> Value -> ModelCall family (Either ModelBoundaryError Value)",
+            "ModelAnnotateWith :: FamilyWitness family -> Text -> Text -> Value -> ModelCall family (Either ModelBoundaryError Value)",
+            "ModelCloseWith :: FamilyWitness family -> Text -> ModelCall family (Either ModelBoundaryError ())",
         ],
         type_defs: &[
             "data ModelBoundaryError = ModelUnavailable Text | ModelRejected Text | ModelTransportFailed Text deriving (Show, Eq)\ninstance ToJSON ModelBoundaryError where\n  toJSON e = case e of\n    ModelUnavailable detail -> object [\"tag\" .= (\"ModelUnavailable\" :: Text), \"detail\" .= detail]\n    ModelRejected detail -> object [\"tag\" .= (\"ModelRejected\" :: Text), \"detail\" .= detail]\n    ModelTransportFailed detail -> object [\"tag\" .= (\"ModelTransportFailed\" :: Text), \"detail\" .= detail]\n",
@@ -20,7 +21,11 @@ pub fn model_call_decl() -> crate::EffectDecl {
             "import Tidepool.Model",
         ],
         helpers: &[],
-        type_params: &[],
-        default_row_args: &[],
+        type_params: &[
+            "family",
+        ],
+        default_row_args: &[
+            "OpenAI",
+        ],
     }
 }

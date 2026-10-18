@@ -37,6 +37,8 @@ tidepool/bridge-effects/src/generated/jev.rs
 bridge/mcp/src/generated/agent_inspection.rs
 bridge/mcp/src/generated/agent_launch.rs
 tidepool/bridge-effects/src/generated/agent_launch.rs
+bridge/mcp/src/generated/spawn_agent.rs
+bridge/mcp/src/generated/fork_agent.rs
 bridge/mcp/src/generated/agent_tools.rs
 bridge/mcp/src/generated/agent_session.rs
 bridge/mcp/src/generated/reflect.rs
@@ -89,6 +91,8 @@ exomonad/actor/src/generated/jev.rs
 exomonad/actor/src/generated/model_call.rs
 exomonad/actor/src/generated/agent_inspection.rs
 exomonad/actor/src/generated/agent_launch.rs
+exomonad/actor/src/generated/spawn_agent.rs
+exomonad/actor/src/generated/fork_agent.rs
 exomonad/actor/src/generated/agent_tools.rs
 exomonad/actor/src/generated/agent_session.rs
 exomonad/actor/src/generated/reflect.rs

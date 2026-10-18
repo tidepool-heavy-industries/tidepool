@@ -21,19 +21,6 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum AgentLaunchReq {
-    AgentLaunchSpawnWith(
-        crate::start::SpawnContextWire,
-        tidepool_bridge::HaskellValue,
-        crate::fork_workspace::SpawnWorkspaceWire,
-        Vec<crate::ActorEffectKeyWire>,
-        Option<String>,
-        Option<crate::Model>,
-        Option<crate::Reasoning>,
-        Option<String>,
-        crate::WorkerLifetime,
-        Option<(i64, i64)>,
-        tidepool_bridge::HaskellValue,
-    ),
     AgentLaunchValidateSpecWith(
         tidepool_bridge::HaskellValue,
         Vec<crate::ActorEffectKeyWire>,
@@ -43,7 +30,6 @@ pub enum AgentLaunchReq {
         tidepool_bridge::HaskellValue,
         Vec<crate::ActorEffectKeyWire>,
     ),
-    AgentLaunchCheckpointWith(String),
     AgentLaunchCheckCheckpointWith(String),
     AgentLaunchReleaseCheckpointWith(String),
 }

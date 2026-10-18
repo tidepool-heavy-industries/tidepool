@@ -4,6 +4,7 @@
 #[must_use]
 pub fn sleep_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Sleep",
         description: "Suspend the current actor evaluation on a monotonic timer without occupying command resources or waking the model before completion.",
         prompt_card: Some("`sleep (minutes 15)` suspends this evaluation once and returns `()` after the delay."),

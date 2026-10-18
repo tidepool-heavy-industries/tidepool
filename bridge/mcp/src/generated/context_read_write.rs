@@ -4,6 +4,7 @@
 #[must_use]
 pub fn context_read_write_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ContextReadWrite",
         description: "Targeted transactional edits to the admitted synchronous tool's committed context projection, next model and reasoning effort. Use `Tidepool.Agent.Context` to curate the next inference's evidence or select its model; `reflect` only reads recorded conversation data. Accepted context batches and explicit next-model/effort choices commit together on whole-cell success; a terminal rejection rolls them back together. External effects already issued are not rolled back. A stage refusal accepts no transaction and leaves separately requested choices and any accepted batch intact. A patch never changes model or effort; choice-only cells remain supported. Context references and native blocks retain host-owned evidence provenance, while system and developer instructions remain host-controlled. Saving an inspection preserves data and content versions, not authority; stage one version-bound patch and inspect its retained terminal receipt. For curation followed by delegation, complete the synchronous context edit before capturing that context for `spawnSubagent`. Context and workspace are independent choices; see `exomonad-agent-work`. Only an explicitly admitted synchronous profile can carry this effect; see `doc workbench` for patch and receipt rules.",
         prompt_card: None,

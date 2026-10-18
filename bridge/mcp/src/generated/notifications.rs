@@ -4,6 +4,7 @@
 #[must_use]
 pub fn notifications_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Notifications",
         description: "One-way actor notifications for information that needs no typed reply obligation. Use typed requests when the sender needs a result or retained settlement; use notifications for progress or observations the recipient can incorporate independently. Inbox-backed delivery observations distinguish admission from presentation; delivery does not prove agreement or action.",
         prompt_card: None,

@@ -4,6 +4,7 @@
 #[must_use]
 pub fn actor_context_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "ActorContext",
         description: "Inspect the executing actor's exact identity and effective role, workspace, native-tool, prompt, and descendant policies. These are runtime facts, not authority handles and not an inference from effect membership.",
         prompt_card: Some("`actorContext` returns exact current-actor identity and effective policy facts."),

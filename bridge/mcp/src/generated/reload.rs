@@ -4,6 +4,7 @@
 #[must_use]
 pub fn reload_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "Reload",
         description: "Publish edited source through an admitted synchronous endpoint. CompatibleOnly preserves the declared tool surface; AcceptCacheInvalidation permits supported surface changes and invalidates the provider tool cache.",
         prompt_card: None,

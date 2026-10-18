@@ -4,6 +4,7 @@
 #[must_use]
 pub fn agent_control_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "AgentControl",
         description: "Private supervised actor-control substrate used by typed stop operations.",
         prompt_card: None,

@@ -436,6 +436,7 @@ mod tests {
     fn test_build_preamble() {
         let effects = vec![
             EffectDecl {
+                model_permission: None,
                 type_name: "Console",
                 description: "Print output",
                 constructors: &["Print :: Text -> Console ()"],
@@ -447,6 +448,7 @@ mod tests {
                 prompt_card: None,
             },
             EffectDecl {
+                model_permission: None,
                 type_name: "KV",
                 description: "Key-value store",
                 constructors: &[
@@ -503,6 +505,7 @@ mod tests {
     #[test]
     fn test_template_haskell() {
         let effects = vec![EffectDecl {
+            model_permission: None,
             type_name: "Console",
             description: "",
             constructors: &["Print :: Text -> Console ()"],
@@ -534,6 +537,7 @@ mod tests {
     #[test]
     fn test_template_haskell_expression_forms() {
         let effects = vec![EffectDecl {
+            model_permission: None,
             type_name: "Console",
             description: "",
             constructors: &["Print :: Text -> Console ()"],
@@ -963,6 +967,7 @@ data Console a where
     #[test]
     fn test_template_haskell_truncation() {
         let effects = vec![EffectDecl {
+            model_permission: None,
             type_name: "Console",
             description: "",
             constructors: &["Print :: Text -> Console ()"],

@@ -4,6 +4,7 @@
 #[must_use]
 pub fn event_decl() -> crate::EffectDecl {
     crate::EffectDecl {
+        model_permission: None,
         type_name: "RepoEvent",
         description: "Typed repository events. `commit tree` and `headChanged tree` are event DESCRIPTIONS — values you can build, `fmap`, and merge with `<|>` before anything is registered. `withHandler event handler body` makes one live for exactly the extent of its lexical body: it registers without blocking, never replays events older than the registration, invokes the handler in the SAME effect row as the surrounding code (so it may send a typed message, spawn a reviewer, or ask the operator — and may itself suspend), runs one handler at a time per subscription with later observations queued in observation order, and on exit closes intake, drains, then unregisters. Handler failure fails the enclosing scope. Queue overflow fails loudly — commits are never silently dropped. `nextEvent event` blocks until the FIRST matching observation (or forever): subscribe, block-await, unsubscribe — the one-shot sibling of `withHandler`, no caller-supplied timeout. `after ms` is a one-shot deadline event, `ms` milliseconds from the moment it is SUBSCRIBED (not from the `after` call itself), that fires exactly one `Tick`, so `nextEvent (someEvent <|> after ms)` reads as an ordinary select with a timeout branch.",
         prompt_card: None,
