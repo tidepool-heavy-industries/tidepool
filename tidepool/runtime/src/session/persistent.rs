@@ -2746,13 +2746,22 @@ impl PersistentSession {
             .graph
             .surface(&owner)
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
-        let exact_context = lib.current_exact_context_in(target);
-        let (graph, context_root) = super::recovery_hydration::materialize_public_compiler_context(
-            &state.graph,
-            &state.artifact_root,
-            exact_context.as_ref(),
-            previous.as_ref().and_then(|s| s.context_root.as_ref()),
-        )?;
+        let scoped_context = lib.current_scoped_compiler_context_in(target);
+        let (graph, context) = match scoped_context.as_ref() {
+            Some(context) => {
+                let (graph, prepared) = state.graph.stage_compiler_context(
+                    &state.artifact_root,
+                    context,
+                    previous.as_ref().and_then(|s| s.context_root.as_ref()),
+                )?;
+                (graph, Some(prepared))
+            }
+            None => (state.graph.clone(), None),
+        };
+        let context_root = context.as_ref().map(|context| context.root().clone());
+        let installing_context = context
+            .as_ref()
+            .map(|context| super::recovery::ScopedCompilerContext::new(context.exact().clone()));
         let bindings = snapshot
             .bindings
             .iter()
@@ -2802,6 +2811,7 @@ impl PersistentSession {
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         let staged = candidate
             .prepare(state.store_revision, state.allocation_ceiling)
+            .and_then(|staged| staged.with_compiler_context(context))
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         let readiness =
             self.prepare_durable_public_readiness(&owner, target, self.admission_owner().epoch());
@@ -2812,7 +2822,7 @@ impl PersistentSession {
             target,
             super::ScopeDeclarationState {
                 tip: snapshot.declaration_tip,
-                exact_context,
+                exact_context: installing_context,
                 published_sources: lib.published_source_selections_in(target).to_vec(),
             },
         );
@@ -2825,13 +2835,22 @@ impl PersistentSession {
         let outcome = match staged.commit() {
             super::StoreDisposition::Committed((graph, receipt)) => {
                 let lib = self.lib_mut();
-                lib.install_committed_recovery_graph(graph, receipt.state.clone());
+                lib.install_committed_recovery_graph(graph, receipt.state().clone());
                 lib.durable_public_scopes = public_scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(target, next_epoch);
                 self.recovery_initialization = None;
                 match receipt.installed_blocking() {
-                    Ok(()) => super::StoreDisposition::Committed(readiness),
+                    Ok(context) => {
+                        // Native graph, scope and epoch installation precedes acknowledgement.
+                        // Promotion only replaces this already installed exact compiler owner.
+                        self.lib_mut()
+                            .tips
+                            .get_mut(&target)
+                            .expect("public scope installed before acknowledgement")
+                            .exact_context = context;
+                        super::StoreDisposition::Committed(readiness)
+                    }
                     Err(error) => super::StoreDisposition::RecoveryRequired(error),
                 }
             }

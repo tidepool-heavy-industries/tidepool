@@ -250,14 +250,14 @@ impl PreparedCompilerContext {
 
 pub(crate) struct StagedCompilerContextPublication {
     staged: StagedRecoveryManifest,
-    context: PreparedCompilerContext,
+    context: Option<PreparedCompilerContext>,
 }
 
 /// Native installation still owns the store's existing exclusion and recovery
 /// obligation. Only its successful acknowledgement releases `Stored`.
 pub(crate) struct CompilerContextInstallation {
     installation: crate::session::recovery_store::NativeInstallationReceipt,
-    context: PreparedCompilerContext,
+    context: Option<PreparedCompilerContext>,
 }
 
 static_assertions::assert_not_impl_any!(PreparedCompilerContext: Clone, Copy);
@@ -269,19 +269,19 @@ impl CompilerContextInstallation {
         &self.installation.state
     }
 
-    pub(crate) fn exact(&self) -> &Arc<ExactDeclarationContext> {
-        self.context.exact()
+    pub(crate) fn exact(&self) -> Option<&Arc<ExactDeclarationContext>> {
+        self.context.as_ref().map(PreparedCompilerContext::exact)
     }
 
-    pub(crate) fn installed_blocking(self) -> Result<ScopedCompilerContext, StoreError> {
+    pub(crate) fn installed_blocking(self) -> Result<Option<ScopedCompilerContext>, StoreError> {
         self.installation.installed_blocking()?;
-        Ok(ScopedCompilerContext::Stored(Arc::new(
-            StoredCompilerContext {
-                exact: self.context.exact,
-                materialized: self.context.materialized,
-                origin: self.context.origin,
-            },
-        )))
+        Ok(self.context.map(|context| {
+            ScopedCompilerContext::Stored(Arc::new(StoredCompilerContext {
+                exact: context.exact,
+                materialized: context.materialized,
+                origin: context.origin,
+            }))
+        }))
     }
 }
 
@@ -1001,12 +1001,13 @@ pub(crate) struct StagedRecoveryManifest {
 impl StagedRecoveryManifest {
     pub(crate) fn with_compiler_context(
         self,
-        context: PreparedCompilerContext,
+        context: Option<PreparedCompilerContext>,
     ) -> Result<StagedCompilerContextPublication, RecoveryError> {
-        if !self
-            .graph
-            .owns_context_receipt(&context.origin, &context.materialized)
-        {
+        if context.as_ref().is_some_and(|context| {
+            !self
+                .graph
+                .owns_context_receipt(&context.origin, &context.materialized)
+        }) {
             return Err(error(
                 "compiler context does not belong to this staged publication",
             ));

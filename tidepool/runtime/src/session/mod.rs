@@ -964,8 +964,7 @@ pub struct SessionLib {
 #[derive(Clone, Default)]
 pub(crate) struct ScopeDeclarationState {
     pub(crate) tip: Generation,
-    pub(crate) exact_context:
-        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    pub(crate) exact_context: Option<recovery::ScopedCompilerContext>,
     pub(crate) published_sources:
         Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
 }
@@ -1821,7 +1820,7 @@ impl SessionLib {
             .entry(scope)
             .or_insert_with(|| ScopeDeclarationState {
                 tip: inherited,
-                exact_context: context,
+                exact_context: context.map(recovery::ScopedCompilerContext::new),
                 published_sources: Vec::new(),
             });
     }
@@ -1832,6 +1831,14 @@ impl SessionLib {
         &self,
         scope: ScopeId,
     ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
+        self.current_scoped_compiler_context_in(scope)
+            .map(|context| context.exact().clone())
+    }
+
+    fn current_scoped_compiler_context_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<recovery::ScopedCompilerContext> {
         self.tips
             .get(&scope)
             .and_then(|state| state.exact_context.clone())
@@ -1845,7 +1852,7 @@ impl SessionLib {
     ) {
         let state = self.tips.entry(scope).or_default();
         state.tip = tip;
-        state.exact_context = Some(context);
+        state.exact_context = Some(recovery::ScopedCompilerContext::new(context));
     }
 
     pub(crate) fn retain_published_source_selection_in(
@@ -1899,7 +1906,7 @@ impl SessionLib {
         let context = self.log.joined_context_at(tip);
         let state = self.tips.entry(scope).or_default();
         state.tip = tip;
-        state.exact_context = context;
+        state.exact_context = context.map(recovery::ScopedCompilerContext::new);
     }
 
     /// The current session-library module, or `None` before any declaration.
