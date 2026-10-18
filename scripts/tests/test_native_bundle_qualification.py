@@ -2019,9 +2019,9 @@ class NativeQualificationTests(unittest.TestCase):
                     with self.subTest(path=invalid), self.assertRaisesRegex(ValueError, 'not an executable file'):
                         qualification.browser_node_executable(invalid)
                     with self.assertRaisesRegex(ValueError, 'not an executable file'), \
-                         patch.object(qualification, 'native_runtime_tools', return_value=root) as tools:
-                        qualification.freeze(SimpleNamespace(bundle=root, browser_node=invalid))
-                    tools.assert_called_once()
+                         patch.object(qualification, 'native_runtime_tools') as tools:
+                        qualification.freeze(SimpleNamespace(browser_node=invalid))
+                    tools.assert_not_called()
             with self.assertRaisesRegex(ValueError, 'immutable Nix paths'):
                 qualification.browser_node_executable(node)
 
@@ -2532,7 +2532,11 @@ class NativeQualificationTests(unittest.TestCase):
                         (bundle / 'share/exomonad').mkdir(parents=True)
                         (bundle / 'share/exomonad/runtime-tools').symlink_to(tools)
                         output = root / 'assembled'
-                        args = SimpleNamespace(runtime_tools=tools, ghc_libdir=tools, output=output, bundle=bundle)
+                        browser_node = root / 'browser-node'
+                        browser_node.write_text('fixture executable; never launched\n')
+                        browser_node.chmod(0o755)
+                        args = SimpleNamespace(runtime_tools=tools, ghc_libdir=tools, output=output,
+                                               bundle=bundle, browser_node=browser_node)
                         with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
                              patch.object(qualification.subprocess, 'run') as execute, \
                              patch.object(qualification.subprocess, 'check_output') as query:
