@@ -13649,8 +13649,9 @@ pub(crate) mod tests {
     #[test]
     fn physical_native_issuance_survives_item_type_projection_without_future_demand() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
-            JoinedInterfaceRole, NativeArtifactDemand, NativeGroupKey,
+            ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
+            CanonicalProducerIdentity, CompilerInputProjection, JoinedInterfaceRole,
+            NativeArtifactDemand, NativeGroupKey,
         };
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
@@ -13740,13 +13741,41 @@ pub(crate) mod tests {
             panic!("one physical native product");
         };
         let issued = Arc::clone(issued);
-        let issued_groups = issued
+        let issued_offer = issued
             .offers()
             .find(|offer| offer.proof().is_some())
             .unwrap()
-            .issued_group_carriers()
-            .unwrap();
-        assert_eq!(issued_groups.len(), 2);
+            .clone();
+        let proof_graph = issued_offer.proof().unwrap().selection.graph_selection();
+        let groups = proof_graph
+            .native_groups
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 17]),
+        );
+        let issued_groups = proof_graph
+            .selections
+            .iter()
+            .flat_map(|scope| &scope.dependencies)
+            .filter_map(|(source, target, edge)| match (source, target, edge) {
+                (
+                    ArtifactBindingNode::Group(group),
+                    ArtifactBindingNode::Artifact(carrier),
+                    ArtifactDependency::Interface,
+                ) if groups.contains(group) && carrier.artifact == group.binding.artifact() => {
+                    Some((*group, *carrier))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(issued_groups.len(), groups.len());
+        assert_eq!(issued_groups, issued_offer.issued_group_carriers().unwrap());
         let before = inventory.metrics();
         let mut item = physical.clone();
         Arc::make_mut(&mut item.modules)
@@ -13781,15 +13810,19 @@ pub(crate) mod tests {
             .contains_namespace_artifact(future.descriptor.id));
         assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(request.groups.is_empty());
+        let request_availability = inputs.native_availability(native.descriptor.id).unwrap();
+        let request_offers = request_availability
+            .offers()
+            .filter(|offer| offer.proof().is_some())
+            .collect::<Vec<_>>();
+        let [request_offer] = request_offers.as_slice() else {
+            panic!("one physical native offer remains in the request");
+        };
+        assert!(request_offer.is_full());
+        assert!(request_offer.same_issuance(&issued_offer));
         assert_eq!(
             issued_groups,
-            inputs
-                .native_original_requirements()
-                .iter()
-                .find(|p| p.original == native.descriptor.id)
-                .unwrap()
-                .issued_group_carriers(inputs.artifacts())
-                .unwrap()
+            request_offer.issued_group_carriers().unwrap()
         );
         let mut fixed = inputs.artifacts().bind_segment( entries, &physical)
             .unwrap();
