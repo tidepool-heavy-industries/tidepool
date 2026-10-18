@@ -3924,12 +3924,12 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .unwrap();
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
     )
-    .is_ok());
+    .expect("explicit issued original remains usable beside historical custody");
     assert!(OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
