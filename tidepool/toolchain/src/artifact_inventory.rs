@@ -1958,6 +1958,29 @@ impl ArtifactEntry {
     ) -> ArtifactId {
         Self::original_descriptor(producer, product).id
     }
+    fn canonical_descriptor(
+        interface: &crate::certified_products::CertifiedModuleInterface,
+    ) -> ArtifactDescriptor {
+        descriptor(
+            ArtifactKind::CanonicalModuleInterface,
+            ExactModuleIdentity {
+                unit: interface.unit().into(),
+                module: interface.module().into(),
+            },
+            interface.producer_sha256(),
+            interface.interface_sha256(),
+            None,
+            interface.package_imports_sha256(),
+            Some(digest(interface.certificate_bytes())),
+        )
+    }
+
+    fn canonical_artifact_id(
+        interface: &crate::certified_products::CertifiedModuleInterface,
+    ) -> ArtifactId {
+        Self::canonical_descriptor(interface).id
+    }
+
     pub(crate) fn canonical(
         interface: crate::certified_products::CertifiedModuleInterface,
     ) -> Self {
@@ -1974,18 +1997,7 @@ impl ArtifactEntry {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let descriptor = descriptor(
-            ArtifactKind::CanonicalModuleInterface,
-            ExactModuleIdentity {
-                unit: interface.unit().into(),
-                module: interface.module().into(),
-            },
-            interface.producer_sha256(),
-            interface.interface_sha256(),
-            None,
-            interface.package_imports_sha256(),
-            Some(digest(interface.certificate_bytes())),
-        );
+        let descriptor = Self::canonical_descriptor(&interface);
         Self {
             descriptor,
             facts: ArtifactFactsHandle::Canonical(Arc::clone(interface.facts())),

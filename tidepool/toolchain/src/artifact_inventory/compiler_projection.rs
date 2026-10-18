@@ -2171,8 +2171,7 @@ impl CompilerInputProjection {
                         failure("compiler original offer lacks canonical attachment")
                     })?;
                     if &original.descriptor.owner != owner
-                        || ArtifactEntry::canonical(canonical.clone()).descriptor.id
-                            != role.interface()
+                        || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
                     {
                         return Err(failure(
                             "compiler original offer differs from its interface",
