@@ -151,7 +151,7 @@ fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), Brows
 fn receive_browser_barrier(
     event: Result<Barrier, BrowserReplyFailure>,
     origin: &harness::model::ConversationIdentity,
-    issued: &mut BTreeMap<harness::model::CallId, harness::model::OperationId>,
+    issued: &mut HashMap<harness::model::CallId, harness::model::OperationId>,
 ) -> Result<Barrier, BrowserJourneyFailure> {
     match event {
         Ok(barrier) => {
@@ -718,7 +718,7 @@ async fn drive_browser(
         actor: identity.actor.clone(),
         incarnation: identity.incarnation.clone(),
     };
-    let mut issued = BTreeMap::new();
+    let mut issued = HashMap::new();
     let ready = json!({
         "type":"ready", "version":1, "base_url":format!("http://{}", fixture.address),
         "session_secret":secret, "actor":{"run":identity.run,"name":identity.actor.0,"incarnation":identity.incarnation},
@@ -1057,7 +1057,7 @@ async fn browser_transport_failure_reaches_runner_with_original_operation() {
             barriers: sender,
             state: Mutex::new(ScriptState::default()),
         };
-        let mut issued = BTreeMap::new();
+        let mut issued = HashMap::new();
         let original = RequestId("issuing-request".into());
         let next = RequestId("next-request".into());
         let mut inputs = vec![vec![harness::item::Item(json!({"content":RAW_INPUT}))]];
@@ -1166,7 +1166,7 @@ async fn browser_barrier_preserves_progress_identity_and_teardown() {
         state: Mutex::new(ScriptState::default()),
     };
     let original = RequestId("original".into());
-    let mut issued = BTreeMap::new();
+    let mut issued = HashMap::new();
     for (input, phase) in [
         (
             vec![harness::item::Item(json!({"content":RAW_INPUT}))],
@@ -1234,7 +1234,7 @@ async fn browser_barrier_preserves_progress_identity_and_teardown() {
                 receive_browser_barrier(
                     receiver.recv().await.unwrap(),
                     &origin,
-                    &mut BTreeMap::new()
+                    &mut HashMap::new()
                 ),
                 Err(BrowserJourneyFailure::Protocol(_))
             ));
