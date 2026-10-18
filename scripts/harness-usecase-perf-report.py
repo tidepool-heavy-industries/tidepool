@@ -15,6 +15,7 @@ import json
 import re
 from pathlib import Path
 import sys
+import uuid
 
 
 class ClaimKind(str, Enum):
@@ -29,6 +30,32 @@ class AssessmentStatus(str, Enum):
     INSUFFICIENT = "insufficient_observations"
     NOT_APPLICABLE = "not_applicable"
     UNASSESSED = "unassessed"
+
+
+def prepared_workspace_selection_valid(selection):
+    """Recognize the issuer's closed selection receipt, never an entry-path proxy."""
+    if not isinstance(selection, dict):
+        return False
+    if selection.get("kind") == "builtin_deployment_program":
+        program = selection.get("program")
+        return (set(selection) == {"kind", "program"}
+                and isinstance(program, dict)
+                and set(program) == {"policy", "manifest_blake3"}
+                and program.get("policy") in ("workbench", "async_workbench")
+                and isinstance(program.get("manifest_blake3"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", program["manifest_blake3"]) is not None)
+    if selection.get("kind") == "workspace_original":
+        if (set(selection) != {"kind", "recipe", "original"}
+                or not isinstance(selection.get("recipe"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", selection["recipe"]) is None
+                or not isinstance(selection.get("original"), str)):
+            return False
+        try:
+            original = uuid.UUID(selection["original"])
+        except ValueError:
+            return False
+        return original.int != 0 and str(original) == selection["original"]
+    return False
 
 
 def claim_assessment(report, requested):
@@ -1507,10 +1534,10 @@ def analyze(record_path):
         "whole_case_wall": case_wall_ledger(phases, roster),
         "catalog_acceptance": catalog_acceptance_observations(host_rows),
         "workspace_route": {"selected": environment.get("workspace_route"),
-                            "installed_entry": (activation or {}).get("prepared_workspace_entry"),
+                            "installed_selection": (activation or {}).get("prepared_workspace_selection"),
                             "verified": environment.get("workspace_route") == "prepared-workspace"
-                                        and isinstance((activation or {}).get("prepared_workspace_entry"), str)
-                                        and (activation or {})["prepared_workspace_entry"].startswith("/")},
+                                        and prepared_workspace_selection_valid(
+                                            (activation or {}).get("prepared_workspace_selection"))},
         "owned_artifact_observations": owner_observations,
         "trace_capture": capture_observation,
         "execution_observations": execution_observation,

@@ -45,6 +45,24 @@ def check_shrinking_samples(samples, check):
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
+    def test_prepared_workspace_selection_requires_exact_typed_receipt(self):
+        builtin = {"kind": "builtin_deployment_program",
+                   "program": {"policy": "workbench", "manifest_blake3": "a" * 64}}
+        original = {"kind": "workspace_original", "recipe": "b" * 64,
+                    "original": "12345678-1234-4234-8234-123456789abc"}
+        for selection in (builtin, original):
+            self.assertTrue(reporter.prepared_workspace_selection_valid(selection))
+        for selection in (None, "", "/old/entry", {},
+                          {**builtin, "entry": "/dummy"},
+                          {**builtin, "program": {"policy": "other", "manifest_blake3": "a" * 64}},
+                          {**builtin, "program": {"policy": "workbench", "manifest_blake3": "bad"}},
+                          {**original, "original": "00000000-0000-0000-0000-000000000000"},
+                          {**original, "original": "not-an-original"},
+                          {**original, "recipe": "not-a-recipe"},
+                          {**original, "entry": "/dummy"}):
+            with self.subTest(selection=selection):
+                self.assertFalse(reporter.prepared_workspace_selection_valid(selection))
+
     def test_case_wall_ledger_keeps_verification_shutdown_and_unpartitioned_work_separate(self):
         for scale in (1, 17, 1000000):
             phases = [

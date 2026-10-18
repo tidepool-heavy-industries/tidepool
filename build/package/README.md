@@ -649,8 +649,13 @@ The reporter separately records certified native receipt origins (Fresh, Cached,
 and RetainedCore) and accepted deployment candidate bytes. These are receipt
 observations, not unique module counts or physical read counts; a prepared entry
 may load without compilation, and absent observations remain unknown. Persona
-and notebook reuse record shutdown and a whole-test monotonic wall ledger. Entry
-installation verification is separate from startup, and the unpartitioned remainder
+and notebook reuse record shutdown and a whole-test monotonic wall ledger. Their
+activation receipt records the actual typed `prepared_workspace_selection`: either
+the builtin policy and exact manifest hash or the workspace recipe and original
+UUID. Builtins have no workspace-original entry path. The live, ready and durable
+installation must agree with the selected deployment and source identity. This
+receipt replaces the old entry-path marker; older frozen reports retain their
+bundle-owned reader. Installation verification is separate from startup, and the unpartitioned remainder
 includes fixture setup, assertions and recording without attributing a cause.
 Nested compiler, installation and snapshot intervals are not added to phase walls.
 
@@ -727,7 +732,7 @@ The raw reporter can issue `workload_timing` with `valid_workload_timing`,
 `failed_workload_diagnostics` or `insufficient_observations`. The scope comes from
 the owning named workload roster, including every required phase. Valid source
 timing does not require a prepared frozen root. Persona and A/A/B/A scopes still
-require their actual consumed prepared-workspace entry and complete whole-case
+require their actual consumed prepared-workspace selection and complete whole-case
 ledger; those are workload premises, independent of frozen-bundle matching.
 The central qualification owner
 alone adds `frozen_workload_timing` with `qualified_frozen_timing` after matching

@@ -523,6 +523,10 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
                 Some(frozen.prepared_toolset_coverage().unwrap()[0].program.clone()));
             assert!(matches!(installation.acquisition,
                 Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })));
+            if immediate {
+                assert!(matches!(host.assert_prepared_workspace_installation().await,
+                    super::hosted_test_context::PreparedWorkspaceInstallation::BuiltinDeploymentProgram { .. }));
+            }
             host.http_input("Run the recursive captured-helper scenario.").await.unwrap();
             let root = AgentPath("/root".into());
             let actor = host.context.actor.identity();
@@ -774,6 +778,8 @@ async fn prepared_children_execute_original_native_probe(
         assert_eq!(completed_entries.get(&recipe), Some(&original),
             "the installed root original belongs to the completed inventory");
         assert_eq!(root_acquisition.selection(), Some(root_coverage.program.clone()));
+        assert!(matches!(host.assert_prepared_workspace_installation().await,
+            super::hosted_test_context::PreparedWorkspaceInstallation::WorkspaceOriginal { .. }));
         progress.root_deployment_original_verified = true;
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");

@@ -1565,7 +1565,8 @@ class NativeQualificationTests(unittest.TestCase):
                     phases[0]["deployment"]["TIDEPOOL_PREPARED_BUILTIN_ENTRIES"] = "/fixture/builtins"
                     activation = phases[1]
                     activation.update(start_ns=10, end_ns=10 + activation["wall_ns"],
-                                      prepared_workspace_entry="/issued/workspace/entry")
+                                      prepared_workspace_selection={"kind": "builtin_deployment_program",
+                                  "program": {"policy": "workbench", "manifest_blake3": "a" * 64}})
                     activation.update(installation_verification_start_ns=activation["end_ns"] + 1,
                                       installation_verification_end_ns=activation["end_ns"] + 11,
                                       installation_verification_ns=10)
@@ -1936,7 +1937,7 @@ class NativeQualificationTests(unittest.TestCase):
 
     def test_prepared_persona_measurement_requires_consumed_route_and_complete_phase_roster(self):
         from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
-        for mutation in (None, "missing_route", "wrong_route", "missing_entry", "empty_entry", "missing_phase", "missing_summary"):
+        for mutation in (None, "missing_route", "wrong_route", "missing_selection", "invalid_selection", "missing_phase", "missing_summary"):
             with self.subTest(mutation=mutation):
                 fixture = HarnessUsecasePerfReportTests()
                 fixture.setUp()
@@ -1947,7 +1948,8 @@ class NativeQualificationTests(unittest.TestCase):
                 phases[0]["workspace_route"] = "prepared-workspace"
                 active = phases[1]
                 active.update(start_ns=10, end_ns=10 + active["wall_ns"],
-                              prepared_workspace_entry="/issued/workspace/entry")
+                              prepared_workspace_selection={"kind": "builtin_deployment_program",
+                                  "program": {"policy": "workbench", "manifest_blake3": "a" * 64}})
                 active.update(installation_verification_start_ns=active["end_ns"] + 1,
                               installation_verification_end_ns=active["end_ns"] + 11,
                               installation_verification_ns=10)
@@ -1962,10 +1964,10 @@ class NativeQualificationTests(unittest.TestCase):
                     phases[0].pop("workspace_route")
                 elif mutation == "wrong_route":
                     phases[0]["workspace_route"] = "unprepared-workspace"
-                elif mutation == "missing_entry":
-                    active.pop("prepared_workspace_entry")
-                elif mutation == "empty_entry":
-                    active["prepared_workspace_entry"] = ""
+                elif mutation == "missing_selection":
+                    active.pop("prepared_workspace_selection")
+                elif mutation == "invalid_selection":
+                    active["prepared_workspace_selection"] = {"kind": "workspace_original", "recipe": "a" * 64, "original": "not-an-original"}
                 elif mutation == "missing_summary":
                     phases.pop()
                 elif mutation == "missing_phase":
@@ -1996,7 +1998,7 @@ class NativeQualificationTests(unittest.TestCase):
                     for kind in ("workload_timing", "frozen_workload_timing"):
                         with self.assertRaises(ValueError):
                             reporter.require_claim(measured, kind, scope="persona-workbench")
-                if mutation in ("missing_route", "wrong_route", "missing_entry", "empty_entry"):
+                if mutation in ("missing_route", "wrong_route", "missing_selection", "invalid_selection"):
                     self.assertFalse(measured["assessment"]["prerequisites"]["selected_workspace_route_consumed"])
                 elif mutation == "missing_phase":
                     self.assertFalse(measured["assessment"]["prerequisites"]["phase_coverage_complete"])

@@ -357,8 +357,13 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
     let session = round.request.session_id.clone();
     let activation_end_ns = case_started.elapsed().as_nanos();
     let verification_start_ns = case_started.elapsed().as_nanos();
-    let prepared_entry = if prepared_workspace {
-        Some(fixture.assert_prepared_workspace_installation().await.0)
+    let prepared_selection = if prepared_workspace {
+        Some(
+            fixture
+                .assert_prepared_workspace_installation()
+                .await
+                .selection(),
+        )
     } else {
         None
     };
@@ -369,7 +374,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             "schema": 1, "phase": "activation", "completed": true,
             "wall_ns": activation_end_ns - activation_start_ns,
             "start_ns": activation_start_ns, "end_ns": activation_end_ns,
-            "prepared_workspace_entry": prepared_entry,
+            "prepared_workspace_selection": prepared_selection,
             "installation_verification_start_ns": verification_start_ns,
             "installation_verification_end_ns": verification_end_ns,
             "installation_verification_ns": verification_end_ns - verification_start_ns,
