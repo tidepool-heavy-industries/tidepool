@@ -705,6 +705,32 @@ impl ExactSelectionSnapshot {
 
     /// Derive retained payload/group rows from exact typed roots and custody.
     /// Proof-only ancestors remain available without becoming payload authority.
+    /// A selected graph packet carries complete atomic scope proofs and their
+    /// ancestry, independently of wider availability retained by this snapshot.
+    pub(crate) fn scope_proofs_for_nodes(
+        &self,
+        nodes: impl IntoIterator<Item = ArtifactBindingNode>,
+    ) -> Result<Vec<Arc<ScopeProofV3>>, SnapshotError> {
+        let mut required = std::collections::BTreeMap::new();
+        let mut pending = nodes
+            .into_iter()
+            .map(|node| node.selection())
+            .collect::<Vec<_>>();
+        while let Some(scope) = pending.pop() {
+            if required.contains_key(&scope) {
+                continue;
+            }
+            let proof = self
+                .scopes
+                .get(&scope)
+                .ok_or_else(|| malformed("selected binding scope proof missing"))?
+                .proof();
+            pending.extend(proof.scope_dependencies());
+            required.insert(scope, Arc::clone(proof));
+        }
+        Ok(required.into_values().collect())
+    }
+
     pub fn graph_selection(&self) -> Result<ArtifactGraphSelection, SnapshotError> {
         let selected = self.retained_nodes()?;
         if self
@@ -715,11 +741,7 @@ impl ExactSelectionSnapshot {
             return Err(malformed("namespace outside exact selected closure"));
         }
         Ok(ArtifactGraphSelection {
-            selections: self
-                .scopes
-                .values()
-                .map(|proof| proof.proof().clone())
-                .collect(),
+            selections: self.scope_proofs_for_nodes(selected.iter().copied())?,
             bindings: selected
                 .iter()
                 .filter_map(|node| match node {

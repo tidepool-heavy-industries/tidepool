@@ -5658,10 +5658,8 @@ impl ArtifactView {
             selections: self
                 .lease
                 .selection
-                .scopes
-                .values()
-                .map(|reference| Arc::clone(reference.proof()))
-                .collect(),
+                .scope_proofs_for_nodes(nodes.iter().copied())
+                .expect("held selected graph retains exact scope ancestry"),
             bindings: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -7480,6 +7478,130 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_packets_project_selected_scope_ancestry_without_dropping_opaque_custody() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "ScopePacketNative",
+            vec![(7, Vec::new()), (9001, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let carrier = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![native.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let selected = inventory
+            .admit_shared(&carrier, vec![native.clone()])
+            .unwrap();
+        let ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+        let proof = NativeOriginalRequirement::from_issued_group_custody(
+            native.descriptor.id,
+            canonical,
+            &selected,
+        )
+        .unwrap()
+        .unwrap();
+        let offer = IssuedNativeOffer::issue(native.descriptor.id, &selected, Some(proof)).unwrap();
+        let held = carrier
+            .retain_issued_offer_custody([offer.clone()])
+            .unwrap();
+        let before = held.selection_snapshot().clone();
+        let expected_carrier_scopes = carrier.capture_graph_selection().selections;
+        assert!(
+            before.scopes.len() > expected_carrier_scopes.len(),
+            "the live owner also retains the disconnected Group availability scope"
+        );
+        let carrier_packet = held.capture_graph_selection();
+        assert!(carrier_packet.native_groups.is_empty());
+        assert_eq!(carrier_packet.selections, expected_carrier_scopes);
+        assert_eq!(
+            before.graph_selection().unwrap().selections,
+            carrier_packet.selections,
+            "both graph writers use the same selected scope ancestry"
+        );
+        assert_eq!(
+            held.selection_snapshot().scopes,
+            before.scopes,
+            "projecting a graph packet does not withdraw opaque custody"
+        );
+        assert!(offer.is_full());
+        assert_eq!(offer.issued_group_carriers().unwrap().len(), 2);
+        assert!(before
+            .scope_proofs_for_nodes(std::iter::empty())
+            .unwrap()
+            .is_empty());
+        let full_packet = selected.capture_graph_selection();
+        let group_scopes = full_packet
+            .native_groups
+            .iter()
+            .map(|group| group.binding.selection())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(full_packet.native_groups.len(), 2);
+        assert_eq!(
+            group_scopes.len(),
+            1,
+            "selected groups share one atomic issuer"
+        );
+        assert!(
+            full_packet.selections.len() > group_scopes.len(),
+            "shared carrier ancestor proof is retained"
+        );
+        for view in [&held, &selected] {
+            let packet = view.capture_graph_selection();
+            let scopes = packet
+                .selections
+                .iter()
+                .map(|proof| proof.selection)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(scopes.len(), packet.selections.len());
+            for proof in &packet.selections {
+                assert!(
+                    proof.scope_dependencies().is_subset(&scopes),
+                    "atomic proof ancestors survive"
+                );
+            }
+            let (packet, edges): (ArtifactGraphSelection, Vec<_>) = serde_json::from_slice(
+                &serde_json::to_vec(&(packet, view.binding_dependencies())).unwrap(),
+            )
+            .unwrap();
+            let fresh = ArtifactInventory::default();
+            let restored = fresh
+                .recover_selection(&fresh.empty_view(), view.entries(), &packet, &edges)
+                .unwrap();
+            assert_eq!(restored.capture_graph_selection(), packet);
+        }
+        // Extra authenticated proof facts still cannot be appended to a selected
+        // graph packet. The receiver's strict minimal-ancestry guard is unchanged.
+        let mut excess = carrier_packet;
+        for proof in selected.capture_graph_selection().selections {
+            if !excess
+                .selections
+                .iter()
+                .any(|existing| existing.selection == proof.selection)
+            {
+                excess.selections.push(proof);
+            }
+        }
+        let fresh = ArtifactInventory::default();
+        assert!(fresh
+            .recover_selection(
+                &fresh.empty_view(),
+                held.entries(),
+                &excess,
+                &held.binding_dependencies()
+            )
+            .is_err());
+    }
 
     proptest::proptest! {
             #[test]
