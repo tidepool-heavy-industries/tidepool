@@ -1,6 +1,9 @@
 module SourceBootCases where
 
 import Tidepool.RequestCompletion (finishCompletion)
+import Tidepool.CompilerRequest
+  ( withBoundCompilerRequest, boundRequestExactScope, withBoundExactInterfaceTransaction )
+import Tidepool.ExtractRequest (RequestField(..), workerArgv, workerRequestFromArgv)
 
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
@@ -201,7 +204,7 @@ import Tidepool.GhcPipeline
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
-  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction )
+  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction, withResidentCompilerScopes )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
@@ -4510,7 +4513,7 @@ data ThinInputFixture = OriginalHomeThinInput | PackageTextThinInput | PackageUn
 -- Compile once to obtain genuine original authority, then remove the source.
 -- The only operation below that removal is the native interface transaction.
 originalThinInterfaceTest :: ThinInputFixture -> IO ()
-originalThinInterfaceTest inputFixture = withScratch $ \work -> do
+originalThinInterfaceTest inputFixture = withTiming $ withScratch $ \work -> do
   let source = work </> "HostActivationOwner.hs"
       output = work </> "thin-output"
       manifest = work </> "thin-offer.cbor"
@@ -4556,8 +4559,26 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
   let producer = scopeProducerSha256 scope
       input = HostBindingInterfaceInput producer (replicate 64 'a') 71 "sessionInput"
         signature scopePath output (OriginalLiveInput offered)
-      emit generation purpose supplied = withExactInterfaceTransaction [] $ \operations ->
-        emitHostBindingInterface operations producer generation "sessionInput" supplied scopePath output purpose
+      emitUnder boundManifest afterAdmission supplied = do
+        BS.writeFile manifest (encodeHostBindingInterface supplied)
+        args <- case workerRequestFromArgv (workerArgv
+          [Input manifest, SessionArtifacts boundManifest, DeclarationJoin manifest
+          ,DeclarationJoinOut (work </> "thin-receipt.cbor")]) of
+          Right (Just args) -> pure args
+          other -> fail ("invalid bound host interface fixture request: " ++ show other)
+        withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler ->
+          (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $ \bound -> do
+            admitted <- maybe (fail "thin fixture has no bound exact scope") pure
+              (boundRequestExactScope bound)
+            afterAdmission admitted
+            operation <- readDeclarationOperation manifest
+            withBoundExactInterfaceTransaction bound $ \operations ->
+              case operation of
+                EmitHostBindingInterface offeredInput -> emitHostBindingInterface operations admitted offeredInput
+                _ -> fail "thin fixture decoded another declaration operation"
+      emitWith = emitUnder scopePath
+      emit generation purpose supplied = emitWith (const (pure ()))
+        (input {hostInterfaceGeneration=generation,hostInterfacePurpose=purpose,hostInterfaceSignature=supplied})
       replace index value values = take index values ++ [value] ++ drop (index + 1) values
       encoded = toStrictByteString . encodeTerm
       refuseOffer value = do
@@ -4626,13 +4647,26 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
         unless (case validateCheckedTypeWitnessBytes invalid of Left _ -> True; Right _ -> False)
           (fail "canonical witness admitted a malformed envelope")
     _ -> fail "thin fixture witness is not a row"
-  withExactInterfaceTransaction [] $ \operations ->
-    requireUserError "original producer" "host interface producer differs from exact scope"
-      (emitHostBindingInterface operations (replicate 64 '0') 74 "sessionInput" signature scopePath output (OriginalLiveInput offered))
+  requireUserError "original producer" "host interface producer differs from exact scope"
+    (emitWith (const (pure ())) (input {hostInterfaceProducer=replicate 64 '0',hostInterfaceGeneration=74}))
+  requireUserError "bound manifest" "host interface manifest differs from bound exact scope"
+    (emitWith (const (pure ())) (input {hostInterfaceScope=work </> "other-scope.cbor",hostInterfaceGeneration=78}))
+  let otherScope = work </> "other-bound-scope.cbor"
+  copyFile scopePath otherScope
+  requireUserError "another bound scope" "host interface manifest differs from bound exact scope"
+    (emitUnder otherScope (const (pure ())) (input {hostInterfaceGeneration=79}))
   unless packageOnly $
     requireUserError "host-builder authority" "checked signature has no authenticated host representation"
       (emit 75 HostBuilt signature)
-  (binder, issued) <- emit 71 (OriginalLiveInput offered) signature
+  when (inputFixture == PackageTextThinInput) $ do
+    (built, builtPurpose) <- emit 80 HostBuilt signature
+    unless (isJust (bbHostAuthority built) && builtPurpose == HostBuilt)
+      (fail "host-built thin interface lost its checked representation authority")
+  ((binder, issued), acquisitionDiagnostics) <- captureDiagnostics $
+    emitWith (\admitted -> forM_ (Set.toList (Set.fromList
+      [exactPath iface | (iface,_,_) <- scopeInterfaces admitted])) removeFile) input
+  unless (length (counterValues ("hash_bytes.scope_metadata." ++ scopeRequestSha256 scope) acquisitionDiagnostics) == 1)
+    (fail "bound host interface did not consume its single admitted scope acquisition")
   unless (isNothing (bbHostAuthority binder)) (fail "original live input acquired host-builder authority")
   fresh <- case issued of
     OriginalLiveInput bytes -> pure bytes
@@ -4642,13 +4676,16 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
   unless (case (witnessTerm, freshTerm) of
     (TList offeredFields, TList freshFields) -> drop 3 offeredFields == drop 3 freshFields
     _ -> False) (fail "thin issuer changed original canonical structure or seals")
-  let path = sessionHiPath output (SessionModule ValMod (Generation 71))
-  forM_ [path, path ++ ".packages", path ++ ".requirements"] $ \file ->
+  let bindingPaths generation = let path = sessionHiPath output (SessionModule ValMod (Generation generation))
+        in [path, path ++ ".packages", path ++ ".requirements"]
+      expectedOutputs = concatMap bindingPaths
+        ([71] ++ [80 | inputFixture == PackageTextThinInput])
+  forM_ expectedOutputs $ \file ->
     doesFileExist file >>= \exists -> unless exists (fail "thin issuer omitted an interface companion")
   outputs <- filesAt output
-  unless (sort outputs == sort [path, path ++ ".packages", path ++ ".requirements"])
+  unless (sort outputs == sort expectedOutputs)
     (fail "thin issuer emitted products beyond the native interface companions")
-  forM_ [72,73,74,75,76,77] $ \generation -> do
+  forM_ [72,73,74,75,76,77,78,79] $ \generation -> do
     exists <- doesFileExist (sessionHiPath output (SessionModule ValMod (Generation generation)))
     when exists (fail "refused thin interface published a binding")
  where
