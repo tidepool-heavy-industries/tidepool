@@ -755,9 +755,12 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         )])),
     );
     let consumer = recovered_witness_fixtures(&[consumer]).remove(0).product;
-    let private =
-        OriginalCompilerInputs::from_native_availability(&baseline, producer, &[consumer])
-            .expect("the private issuer may use receiving baseline type evidence");
+    let private = OriginalCompilerInputs::from_native_availability(
+        &baseline,
+        producer,
+        std::slice::from_ref(&consumer),
+    )
+    .expect("the private issuer may use receiving baseline type evidence");
     let offered = identity("fixture", "PrivateFragment");
     assert_eq!(
         private
@@ -827,12 +830,20 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         .into_iter()
         .find(|proof| proof.original == original)
         .unwrap();
-    assert_eq!(
-        final_proof
-            .issued_groups(&final_inputs.artifacts())
-            .unwrap(),
-        groups
-    );
+    assert_eq!(final_proof.original, original);
+    let availability = final_inputs.native_availability(original).unwrap();
+    assert_eq!(availability.original_owner(), consumer.owner());
+    assert_eq!(availability.mode, NativeTransportMode::Full);
+    let support = availability
+        .dependency_support(
+            NativeGroupKey {
+                artifact: original,
+                original_ordinal: 7,
+            },
+            consumer.owner(),
+        )
+        .expect("the final request carries this exact issued group");
+    assert_eq!(support.groups().collect::<BTreeSet<_>>(), groups);
     assert_eq!(baseline.semantic_sha256(), before);
     assert!(
         !baseline
