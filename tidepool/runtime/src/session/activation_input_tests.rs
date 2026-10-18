@@ -1614,7 +1614,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         expected_descriptors,
         "the joint request projection retains exactly the sealed response interface closure"
     );
-    assert!(retained_context.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(&retained_context);
     assert!(retained_context.lexical_graph().is_empty());
     let producer = compiler_context.toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
@@ -2154,7 +2154,12 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     );
     let reobserved = outputs
         .iter()
-        .map(|output| source.provenance_for(&output.code()).unwrap())
+        .map(|output| {
+            source
+                .admit_turn_code_in(source.run_context.lexical_scope, output.code())
+                .and_then(|admission| source.provenance_for(&admission))
+                .unwrap()
+        })
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
         let recomputed = CompiledProvenancePlan::build(&output.code())
@@ -2290,7 +2295,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         );
         assert_eq!(
             source
-                .provenance_for(&compiled.code())
+                .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                .and_then(|admission| source.provenance_for(&admission))
                 .unwrap()
                 .authenticated_inputs,
             original.authenticated_inputs,
@@ -2308,7 +2314,9 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             let roots = source.persistent_roots_count();
             assert!(
                 matches!(
-                    source.provenance_for(&compiled.code()),
+                    source
+                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
                     ))
@@ -2318,7 +2326,9 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.retire_scope(sibling.private_scope());
             assert!(
                 matches!(
-                    source.provenance_for(&compiled.code()),
+                    source
+                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
                     ))
@@ -2329,7 +2339,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.set_run_context(previous).unwrap();
             assert_eq!(
                 source
-                    .provenance_for(&compiled.code())
+                    .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                    .and_then(|admission| source.provenance_for(&admission))
                     .unwrap()
                     .authenticated_inputs,
                 original.authenticated_inputs,
@@ -3183,10 +3194,7 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         original.producer_sha256,
         "type context retains the canonical interface's authenticated producer"
     );
-    assert!(
-        retained.declarations().recovery_products().is_empty(),
-        "type custody grants no original native products"
-    );
+    assert_interface_only_roles_without_native_selection(retained.declarations());
     assert!(
         retained.declarations().lexical_graph().is_empty(),
         "type custody grants no source names"
@@ -3449,6 +3457,23 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     );
 }
 
+fn assert_interface_only_roles_without_native_selection(
+    context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+) {
+    let roles = context.compiler_input_roles();
+    assert!(!roles.is_empty());
+    assert!(roles.iter().all(|role| matches!(
+        role,
+        tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
+    )));
+    assert!(context.artifact_view().selected_native_groups().is_empty());
+    eprintln!(
+        "type interface selection roles={} selected_native_groups=0 held_originals={}",
+        roles.len(),
+        context.recovery_products().len()
+    );
+}
+
 #[test]
 fn activation_preview_executes_original_ordinary_home_custom_display_after_readers_drop() {
     use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
@@ -3461,7 +3486,36 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .descriptors()
         .iter()
         .any(|descriptor| descriptor.owner.module == "ActivationDisplayOriginal"));
-    assert!(input_types.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(input_types);
+    let expected = input_types
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.owner.unit == "main"
+                && descriptor.owner.module == "ActivationDisplayOriginal"
+                && descriptor.kind
+                    == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+                && input_types
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| role.interface() == descriptor.id)
+        })
+        .expect("the input type selects its original canonical interface");
+    assert_eq!(expected.producer_sha256, interface.prototype().producer());
+    let expected_seal = expected
+        .interface_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(interface
+        .prototype()
+        .original_input_type()
+        .expect("the actual input retains its issued type witness")
+        .interface_seals()
+        .any(|(unit, module, seal)| {
+            unit == expected.owner.unit && module == expected.owner.module && seal == expected_seal
+        }));
     assert!(input_types.lexical_graph().is_empty());
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
@@ -3547,11 +3601,14 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();
-        let refused = resident.install_turn_program_in_with_images(
-            compiled.admission.scope_lease.scope(),
-            compiled.renderer.compiled.table(),
-            compiled.renderer.compiled.prepared().as_ref().clone(),
-            compiled.renderer.compiled.certification.as_ref(),
+        let admission = resident
+            .admit_turn_code_in(
+                compiled.admission.scope_lease.scope(),
+                compiled.renderer.compiled.code(),
+            )
+            .unwrap();
+        let refused = resident.install_admitted_turn(
+            admission,
             TurnImageAcquisition::Ready {
                 bundle: &incomplete,
             },
@@ -4294,7 +4351,7 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
     let type_only = mounted.interface().prototype().context().clone();
-    assert!(type_only.recovery_products().is_empty());
+    assert_interface_only_roles_without_native_selection(&type_only);
     assert!(type_only.lexical_graph().is_empty());
     assert_eq!(
         type_only.toolchain_identity_sha256(),
