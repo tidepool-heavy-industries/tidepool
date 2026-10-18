@@ -209,7 +209,9 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), Candi
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.OriginalProductRoots (reconcileOriginalProducts, unrecoveredExactProducts)
-import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports
+  , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
+  , packageImportRootWithin, validatePackageImportRootWithin)
 import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmYieldSites, pmSiteRejections)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
@@ -6132,12 +6134,70 @@ packageInputs = withScratch $ \work -> do
     -- Both offers share the complete fresh warmer capture. This fixture
     -- checks input identity; mixed fresh/retained reissuance has separate owners.
     writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work warmerFixture
-    reused <- root (PreparedProducts (Just (manifest work)))
+    (reused, sharedRootLog) <- captureDiagnostics $ root (PreparedProducts (Just (manifest work)))
+    let offeredNames = ["OptionalAnchor", "OptionalSupport"]
+        offeredPackages = [facts | name <- offeredNames
+          , Just facts <- [Map.lookup (mkModuleName name) (pprPackageImports warmer)]]
+        expectedRootPaths = Set.fromList (map packagePath (concatMap packageInterfaces offeredPackages))
+        checks = counterTotal "package_preflight.root_requests" sharedRootLog
+        reads = counterTotal "package_preflight.physical_reads" sharedRootLog
+    unless (length offeredPackages == length offeredNames
+        && not (Set.null expectedRootPaths)
+        && reads == fromIntegral (Set.size expectedRootPaths) && checks > reads) $
+      fail ("actual candidate preflight did not share physical roots while retaining independent checks: "
+        ++ show (checks,reads,Set.size expectedRootPaths))
     unless (map candidateModule (pprAcceptedCandidates reused) == ["OptionalAnchor", "OptionalSupport"]) $
       fail "input fixture did not exercise authenticated candidate hydration"
     reusedBody <- proof work "candidate" reused
     unless (normalized cold == normalized reused && coldBody == reusedBody) $
       fail "accepted candidate lost its checked direct package inputs"
+    -- Mutate only one genuine optional candidate's package witness. A bad
+    -- alternative must not poison a viable owner, regardless of row order.
+    originalManifest <- BS.readFile (manifest work)
+    offered <- readModuleCandidates (manifest work) >>= either fail pure
+    bad <- case filter ((== "OptionalSupport") . candidateModule) offered of
+      [value] -> pure value
+      _ -> fail "package alternative control lost its genuine support candidate"
+    let factsFor name = maybe (fail "package alternative lacks compiler facts") pure
+          (Map.lookup (mkModuleName name) (pprPackageImports warmer))
+    anchorPackages <- factsFor "OptionalAnchor"
+    supportPackages <- factsFor "OptionalSupport"
+    sharedRoot <- case Set.toAscList (Set.intersection
+        (Set.fromList (packageInterfaces anchorPackages))
+        (Set.fromList (packageInterfaces supportPackages))) of
+      value:_ -> pure value
+      _ -> fail "optional candidates must share a genuine package witness"
+    let alternateRoot = work </> "candidate-equal-byte-package.hi"
+        badSidecar = work </> "candidate-conflicting-package.packages"
+        badInterface = ExactIfaceArtifact (candidateUnit bad) (candidateModule bad)
+          (candidateInterface bad) (candidateInterfaceSha256 bad) (candidateInterfaceRequirements bad)
+    copyFile (packagePath sharedRoot) alternateRoot
+    let badFacts = supportPackages {packageInterfaces =
+          [if value == sharedRoot then value {packagePath=alternateRoot} else value
+          | value <- packageInterfaces supportPackages]}
+        badBytes = encodePackageImports badInterface badFacts
+    BS.writeFile badSidecar badBytes
+    term <- readCodecTerm (manifest work)
+    (fields, rows) <- case term of
+      TList values@[TString "TPMCAN",TString "11",_,_,TList values',_,_,TList [TString "fresh-files"]] ->
+        pure (values,values')
+      _ -> fail "optional package control requires its genuine durable candidate delivery"
+    let replaceField index value values = take index values ++ [value] ++ drop (index+1) values
+        change row = case row of
+          TList values | length values == 16
+            , take 2 values == [TString (T.pack (candidateUnit bad)),TString "OptionalSupport"] ->
+              TList (replaceField 11 (TString (T.pack badSidecar))
+                (replaceField 12 (TString (T.pack (digest badBytes))) values))
+          _ -> row
+        changedRows = map change rows
+    unless (changedRows /= rows) (fail "optional package control did not change its intended witness")
+    (forM_ [changedRows,reverse changedRows] $ \ordered -> do
+      BS.writeFile (manifest work) (toStrictByteString (encodeTerm (TList (replaceField 4 (TList ordered) fields))))
+      (selected,refusalLog) <- captureDiagnostics $ root (PreparedProducts (Just (manifest work)))
+      unless (map candidateModule (pprAcceptedCandidates selected) == ["OptionalAnchor"]
+          && counterTotal "candidate_admission.CandidatePackageSelection" refusalLog == 1) $
+        fail "a conflicting optional package witness poisoned its viable peer or missed its owning refusal")
+      `finally` BS.writeFile (manifest work) originalManifest
     let incompletePackages = Map.delete (mkModuleName "OptionalSupport") (pprPackageImports reused)
     requireUserError "compiler input missing candidate package owner"
       "compiler input proof lacks complete checked package-import owners"
@@ -6307,6 +6367,40 @@ verifyCollectivePackageProof work prepared = withTiming $ do
       requireLeft label = \case
         Left _ -> pure ()
         Right () -> fail (label ++ " admitted changed proof inputs")
+  let sharedChecks = 8
+      installedOwnerFor root = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
+  writeIORef resolverCalls 0
+  (stageResults, stageLog) <- captureDiagnostics $ withPackageRootObservations environment $ \stage ->
+    mapM (validatePackageImportRootWithin stage) (replicate sharedChecks firstRoot)
+  mapM_ (requireRight "shared read-only package stage") stageResults
+  calls <- readIORef resolverCalls
+  unless (calls == sharedChecks
+      && count "package_preflight.root_requests" stageLog == fromIntegral sharedChecks
+      && count "package_preflight.physical_reads" stageLog == 1
+      && count "package_preflight.physical_bytes" stageLog == fromIntegral (BS.length rootBytes)) $
+    fail "package observation sharing skipped resolution or repeated physical reads"
+  (_,referenceLog) <- captureDiagnostics $ forM_ [1..sharedChecks] $ \_ ->
+    validatePackageImportRoot environment firstRoot >>= requireRight "independent old-policy reference"
+  unless (length (counterValues ("hash_bytes.package_root." ++ packageSha256 firstRoot) referenceLog) == sharedChecks) $
+    fail "old independent root policy did not calibrate the repeated physical work"
+  let equalPath = work </> "package-stage-equal-bytes.hi"
+      alternateExpected = firstRoot {packagePath=equalPath}
+  BS.writeFile equalPath rootBytes
+  forM_ [[firstRoot,alternateExpected],[alternateExpected,firstRoot]] $ \expected -> do
+    results <- withPackageRootObservations environment $ \stage -> mapM (validatePackageImportRootWithin stage) expected
+    unless (map (either (const False) (const True)) results == map (==firstRoot) expected) $
+      fail "optional conflicting package witnesses shared acceptance instead of only observations"
+  (_,changedPathLog) <- captureDiagnostics $ withPackageRootObservations environment $ \stage -> do
+    packageImportRootWithin stage (installedOwnerFor firstRoot) >>= \case
+      Right actual | actual == firstRoot -> pure ()
+      _ -> fail "package observation did not preserve the exact selected witness"
+    addModuleToFinder finder (GWIB (installedOwnerFor firstRoot) NotBoot) (location {ml_hi_file=equalPath})
+    (do
+      validatePackageImportRootWithin stage firstRoot >>= requireLeft "equal-byte changed resolved path"
+      validatePackageImportRootWithin stage alternateExpected >>= requireRight "new exact selected path")
+      `finally` addModuleToFinder finder (GWIB (installedOwnerFor firstRoot) NotBoot) location
+  unless (count "package_preflight.physical_reads" changedPathLog == 2) $
+    fail "equal bytes at different selected paths incorrectly shared a physical observation"
   interface <- maybe (fail "package proof lacks the compiled owning interface") pure
     (Map.lookup (mkModuleName "OptionalRoot") (pprProductInterfaces prepared))
   let ownerPath = work </> "package-proof-owner.hi"
@@ -6427,6 +6521,13 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   requireLeft "unresolved equal-content owner" unitResult
   unless (count "package_proof.staged_full_witnesses" unitDiagnostics == 2) $
     fail "equal-content owners in different units were collapsed during staging"
+  withPackageRootObservations environment $ \stage ->
+    validatePackageImportRootWithin stage firstRoot >>= requireRight "preflight before publication mutation"
+  bracket (BS.readFile (packagePath firstRoot)) (BS.writeFile (packagePath firstRoot)) $ \_ -> do
+    BS.writeFile (packagePath firstRoot) "changed between preflight and publication"
+    withPackageRootObservations environment (\stage -> validatePackageImportRootWithin stage firstRoot)
+      >>= requireLeft "fresh stage after mutation"
+    revalidatePackageImports environment [firstWitness] >>= requireLeft "publication after preflight mutation"
   let proof = take 8 fanout
   (lastArtifact,lastSidecar,_) <- case reverse proof of
     lastWitness:_ -> pure lastWitness
