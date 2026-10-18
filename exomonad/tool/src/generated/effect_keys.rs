@@ -8,10 +8,12 @@ pub enum ModelFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ModelOperation {
+    #[serde(rename = "model_call")]
     ModelCall,
+    #[serde(rename = "fork_agent")]
     ForkAgent,
+    #[serde(rename = "spawn_agent")]
     SpawnAgent,
 }
 

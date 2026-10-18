@@ -7,7 +7,7 @@ use crate::schema::{
 };
 
 pub(crate) const MODEL_FAMILY_PARAMS: &[crate::schema::TypeParam] =
-    &[crate::schema::TypeParam::value("family")];
+    &[crate::schema::TypeParam::value("modelFamily")];
 
 /// Admit an idle persistent actor with explicit context, directory and tools.
 #[must_use]
@@ -539,7 +539,7 @@ pub fn fork_agent() -> Effect {
 pub(crate) fn family_witness_arg() -> Arg {
     Arg {
         name: "family",
-        ty: HsType::app(HsType::Named("FamilyWitness"), HsType::Var("family")),
+        ty: HsType::app(HsType::Named("FamilyWitness"), HsType::Var("modelFamily")),
         rust: RustBinding::Path("tidepool_bridge_effects::ModelFamilyWitness"),
     }
 }

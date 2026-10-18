@@ -154,7 +154,7 @@ fn family_spawn_retains_live_spec_and_explicit_model_permissions() {
     assert_eq!(argument("modelGrants").ty, HsType::Value);
     assert_eq!(
         argument("family").ty,
-        HsType::app(HsType::Named("FamilyWitness"), HsType::Var("family"))
+        HsType::app(HsType::Named("FamilyWitness"), HsType::Var("modelFamily"))
     );
     assert_eq!(argument("instructions").ty, HsType::maybe(HsType::Text));
     assert_eq!(

@@ -73,11 +73,12 @@ fn schema() -> Vec<Decl> {
     vec![
         Decl {
             name: "ModelOperation",
-            shape: Shape::Enumeration(vec![
-                ("ModelCall", "model_call"),
-                ("ForkAgent", "fork_agent"),
-                ("SpawnAgent", "spawn_agent"),
-            ]),
+            shape: Shape::Enumeration(
+                crate::actor_profiles::ModelOperation::ALL
+                    .into_iter()
+                    .map(|operation| (operation.name(), operation.wire_name()))
+                    .collect(),
+            ),
         },
         Decl {
             name: "ModelGrantRequest",

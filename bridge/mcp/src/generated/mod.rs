@@ -76,7 +76,7 @@ pub use worktree_allocation::*;
 pub use worktree_integration::*;
 pub use worktree_registry::*;
 
-pub(crate) const MODEL_FAMILY_VOCABULARY: &str = "data OpenAI\ndata Argon\ndata DeepSeek\ntype role FamilyWitness nominal\ndata FamilyWitness family where\n  OpenAIWitness :: FamilyWitness OpenAI\n  ArgonWitness :: FamilyWitness Argon\n  DeepSeekWitness :: FamilyWitness DeepSeek\nclass KnownFamily family where\n  familyWitness :: FamilyWitness family\ninstance KnownFamily OpenAI where familyWitness = OpenAIWitness\ninstance KnownFamily Argon where familyWitness = ArgonWitness\ninstance KnownFamily DeepSeek where familyWitness = DeepSeekWitness\n";
+pub(crate) const MODEL_FAMILY_VOCABULARY: &str = "data OpenAI\ndata Argon\ndata DeepSeek\ntype role FamilyWitness nominal\ndata FamilyWitness modelFamily where\n  OpenAIWitness :: FamilyWitness OpenAI\n  ArgonWitness :: FamilyWitness Argon\n  DeepSeekWitness :: FamilyWitness DeepSeek\nclass KnownFamily modelFamily where\n  familyWitness :: FamilyWitness modelFamily\ninstance KnownFamily OpenAI where familyWitness = OpenAIWitness\ninstance KnownFamily Argon where familyWitness = ArgonWitness\ninstance KnownFamily DeepSeek where familyWitness = DeepSeekWitness\n";
 
 pub(crate) const CORE_IMPORTS: &[&str] = &[
     "import Tidepool.Duration (Duration)",

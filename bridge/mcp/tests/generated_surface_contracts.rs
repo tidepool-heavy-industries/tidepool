@@ -216,3 +216,22 @@ fn synchronous_reload_profile_and_async_source_inspection_compile() {
 fn reload_defaults_and_structured_receipts_execute() {
     Surface::new().execute("ReloadCodec.hs");
 }
+
+#[test]
+fn indexed_model_witnesses_reject_wrong_family_and_coercion() {
+    let surface = Surface::new();
+    let valid = surface.compile("ModelFamilyControl.hs", false);
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    for fixture in ["WrongModelFamily.hs", "CoercedModelFamily.hs"] {
+        let refused = surface.compile(fixture, false);
+        assert!(
+            !refused.status.success(),
+            "{fixture} admitted a different family after valid control"
+        );
+        assert!(!refused.stderr.is_empty());
+    }
+}

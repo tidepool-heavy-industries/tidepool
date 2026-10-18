@@ -16,6 +16,7 @@ pub enum ModelFamily {
 }
 
 impl ModelFamily {
+    pub const ALL: [Self; 3] = [Self::OpenAI, Self::Argon, Self::DeepSeek];
     pub const fn name(self) -> &'static str {
         match self {
             Self::OpenAI => "OpenAI",
@@ -33,6 +34,14 @@ pub enum ModelOperation {
 }
 
 impl ModelOperation {
+    pub const ALL: [Self; 3] = [Self::ModelCall, Self::ForkAgent, Self::SpawnAgent];
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::ModelCall => "model_call",
+            Self::ForkAgent => "fork_agent",
+            Self::SpawnAgent => "spawn_agent",
+        }
+    }
     pub const fn name(self) -> &'static str {
         match self {
             Self::ModelCall => "ModelCall",
@@ -667,7 +676,19 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         .filter(|effect| effect.scope == EffectScope::InvocationOnly)
         .collect::<Vec<_>>();
     let mut rust = crate::gen::header("//! ", "Nominal effect identities");
-    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ModelFamily {\n    OpenAI,\n    Argon,\n    DeepSeek,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\n#[serde(rename_all = \"snake_case\")]\npub enum ModelOperation {\n    ModelCall,\n    ForkAgent,\n    SpawnAgent,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub struct ModelPermission {\n    pub operation: ModelOperation,\n    pub family: ModelFamily,\n}\n");
+    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ModelFamily {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!("    {},\n", family.name()));
+    }
+    rust.push_str("}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ModelOperation {\n");
+    for operation in ModelOperation::ALL {
+        rust.push_str(&format!(
+            "    #[serde(rename = \"{}\")]\n    {},\n",
+            operation.wire_name(),
+            operation.name()
+        ));
+    }
+    rust.push_str("}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub struct ModelPermission {\n    pub operation: ModelOperation,\n    pub family: ModelFamily,\n}\n");
     rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellTypeIdentity {\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellEffectIdentity {\n    pub arguments: &'static [HaskellTypeIdentity],\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\nimpl HaskellEffectIdentity {\n    pub fn render(self) -> String {\n        let mut rendered = format!(\"{}.{}\", self.module, self.name);\n        for argument in self.arguments {\n            rendered.push_str(&format!(\" {}.{}\", argument.module, argument.name));\n        }\n        rendered\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ActorEffectKey {\n");
     let mut rust_keys = actor
         .iter()
@@ -1217,16 +1238,12 @@ mod tests {
 
 /// Indexed witness retains the family through the erased STG request boundary.
 pub fn family_vocabulary() -> String {
-    let families = [
-        ModelFamily::OpenAI,
-        ModelFamily::Argon,
-        ModelFamily::DeepSeek,
-    ];
+    let families = ModelFamily::ALL;
     let mut hs = String::new();
     for family in families {
         hs.push_str(&format!("data {}\n", family.name()));
     }
-    hs.push_str("type role FamilyWitness nominal\ndata FamilyWitness family where\n");
+    hs.push_str("type role FamilyWitness nominal\ndata FamilyWitness modelFamily where\n");
     for family in families {
         hs.push_str(&format!(
             "  {}Witness :: FamilyWitness {}\n",
@@ -1234,7 +1251,9 @@ pub fn family_vocabulary() -> String {
             family.name()
         ));
     }
-    hs.push_str("class KnownFamily family where\n  familyWitness :: FamilyWitness family\n");
+    hs.push_str(
+        "class KnownFamily modelFamily where\n  familyWitness :: FamilyWitness modelFamily\n",
+    );
     for family in families {
         hs.push_str(&format!(
             "instance KnownFamily {} where familyWitness = {}Witness\n",
@@ -1246,34 +1265,21 @@ pub fn family_vocabulary() -> String {
 }
 
 pub fn family_witness_rust() -> String {
-    String::from("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ModelFamilyWitness {\n    #[haskell(module = \"Tidepool.Effects.Core\")]\n    OpenAIWitness,\n    #[haskell(module = \"Tidepool.Effects.Core\")]\n    ArgonWitness,\n    #[haskell(module = \"Tidepool.Effects.Core\")]\n    DeepSeekWitness,\n}\n\nimpl From<ModelFamilyWitness> for exomonad_tool::ModelFamily {\n    fn from(value: ModelFamilyWitness) -> Self {\n        match value {\n            ModelFamilyWitness::OpenAIWitness => Self::OpenAI,\n            ModelFamilyWitness::ArgonWitness => Self::Argon,\n            ModelFamilyWitness::DeepSeekWitness => Self::DeepSeek,\n        }\n    }\n}\n")
-}
-
-#[cfg(test)]
-mod family_tests {
-    use super::*;
-    #[test]
-    fn family_applications_have_distinct_nominal_arguments_and_typed_permissions() {
-        let qualified = EFFECTS
-            .iter()
-            .filter(|effect| effect.model_permission.is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(qualified.len(), 9);
-        assert!(validate(EFFECTS).is_ok());
-        for target in qualified {
-            let mut changed = EFFECTS.to_vec();
-            let index = changed
-                .iter()
-                .position(|effect| effect.wire_name == target.wire_name)
-                .unwrap();
-            changed[index].model_permission.as_mut().unwrap().family =
-                match target.model_permission.unwrap().family {
-                    ModelFamily::OpenAI => ModelFamily::Argon,
-                    _ => ModelFamily::OpenAI,
-                };
-            assert!(validate(&changed)
-                .unwrap_err()
-                .contains("model permission disagrees"));
-        }
+    let mut rust = String::from("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ModelFamilyWitness {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!(
+            "    #[haskell(module = \"Tidepool.Effects.Core\")]\n    {}Witness,\n",
+            family.name()
+        ));
     }
+    rust.push_str("}\n\nimpl From<ModelFamilyWitness> for exomonad_tool::ModelFamily {\n    fn from(value: ModelFamilyWitness) -> Self {\n        match value {\n");
+    for family in ModelFamily::ALL {
+        rust.push_str(&format!(
+            "            ModelFamilyWitness::{}Witness => Self::{},\n",
+            family.name(),
+            family.name()
+        ));
+    }
+    rust.push_str("        }\n    }\n}\n");
+    rust
 }

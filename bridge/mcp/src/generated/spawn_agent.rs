@@ -9,13 +9,13 @@ pub fn spawn_agent_decl() -> crate::EffectDecl {
         description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
         prompt_card: None,
         constructors: &[
-            "SpawnAgentSpawnWith :: FamilyWitness family -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> SpawnAgent family (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
+            "SpawnAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> SpawnAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
         ],
         type_defs: &[],
         extra_imports: &[],
         helpers: &[],
         type_params: &[
-            "family",
+            "modelFamily",
         ],
         default_row_args: &[
             "OpenAI",

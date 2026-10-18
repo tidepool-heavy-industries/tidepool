@@ -9,14 +9,14 @@ pub fn fork_agent_decl() -> crate::EffectDecl {
         description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
         prompt_card: None,
         constructors: &[
-            "ForkAgentSpawnWith :: FamilyWitness family -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> ForkAgent family (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
-            "ForkAgentCheckpointWith :: FamilyWitness family -> Text -> ForkAgent family (Either CheckpointRefusal Text)",
+            "ForkAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> ForkAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
+            "ForkAgentCheckpointWith :: FamilyWitness modelFamily -> Text -> ForkAgent modelFamily (Either CheckpointRefusal Text)",
         ],
         type_defs: &[],
         extra_imports: &[],
         helpers: &[],
         type_params: &[
-            "family",
+            "modelFamily",
         ],
         default_row_args: &[
             "OpenAI",

@@ -72,6 +72,11 @@ Imports needed by generated helpers are declaration data. Imports needed by an
 authored library helper belong in that library module. A generated effects
 module cannot depend on the authored library layer.
 
+A family-qualified executable row specializes each declaration with
+`for_model_permission` from its issued nominal key. Multiple applications of
+one effect head remain separate row entries. Vocabulary deduplication applies
+to declarations only; invocation row arguments cannot override model authority.
+
 ## Paths and configuration
 
 All locations resolve through `tidepool_toolchain::paths`:
