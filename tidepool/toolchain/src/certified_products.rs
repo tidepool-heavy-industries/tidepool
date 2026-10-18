@@ -7948,6 +7948,112 @@ pub(crate) fn certify_products(
     )
 }
 
+/// Differences here select new binding issuance; they are not admission failures.
+#[derive(Clone, Copy, Debug)]
+enum CatalogBindingDifference {
+    Payload,
+    Canonical,
+    Recipe,
+    Groups,
+    Requirements,
+    Packages,
+}
+
+#[derive(Default)]
+struct OriginalIssuanceWork {
+    inherited_reuses: u64,
+    catalog_originals: u64,
+    catalog_reuses: u64,
+    catalog_reused_product_bytes: u64,
+    catalog_payload_changes: u64,
+    catalog_canonical_changes: u64,
+    catalog_recipe_changes: u64,
+    catalog_group_changes: u64,
+    catalog_requirement_changes: u64,
+    catalog_package_changes: u64,
+    new_issues: u64,
+    copied_product_bytes: u64,
+    encoded_certificate_bytes: u64,
+}
+
+impl OriginalIssuanceWork {
+    fn new_binding(&mut self, difference: CatalogBindingDifference) {
+        match difference {
+            CatalogBindingDifference::Payload => self.catalog_payload_changes += 1,
+            CatalogBindingDifference::Canonical => self.catalog_canonical_changes += 1,
+            CatalogBindingDifference::Recipe => self.catalog_recipe_changes += 1,
+            CatalogBindingDifference::Groups => self.catalog_group_changes += 1,
+            CatalogBindingDifference::Requirements => self.catalog_requirement_changes += 1,
+            CatalogBindingDifference::Packages => self.catalog_package_changes += 1,
+        }
+    }
+}
+
+/// Called only after current source and receipt admission. Equality earns reuse
+/// of an issued binding; a valid different selection still receives a new one.
+fn compare_catalog_original_binding<'a>(
+    original: &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
+    owner: &CachedHomeOwner,
+    interface: &[u8],
+    product: &[u8],
+    package_bytes: &[u8],
+    groups: &[PendingCertifiedGroup],
+    canonical: &CertifiedModuleInterface,
+    execution_source: Option<&Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    requirements: &BTreeMap<(String, String), [u8; 32]>,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+) -> Result<&'a OriginalNativeWitness, CatalogBindingDifference> {
+    if original.owner() != owner
+        || original.interface_bytes() != interface
+        || original.product_bytes() != product
+        || original.package_imports_bytes() != package_bytes
+    {
+        return Err(CatalogBindingDifference::Payload);
+    }
+    if original.module_interface() != Some(canonical) {
+        return Err(CatalogBindingDifference::Canonical);
+    }
+    let Some(native) = original.original_native() else {
+        return Err(CatalogBindingDifference::Payload);
+    };
+    if !native.matches_original(original) {
+        return Err(CatalogBindingDifference::Payload);
+    }
+    if original.execution_source() != execution_source
+        || native.execution_source_digest() != execution_source.map(|graph| graph.digest())
+    {
+        return Err(CatalogBindingDifference::Recipe);
+    }
+    let mut ordinals = BTreeSet::new();
+    if groups.len() != native.groups.len()
+        || groups.iter().any(|current| {
+            !ordinals.insert(current.group.original_ordinal())
+                || current.owner() != owner
+                || native
+                    .group(current.group.original_ordinal())
+                    .is_none_or(|issued| {
+                        issued.group() != current.group.as_ref()
+                            || issued.imports() != current.imports.as_ref()
+                    })
+        })
+    {
+        return Err(CatalogBindingDifference::Groups);
+    }
+    if &native.interface_requirements != requirements {
+        return Err(CatalogBindingDifference::Requirements);
+    }
+    // Issuance retains only packages referenced by these exact imports. Extra
+    // accepted packages do not change this original's binding.
+    if native
+        .packages
+        .iter()
+        .any(|(owner, issued)| packages.get(owner) != Some(issued))
+    {
+        return Err(CatalogBindingDifference::Packages);
+    }
+    Ok(native)
+}
+
 pub(crate) fn certify_products_with_validation(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
@@ -9043,6 +9149,7 @@ pub(crate) fn certify_products_with_validation(
         captured_payload_root,
         &validation.inventory,
     );
+    let mut issuance_work = OriginalIssuanceWork::default();
     let mut recovery_products: Vec<_> = module_bytes
         .into_iter()
         .map(
@@ -9053,6 +9160,7 @@ pub(crate) fn certify_products_with_validation(
                             || product.package_imports_bytes() != package_bytes || product.source_sha256() != Some(source_sha) {
                             return Err(CertificationError::Mismatch("shared original native bytes"));
                         }
+                        issuance_work.inherited_reuses += 1;
                         return Ok(product.clone());
                     }
                 }
@@ -9087,6 +9195,34 @@ pub(crate) fn certify_products_with_validation(
                         .map(|proof| &proof.graph),
                     ProductOrigin::RetainedCore => None,
                 };
+                if origin == ProductOrigin::Cached {
+                    if let Some(issued) = candidates
+                        .and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone())))
+                        .filter(|bundle| bundle.owner == owner)
+                        .and_then(|bundle| bundle.product.deployment_original())
+                    {
+                        issuance_work.catalog_originals += 1;
+                        match compare_catalog_original_binding(
+                            issued, &owner, interface, product_bytes, package_bytes, &original,
+                            canonical_interface, execution_source, &accepted.interface_requirements,
+                            &receipt.packages,
+                        ) {
+                            Ok(native) => {
+                                // Preserve issuance's current package observation. Immutable
+                                // equality does not authorize a fresh filesystem selection.
+                                for package in native.packages.values() {
+                                    verify_package_interface(validation, package)?;
+                                }
+                                issuance_work.catalog_reuses += 1;
+                                issuance_work.catalog_reused_product_bytes += product_bytes.len() as u64;
+                                // Source identity in the durable certificate alone grants no
+                                // current-source witness. This request admitted it above.
+                                return Ok(issued.clone().with_source_sha256(source_sha));
+                            }
+                            Err(difference) => issuance_work.new_binding(difference),
+                        }
+                    }
+                }
                 let witness = issue_home_certification_with_validation(
                     &owner,
                     &original,
@@ -9097,6 +9233,9 @@ pub(crate) fn certify_products_with_validation(
                     validation,
                 )?;
                 let certification = encode_home_witness_with_operation(&witness, &validation.inventory)?;
+                issuance_work.new_issues += 1;
+                issuance_work.encoded_certificate_bytes += certification.len() as u64;
+                issuance_work.copied_product_bytes += product_bytes.len() as u64;
                 let binding = validate_module_binding(&witness, canonical_interface, interface, package_bytes, Some(source_sha))?;
                 validation.inventory.charge(product_bytes.len())?;
                 let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
@@ -9116,6 +9255,22 @@ pub(crate) fn certify_products_with_validation(
         &validation.inventory,
     );
     if std::env::var(crate::timing::TIMING_ENV).as_deref() == Ok("1") {
+        tracing::debug!(target: "tidepool_toolchain::module_candidates",
+            phase = "original_native_issuance_work",
+            inherited_reuses = issuance_work.inherited_reuses,
+            catalog_originals = issuance_work.catalog_originals,
+            catalog_reuses = issuance_work.catalog_reuses,
+            catalog_reused_product_bytes = issuance_work.catalog_reused_product_bytes,
+            catalog_payload_changes = issuance_work.catalog_payload_changes,
+            catalog_canonical_changes = issuance_work.catalog_canonical_changes,
+            catalog_recipe_changes = issuance_work.catalog_recipe_changes,
+            catalog_group_changes = issuance_work.catalog_group_changes,
+            catalog_requirement_changes = issuance_work.catalog_requirement_changes,
+            catalog_package_changes = issuance_work.catalog_package_changes,
+            new_issues = issuance_work.new_issues,
+            copied_product_bytes = issuance_work.copied_product_bytes,
+            encoded_certificate_bytes = issuance_work.encoded_certificate_bytes,
+            "original native issuance work");
         for (accepted, product) in receipt.modules.iter().zip(&recovery_products) {
             tracing::debug!(target: "tidepool_toolchain::module_candidates",
                 phase = "candidate_certification_owner", origin = ?accepted.origin,
@@ -9336,6 +9491,7 @@ mod home_self_issuer_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     mod artifact_view_group_index_properties;
+    mod catalog_original_reuse;
     mod complete_original_admission_properties;
     mod issued_interface_selection_history;
     #[path = "../planned_original_history_tests.rs"]
