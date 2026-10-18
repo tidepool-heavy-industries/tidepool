@@ -582,6 +582,14 @@ fn source_boot_authored_declaration_packet_producer() {
         unit: "main".into(),
         module: module.module_name(),
     };
+    let expected_interface = context
+        .compiler_source_support()
+        .selected_interfaces()
+        .unwrap()
+        .get(&owner)
+        .expect("issued authored canonical interface")
+        .descriptor
+        .id;
     let projected = context
         .compiler_source_support()
         .selected_interfaces()
@@ -592,7 +600,22 @@ fn source_boot_authored_declaration_packet_producer() {
         .unwrap()
         .extend_issued_compiler_support(&projected)
         .unwrap();
-    assert!(type_context.recovery_products().is_empty());
+    let type_support = type_context.compiler_source_support();
+    let roles = type_support.projection().snapshot_roles();
+    assert_eq!(
+        roles.get(&owner),
+        Some(
+            &crate::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                interface: expected_interface,
+            }
+        ),
+    );
+    assert!(roles.values().all(|role| matches!(
+        role,
+        crate::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
+    )));
+    assert!(type_support.native_offers().is_empty());
+    assert!(type_support.artifacts().selected_native_groups().is_empty());
     assert!(type_context
         .module_interfaces()
         .iter()
