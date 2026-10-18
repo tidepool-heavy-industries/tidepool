@@ -9412,7 +9412,12 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
             .or_insert_with(Vec::new)
             .push(*artifact);
     }
-    let selected_key = |group: &PendingCertifiedGroup| {
+    #[derive(Clone, Copy, Debug)]
+    enum GroupAdmissionPhase {
+        Candidate,
+        Baseline,
+    }
+    let selected_key = |phase: GroupAdmissionPhase, group: &PendingCertifiedGroup| {
         let artifact = match original_ids.get(group.owner()).map(Vec::as_slice) {
             Some([artifact]) => *artifact,
             Some(artifacts) => {
@@ -9425,7 +9430,10 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
                     ),
                 ));
             }
-            None => return Err(failure("certified group has no exact original artifact")),
+            None => return Err(failure(format!(
+                "certified group has no exact original artifact: phase={phase:?} owner={:?} ordinal={} selected_groups={} available_originals={}",
+                group.owner(), group.group().original_ordinal(), metadata.selected_native_groups.len(), available.len(),
+            ))),
         };
         Ok(crate::artifact_inventory::NativeGroupKey {
             artifact,
@@ -9435,7 +9443,7 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     let mut current = Vec::new();
     let mut current_positions = BTreeMap::new();
     for group in candidates {
-        let key = selected_key(group)?;
+        let key = selected_key(GroupAdmissionPhase::Candidate, group)?;
         if metadata.selected_native_groups.contains(&key) {
             // Baseline comparison uses the first candidate; certification below
             // retains responsibility for duplicate-current refusal.
@@ -9445,7 +9453,7 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     }
     let mut baseline_keys = BTreeSet::new();
     for group in baseline {
-        let key = selected_key(group)?;
+        let key = selected_key(GroupAdmissionPhase::Baseline, group)?;
         if !baseline_keys.insert(key) || !metadata.selected_native_groups.contains(&key) {
             return Err(failure(
                 "artifact view removed or duplicated a previously selected group",
