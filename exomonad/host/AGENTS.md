@@ -74,6 +74,11 @@ the Store. Component campaigns use `TestCampaign::drive_actor_output` while
 awaiting any operation that can publish output, including named authored tool
 handlers.
 
+Model-free `TestCampaign` setup that spawns native children must await the
+operation through `drive_native_admission`. It acknowledges native installations,
+retains their deployment events for assertions, and drives output. Tests of
+admission barriers keep explicit acknowledgement ownership.
+
 Recipe activation messages present the typed request; they are separate from
 the fresh context seed supplied during provider attachment. Assert payload
 fields through the checked actor's `sessionInput`. Assert seeded provider context
