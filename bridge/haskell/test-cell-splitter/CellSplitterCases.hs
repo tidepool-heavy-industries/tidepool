@@ -99,7 +99,7 @@ import Tidepool.Timing
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
   , removeFile, removeDirectoryRecursive, copyFile
-  , getPermissions, setPermissions, setOwnerExecutable )
+  , getPermissions, setPermissions, setOwnerExecutable, listDirectory )
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose, hFlush, readFile', stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -476,7 +476,12 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
     (fail "original interface seal reread the mutable session path")
   sealed <- originalInterfaceSha256 originals valueOwner >>= maybe
     (fail "selected value interface has no dependency seal") pure
-  finalized <- capture originals
+  beforeCapture <- sort <$> listDirectory root
+  held <- capture originals
+  afterCapture <- sort <$> listDirectory root
+  unless (beforeCapture == afterCapture)
+    (fail "held finalization capture wrote packet destination files")
+  finalized <- materializeFinalizedModuleArtifacts root held
   let requirements = concatMap (Map.toList . localFinalizedRequirements)
         (Map.elems (finalizedLocalAdmissions finalized))
   unless (any (\((_, name), sha) -> name == moduleNameString (renderSessionModule owner)

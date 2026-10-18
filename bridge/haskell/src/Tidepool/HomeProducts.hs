@@ -20,6 +20,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Tidepool.ArtifactBytes (ArtifactBytes)
 import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
@@ -78,7 +79,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes )
+  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
@@ -206,7 +207,7 @@ recoverAdmittedFinalizedOriginalWithPrevious admittedScope@(OriginalRecoveryScop
         location = ms_location (exactInterfaceSummary env artifact)
     home <- admittedHomeInterface env admission owner
     version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInRecoveryScope admittedScope owner)
-    bytes <- readAdmittedCore admission
+    bytes <- readAdmittedCoreBody admission
     original <- case previous of
       Just (oldVersion,old) | oldVersion == version -> pure old
       _ -> decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
@@ -304,6 +305,11 @@ readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
 readAdmittedCore proof = case admittedInterfaceCore proof of
   Nothing -> throwIO CandidateCoreMissing
   Just _ -> admittedInterfaceCoreBytes proof
+
+readAdmittedCoreBody :: CanonicalInterfaceAdmission -> IO ArtifactBytes
+readAdmittedCoreBody proof = case admittedInterfaceCore proof of
+  Nothing -> throwIO CandidateCoreMissing
+  Just _ -> admittedInterfaceCoreBody proof
 
 -- Every ordinary summary and every boot summary is from the current
 -- downsweep. The caller has already checked source/package witnesses and

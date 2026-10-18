@@ -198,7 +198,7 @@ import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
-import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
+import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
@@ -2998,10 +2998,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           unless (mi_module iface == ms_mod (pendingSummary pending)) $
             throwIO LoadedFinalizationOwnerMismatch
           let skinny = set_mi_extra_decls Nothing iface
-              finalized = FinalizedModule
-                (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
-                (pendingTidyGuts pending)
-              loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
+          finalized <- newFinalizedModule (pendingEnvironment pending)
+            (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
+            (pendingTidyGuts pending)
+          let loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
                 (pendingOutput pending) finalized
               name = ms_mod_name (pendingSummary pending)
           -- A candidate's bytecode may be needed by a splice. Its recompilation
@@ -5412,7 +5412,8 @@ registerPreparedInterface timing requestId interfaceReuse interfaceUse front sim
       hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
   when (needsPreparedInterface interfaceUse) $
     installPreparedInterface (ms_mod_name modSum) hmi
-  pure (tidyMs + ifaceMs, FinalizedModule hmi cgGuts)
+  finalized <- liftIO (newFinalizedModule hscEnv hmi cgGuts)
+  pure (tidyMs + ifaceMs, finalized)
 
 -- Keep request-local executable state out of the reusable prepared memo.
 installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()

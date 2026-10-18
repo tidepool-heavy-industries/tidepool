@@ -2,7 +2,8 @@
 
 module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories, agentPageDisplayFinalizationHistory) where
 
-import Control.Exception (SomeException, IOException, bracket, try)
+import Control.Exception (SomeException, IOException, bracket, try, evaluate, throwIO)
+import Control.Concurrent (forkFinally, killThread, newEmptyMVar, readMVar, putMVar, takeMVar)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -22,6 +23,8 @@ import GHC.Cmm.CLabel (mkInitializerStubLabel)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Utils.Outputable qualified as Outputable
+import GHC.Driver.Session (targetWays_)
+import GHC.Platform.Ways (Way(WayProf), hasWay, addWay, removeWay)
 import GHC.Driver.Main (loadIfaceByteCode)
 import GHC.Driver.Make (load')
 import GHC.Iface.Recomp
@@ -52,24 +55,26 @@ import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_home_u
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
-import Data.List (isInfixOf, intercalate)
+import Data.List (isInfixOf, isPrefixOf, stripPrefix, intercalate)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
-import Tidepool.ArtifactBytes (artifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, captureArtifactBytes)
+import System.Mem.StableName (makeStableName)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope, serializeOriginalInterface )
+  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope, serializeOriginalInterface
+  , newOriginalInterfaceArtifacts, originalInterfaceBody )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
-import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, captureFinalizedInterface)
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
-  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
+  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
@@ -110,7 +115,7 @@ agentPageDisplayFinalizationHistory = withScratch $ \work -> do
           (Map.lookup owner (pprFinalizedModules prepared))
         let env = prHscEnv (pprPipelineResult prepared)
         interface <- serializeOriginalInterface env work (hm_iface (finalizedHomeModInfo finalized))
-        core <- requireRight =<< captureFinalizedCore env finalized work
+        core <- requireRight =<< captureFinalizedCore finalized
         pure (interface, artifactBytes core)
       target index imported = do
         let name = "AgentPageHistory" ++ show index
@@ -146,6 +151,85 @@ agentPageDisplayFinalizationHistory = withScratch $ \work -> do
   putStrLn ("Agent PageDisplay: four fresh histories and a hydrated support history retain identical canonical bytes "
     ++ show (map fingerprint histories))
 
+-- Exercise actual codec work through one genuine completed pair. Each fresh
+-- owner has independent deferred representations even when its body is equal.
+deferredFinalizationChecks :: FilePath -> HscEnv -> FinalizedModule -> IO ()
+deferredFinalizationChecks work env original = do
+  let home = finalizedHomeModInfo original
+      guts = finalizedTidyGuts original
+      fresh = newFinalizedModule env home guts
+  owner <- fresh
+  ((first, second), coreCounts) <- withTiming $ captureDiagnostics $
+    concurrentCaptures (captureFinalizedCore owner >>= requireRight)
+  sameBody "concurrent Core consumers rebuilt held bytes" first second
+  assert (captureCount "finalized_core_encoding_attempts" coreCounts == 1
+      && captureCount "finalized_core_encoding_completions" coreCounts == 1
+      && captureCount "finalized_core_capture_reuses" coreCounts == 1)
+    "same-owner concurrent demands did not share one Core encoding"
+  ((left, right), interfaceCounts) <- withTiming $ captureDiagnostics $
+    concurrentCaptures (captureFinalizedInterface owner)
+  sameBody "concurrent interface consumers rebuilt held bytes" left right
+  assert (captureCount "finalized_interface_encoding_attempts" interfaceCounts == 1
+      && captureCount "finalized_interface_encoding_completions" interfaceCounts == 1)
+    "same-owner concurrent demands did not share one interface encoding"
+  distinct <- fresh
+  (distinctBody, distinctCounts) <- withTiming $ captureDiagnostics $
+    captureFinalizedCore distinct >>= requireRight
+  assert (captureCount "finalized_core_encoding_attempts" distinctCounts == 1
+      && artifactBytes distinctBody == artifactBytes first)
+    "a distinct fresh semantic owner borrowed another owner's completed encoding"
+  let flags = hsc_dflags env
+      originalWays = targetWays_ flags
+      changedWays = (if hasWay originalWays WayProf then removeWay else addWay) WayProf originalWays
+      receiving = env {hsc_dflags = flags {targetWays_ = changedWays}}
+      name = moduleName (mi_module (hm_iface home))
+  expected <- serializeOriginalInterface env work (hm_iface home)
+  changed <- serializeOriginalInterface receiving work (hm_iface home)
+  assert (expected /= changed) "profile control did not change the interface codec input"
+  profileOwner <- fresh
+  receivingView <- newOriginalInterfaceArtifacts receiving (Map.singleton name profileOwner) [] work
+  issued <- originalInterfaceBody receivingView (mi_module (hm_iface home))
+    >>= maybe (fail "receiving view lost the finalized original") pure
+  assert (artifactBytes issued == expected)
+    "receiving request profile changed the original owner's interface encoding"
+  retryOwner <- fresh
+  ((refused, retryBody), retryCounts) <- withTiming $ captureDiagnostics $ do
+    refused <- bracket (lookupEnv "TMPDIR") restoreTemporary $ \_ -> do
+      setEnv "TMPDIR" (work </> "absent-interface-scratch")
+      try (captureFinalizedInterface retryOwner) :: IO (Either IOException ArtifactBytes)
+    retryBody <- captureFinalizedInterface retryOwner
+    pure (refused, retryBody)
+  assert (case refused of Left _ -> True; Right _ -> False)
+    "interface scratch IO failure control did not refuse"
+  assert (artifactBytes retryBody == expected
+      && captureCount "finalized_interface_encoding_completions" retryCounts == 1)
+    "failed first interface capture poisoned the same semantic owner"
+ where
+  restoreTemporary = maybe (unsetEnv "TMPDIR") (setEnv "TMPDIR")
+
+concurrentCaptures :: IO a -> IO (a, a)
+concurrentCaptures action = do
+  start <- newEmptyMVar
+  first <- newEmptyMVar
+  second <- newEmptyMVar
+  let acquire = mapM (\done -> forkFinally (readMVar start >> action) (putMVar done)) [first, second]
+      result done = takeMVar done >>= either throwIO pure
+  bracket acquire (mapM_ killThread) $ \_ -> do
+    putMVar start ()
+    (,) <$> result first <*> result second
+
+sameBody :: String -> ArtifactBytes -> ArtifactBytes -> IO ()
+sameBody label first second = do
+  left <- evaluate (artifactBytes first) >>= makeStableName
+  right <- evaluate (artifactBytes second) >>= makeStableName
+  assert (left == right) label
+
+captureCount :: String -> String -> Integer
+captureCount name diagnostics = sum
+  [read value | line <- lines diagnostics
+    , ("tidepool-count name=" ++ name ++ " ") `isPrefixOf` line
+    , field <- words line, Just value <- [stripPrefix "count=" field]]
+
 -- | A new GHC session hydrates captured interface bytes after the only source
 -- file has been removed. Its original Names, polymorphic types, recursive
 -- groups, local class instance and CorePrep input must all survive.
@@ -164,6 +248,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       | ModuleNode _ item <- mgModSummaries' (hsc_mod_graph env), ms_mod_name item == name] of
     [item] -> pure item
     _ -> fail "compiler omitted its original module summary"
+  deferredFinalizationChecks work env finalized
   capture <- captureCompilerFixture (FixtureCompilerInput work source [work]) prepared
   scopePath <- writeGenuineMetadataScope work ["FinalizedCoreFixture"] capture
   scope <- requireRight =<< readExactScope scopePath
@@ -187,7 +272,8 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     (admittedInterfaceCore (ModuleInterfaceAdmission proof))
   bytes <- BS.readFile corePath
   assert (hexBytes (SHA256.hash bytes) == coreSha) "issued Core seal changed before consumption"
-  rawBytes <- requireRight =<< captureFinalizedCore env finalized work
+  originalCoreBody <- admittedInterfaceCoreBody (ModuleInterfaceAdmission proof)
+  rawBytes <- requireRight =<< captureFinalizedCore finalized
   assert (bytes == artifactBytes rawBytes) "certification did not retain the original finalized Core bytes"
   let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
       initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
@@ -196,23 +282,23 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         ,ForeignStubs (CHeader Outputable.empty) (CStub (Outputable.text "void canonical_test(void) {}") [] [])
         ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [initializer] [])
         ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [initializer])]
-  emptyCapture <- requireRight =<< captureFinalizedCore env
-    finalized {finalizedTidyGuts = guts {cg_foreign = emptyStubs}} work
+  emptyOwner <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_foreign = emptyStubs}
+  emptyCapture <- requireRight =<< captureFinalizedCore emptyOwner
   assert (artifactBytes emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
   forM_ nonemptyStubs $ \stubs -> do
-    refusal <- captureFinalizedCore env
-      finalized {finalizedTidyGuts = guts {cg_foreign = stubs}} work
+    refusedOwner <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_foreign = stubs}
+    refusal <- captureFinalizedCore refusedOwner
     assert (case refusal of Left (FinalizedCoreUnsupported ForeignExportStubs) -> True; _ -> False)
       "nonempty foreign header/body/initializer/finalizer was discarded"
   forM_ (take 1 (bindersOfBinds (cg_binds guts))) $ \binder -> do
-    refusal <- captureFinalizedCore env
-      finalized { finalizedTidyGuts = guts
-        { cg_spt_entries = [SptEntry binder (Fingerprint 1 2)] } } work
+    refusedOwner <- newFinalizedModule env (finalizedHomeModInfo finalized)
+      guts {cg_spt_entries = [SptEntry binder (Fingerprint 1 2)]}
+    refusal <- captureFinalizedCore refusedOwner
     assert (case refusal of Left (FinalizedCoreUnsupported StaticPointerEntries) -> True; _ -> False)
       "static-pointer metadata was discarded instead of explicitly refused"
-  refusal <- captureFinalizedCore env
-    finalized { finalizedTidyGuts = guts
-      { cg_foreign_files = [(LangC, work </> "unavailable.c")] } } work
+  refusedOwner <- newFinalizedModule env (finalizedHomeModInfo finalized)
+    guts {cg_foreign_files = [(LangC, work </> "unavailable.c")]}
+  refusal <- captureFinalizedCore refusedOwner
   assert (case refusal of Left (FinalizedCoreUnsupported ForeignSourceFiles) -> True; _ -> False)
     "foreign source metadata was discarded instead of explicitly refused"
   -- A second request receives the same immutable capture without compiling it.
@@ -295,7 +381,14 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         :: IO (Either CandidateCoreFailure ModIface)
       assert (case wrongOwner of Left CandidateCoreHomeMissing -> True; _ -> False)
         "captured executable interface accepted a different exact unit"
-      finalized <- requireRight =<< decodeFinalizedCore env home (ms_location summary) bytes
+      (finalized, recoveryCounts) <- withTiming $ captureDiagnostics $ do
+        recovered <- requireRight =<< decodeFinalizedCore env home (ms_location summary) originalCoreBody
+        held <- requireRight =<< captureFinalizedCore recovered
+        sameBody "cold recovery recaptured its original Core" originalCoreBody held
+        pure recovered
+      assert (captureCount "finalized_core_admitted_seeds" recoveryCounts == 1
+          && captureCount "finalized_core_encoding_attempts" recoveryCounts == 0)
+        "cold recovery encoded Core instead of retaining its admitted body"
       let guts = finalizedTidyGuts finalized
       assert (bindingGroups guts == groups) "canonical binding order or recursive groups changed"
       assert (any (\(recursive, names) -> recursive
@@ -321,7 +414,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       let owner = cg_module guts
           wrongHome = home { hm_iface = set_mi_module
             (mkModule (moduleUnit owner) (mkModuleName "OtherOriginal")) (hm_iface home) }
-      wrongOwner <- decodeFinalizedCore env wrongHome (ms_location summary) bytes
+      wrongOwner <- decodeFinalizedCore env wrongHome (ms_location summary) originalCoreBody
       assert (case wrongOwner of Left FinalizedCoreOwnerMismatch -> True; _ -> False)
         "canonical companion accepted a different exact owner"
       let backend = mi_final_exts (hm_iface home)
@@ -329,10 +422,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
           different = if fingerprint == Fingerprint 0 0 then Fingerprint 1 0 else Fingerprint 0 0
           wrongVersion = home { hm_iface = set_mi_final_exts
             backend {mi_iface_hash = different} (hm_iface home) }
-      mismatch <- decodeFinalizedCore env wrongVersion (ms_location summary) bytes
+      mismatch <- decodeFinalizedCore env wrongVersion (ms_location summary) originalCoreBody
       assert (case mismatch of Left FinalizedCoreInterfaceMismatch -> True; _ -> False)
         "canonical companion accepted a different native interface version"
-      malformed <- decodeFinalizedCore env home (ms_location summary) (BS.take 1 bytes)
+      malformed <- decodeFinalizedCore env home (ms_location summary) (captureArtifactBytes (BS.take 1 bytes))
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
   directBytecodeChecks libdir work artifact summary (ModuleInterfaceAdmission proof)

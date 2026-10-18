@@ -121,7 +121,8 @@ import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ResumePackage (resolveResumeInterface)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
-import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
+import Tidepool.FinalizedModule.Internal (serializeOriginalInterface)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
 import Numeric (showHex)
@@ -919,20 +920,6 @@ data OriginalInterfaceCaptureFailure
 
 instance Exception OriginalInterfaceCaptureFailure
 
--- The one serializer used for finalization certification and candidate reuse.
--- The temporary handle must be closed before GHC opens the same path.
-serializeOriginalInterface :: HscEnv -> FilePath -> ModIface -> IO BS.ByteString
-serializeOriginalInterface env directory interface =
-  bracket (openBinaryTempFile directory "module-product.hi")
-    (\(path, handle) -> do
-      closed <- hIsClosed handle
-      unless closed (hClose handle)
-      removeFile path)
-    (\(path, handle) -> do
-      hClose handle
-      writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path interface
-      BS.readFile path)
-
 -- Original product publication and type witnesses share the same serializer
 -- and immutable bytes. This cache belongs only to the completed transaction;
 -- it neither consults source nor survives in a worker-global map.
@@ -1022,8 +1009,9 @@ originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ direc
           productInterface = Map.lookup owner originals >>= matches . hm_iface . finalizedHomeModInfo
           packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
       artifact <- case productInterface of
-        Just interface -> do
-          finalized <- serialize interface
+        Just _ -> do
+          original <- maybe (fail "finalized interface has no semantic owner") pure (Map.lookup owner originals)
+          finalized <- Just <$> captureFinalizedInterface original
           case (Map.lookup owner retained, finalized) of
             (Just admitted, Just bytes) | admitted /= bytes ->
               throwIO (FinalizedOriginalConflict (unitString (moduleUnit owner)) (moduleNameString (moduleName owner)))
