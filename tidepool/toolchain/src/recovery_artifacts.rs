@@ -2327,73 +2327,94 @@ fn materialize_owned_interface(
     .materialize(recovery_root, validation, mode)
 }
 
+struct ValidatedModuleInterface<'a> {
+    interface: &'a crate::certified_products::CertifiedModuleInterface,
+    bytes: ValidatedInterfaceBytes<'a>,
+}
+
+impl<'a> ValidatedModuleInterface<'a> {
+    fn admit(
+        interface: &'a crate::certified_products::CertifiedModuleInterface,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
+        let bytes = ValidatedInterfaceBytes::admit(
+            interface.producer_sha256(),
+            interface.unit(),
+            interface.module(),
+            interface.interface_bytes(),
+            interface.package_imports_bytes(),
+            validation,
+        )?;
+        Ok(Self { interface, bytes })
+    }
+
+    fn materialize(
+        &self,
+        root: &Path,
+        validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
+    ) -> Result<RecoveryModuleInterfaceRef, RecoveryArtifactError> {
+        let interface = self.interface;
+        let files = self.bytes.materialize(root, validation, mode)?;
+        let anchor = RecoveryJoinRef {
+            toolchain_identity_sha256: interface.producer_sha256(),
+            unit: interface.unit().to_owned(),
+            module: interface.module().to_owned(),
+            skinny_iface_sha256: files.skinny_iface_sha256,
+            interface_path: files.interface_path,
+            package_imports_path: files.package_imports_path,
+            package_imports_sha256: files.package_imports_sha256,
+        };
+        let certificate_sha256 = validation.digest(interface.certificate_bytes());
+        let certificate_path =
+            PathBuf::from("artifacts").join(format!("{}.finalized.cbor", hex(&certificate_sha256)));
+        let owned = prepare_owned_directory(root, mode)?;
+        materialize_copy_with_validation(
+            &root.join(&certificate_path),
+            interface.certificate_bytes(),
+            &certificate_sha256,
+            mode,
+            validation,
+        )?;
+        let core = interface
+            .core_bytes()
+            .map(|bytes| {
+                let sha256 = validation.digest(bytes);
+                let path =
+                    PathBuf::from("artifacts").join(format!("{}.finalized.core", hex(&sha256)));
+                materialize_copy_with_validation(
+                    &root.join(&path),
+                    bytes,
+                    &sha256,
+                    mode,
+                    validation,
+                )?;
+                Ok::<_, RecoveryArtifactError>(RecoveryCoreRef {
+                    path,
+                    sha256,
+                    bytes: bytes.len() as u64,
+                })
+            })
+            .transpose()?;
+        if mode == MaterializationMode::Durable {
+            File::open(&owned)?.sync_all()?;
+        }
+        Ok(RecoveryModuleInterfaceRef {
+            interface: anchor,
+            certificate_path,
+            certificate_sha256,
+            core,
+        })
+    }
+}
+
 pub(crate) fn materialize_module_interface(
     root: &Path,
     interface: &crate::certified_products::CertifiedModuleInterface,
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<RecoveryModuleInterfaceRef, RecoveryArtifactError> {
-    let checked = ValidatedInterfaceBytes::admit(
-        interface.producer_sha256(),
-        interface.unit(),
-        interface.module(),
-        interface.interface_bytes(),
-        interface.package_imports_bytes(),
-        validation,
-    )?;
-    materialize_module_interface_admitted(root, interface, &checked, validation, mode)
-}
-
-fn materialize_module_interface_admitted(
-    root: &Path,
-    interface: &crate::certified_products::CertifiedModuleInterface,
-    checked: &ValidatedInterfaceBytes<'_>,
-    validation: &mut PackageInterfaceValidation,
-    mode: MaterializationMode,
-) -> Result<RecoveryModuleInterfaceRef, RecoveryArtifactError> {
-    let files = checked.materialize(root, validation, mode)?;
-    let anchor = RecoveryJoinRef {
-        toolchain_identity_sha256: interface.producer_sha256(),
-        unit: interface.unit().to_owned(),
-        module: interface.module().to_owned(),
-        skinny_iface_sha256: files.skinny_iface_sha256,
-        interface_path: files.interface_path,
-        package_imports_path: files.package_imports_path,
-        package_imports_sha256: files.package_imports_sha256,
-    };
-    let certificate_sha256 = validation.digest(interface.certificate_bytes());
-    let certificate_path =
-        PathBuf::from("artifacts").join(format!("{}.finalized.cbor", hex(&certificate_sha256)));
-    let owned = prepare_owned_directory(root, mode)?;
-    materialize_copy_with_validation(
-        &root.join(&certificate_path),
-        interface.certificate_bytes(),
-        &certificate_sha256,
-        mode,
-        validation,
-    )?;
-    let core = interface
-        .core_bytes()
-        .map(|bytes| {
-            let sha256 = validation.digest(bytes);
-            let path = PathBuf::from("artifacts").join(format!("{}.finalized.core", hex(&sha256)));
-            materialize_copy_with_validation(&root.join(&path), bytes, &sha256, mode, validation)?;
-            Ok::<_, RecoveryArtifactError>(RecoveryCoreRef {
-                path,
-                sha256,
-                bytes: bytes.len() as u64,
-            })
-        })
-        .transpose()?;
-    if mode == MaterializationMode::Durable {
-        File::open(&owned)?.sync_all()?;
-    }
-    Ok(RecoveryModuleInterfaceRef {
-        interface: anchor,
-        certificate_path,
-        certificate_sha256,
-        core,
-    })
+    ValidatedModuleInterface::admit(interface, validation)?.materialize(root, validation, mode)
 }
 
 pub(crate) fn capture_module_payload(
@@ -2591,19 +2612,20 @@ fn record_native_materialization(hashed: usize, copied: usize) {
 
 /// Shared semantic admission over actual immutable product owners. No output
 /// directory, recovery references or writer-only naming hashes are constructed.
-pub(crate) struct ValidatedCertifiedProducts<'a> {
+pub(crate) struct ValidatedCertifiedProducts<'a, 'validation> {
     producer: [u8; 32],
     products: &'a [CertifiedRecoveryProduct],
     source_graphs:
         BTreeMap<[u8; 32], &'a Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
-    interfaces: Vec<ValidatedInterfaceBytes<'a>>,
+    interfaces: Vec<ValidatedModuleInterface<'a>>,
+    validation: &'validation mut PackageInterfaceValidation,
 }
 
-impl<'a> ValidatedCertifiedProducts<'a> {
+impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
     pub(crate) fn admit(
         toolchain_identity_sha256: [u8; 32],
         products: &'a [CertifiedRecoveryProduct],
-        validation: &mut PackageInterfaceValidation,
+        validation: &'validation mut PackageInterfaceValidation,
     ) -> Result<Self, RecoveryArtifactError> {
         if toolchain_identity_sha256 == [0; 32] {
             return Err(RecoveryArtifactError::InvalidReference);
@@ -2698,14 +2720,7 @@ impl<'a> ValidatedCertifiedProducts<'a> {
             let interface = product
                 .module_interface()
                 .ok_or(RecoveryArtifactError::InvalidReference)?;
-            interfaces.push(ValidatedInterfaceBytes::admit(
-                interface.producer_sha256(),
-                interface.unit(),
-                interface.module(),
-                interface.interface_bytes(),
-                interface.package_imports_bytes(),
-                validation,
-            )?);
+            interfaces.push(ValidatedModuleInterface::admit(interface, validation)?);
             crate::host_work::checkpoint()?;
         }
         Ok(Self {
@@ -2713,15 +2728,16 @@ impl<'a> ValidatedCertifiedProducts<'a> {
             products,
             source_graphs,
             interfaces,
+            validation,
         })
     }
 
     pub(crate) fn materialize(
         self,
         recovery_root: &Path,
-        validation: &mut PackageInterfaceValidation,
         mode: MaterializationMode,
     ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+        let validation = self.validation;
         let toolchain_identity_sha256 = self.producer;
         let owned = prepare_owned_directory(recovery_root, mode)?;
         for (digest, graph) in &self.source_graphs {
@@ -2819,15 +2835,7 @@ impl<'a> ValidatedCertifiedProducts<'a> {
                 certification_path,
                 certification_sha256,
                 product_path,
-                module_interface: Some(materialize_module_interface_admitted(
-                    recovery_root,
-                    product
-                        .module_interface()
-                        .ok_or(RecoveryArtifactError::InvalidReference)?,
-                    interface,
-                    validation,
-                    mode,
-                )?),
+                module_interface: Some(interface.materialize(recovery_root, validation, mode)?),
                 execution_source,
             });
         }
