@@ -13824,6 +13824,7 @@ pub(crate) mod tests {
             issued_groups,
             request_offer.issued_group_carriers().unwrap()
         );
+        let inventory = inputs.artifacts().inventory();
         let mut fixed = inventory
             .bind_segment(inputs.artifacts(), entries, &physical)
             .unwrap();
