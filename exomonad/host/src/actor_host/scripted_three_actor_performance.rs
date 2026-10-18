@@ -539,6 +539,7 @@ async fn three_actor_capture(concurrent: bool) {
         let root_name = root.to_string();
         let output_origin = super::test_campaign::actor_output_origin(host.runtime.run_identity(), root);
         host.assert_prepared_workspace_installation().await;
+        let installation = host.context.observer.installation(root).await;
         host.http_input("Exercise the real three-actor capture workload.").await.unwrap();
         let mut pending = VecDeque::new();
         let mut round = next_root(host, &mut requests, &mut pending).await;
