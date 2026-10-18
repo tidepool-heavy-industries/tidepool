@@ -102,7 +102,7 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 15 with eleven fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
 or null, the exact published source selection roots with their issued dependency originals, and an input acquisition.
 Each publication row keeps its public root separate from dependency interface/product pairs.
@@ -121,9 +121,13 @@ Protected checked-value purpose paths may differ from their transported interfac
 paths. Continuation binds them to the same admitted value-role owner and seal,
 sharing captured bytes; it never reacquires a missing original from a path.
 
-Native product rows have nine fields: unit, module, version, interface SHA, native
+Native product rows have ten fields: unit, module, version, interface SHA, native
 SHA, native path, selected ordinals, the logical path/SHA descriptor for the
-existing `TPHOMEOWNERS` version 5 certificate, and closed availability.
+existing `TPHOMEOWNERS` version 5 certificate, closed availability, and the issuer-frozen
+`compiler-original` or `private-native` classification. The matched reader rejects old
+versions and unknown classifications. Recipe owners use only compiler originals;
+physical body consumers retain both classes. Empty selected ordinals do not imply
+either class. Scope extensions preserve this distinction from their actual receipt.
 Availability is `["full-carrier"]` or `["issued-groups", ordinals]`; selected
 ordinals must belong to that availability. The Rust issuer grants full availability
 only from an independently qualified complete carrier before custody merging.

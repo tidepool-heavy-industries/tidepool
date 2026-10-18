@@ -60,7 +60,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
@@ -457,13 +457,18 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner = case exact of
+      acquireOriginal siblings owner producer missing = case exact of
         Nothing -> pure Nothing
         Just scope -> do
           when (any (\original -> (originalUnit original,originalModule original) ==
               (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
             (fail ("required binder is absent from the admitted original native census: "
-              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              ++ "; producing module: "
+              ++ show (unitString (moduleUnit producer),moduleNameString (moduleName producer))
+              ++ "; missing binders: " ++ show (Set.toAscList (Set.filter (\identity ->
+                symbolUnit identity == T.pack (unitString (moduleUnit owner))
+                  && symbolModule identity == T.pack (moduleNameString (moduleName owner))) missing))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -497,8 +502,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modules <- readIORef modulesRef
         attempted <- readIORef attemptedRef
         known <- readIORef knownRef
-        let pending = Set.toAscList (Set.fromList
-              [owner | identity <- Set.toAscList (rawOriginalProductDemands raw `Set.difference` known)
+        let missing = rawOriginalProductDemands raw `Set.difference` known
+            pending = Set.toAscList (Set.fromList
+              [owner | identity <- Set.toAscList missing
                 , let owner = mkModule
                         (stringToUnit (T.unpack (symbolUnit identity)))
                         (mkModuleName (T.unpack (symbolModule identity)))
@@ -508,7 +514,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> do
-          original <- acquireOriginal siblings owner
+          original <- acquireOriginal siblings owner (rawOriginalProductOwner raw) missing
           let version = ownerVersion interfaces owner
           -- A present canonical owner checks the current artifact bytes. A
           -- prepared hit avoids decoding and lowering, not validation work.
@@ -929,7 +935,7 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
-              retained = map originalIdentity (scopeProducts scope)
+              retained = map originalIdentity (scopeRecipeOriginals scope)
                 ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
                     (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
                     (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
@@ -1034,7 +1040,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
   (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached outputWrites) finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
-  admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
+  admitted <- extendExactScopeGeneration cached additions (map CompilerOriginal pendingProducts) pendingLexical >>= either fail pure
   promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
@@ -1201,7 +1207,8 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       writeFresh outputWrites productPath productBytes
-      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+      extendExactScopeGeneration scope [] [if Map.member key (certifiedRetainedOriginals certified)
+        then PrivateNative original else CompilerOriginal original] [] >>= either fail pure
     writeFresh outputWrites path bytes = do
       BS.writeFile path bytes
       modifyIORef' outputWrites (++ [(path,bytes)])

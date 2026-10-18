@@ -284,7 +284,13 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Older snapshots require regeneration.
+Context snapshots use version 4 and persist the input issuer's per-original
+decision domain alongside compact exact Group references. An explicitly empty
+decision differs from no issued choice; neither grants native availability or
+executes a group. Older context versions require regeneration and are refused.
+Custody attachment preserves these decisions, narrowing withdraws removed
+choices, and only the checked publication endorsement can rebind a decision to
+its new published role. Arbitrary role replacement cannot inherit a choice.
 
 Compiler transport combines authenticated body availability while retaining each
 offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct
@@ -292,6 +298,11 @@ issuance scopes; transport neither selects nor collapses those bindings. Full
 availability requires an individual offer's complete proof. Combining issued
 subsets cannot create Full. The inventory owns execution selection through exact
 root and carrier choices, and refuses any remaining demand ambiguity.
+An interface-only role may consume an existing Full body's exact canonical and
+carrier qualification without selecting an Original role or executable roots.
+Transport refuses different Original payloads competing for one compiler owner.
+Multiple qualified histories for the same payload remain available; a demanded
+execution binding requires an exact choice among their carrier and group issuers.
 Target admission uses exact offered graph candidates before explicit execution
 root qualification. Retained custody cannot fill an empty or partial request
 offer, including dependency-only originals absent from its compiler namespace.

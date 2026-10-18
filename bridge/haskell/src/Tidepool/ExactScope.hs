@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.ExactScope
-  ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
-  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
+  ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
+  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
@@ -112,7 +112,7 @@ data ExactScope = ExactScope
   , ownedScopeSemanticSha256 :: String
   , scopeInputs :: AdmittedScopeInputs
   , ownedScopeLexical :: [((String, String), [(String, String)])]
-  , ownedScopeProducts :: [ExactProduct]
+  , ownedScopeProducts :: [ExactScopeOriginal]
   , ownedScopeExecutionGraphs :: [ExecutionSourceGraph]
   , ownedScopeExecutionOwners :: [ExecutionSourceRef]
   , ownedScopePurpose :: ExactScopePurpose
@@ -141,7 +141,25 @@ scopeLexical :: ExactScope -> [((String, String), [(String, String)])]
 scopeLexical = ownedScopeLexical
 
 scopeProducts :: ExactScope -> [ExactProduct]
-scopeProducts = ownedScopeProducts
+scopeProducts = map scopeOriginalProduct . ownedScopeProducts
+
+-- Physical body availability and compiler namespace ownership are independent.
+-- Only the request or a checked current-product receipt issues this distinction.
+data ExactScopeOriginal = CompilerOriginal ExactProduct | PrivateNative ExactProduct
+  deriving (Eq, Show)
+
+data NativeInputClassification = CompilerOriginalInput | PrivateNativeInput
+
+classifyOriginal :: NativeInputClassification -> ExactProduct -> ExactScopeOriginal
+classifyOriginal CompilerOriginalInput = CompilerOriginal
+classifyOriginal PrivateNativeInput = PrivateNative
+
+scopeOriginalProduct :: ExactScopeOriginal -> ExactProduct
+scopeOriginalProduct (CompilerOriginal product) = product
+scopeOriginalProduct (PrivateNative product) = product
+
+scopeRecipeOriginals :: ExactScope -> [ExactProduct]
+scopeRecipeOriginals scope = [product | CompilerOriginal product <- ownedScopeProducts scope]
 
 scopeExecutionGraphs :: ExactScope -> [ExecutionSourceGraph]
 scopeExecutionGraphs = ownedScopeExecutionGraphs
@@ -546,7 +564,7 @@ newtype NativeOrdinalSelection = NativeOrdinalSelection [Word]
 
 data OfferedNativeAvailability = OfferedFullCarrier | OfferedIssuedGroups NativeOrdinalSelection
 
-type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String), OfferedNativeAvailability)
+type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String), OfferedNativeAvailability, NativeInputClassification)
 
 admitOriginalCensusWith :: RequestInputReader -> String -> Map.Map InterfaceOwner ExactInterfaceEvidence
   -> [OfferedNativeProduct] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
@@ -556,7 +574,7 @@ admitOriginalCensusUsing :: (FilePath -> String -> IO OriginalNativeCensus) -> S
   -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [OfferedNativeProduct]
   -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
 admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> forM offered
-  (\(selected,_,(path,sha),offeredAvailability) -> do
+  (\(selected,_,(path,sha),offeredAvailability,_) -> do
     native <- readFacts path sha
     let key = (originalUnit selected,originalModule selected)
         expectedOwner = (originalUnit selected,originalModule selected,originalVersion selected,
@@ -576,15 +594,15 @@ admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> 
     let full = selected {originalGroups=nativeCensusExactGroups native}
     pure (key,AdmittedOriginalCensus path sha full native availability))
 
-selectedCensusProducts :: [OfferedNativeProduct] -> Map.Map InterfaceOwner AdmittedOriginalCensus -> IO [ExactProduct]
-selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_,_) -> do
+selectedCensusProducts :: [OfferedNativeProduct] -> Map.Map InterfaceOwner AdmittedOriginalCensus -> IO [ExactScopeOriginal]
+selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_,_,classify) -> do
   let key = (originalUnit product,originalModule product)
   case Map.lookup key admitted of
     Just (AdmittedOriginalCensus _ _ full census availability) -> do
       groups <- either fail pure (selectNativeCensusGroups census ordinals)
       let selected = product {originalGroups=groups}
       validateNativeSelection selected full census availability
-      pure selected
+      pure (classifyOriginal classify selected)
     Nothing -> fail "selected native owner lacks its authenticated census"
 
 rowOwner :: InterfaceRow -> InterfaceOwner
@@ -649,26 +667,26 @@ extendExactScopeInputs scope offered = do
 -- Complete additions form one immutable generation. Product and lexical roots
 -- cannot be published independently of the interface evidence that owns them.
 extendExactScopeGeneration :: ExactScope -> [(InterfaceRow,ExactInterfaceEvidence)]
-  -> [ExactProduct] -> [((String,String),[(String,String)])]
+  -> [ExactScopeOriginal] -> [((String,String),[(String,String)])]
   -> IO (Either String ExactScope)
 extendExactScopeGeneration scope offered products lexical = do
-  let oldProducts = Map.fromList [((originalUnit p,originalModule p),p) | p <- scopeProducts scope]
+  let oldProducts = Map.fromList [((originalUnit p,originalModule p),entry) | entry <- ownedScopeProducts scope, let p = scopeOriginalProduct entry]
       oldLexical = Map.fromList (scopeLexical scope)
       merge selected values = foldM (\known (key,value) -> case Map.lookup key known of
         Just previous | previous /= value -> Left "scope generation replaces an admitted owner"
         _ -> Right (Map.insert key value known)) selected values
       admittedOwners = Set.fromList (map rowOwner (scopeInterfaces scope ++ map fst offered))
       lexicalOwners = Set.union (Map.keysSet oldLexical) (Set.fromList (map fst lexical))
-      productKeys = [(originalUnit p,originalModule p) | p <- products]
+      productKeys = [(originalUnit p,originalModule p) | entry <- products, let p = scopeOriginalProduct entry]
   if Set.size (Set.fromList productKeys) /= length products
       || Set.size (Set.fromList (map fst lexical)) /= length lexical
     then pure (Left "scope generation repeats a product or lexical owner")
     else
-     case (merge oldProducts [((originalUnit p,originalModule p),p) | p <- products], merge oldLexical lexical) of
+     case (merge oldProducts [((originalUnit p,originalModule p),entry) | entry <- products, let p = scopeOriginalProduct entry], merge oldLexical lexical) of
        (Right _,Right _) | all (\(key,requirements) -> key `Set.member` admittedOwners
            && all (`Set.member` lexicalOwners) requirements) lexical ->
          extendExactScopeInputs (scope
-           { ownedScopeProducts=scopeProducts scope ++ [p | p <- products, Map.notMember (originalUnit p,originalModule p) oldProducts]
+           { ownedScopeProducts=ownedScopeProducts scope ++ [entry | entry <- products, let p = scopeOriginalProduct entry, Map.notMember (originalUnit p,originalModule p) oldProducts]
            , ownedScopeLexical=scopeLexical scope ++ [entry | entry@(key,_) <- lexical, Map.notMember key oldLexical] }) offered
        (Left reason,_) -> pure (Left reason)
        (_,Left reason) -> pure (Left reason)
@@ -1307,7 +1325,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
            _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
            pure ()
          ContinueOwnedOriginals _ -> pure ()
-       validateInputClosure producer inputs selectedProducts
+       validateInputClosure producer inputs (map scopeOriginalProduct selectedProducts)
        forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
          _ -> fail "published original lacks its canonical source owner"
@@ -2013,7 +2031,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
                 ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (_,proof) <- evidence]
         ++ [(InputNative,originalProductPath product,originalProductSha256 product) | product <- products]
-        ++ [(InputCensus,path,sha) | (_,_,(path,sha),_) <- census]
+        ++ [(InputCensus,path,sha) | (_,_,(path,sha),_,_) <- census]
         ++ [(InputGraph,path,sha) | (sha,path) <- graphs]
       ownedParts = [((exactUnit iface,exactModule iface),(kind,path,sha)) | (iface,packages,packageSha) <- rows
         , (kind,path,sha) <- [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]]
@@ -2022,7 +2040,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
               ++ [(key,(InputCore,canonicalCorePath core,canonicalCoreSha256 core)) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (key,proof) <- evidence]
         ++ [((originalUnit product,originalModule product),(InputNative,originalProductPath product,originalProductSha256 product)) | product <- products]
-        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,_,(path,sha),_) <- census]
+        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,_,(path,sha),_,_) <- census]
       byOwner = Map.fromListWith Set.union [(key,Set.singleton part) | (key,part) <- ownedParts]
       owners = Set.fromList [(exactUnit iface,exactModule iface) | (iface,_,_) <- rows]
   unless (Set.fromList parts == Set.fromList expected)
@@ -2041,7 +2059,7 @@ decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "15" && count == 11)
+  unless (magic == "TPEXACTSCOPE" && version == "16" && count == 11)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -2084,7 +2102,7 @@ decodeScope = do
     unique "exact lexical imports" imports
     pure (node, imports)
   nativeProducts <- bounded 4096 $ do
-    array 9
+    array 10
     originalProduct <- ExactProduct <$> nonempty <*> nonempty <*> digestField
       <*> digestField <*> digestField <*> absolute <*> pure []
     selected <- nativeOrdinals "selected"
@@ -2095,8 +2113,12 @@ decodeScope = do
       ("full-carrier",1) -> pure OfferedFullCarrier
       ("issued-groups",2) -> OfferedIssuedGroups <$> nativeOrdinals "available"
       _ -> fail "invalid exact native availability"
-    pure (originalProduct,selected,descriptor,availability)
-  let products = [product | (product,_,_,_) <- nativeProducts]
+    classification <- nonempty >>= \case
+      "compiler-original" -> pure CompilerOriginalInput
+      "private-native" -> pure PrivateNativeInput
+      _ -> fail "invalid exact native input classification"
+    pure (originalProduct,selected,descriptor,availability,classification)
+  let products = [product | (product,_,_,_,_) <- nativeProducts]
       keys = [(exactUnit iface, exactModule iface) | (iface, _, _) <- interfaces]
       selected = map fst lexical
       productKeys = [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- products]

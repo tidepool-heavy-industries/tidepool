@@ -764,8 +764,8 @@ mod tests {
         assert!(availability.permits(7));
         assert!(!availability.permits(11));
         assert!(
-            matches!(&availability.mode, NativeTransportMode::IssuedGroups(groups)
-            if groups == &BTreeSet::from([7]))
+            matches!(&availability.mode, NativeTransportMode::IssuedGroups)
+                && availability.issued_ordinals() == BTreeSet::from([7])
         );
     }
 
