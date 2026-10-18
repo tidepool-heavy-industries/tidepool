@@ -1127,25 +1127,24 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let facts = offer.snapshot_facts();
         let offer_id = facts.identity().unwrap();
         assert_ne!(facts.original, hidden_entry.descriptor.id);
-        let reachable = offer
-            .proof()
+        let contribution = offer
+            .contribution_for(&std::collections::BTreeSet::from([hidden_entry
+                .descriptor
+                .id]))
             .unwrap()
-            .selection
-            .graph_selection()
-            .native_groups
-            .iter()
-            .copied()
-            .filter(|group| group.binding.artifact() == hidden_entry.descriptor.id)
-            .map(|group| {
-                observed.insert(group.original_ordinal);
-                ArtifactBindingNode::Group(group)
+            .unwrap();
+        let groups = contribution
+            .groups(NativeGroupKey {
+                artifact: hidden_entry.descriptor.id,
+                original_ordinal: hidden_ordinal,
             })
-            .collect();
-        let contribution = NativeContributionSnapshotFacts {
-            offer: offer_id,
-            reachable,
-        };
-        assert_eq!(contribution.reachable.len(), 1);
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 1);
+        observed.insert(groups[0].original_ordinal);
+        let contribution = contribution.snapshot_facts().unwrap();
+        assert_eq!(contribution.offer, offer_id);
+        assert!(contribution.reachable.iter().any(|node| matches!(node,
+            ArtifactBindingNode::Artifact(binding) if binding.artifact == hidden_entry.descriptor.id)));
         contributions.insert(contribution.identity().unwrap(), contribution);
         snapshot.offers.insert(offer_id, facts);
     }
@@ -1171,4 +1170,52 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
             .native_availability,
         snapshot.native_availability
     );
+}
+
+#[test]
+fn accumulating_availability_encodes_only_the_added_membership() {
+    let store = MemoryBlockstore::new();
+    let mut snapshot = availability_wire_snapshot(NativeTransportMode::IssuedGroups, None);
+    let offer = *snapshot.offers.keys().next().unwrap();
+    let mut writer = Materializer::new(&store);
+    let mut previous = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    for generation in 0u8..8 {
+        let fact = NativeContributionSnapshotFacts {
+            offer,
+            reachable: (0u8..8)
+                .map(|byte| {
+                    ArtifactBindingNode::Artifact(ArtifactBinding {
+                        artifact: ArtifactId([byte; 32]),
+                        selection: ArtifactSelectionId([generation; 32]),
+                    })
+                })
+                .collect(),
+        };
+        snapshot
+            .native_availability
+            .get_mut(&ArtifactId([1; 32]))
+            .unwrap()
+            .contributions
+            .insert(fact.identity().unwrap(), fact);
+        let mut writer = Materializer::new(&store);
+        let next = writer
+            .materialize_context(Some(&previous), &snapshot)
+            .unwrap();
+        let packet = writer.finish().unwrap();
+        assert_eq!(
+            packet.metrics().changed_entries,
+            10,
+            "only eight new membership entries, one contribution and one row are encoded"
+        );
+        install(&store, packet);
+        assert_eq!(
+            hydrate_context(&store, next.root())
+                .unwrap()
+                .snapshot()
+                .native_availability,
+            snapshot.native_availability
+        );
+        previous = next;
+    }
 }

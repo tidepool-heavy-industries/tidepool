@@ -197,6 +197,9 @@ pub struct Materializer<'a, BS: Blockstore> {
     serialized_bytes: Cell<u64>,
     cid_validation_bytes: Cell<u64>,
     selection_base: Option<MaterializedSelection>,
+    native_availability_base: Option<
+        MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
+    >,
     scopes: std::collections::BTreeMap<ArtifactSelectionId, MaterializedScope>,
     selections: std::collections::BTreeMap<usize, MaterializedSelection>,
 }
@@ -216,6 +219,7 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             serialized_bytes: Cell::new(0),
             cid_validation_bytes: Cell::new(0),
             selection_base: None,
+            native_availability_base: None,
             scopes: Default::default(),
             selections: Default::default(),
         }
@@ -1311,8 +1315,27 @@ impl SnapshotValueCodec<NativeAvailabilitySnapshotFacts> for NativeAvailabilityC
         store: &mut Materializer<'_, BS>,
         facts: &NativeAvailabilitySnapshotFacts,
     ) -> Result<Cid, SnapshotError> {
-        let contributions = store
-            .materialize_map_with::<_, _, NativeContributionCodec>(None, &facts.contributions)?;
+        let prior = store.native_availability_base.as_ref().and_then(|base| {
+            base.facts
+                .get(&facts.original)
+                .map(|fact| (base.root.clone(), fact.contributions.clone()))
+        });
+        let prior = if let Some((root, contributions)) = prior {
+            let cid = lookup_map::<ArtifactId, Cid, _>(&*store, &root, &facts.original)?
+                .ok_or_else(|| malformed("native availability base omits its row"))?;
+            let wire: NativeAvailabilityWire = read_value(&SnapshotHydrator::new(&*store), &cid)?;
+            Some(MaterializedMap::<_, _, NativeContributionCodec> {
+                root: wire.contributions,
+                facts: contributions,
+                codec: PhantomData,
+            })
+        } else {
+            None
+        };
+        let contributions = store.materialize_map_with::<_, _, NativeContributionCodec>(
+            prior.as_ref(),
+            &facts.contributions,
+        )?;
         store.materialize_value(&NativeAvailabilityWire {
             original: facts.original,
             owner: NativeAvailabilityOwnerWire {
@@ -1603,6 +1626,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         next: &ExactContextSnapshot,
     ) -> Result<MaterializedContext, SnapshotError> {
         self.selection_base = base.map(|base| base.selection.clone());
+        self.native_availability_base = base.map(|base| base.native_availability.clone());
         let selection =
             self.materialize_selection(base.map(|base| &base.selection), &next.selection)?;
         let roles = self.materialize_map_with::<_, _, CompilerRoleCodec>(
