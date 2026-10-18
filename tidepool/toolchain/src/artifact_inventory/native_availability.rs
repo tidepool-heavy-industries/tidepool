@@ -671,14 +671,6 @@ impl IssuedNativeOffer {
                 custody: NativeOfferCustody::from_checked_nodes(&state, lease, nodes)?,
             })));
         }
-        drop(state);
-        let mut state = source.inventory.0.lock().expect("inventory lock");
-        for offer in &offers {
-            let lease = offer.custody_lease();
-            state
-                .views
-                .push((Arc::downgrade(lease), Arc::clone(&lease.selection)));
-        }
         Ok(offers)
     }
 

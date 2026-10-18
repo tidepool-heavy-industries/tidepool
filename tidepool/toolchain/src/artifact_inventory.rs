@@ -2075,7 +2075,8 @@ impl NativeOwnerKey {
 #[derive(Default)]
 struct InventoryState {
     payload_intern: BTreeMap<ArtifactId, Vec<Weak<ArtifactEntry>>>,
-    views: Vec<(Weak<ViewLease>, Arc<ExactSelectionSnapshot>)>,
+    // Observe live views without publishing their still-initializing leases.
+    views: Vec<(Weak<ViewReadCache>, Arc<ExactSelectionSnapshot>)>,
     /// Immutable proof evidence lasts for this inventory's lifetime. Releasing
     /// native payload custody does not release proof-only ancestor facts.
     selection_plans: BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>,
@@ -2539,6 +2540,7 @@ impl SelectedOwners {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactInventoryMetrics {
+    /// Nodes observed by live views; proof-only payload custody is independent.
     pub nodes: usize,
     pub graph_visits: u64,
     pub view_queries: u64,
@@ -4454,6 +4456,7 @@ impl ArtifactInventory {
             issued_scope_nodes: state.issued_scope_nodes.load(Ordering::Relaxed),
         }
     }
+    /// Nodes observed by live views, not a bound on retained proof custody.
     pub fn node_count(&self) -> usize {
         self.0.lock().expect("inventory lock").live_nodes().len()
     }
@@ -4839,10 +4842,6 @@ impl ViewLease {
         for (id, entry) in &lease.payloads {
             state.intern(*id, entry);
         }
-        state.views.retain(|(view, _)| view.strong_count() > 0);
-        state
-            .views
-            .push((Arc::downgrade(&lease), Arc::clone(&lease.selection)));
         drop(state);
         lease
     }
@@ -5282,10 +5281,14 @@ impl ArtifactView {
     }
 
     fn from_custody(lease: Arc<ViewLease>) -> Self {
-        Self {
-            lease,
-            reads: Arc::new(ViewReadCache::default()),
-        }
+        let reads = Arc::new(ViewReadCache::default());
+        let mut state = lease.inventory.0.lock().expect("inventory lock");
+        state.views.retain(|(view, _)| view.strong_count() > 0);
+        state
+            .views
+            .push((Arc::downgrade(&reads), Arc::clone(&lease.selection)));
+        drop(state);
+        Self { lease, reads }
     }
 
     // Closure and dependency initializers receive an already locked inventory. Nothing
@@ -9799,6 +9802,68 @@ mod tests {
         .with_module_interface(interface)
         .unwrap();
         ArtifactEntry::original([2; 32], product).unwrap()
+    }
+
+    #[test]
+    fn proof_only_custody_keeps_payloads_without_blocking_new_view_initialization() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "ProofOnlyLifetime",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let id = native.descriptor.id;
+        let payload = Arc::downgrade(&native);
+        let base = inventory.empty_view();
+        let custody = inventory
+            .issue_selected_custody(
+                &base,
+                vec![native],
+                BTreeSet::from([NativeGroupKey {
+                    artifact: id,
+                    original_ordinal: 7,
+                }]),
+                false,
+                ArtifactRootIntent::SuppliedArtifacts,
+                None,
+            )
+            .unwrap();
+        drop(base);
+        assert_eq!(
+            inventory.node_count(),
+            0,
+            "this metric observes views, not proof custody"
+        );
+        assert!(payload.upgrade().is_some());
+
+        let mut view = custody.into_view().artifacts;
+        assert!(inventory.node_count() > 0);
+        let namespace = view.namespace();
+        view.replace_namespace(&BTreeMap::new());
+        assert!(view.namespace().is_empty());
+        view.replace_namespace(&namespace);
+        let proof = NativeOriginalRequirement::from_selected_view(id, &view)
+            .unwrap()
+            .unwrap();
+        let offer = IssuedNativeOffer::issue(id, &view, Some(proof)).unwrap();
+        drop(view);
+        assert_eq!(inventory.node_count(), 0);
+        assert!(
+            payload.upgrade().is_some(),
+            "the issued offer retains its physical body"
+        );
+
+        let reopened = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
+        assert!(inventory.node_count() > 0);
+        assert!(reopened.selected_native_groups().contains(&NativeGroupKey {
+            artifact: id,
+            original_ordinal: 7,
+        }));
+        drop(reopened);
+        drop(offer);
+        assert!(payload.upgrade().is_none());
+        assert_eq!(inventory.node_count(), 0);
     }
 
     fn issued_native_groups(
