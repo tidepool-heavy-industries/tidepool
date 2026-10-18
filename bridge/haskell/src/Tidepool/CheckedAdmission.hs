@@ -14,13 +14,13 @@ import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExactScope
   ( CheckedCellAdmission(..), CheckedItemAdmission(..) )
-import Tidepool.ExtractRequest (WorkerRequest(..))
+import Tidepool.ExtractRequest (WorkerRequest(..), RequestOperation(..), admitRequestOperation)
 import Tidepool.ExtractUtil (shaHex)
 
 -- An inspection input cap cannot be used by an executable or publication mode.
 matchesInspectionAdmission :: WorkerRequest -> [String] -> Bool
 matchesInspectionAdmission args values =
-  not (null (requestInspections args)) && isJust (requestInspectOut args)
+  admitRequestOperation args == Right InspectionOperation && isJust (requestInspectOut args)
     && not (requestTurn args) && not (requestCell args) && not (requestClassify args)
     && not (requestCheckSource args) && not (requestCellPlan args)
     && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
