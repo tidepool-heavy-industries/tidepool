@@ -224,6 +224,51 @@ fn property_config() -> proptest::test_runner::Config {
 }
 
 #[test]
+fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
+    let (root, _, publication) = fixture(0);
+    let context = publication.context();
+    assert!(!context
+        .published_source_original_selections()
+        .unwrap()
+        .is_empty());
+    let mut lexical = context.lexical_graph().to_vec();
+    lexical
+        .iter_mut()
+        .find(|node| node.owner == root.descriptor.owner)
+        .unwrap()
+        .imports
+        .clear();
+    let mut changed = context.as_ref().clone().rebuild(|facts| {
+        facts.lexical = facts.lexical.replace(lexical).unwrap();
+    });
+    let mut projection = CompilerInputProjection::default();
+    for mut role in changed.compiler_input_roles() {
+        if role.is_published_source_original() {
+            let digest = changed
+                .published_selection_sha256(&root.descriptor.owner, &role)
+                .unwrap();
+            if let CompilerInputRole::PublishedSourceOriginal {
+                selection_sha256, ..
+            } = &mut role
+            {
+                *selection_sha256 = digest;
+            }
+        }
+        let owner = changed.artifact_view().metadata_snapshot().artifacts[&role.interface()]
+            .descriptor
+            .owner
+            .clone();
+        projection.admit_role(owner, role).unwrap();
+    }
+    changed = changed.recover_fixture_projection(projection).unwrap();
+    assert!(changed.published_source_original_selections().is_err());
+    // Recovery authenticates the broad graph, but reopening still validates the
+    // selected publication's narrower compiler namespace.
+    let recovered = restored(&changed, &changed.compiler_input_roles()).unwrap();
+    assert!(recovered.published_source_original_selections().is_err());
+}
+
+#[test]
 fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let mut config = proptest::test_runner::contextualize_config(property_config());
     config.source_file =
