@@ -286,6 +286,10 @@ impl CompilerContextInstallation {
 }
 
 impl StagedCompilerContextPublication {
+    pub(crate) fn work(&self) -> crate::session::RecoveryPublicationWork {
+        self.staged.work
+    }
+
     pub(crate) fn commit(self) -> StoreDisposition<(RecoveryGraph, CompilerContextInstallation)> {
         match self.staged.commit() {
             StoreDisposition::Committed((graph, installation)) => StoreDisposition::Committed((
