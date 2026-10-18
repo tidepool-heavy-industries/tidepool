@@ -15014,14 +15014,13 @@ mod tests {
         ));
         {
             let metadata = &replacement_request.compiler_inputs().metadata;
-            let mixed = RetainedArtifactMaterialization::select_custody(
+            let mixed = RetainedArtifactMaterialization::select_custody_inputs(
                 &[
                     Arc::clone(joined_owner),
                     Arc::clone(replacement_request.materialization.as_ref().unwrap()),
                 ],
                 &metadata.retained,
-            )
-            .unwrap();
+            );
             let expected = metadata
                 .entries
                 .values()
@@ -15029,11 +15028,14 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             let mut actual = BTreeSet::new();
             let mut stored_rows = 0;
-            mixed.visit_owners(&mut BTreeSet::new(), &mut |owner| {
-                actual.extend(owner.rows.keys().copied());
-                stored_rows += owner.rows.len();
-                assert!(owner.groups.is_empty());
-            });
+            let mut visited = BTreeSet::new();
+            for owner in &mixed {
+                owner.visit_owners(&mut visited, &mut |owner| {
+                    actual.extend(owner.rows.keys().copied());
+                    stored_rows += owner.rows.len();
+                    assert!(owner.groups.is_empty());
+                });
+            }
             assert_eq!(
                 actual, expected,
                 "mixed custody excludes old Native and unrelated Left/Right rows"
@@ -15043,7 +15045,10 @@ mod tests {
                 expected.len(),
                 "excluded or shadowed physical rows are not retained"
             );
-            let selected_rows = mixed.selected_rows(metadata);
+            let selected_rows = mixed
+                .iter()
+                .flat_map(|owner| owner.selected_rows(metadata))
+                .collect::<BTreeMap<_, _>>();
             let mut selected_files = selected_rows
                 .values()
                 .map(|row| row.artifact())
