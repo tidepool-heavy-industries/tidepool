@@ -3913,8 +3913,46 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
             &[],
         )
         .expect("the inventory issuer selects the explicit original and canonical pair");
+    let first_id = entries[0].descriptor.id;
+    let second_id = entries[1].descriptor.id;
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        selected
+            .selected_native_groups()
+            .iter()
+            .map(|group| group.artifact)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id, second_id]),
+        "the broad fixture selected both complete native censuses"
+    );
+    let selected = selected.select_roots(vec![first_id]).unwrap();
+    assert_eq!(
+        selected
+            .selected_native_groups()
+            .iter()
+            .map(|group| group.artifact)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id]),
+        "the explicit winner alone supplies executable demand"
+    );
+    let retained_originals = selected
+        .entries()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(_)
+            )
+        })
+        .map(|entry| entry.descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(retained_originals, BTreeSet::from([first_id, second_id]));
+    assert!(selected
+        .metadata_snapshot()
+        .ambiguous_native_owners
+        .contains(&identity("fixture", "AmbiguousNative")));
     let support = recover_fixture_compiler_support(
-        projection,
+        projection.clone(),
         selected,
         ambiguous
             .compiler_source_support()
@@ -3924,6 +3962,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .unwrap();
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
+    assert_eq!(ambiguous.compiler_input_projection(), &projection);
     OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
