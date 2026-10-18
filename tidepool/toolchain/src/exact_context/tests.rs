@@ -170,6 +170,21 @@ fn independent_scope_owners_authenticate_and_contradictory_bodies_refuse() {
         .materialize_selection(None, &snapshots[0])
         .unwrap();
     let independent = ImmutableScopeProofRef::from_issued(Arc::new(proof.proof().as_ref().clone()));
+    let before = materializer.cid_validation_bytes.get();
+    assert_eq!(
+        ScopeProofCodec::encode(&mut materializer, &independent).unwrap(),
+        *cid
+    );
+    assert_eq!(
+        materializer.cid_validation_bytes.get() - before,
+        bytes.len() as u64
+    );
+    let checked = materializer.cid_validation_bytes.get();
+    assert_eq!(
+        ScopeProofCodec::encode(&mut materializer, &independent).unwrap(),
+        *cid
+    );
+    assert_eq!(materializer.cid_validation_bytes.get(), checked);
     let mut equal = snapshots[0].as_ref().clone();
     equal
         .scopes
@@ -184,7 +199,13 @@ fn independent_scope_owners_authenticate_and_contradictory_bodies_refuse() {
     );
     let work = materializer.finish().unwrap().metrics();
     assert_eq!(observed.reads.borrow().get(cid).unwrap().0, 1);
-    assert!(work.cid_validation_bytes >= 3 * bytes.len() as u64);
+    assert!(work.cid_validation_bytes >= checked);
+
+    let corrupt = MemoryBlockstore::new();
+    corrupt.put_keyed(cid, b"untrusted incoming proof").unwrap();
+    assert!(
+        matches!(ScopeProofCodec::decode(&SnapshotHydrator::new(&corrupt), *cid), Err(SnapshotError::Integrity(found)) if found == *cid)
+    );
 
     let mut contradictory = proof.proof().as_ref().clone();
     contradictory.nodes.pop();
