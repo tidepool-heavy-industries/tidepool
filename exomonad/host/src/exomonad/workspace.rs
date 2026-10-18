@@ -1446,7 +1446,7 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
         &workspace.join(".exomonad"),
         Path::new(".exomonad"),
         destination,
-        &mut BTreeMap::new(),
+        &mut SourceInventory::Validate,
         true,
     )?;
     for name in ["flake.nix", "flake.lock"] {
@@ -1463,7 +1463,13 @@ pub(super) fn capture_sources(
     destination: &Path,
     files: &mut BTreeMap<PathBuf, String>,
 ) -> Result<()> {
-    capture_tree(source, relative, destination, files, false)
+    capture_tree(
+        source,
+        relative,
+        destination,
+        &mut SourceInventory::Record(files),
+        false,
+    )
 }
 
 fn capture_selected_runtime_libraries(
@@ -1623,7 +1629,7 @@ fn capture_tree(
     source: &Path,
     relative: &Path,
     destination: &Path,
-    files: &mut BTreeMap<PathBuf, String>,
+    inventory: &mut SourceInventory<'_>,
     all_authored: bool,
 ) -> Result<()> {
     let mut timing = InvocationTiming::start_scoped("workspace.source", "capture");
@@ -1631,7 +1637,7 @@ fn capture_tree(
         source,
         relative,
         Some(destination),
-        &mut SourceInventory::Record(files),
+        inventory,
         all_authored,
         &mut timing,
     )?;
@@ -1860,6 +1866,119 @@ mod tests {
         std::fs::remove_file(root.join("Include.h")).unwrap();
         let _socket = std::os::unix::net::UnixListener::bind(root.join("Include.h")).unwrap();
         assert!(verify_deployment_sources(&selection)
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+    }
+
+    #[test]
+    fn authored_copy_preserves_exact_files_without_unused_inventory() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let files: &[(&str, &[u8])] = &[
+            (".exomonad/A.hs", b"module A where\n"),
+            (".exomonad/Include.h", b"#define VALUE 7\n"),
+            (
+                ".exomonad/config.toml",
+                b"[haskell]\nsource_roots = ['.']\n",
+            ),
+            (".exomonad/nested/data.bin", &[0, 255, 1]),
+            ("flake.nix", b"{ outputs = _: {}; }\n"),
+            ("flake.lock", b"{}\n"),
+        ];
+        for (path, bytes) in files {
+            let path = source.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        for excluded in ["state", "logs", "build"] {
+            let path = source.path().join(".exomonad").join(excluded);
+            std::fs::create_dir(&path).unwrap();
+            std::os::unix::fs::symlink("missing", path.join("Bad.hs")).unwrap();
+        }
+        SOURCE_INSPECTION_WORK.with(|work| work.set((0, 0, 0)));
+        copy_authored(source.path(), destination.path()).unwrap();
+        let copied = SOURCE_INSPECTION_WORK.with(|work| work.replace((0, 0, 0)));
+        // Flake files retain their separate std::fs::copy path.
+        let authored_bytes = files[..4]
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>();
+        assert_eq!(copied, (4, authored_bytes, 0));
+        fn actual_files(root: &Path, relative: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            let mut files = BTreeMap::new();
+            for entry in std::fs::read_dir(root.join(relative)).unwrap() {
+                let entry = entry.unwrap();
+                let path = relative.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    files.extend(actual_files(root, &path));
+                } else {
+                    files.insert(path, std::fs::read(entry.path()).unwrap());
+                }
+            }
+            files
+        }
+        let expected: BTreeMap<_, _> = files
+            .iter()
+            .map(|(path, bytes)| (PathBuf::from(*path), bytes.to_vec()))
+            .collect();
+        assert_eq!(actual_files(destination.path(), Path::new("")), expected);
+
+        let capture = tempfile::tempdir().unwrap();
+        let mut inventory = BTreeMap::new();
+        capture_sources(
+            &source.path().join(".exomonad"),
+            Path::new(""),
+            capture.path(),
+            &mut inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            SOURCE_INSPECTION_WORK.with(|work| work.replace((0, 0, 0))),
+            (2, files[0].1.len() + files[1].1.len(), 2)
+        );
+        let expected_inventory: BTreeMap<_, _> = files[..2]
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    Path::new(path)
+                        .strip_prefix(".exomonad")
+                        .unwrap()
+                        .to_path_buf(),
+                    blake3::hash(bytes).to_hex().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(inventory, expected_inventory);
+    }
+
+    #[test]
+    fn authored_copy_preserves_read_policy_and_write_refusals() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        assert!(copy_authored(source.path(), destination.path())
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+        std::fs::create_dir(source.path().join(".exomonad")).unwrap();
+        let selected = source.path().join(".exomonad/Selected.h");
+        std::os::unix::fs::symlink("missing", &selected).unwrap();
+        assert!(copy_authored(source.path(), destination.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains a symlink"));
+        std::fs::remove_file(&selected).unwrap();
+        let socket = std::os::unix::net::UnixListener::bind(&selected).unwrap();
+        assert!(copy_authored(source.path(), destination.path())
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+        drop(socket);
+        std::fs::remove_file(&selected).unwrap();
+        std::fs::write(&selected, b"#define VALUE 7\n").unwrap();
+        let blocked = tempfile::tempdir().unwrap();
+        std::fs::write(blocked.path().join(".exomonad"), b"not a directory").unwrap();
+        assert!(copy_authored(source.path(), blocked.path())
             .unwrap_err()
             .downcast_ref::<std::io::Error>()
             .is_some());
