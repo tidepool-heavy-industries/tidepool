@@ -81,7 +81,106 @@
 //! target string remains `exomonad_harness::timing` for collector compatibility
 //! regardless of which crate calls [`record_stage`].
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Disjoint child intervals of one synchronous compile invocation. The enclosing
+/// tracing span carries its output scope and the endpoint's physical request
+/// identification. Nested invocations still have separate inclusive scopes.
+pub(crate) struct InvocationTiming(Option<InvocationInterval>);
+
+struct InvocationInterval {
+    phase: &'static str,
+    wall: Instant,
+    monotonic_ns: Option<u64>,
+    thread_cpu_ns: Option<u64>,
+}
+
+impl InvocationTiming {
+    pub(crate) fn start(phase: &'static str) -> Self {
+        Self(
+            tracing::enabled!(target: "exomonad_harness::timing", tracing::Level::DEBUG)
+                .then(|| InvocationInterval::start(phase)),
+        )
+    }
+
+    pub(crate) fn advance(&mut self, phase: &'static str) {
+        self.transition(phase, "complete");
+    }
+
+    pub(crate) fn retry(&mut self, phase: &'static str) {
+        self.transition(phase, "error");
+    }
+
+    fn transition(&mut self, phase: &'static str, outcome: &'static str) {
+        if let Some(interval) = self.0.take() {
+            interval.emit(outcome);
+            self.0 = Some(InvocationInterval::start(phase));
+        }
+    }
+
+    pub(crate) fn finish(mut self, success: bool) {
+        if let Some(interval) = self.0.take() {
+            interval.emit(if success { "complete" } else { "error" });
+        }
+    }
+}
+
+impl Drop for InvocationTiming {
+    fn drop(&mut self) {
+        if let Some(interval) = self.0.take() {
+            interval.emit(if std::thread::panicking() {
+                "panic"
+            } else {
+                "error"
+            });
+        }
+    }
+}
+
+impl InvocationInterval {
+    fn start(phase: &'static str) -> Self {
+        Self {
+            phase,
+            wall: Instant::now(),
+            monotonic_ns: observed_clock_ns(libc::CLOCK_MONOTONIC),
+            thread_cpu_ns: observed_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID),
+        }
+    }
+
+    fn emit(self, outcome: &'static str) {
+        let end_ns = observed_clock_ns(libc::CLOCK_MONOTONIC);
+        let wall_ns = self
+            .monotonic_ns
+            .zip(end_ns)
+            .and_then(|(start, end)| end.checked_sub(start))
+            .unwrap_or_else(|| self.wall.elapsed().as_nanos() as u64);
+        let thread_cpu_ns = self
+            .thread_cpu_ns
+            .zip(observed_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID))
+            .and_then(|(start, end)| end.checked_sub(start));
+        tracing::debug!(target: "exomonad_harness::timing",
+            schema = 1, phase = self.phase, outcome,
+            clock_domain = "CLOCK_MONOTONIC", inclusive = false,
+            start_ns = self.monotonic_ns, end_ns,
+            wall_ns,
+            cpu_scope = "current_thread", thread_cpu_ns,
+            "compile invocation phase");
+    }
+}
+
+fn observed_clock_ns(clock: libc::clockid_t) -> Option<u64> {
+    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // The clock writes a timespec only on success; unavailable observations do
+    // not become zero-duration evidence or affect compiler admission.
+    if unsafe { libc::clock_gettime(clock, value.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let value = unsafe { value.assume_init() };
+    u64::try_from(value.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(value.tv_nsec).ok()?)
+}
 
 /// Env var that turns on extract-side phase timing (`=1`). Off ⇒ silent.
 pub const TIMING_ENV: &str = "TIDEPOOL_TIMING";
@@ -616,6 +715,86 @@ pub fn log_compile_summary(summary: &CompileSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invocation_intervals_retain_success_refusal_retry_and_unwind() {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        type Rows = Arc<Mutex<Vec<BTreeMap<String, String>>>>;
+        struct Capture(Rows);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Fields(BTreeMap<String, String>);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                    }
+                }
+                let mut fields = Fields(BTreeMap::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+
+        let rows = Rows::default();
+        tracing::subscriber::with_default(Capture(Arc::clone(&rows)), || {
+            let mut success = InvocationTiming::start("prepare");
+            success.advance("execute");
+            success.finish(true);
+            let refused = || -> Result<(), ()> {
+                let _interval = InvocationTiming::start("refusal");
+                Err(())?;
+                Ok(())
+            };
+            assert!(refused().is_err());
+            assert!(std::panic::catch_unwind(|| {
+                let _interval = InvocationTiming::start("unwind");
+                panic!("diagnostic unwind control");
+            })
+            .is_err());
+            let mut retry = InvocationTiming::start("first_attempt");
+            retry.retry("second_attempt");
+            retry.finish(true);
+        });
+        let rows = rows.lock().unwrap();
+        let outcomes: Vec<_> = rows
+            .iter()
+            .map(|row| (row["phase"].as_str(), row["outcome"].as_str()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("\"prepare\"", "\"complete\""),
+                ("\"execute\"", "\"complete\""),
+                ("\"refusal\"", "\"error\""),
+                ("\"unwind\"", "\"panic\""),
+                ("\"first_attempt\"", "\"error\""),
+                ("\"second_attempt\"", "\"complete\""),
+            ]
+        );
+        for row in rows.iter() {
+            assert_eq!(row["inclusive"], "false");
+            let start: u64 = row["start_ns"].parse().unwrap();
+            let end: u64 = row["end_ns"].parse().unwrap();
+            assert_eq!(row["wall_ns"].parse::<u64>().unwrap(), end - start);
+            assert_eq!(row["cpu_scope"], "\"current_thread\"");
+        }
+    }
 
     #[test]
     fn interface_counts_retain_only_closed_bounded_counter_lines() {

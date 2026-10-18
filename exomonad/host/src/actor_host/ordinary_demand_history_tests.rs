@@ -585,9 +585,18 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
             let source = format!("import qualified {PROBE} as Probe\ndisplay (Probe.{binding} :: Int)");
             let started = std::time::Instant::now();
             round.call(&call, &source);
-            round = host.while_operation_succeeds(&operation,
+            let terminal = host.while_operation_succeeds(&operation,
                 next_hosted_script_round(&mut requests, &mut pending, &root))
-                .await.expect("the exact ordinary cell succeeds and produces its successor request");
+                .await;
+            record_phase(&phases, json!({"phase":format!("{label}-operation-terminal"),
+                "operation":operation, "outcome":if terminal.is_ok() {"success"} else {"failure"},
+                "elapsed_ns":started.elapsed().as_nanos(),
+                "expected_original":expected, "demanded_ordinal":ordinal,
+                "host_trace_start":offset, "host_trace_end":trace_offset(&host_trace),
+                "compiler_trace_start":compiler_offset, "compiler_trace_end":trace_offset(&compiler_trace),
+                "semantic_store_receipt_verified":false,
+                "worker_work":"UNKNOWN_until_successful_attribution"}));
+            round = terminal.expect("the exact ordinary cell succeeds and produces its successor request");
             round.assert_authored_value(&host.runtime.store(), &origin, &call, value);
             let operation_elapsed_ns = started.elapsed().as_nanos();
             let observation_started = std::time::Instant::now();

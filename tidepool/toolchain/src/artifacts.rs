@@ -4728,6 +4728,13 @@ fn compile_invocation_inner(
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     mut policy: CompilationPolicy<'_>,
 ) -> Result<CompilationOutput, CompileError> {
+    let invocation_span = tracing::debug_span!(
+        target: "exomonad_harness::timing", "compile.invocation",
+        inclusive = true, source_bytes = inv.source.len(), target_count = inv.targets.len(),
+        output_dir = tracing::field::Empty, input_path = tracing::field::Empty,
+    );
+    let _invocation_span = invocation_span.enter();
+    let mut invocation_timing = timing::InvocationTiming::start("output_preparation");
     assert!(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
@@ -4815,6 +4822,11 @@ fn compile_invocation_inner(
             path
         }
     };
+    invocation_span.record(
+        "output_dir",
+        tracing::field::display(output_owner.path().display()),
+    );
+    invocation_span.record("input_path", tracing::field::display(input_path.display()));
 
     let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
     cmd.input(&input_path)
@@ -4846,6 +4858,7 @@ fn compile_invocation_inner(
     {
         cmd.certify_home_products();
     }
+    invocation_timing.advance("exact_input_preparation");
     let exact_request = if let Some(ref context) = exact_context {
         let endpoint = cmd
             .bind()
@@ -4889,8 +4902,15 @@ fn compile_invocation_inner(
     // this placement never authorizes additional source inputs. Reaped slot
     // rotations retain disk warmth; new daemons use fresh writer namespaces.
     let base_cmd = cmd;
+    let mut first_attempt = true;
     let attempt = retry_bounded(
         || {
+            if first_attempt {
+                invocation_timing.advance("endpoint_selection");
+                first_attempt = false;
+            } else {
+                invocation_timing.retry("endpoint_selection");
+            }
             let mut cmd = base_cmd.clone();
             let endpoint = match &policy {
                 CompilationPolicy::BuildAction { .. } => cmd.bind_direct(),
@@ -4919,6 +4939,7 @@ fn compile_invocation_inner(
                 _ => crate::paths::apply_build_products_dir(&mut cmd, &endpoint),
             }
 
+            invocation_timing.advance("candidate_selection");
             let candidate_set = if allow_candidates {
                 module_candidates::select_configured(
                     endpoint.identity().producer_bytes(),
@@ -4960,6 +4981,7 @@ fn compile_invocation_inner(
                 )
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
+            invocation_timing.advance("submission_preparation");
             let preparation = CompilerDiagnosticCapture::preparing(output_owner.path(), &cmd);
             let selected_session_values = SelectedSessionValueOwners::from_command(&cmd)
                 .map_err(CompileError::from)
@@ -4978,6 +5000,7 @@ fn compile_invocation_inner(
             crate::host_work::checkpoint()
                 .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
             let previous_submission = output_owner.begin_execution();
+            invocation_timing.advance("endpoint_execution");
             let execution = match &mut policy {
                 CompilationPolicy::Runtime {
                     settlement: recipient,
@@ -5057,6 +5080,7 @@ fn compile_invocation_inner(
         }
     };
     let (cmd, selected_session_values, run, producer, candidate_set, deployment) = attempt;
+    invocation_timing.advance("output_acquisition");
 
     if let Some(request) = exact_request.as_ref() {
         let actual =
@@ -5161,6 +5185,7 @@ fn compile_invocation_inner(
                 original_entry: None,
             })
         })();
+        invocation_timing.finish(portable.is_ok());
         return portable.map_err(|error| {
             retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error)
         });
@@ -5193,6 +5218,7 @@ fn compile_invocation_inner(
     let inventory_operation = bundle.operation();
 
     let assembled = (|| {
+        invocation_timing.advance("source_admission");
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory_operation.clone(),
         );
@@ -5299,6 +5325,7 @@ fn compile_invocation_inner(
             ensure_no_uncertified_globals(&artifacts)?;
             return Ok(artifacts);
         }
+        invocation_timing.advance("product_decode_and_freshness");
         let receipt = certified_products::decode_receipt_with_operation(
             &receipt_bytes,
             Some(output_owner.path()),
@@ -5317,6 +5344,7 @@ fn compile_invocation_inner(
             .iter()
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
+        invocation_timing.advance("product_certification");
         let mut certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
@@ -5359,6 +5387,7 @@ fn compile_invocation_inner(
                     certified_products::CertifiedSourceSelection::empty_product_output(),
             }
         };
+        invocation_timing.advance("output_assembly");
         let extra_products: Vec<_> = cached_receipts
             .iter()
             .map(|module| {
@@ -5422,6 +5451,7 @@ fn compile_invocation_inner(
             ));
         }
         let target_admission_start = Instant::now();
+        invocation_timing.advance("target_admission");
         let package_catalog =
             package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
         let mut target_imports = Vec::new();
@@ -5507,6 +5537,7 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
+        invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
         artifacts.certified_groups = certified.groups.to_vec();
         artifacts.recovery_products = certified.recovery_products.to_vec();
@@ -5546,14 +5577,20 @@ fn compile_invocation_inner(
         artifacts.exact_source_admission = exact_source;
         Ok(artifacts)
     })();
-    let artifacts = assembled.map_err(|error| match &policy {
-        CompilationPolicy::BuildAction {
-            export: BuildActionExport::PreparedFixture { .. },
-            ..
-        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+    let artifacts = assembled.map_err(|error| {
+        invocation_timing.retry("failure_retention");
+        let error = match &policy {
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::PreparedFixture { .. },
+                ..
+            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+            CompilationPolicy::BuildAction { .. } => error,
+            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        };
+        invocation_timing.advance("refusal_return");
+        error
     })?;
+    invocation_timing.advance("retained_entry_seal");
     let original_entry = if let CompilationOutputOwner::Original(preparation) = output_owner {
         match &policy {
             CompilationPolicy::RetainedEntry {
@@ -5618,6 +5655,7 @@ fn compile_invocation_inner(
     } else {
         None
     };
+    invocation_timing.finish(true);
     Ok(CompilationOutput {
         artifacts,
         original_entry,
