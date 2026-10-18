@@ -3023,8 +3023,7 @@ pub(crate) fn validate_workspace_program(
     )
 }
 
-/// Typecheck the exact selected spec installation for each static launchable
-/// public child profile. GHC expands aliases and checks the selected entry's actual
+/// Typecheck the selected spec with the catalog-issued root effect list. GHC expands aliases and checks the selected entry's actual
 /// type, so this also covers requirements that are not spelled in its
 /// signature. This is an authored-row check; runtime handler availability is
 /// resolved later when an actor's workbench is installed.
@@ -4237,7 +4236,10 @@ fn orient_launch_instructions(
         let effects = tool
             .effect_keys()
             .iter()
-            .map(|effect| effect.haskell_row_entry())
+            .map(|effect| match effect {
+                exomonad_tool::ToolEffectKey::Actor(actor) => actor.haskell_row_entry(),
+                effect => effect.haskell_name(),
+            })
             .collect::<Vec<_>>();
         instructions.push_str(&format!(
             "\nNotebook {} effects: {}.",

@@ -285,10 +285,9 @@ impl ResolvedCatalog {
             ModelPermissions,
         };
         use exomonad_tool::{ModelOperation, ModelPermission};
-        let primary = self
-            .models
-            .get(&self.primary)
-            .ok_or("catalog primary model is missing")?;
+        if !self.models.contains_key(&self.primary) {
+            return Err("catalog primary model is missing".into());
+        }
         let mut grants = Vec::new();
         let mut own = None;
         for (key, selected) in &self.models {
@@ -310,12 +309,6 @@ impl ResolvedCatalog {
                 ModelOperation::ForkAgent,
                 ModelOperation::ModelCall,
             ] {
-                if operation == ModelOperation::ForkAgent
-                    && (selected.provider != primary.provider
-                        || selected.model.backend() != primary.model.backend())
-                {
-                    continue;
-                }
                 grants.push(
                     ModelGrant::new(
                         ModelPermission {
@@ -476,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn root_grants_preserve_exact_catalog_provider_effort_and_capture_binding() {
+    fn root_grants_preserve_exact_catalog_provider_and_effort_for_delegation() {
         use exomonad_actor::AdmittedModelIdentity;
         use exomonad_tool::ModelOperation;
         let mut config = fixture_config();
@@ -517,7 +510,7 @@ mod tests {
         assert!(caps
             .model_permissions()
             .permits(ModelOperation::ForkAgent, &own, low));
-        assert!(!caps
+        assert!(caps
             .model_permissions()
             .permits(ModelOperation::ForkAgent, &twin, low));
         for op in [ModelOperation::ModelCall, ModelOperation::SpawnAgent] {
@@ -528,6 +521,49 @@ mod tests {
         assert!(conversation.permits(&own, low));
         assert!(!conversation.permits(&twin, low));
         assert!(!conversation.permits(&own, max));
+    }
+
+    #[test]
+    fn argon_root_can_grant_a_fresh_deepseek_child_its_own_family_fork() {
+        use exomonad_tool::{ActorEffectKey, ModelFamily, ModelOperation, ModelPermission};
+        let catalog = persona_argon_fixture_config()
+            .resolved_catalog()
+            .unwrap()
+            .unwrap();
+        let caps = catalog.root_capabilities(vec![]).unwrap();
+        let target = &catalog.models["flash"];
+        let selection = tidepool_bridge_effects::ModelSelectionEnvelope {
+            catalog_identity: catalog.identity.clone(),
+            key: "flash".into(),
+            reasoning: target.reasoning,
+        };
+        let request = tidepool_bridge_effects::ModelGrantRequest {
+            operation: ModelOperation::ForkAgent,
+            catalog_identity: catalog.identity.clone(),
+            key: "flash".into(),
+            efforts: vec![target.reasoning],
+        };
+        let child = caps
+            .admit_model_child(
+                ModelPermission {
+                    operation: ModelOperation::SpawnAgent,
+                    family: ModelFamily::DeepSeek,
+                },
+                &selection,
+                vec![ActorEffectKey::ForkAgentDeepSeek],
+                &[request],
+                None,
+                None,
+            )
+            .unwrap();
+        let conversation = child.conversation_permission().unwrap();
+        assert_eq!(conversation.model().model(), &Model::DeepSeekFlash);
+        assert!(child.model_permissions().permits(
+            ModelOperation::ForkAgent,
+            conversation.model(),
+            target.reasoning
+        ));
+        assert_eq!(child.effect_keys(), &[ActorEffectKey::ForkAgentDeepSeek]);
     }
 
     #[test]
