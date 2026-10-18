@@ -197,16 +197,25 @@ impl PreparedValueSourceSupport {
         self.retain_surface(&view, &BTreeSet::from([owner]))
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.value_source_surface",
+        level = "debug", skip_all, fields(inclusive = true, value_owners = value_owners.len())
+    )]
     fn retain_surface(
         &self,
         value: &ArtifactView,
         value_owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<RetainedValueSourceSurface, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.value_source_surface",
+            "retained_owners",
+        );
         let retained = value
             .descriptors()
             .into_iter()
             .map(|descriptor| descriptor.owner)
             .collect::<BTreeSet<_>>();
+        timing.advance("source_lexical_surface");
         let roots = self
             .imports
             .keys()
@@ -220,6 +229,7 @@ impl PreparedValueSourceSupport {
             &self.implementations,
         )?
         .lexical;
+        timing.advance("select_source_entries");
         let entries = lexical
             .iter()
             .filter_map(|node| {
@@ -233,6 +243,7 @@ impl PreparedValueSourceSupport {
                 "retained source surface lacks its exact artifact owner",
             ));
         }
+        timing.advance("derive_source_support");
         let source_owners = lexical
             .iter()
             .map(|node| node.owner.clone())
@@ -244,16 +255,21 @@ impl PreparedValueSourceSupport {
             .facts
             .compiler_support
             .source_support(&source_owners)?;
+        timing.advance("retain_value_custody");
         let compiler_support = support.retain_custody(value)?;
+        timing.advance("retain_original_custody");
         let artifacts = self
             .context
             .artifact_view()
             .retain_original_custody(compiler_support.artifacts())?;
-        Ok(RetainedValueSourceSurface {
+        timing.advance("assemble_surface");
+        let surface = RetainedValueSourceSurface {
             artifacts,
             compiler_support,
             lexical,
-        })
+        };
+        timing.finish(true);
+        Ok(surface)
     }
 }
 
@@ -4617,6 +4633,13 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
 }
 
 impl CapturedTemplateImports {
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.template_imports.into_value_support",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(crate) fn into_value_support(
         self,
         artifacts: ArtifactView,
@@ -4629,15 +4652,31 @@ impl CapturedTemplateImports {
         ),
         CompileError,
     > {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.template_imports.into_value_support",
+            "retain_template_custody",
+        );
         let artifacts = artifacts.retain_custody(self.compiler_support.artifacts())?;
+        timing.advance("merge_template_support");
         let support = support.merge(&self.compiler_support)?;
-        Ok((artifacts, support, Arc::new(self.evidence)))
+        timing.advance("assemble_value_support");
+        let result = (artifacts, support, Arc::new(self.evidence));
+        timing.finish(true);
+        Ok(result)
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.template_imports.capture",
+        level = "debug", skip_all, fields(inclusive = true, template_count = templates.len())
+    )]
     pub(crate) fn capture(
         original: &ExactDeclarationContext,
         templates: &[String],
     ) -> Result<Option<Self>, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.template_imports.capture",
+            "canonical_interfaces",
+        );
         let interfaces = original.compiler_source_support().selected_interfaces()?;
         let canonical = interfaces
             .values()
@@ -4653,6 +4692,7 @@ impl CapturedTemplateImports {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
+        timing.advance("select_template_roots");
         let roots = original
             .lexical_graph()
             .iter()
@@ -4664,6 +4704,7 @@ impl CapturedTemplateImports {
             .map(|node| node.owner.clone())
             .collect::<BTreeSet<_>>();
         if roots.is_empty() {
+            timing.finish(true);
             return Ok(None);
         }
         if !matches!(
@@ -4674,6 +4715,7 @@ impl CapturedTemplateImports {
                 "retained template imports require complete original compiler execution evidence",
             ));
         }
+        timing.advance("template_graph");
         let lexical = original
             .lexical_graph()
             .iter()
@@ -4703,9 +4745,13 @@ impl CapturedTemplateImports {
                 },
             );
         }
-        let compiler_support = interfaces
-            .support_for_owners(graph.keys().cloned().collect())?
+        timing.advance("select_template_interfaces");
+        let template_interfaces = interfaces.support_for_owners(graph.keys().cloned().collect())?;
+        timing.advance("retain_template_availability");
+        let compiler_support = template_interfaces
             .retain_template_availability(&original.owner.facts.compiler_support)?;
+        drop(template_interfaces);
+        timing.advance("assemble_template_capture");
         let retained = Self {
             evidence: TemplateImportEvidence {
                 producer: original.owner.facts.producer,
@@ -4714,9 +4760,11 @@ impl CapturedTemplateImports {
             },
             compiler_support,
         };
+        timing.advance("validate_template_graph");
         retained
             .evidence
             .validate(original.owner.facts.producer, original.artifact_view())?;
+        timing.finish(true);
         Ok(Some(retained))
     }
 }
@@ -8304,19 +8352,29 @@ impl ExactDeclarationContext {
             })
             .collect()
     }
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.value_context_extension",
+        level = "debug", skip_all, fields(inclusive = true, value_count = values.len())
+    )]
     pub fn extend_with_value_interfaces(
         mut self,
         values: &[Arc<CertifiedValueInterface>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.value_context_extension",
+            "admit_producers",
+        );
         for value in values {
             self = self.admit_producer(value.interface().toolchain_identity_sha256())?;
         }
+        timing.advance("admit_value_interfaces");
         let updated = self
             .owner
             .facts
             .compiler_support
             .admit_value_interfaces(values)?;
+        timing.advance("update_context_facts");
         self = self.rebuild(|facts| facts.compiler_support = updated);
         {
             let updated = self.owner.facts.lexical.replace(lexical)?;
@@ -8326,7 +8384,10 @@ impl ExactDeclarationContext {
             let updated = OriginalInstanceEnvironment::Unknown;
             self = self.rebuild(|facts| facts.original_instance_environment = updated);
         }
-        self.finish()
+        timing.advance("finish_context");
+        let result = self.finish();
+        timing.finish(result.is_ok());
+        result
     }
 
     #[tracing::instrument(
