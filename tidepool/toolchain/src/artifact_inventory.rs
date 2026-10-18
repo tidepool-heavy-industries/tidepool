@@ -6977,6 +6977,13 @@ impl ArtifactView {
         )
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.compiler_input_merge",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     fn merge_compiler_inputs_with_demand(
         &self,
         projection: &CompilerInputProjection,
@@ -6992,6 +6999,10 @@ impl ArtifactView {
         ),
         CompileError,
     > {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_input_merge",
+            "validate_inputs",
+        );
         match validation {
             CompilerInputValidation::Closed => {
                 projection.validate(self)?;
@@ -7006,7 +7017,9 @@ impl ArtifactView {
                 incoming.validate_associations(other)?;
             }
         }
+        timing.advance("merge_projection");
         let selected = projection.merge(incoming)?;
+        timing.advance("resolve_namespace_and_native_choices");
         let mut namespace = BTreeMap::new();
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
@@ -7149,8 +7162,11 @@ impl ArtifactView {
                 },
             );
         }
+        timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
+        timing.advance("merge_namespace");
         let joined = self.merge_validated_namespace(other, namespace.clone())?;
+        timing.advance("select_roots_and_custody");
         let roots = if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
             let previous = self.namespace();
             self.roots()
@@ -7178,14 +7194,17 @@ impl ArtifactView {
             .chain(joined.custody_roots().iter().copied())
             .filter(|node| !roots.contains(node))
             .collect::<BTreeSet<_>>();
+        timing.advance("retain_selection");
         let retained = joined.inventory().retain(
             roots.into_iter().collect(),
             custody.into_iter().collect(),
             Vec::new(),
             Vec::new(),
         );
+        timing.advance("retain_materializations_and_namespace");
         let mut retained = joined.retain_projected_materializations(retained)?;
         retained.replace_namespace(&namespace);
+        timing.finish(true);
         Ok((retained, selected, input_decisions))
     }
 
