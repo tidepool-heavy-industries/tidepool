@@ -529,6 +529,8 @@ def parse_args(argv, *, require_binary=True):
                         help='select an explicitly owned compiler for each isolated test')
     parser.add_argument('--trace-profile', choices=('full', 'minimal'),
                         help='compiler/campaign trace detail profile for a retained case')
+    parser.add_argument('--compiler-diagnostics', choices=('capture', 'off'), default='capture',
+                        help='compiler output/source retention, independent of trace detail (default: capture)')
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
@@ -546,6 +548,8 @@ def parse_args(argv, *, require_binary=True):
         parser.error('--retain-artifacts requires --output-dir')
     if options.trace_profile is not None and options.output_dir is None:
         parser.error('--trace-profile requires --output-dir')
+    if options.compiler_diagnostics == 'off' and options.output_dir is None:
+        parser.error('--compiler-diagnostics off requires --output-dir')
     if options.trace_profile == 'full' and not options.retain_artifacts:
         parser.error('--trace-profile full requires --retain-artifacts')
     if (len(options.resource_env) != len(set(options.resource_env))
@@ -1225,7 +1229,7 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=(),
             retain_artifacts=False, foreground_jobs=None, preparation_jobs=None,
-            trace_profile=None, compiler_workers=None):
+            trace_profile=None, compiler_workers=None, compiler_diagnostics='capture'):
     if record is None:
         record = {}
     for key in ('artifact_disposition', 'artifacts_removed_after_success',
@@ -1234,6 +1238,11 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
                   compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
                   diagnostic_evidence_complete=None, libtest_passed=None)
+    if compiler_diagnostics not in ('capture', 'off'):
+        raise ValueError('unsupported compiler diagnostic capture mode')
+    if compiler_diagnostics == 'off' and artifact_root is None:
+        raise ValueError('compiler diagnostics off requires a retained case root')
+    record['compiler_diagnostics'] = compiler_diagnostics if artifact_root is not None else 'not_requested'
     record['compiler_allowances'] = {
         'requested_foreground_jobs': foreground_jobs,
         'requested_preparation_jobs': preparation_jobs,
@@ -1267,7 +1276,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record['artifact_custody'] = disposable_tree_custody(artifact_root, private_parent=True)
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
-                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
+                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1' if compiler_diagnostics == 'capture' else '0')
         if trace_profile is not None:
             environment['TIDEPOOL_TEST_TRACE_PROFILE'] = trace_profile
             environment['TIDEPOOL_TIMING'] = '0' if trace_profile == 'minimal' else '1'
@@ -1277,6 +1286,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             'hosted_cleanup_status': 'not_observed', 'compiler_cleanup_status': 'not_observed',
             'compiler_mode': compiler_mode, 'compiler_allowances': record['compiler_allowances'],
             'trace_profile': trace_profile,
+            'compiler_diagnostics': compiler_diagnostics,
         }, indent=2) + '\n')
     if compiler_mode == 'owned-resident':
         frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
@@ -1678,6 +1688,7 @@ def main(argv=None):
                     artifact_root, compiler_mode, options.resource_env,
                     options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
                     options.trace_profile, options.compiler_workers,
+                    options.compiler_diagnostics,
                 )
             except RunnerInterrupted:
                 raise

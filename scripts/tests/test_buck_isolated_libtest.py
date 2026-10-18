@@ -795,6 +795,50 @@ class IsolatedLibtestTests(unittest.TestCase):
         case = json.loads((root / 'case.json').read_text())
         self.assertEqual(case['trace_profile'], 'minimal')
 
+    def test_full_timing_and_retained_case_survive_disabled_compiler_diagnostics(self):
+        for mode, enabled in (('capture', '1'), ('off', '0')):
+            with self.subTest(mode=mode):
+                root = Path(self.tmp.name) / ('capture-mode-' + mode)
+                observed = {}
+                record = {}
+
+                def run(args, timeout, environment=None):
+                    observed.update(environment or {})
+                    return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+
+                with patch.dict(os.environ, {'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE': '1'}), \
+                     patch.object(runner, 'execute', side_effect=run):
+                    result = runner.run_one(str(self.binary), 'suite::works', False, 10, record,
+                        artifact_root=root, retain_artifacts=True, trace_profile='full',
+                        compiler_diagnostics=mode)
+                self.assertTrue(result[0])
+                self.assertEqual(observed['TIDEPOOL_TEST_DIAGNOSTIC_SCOPE'], enabled)
+                self.assertEqual(observed['TIDEPOOL_TEST_TRACE_PROFILE'], 'full')
+                self.assertEqual(observed['TIDEPOOL_TIMING'], '1')
+                self.assertEqual(observed['TIDEPOOL_TIMING_SUMMARY'], '1')
+                self.assertEqual(observed['TIDEPOOL_TEST_ARTIFACT_ROOT'], str(root))
+                self.assertEqual(record['compiler_diagnostics'], mode)
+                self.assertEqual(json.loads((root / 'case.json').read_text())['compiler_diagnostics'], mode)
+
+    def test_compiler_diagnostic_capture_refusals_precede_execution(self):
+        with patch.object(runner, 'execute') as execute:
+            for mode in ('invalid', 'off'):
+                with self.subTest(mode=mode), self.assertRaises(ValueError):
+                    runner.run_one(str(self.binary), 'suite::works', False, 10,
+                                   compiler_diagnostics=mode)
+            execute.assert_not_called()
+        with self.assertRaises(SystemExit):
+            runner.parse_args([str(self.binary), '--compiler-diagnostics', 'off'])
+        with self.assertRaises(SystemExit):
+            runner.parse_args([str(self.binary), '--compiler-diagnostics', 'invalid'])
+        default = runner.parse_args([str(self.binary)])
+        self.assertEqual(default.compiler_diagnostics, 'capture')
+        options = runner.parse_args([str(self.binary), '--trace-profile', 'full',
+            '--retain-artifacts', '--output-dir', str(Path(self.tmp.name) / 'pair'),
+            '--compiler-diagnostics', 'off'])
+        self.assertEqual(options.trace_profile, 'full')
+        self.assertEqual(options.compiler_diagnostics, 'off')
+
     def test_trace_scan_retains_applied_profile_boot_and_generation_counts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
