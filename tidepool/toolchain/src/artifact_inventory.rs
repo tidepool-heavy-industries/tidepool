@@ -8144,6 +8144,7 @@ mod tests {
             home_unit,
             producer_sha256,
             "TargetPrefixChild",
+            b"TargetPrefixChild".to_vec(),
             vec![(7, Vec::new())],
             &[],
             &BTreeMap::new(),
@@ -8152,10 +8153,15 @@ mod tests {
             home_unit,
             producer_sha256,
             "TargetPrefix",
+            b"TargetPrefix".to_vec(),
             vec![(7, vec![issued_source(&child, 7)])],
             &[&child],
             &BTreeMap::new(),
         ));
+        assert_ne!(
+            native.descriptor.interface_sha256, child.descriptor.interface_sha256,
+            "distinct module interfaces must not alias owner-specific package sidecars"
+        );
         let id = native.descriptor.id;
         let base = inventory
             .admit_recovery_selection(
@@ -10441,13 +10447,22 @@ mod tests {
         requirements: &[&ArtifactEntry],
         packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
     ) -> ArtifactEntry {
-        issued_native_groups_in_unit("fixture", [2; 32], name, groups, requirements, packages)
+        issued_native_groups_in_unit(
+            "fixture",
+            [2; 32],
+            name,
+            vec![0x42],
+            groups,
+            requirements,
+            packages,
+        )
     }
 
     fn issued_native_groups_in_unit(
         unit: &str,
         producer_sha256: [u8; 32],
         name: &str,
+        interface: Vec<u8>,
         groups: Vec<(u32, Vec<crate::certified_products::PendingImportOwner>)>,
         requirements: &[&ArtifactEntry],
         packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
@@ -10458,7 +10473,7 @@ mod tests {
             groups,
             1,
             packages,
-            vec![0x42],
+            interface,
             &BTreeMap::new(),
             &[],
         );
