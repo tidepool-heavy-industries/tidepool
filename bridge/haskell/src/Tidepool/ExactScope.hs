@@ -9,15 +9,15 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
-  , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProofWithOwner
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
-  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
+  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, readCandidateManifestWithOwner, readCandidateInterfacesWithOwner
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
   , ExactCompilationPublication(..)
@@ -38,7 +38,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (Exception, IOException, try, throwIO, evaluate)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, withMVar)
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -79,7 +79,8 @@ import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..)
-  , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor, candidateExecutionSources )
+  , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor, candidateExecutionSources
+  , CapturedCandidateManifest, readCapturedModuleCandidateBatch, capturedCandidateRows, capturedCandidateContent, capturedCandidateBytes )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences
@@ -918,25 +919,6 @@ revalidateCanonicalProofInputs proofs = pure (() <$ mapM capturedOwner proofs)
           (Left "canonical originals lack selected captured bodies")
       DescriptorInputs -> Left "canonical originals have not been captured for publication"
 
--- A retained support row changes paths, never its authenticated facts. The
--- request owner records aliases of the one captured payload for durable copies.
-relocateCanonicalInterfaceProof :: CanonicalInterfaceProof -> InterfaceRow -> Maybe (FilePath,String)
-  -> Either String CanonicalInterfaceProof
-relocateCanonicalInterfaceProof proof row@(iface,packages,packageSha) native = do
-  let (oldIface,oldPackages,oldPackageSha) = proofInterfaceInput proof
-  unless (iface {exactPath=exactPath oldIface} == oldIface && packageSha == oldPackageSha
-      && fmap snd native == fmap snd (proofNativeInput proof))
-    (Left "retained canonical row changes its authenticated original facts")
-  owner <- case proofInputCustody proof of
-    CapturedCanonicalInputs captured -> Right captured
-    DescriptorInputs -> Left "retained canonical row lacks captured custody"
-  relocated <- foldM (\bodies (new,old,sha) -> case Map.lookup old bodies of
-      Just body | artifactSha256 body == sha -> Right (Map.insert new body bodies)
-      _ -> Left "retained canonical alias lacks selected bytes") owner
-    ([(exactPath iface,exactPath oldIface,exactSha256 iface),(packages,oldPackages,packageSha)]
-      ++ [(new,old,sha) | Just (new,sha) <- [native], Just (old,_) <- [proofNativeInput proof]])
-  pure proof {proofInterfaceInput=row,proofNativeInput=native,proofInputCustody=CapturedCanonicalInputs relocated}
-
 scopeOriginalBytes :: ExactScope -> FilePath -> String -> IO BS.ByteString
 scopeOriginalBytes scope path sha = do
   owner <- maybe (fail "exact scope input custody is not sealed") pure (scopeCapturedInputs scope)
@@ -1357,39 +1339,73 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
         additions <- forM images $ \(OriginalInputImage _ _ key parts) -> do
           content <- either fail pure (selectedOriginalContent (map snd parts) originals)
           pure (key,content)
-        let keys = Set.fromList (map fst additions)
-            candidates = additions ++ filter ((`Set.notMember` keys) . fst) retained
-            unionContent entries = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
-              emptyCapturedOriginalContent entries
-            keep _ [] = []
-            keep content (entry@(_,more):rest)
-              | capturedOriginalContentBytes combined <= retentionLimit = entry : keep combined rest
-              | otherwise = keep content rest
-              where combined = mergeCapturedOriginalContent content more
-            settled = take 4096 (keep emptyCapturedOriginalContent candidates)
-            retainedContent = unionContent settled
-            bytesRetained = capturedOriginalContentBytes retainedContent
-            bytesBefore = capturedOriginalContentBytes (unionContent candidates)
-        decodedCount <- pruneRequestIfaceDecoder (Set.map fst (capturedOriginalContentKeys retainedContent)) decoder
-        emitCount timing "original_inputs.retained_encoded_bytes" bytesRetained
-        emitCount timing "original_inputs.evicted_encoded_bytes" (bytesBefore - bytesRetained)
-        emitCount timing "original_inputs.live_request_encoded_bytes" (requestInputBytes originals)
-        emitCount timing "original_inputs.receiving_images" (fromIntegral (length images))
-        emitCount timing "original_inputs.decoded_interfaces" (fromIntegral decodedCount)
-        emitCount timing "original_inputs.receiving_encoded_bytes" (capturedOriginalContentBytes (unionContent additions))
-        let seals = Set.map fst (capturedOriginalContentKeys retainedContent)
-        certificateFacts <- Map.restrictKeys <$> readIORef certificatesState <*> pure seals
-        packageFacts <- Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) <$> readIORef packagesState
-        nativeFacts <- Map.restrictKeys <$> readIORef nativeState <*> pure seals
-        graphFacts <- Map.restrictKeys <$> readIORef graphsState <*> pure seals
-        emitCount timing "original_inputs.decoded_content_facts" (fromIntegral
-          (Map.size certificateFacts + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts))
-        pure (complete,RetainedOriginalInputs settled decoder
-          (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts)))
+        facts <- DecodedOriginalFacts <$> readIORef certificatesState <*> readIORef packagesState
+          <*> readIORef nativeState <*> readIORef graphsState
+        settled <- settleOriginalInputs retentionLimit retained decoder facts additions (requestInputBytes originals)
+        pure (complete,settled))
           :: IO (Either IOException (ExactScope,RetainedOriginalInputs))
       pure $ case captured of
         Left failure -> (previous,Left (show failure))
         Right (scope,settled) -> (settled,Right scope)
+
+-- Both receiving schemas settle through this one encoded-content budget. A
+-- candidate suggestion never carries a prior source/admission decision.
+settleOriginalInputs :: Integer -> [(String,CapturedOriginalContent)] -> RequestIfaceDecoder
+  -> DecodedOriginalFacts -> [(String,CapturedOriginalContent)] -> Integer -> IO RetainedOriginalInputs
+settleOriginalInputs retentionLimit retained decoder (DecodedOriginalFacts certificates packages native graphs) additions liveBytes = do
+  timing <- readTimingEnabled
+  let keys = Set.fromList (map fst additions)
+      candidates = additions ++ filter ((`Set.notMember` keys) . fst) retained
+      unionContent entries = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
+        emptyCapturedOriginalContent entries
+      keep _ [] = []
+      keep content (entry@(_,more):rest)
+        | capturedOriginalContentBytes combined <= retentionLimit = entry : keep combined rest
+        | otherwise = keep content rest
+        where combined = mergeCapturedOriginalContent content more
+      settled = take 4096 (keep emptyCapturedOriginalContent candidates)
+      retainedContent = unionContent settled
+      bytesRetained = capturedOriginalContentBytes retainedContent
+      bytesBefore = capturedOriginalContentBytes (unionContent candidates)
+  decodedCount <- pruneRequestIfaceDecoder (Set.map fst (capturedOriginalContentKeys retainedContent)) decoder
+  emitCount timing "original_inputs.retained_encoded_bytes" bytesRetained
+  emitCount timing "original_inputs.evicted_encoded_bytes" (bytesBefore - bytesRetained)
+  emitCount timing "original_inputs.live_request_encoded_bytes" liveBytes
+  emitCount timing "original_inputs.receiving_images" (fromIntegral (length additions))
+  emitCount timing "original_inputs.decoded_interfaces" (fromIntegral decodedCount)
+  emitCount timing "original_inputs.receiving_encoded_bytes" (capturedOriginalContentBytes (unionContent additions))
+  let seals = Set.map fst (capturedOriginalContentKeys retainedContent)
+  let certificateFacts = Map.restrictKeys certificates seals
+      packageFacts = Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) packages
+      nativeFacts = Map.restrictKeys native seals
+      graphFacts = Map.restrictKeys graphs seals
+  emitCount timing "original_inputs.decoded_content_facts" (fromIntegral
+    (Map.size certificateFacts + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts))
+  pure (RetainedOriginalInputs settled decoder
+    (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts))
+
+readCandidateManifestWithOwner :: ExactInputOwner -> [ExecutionSourceGraph]
+  -> CapturedCandidateManifest -> IO (Either String [ModuleCandidate])
+readCandidateManifestWithOwner (ExactInputOwner retentionLimit state) exactGraphs manifest =
+  modifyMVar state $ \previous@(RetainedOriginalInputs retained decoder facts) -> do
+    let available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
+          emptyCapturedOriginalContent retained
+    result <- readCapturedModuleCandidateBatch available exactGraphs manifest
+    case result of
+      Left reason -> pure (previous,Left reason)
+      Right batch -> do
+        settlement <- try (settleOriginalInputs retentionLimit retained decoder facts
+          (capturedCandidateContent batch) (capturedCandidateBytes batch))
+          :: IO (Either IOException RetainedOriginalInputs)
+        pure $ case settlement of
+          Left failure -> (previous,Left (show failure))
+          Right settled -> (settled,Right (capturedCandidateRows batch))
+
+readCandidateInterfacesWithOwner :: ExactInputOwner -> (ExactIfaceArtifact -> IO ArtifactBytes)
+  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+readCandidateInterfacesWithOwner (ExactInputOwner _ state) readInput env originals values = do
+  decoder <- withMVar state $ \(RetainedOriginalInputs _ decoder _) -> pure decoder
+  readCapturedExactIfaceClosureWithCheckedValues decoder readInput env originals values
 
 -- Protected value paths and materialized transport paths can differ. Their
 -- typed owner and seal select already captured bytes, never a filesystem read.
@@ -1590,7 +1606,30 @@ validateCanonicalProof producer interfaces key certificatePath certificateSha co
 validateCandidateCanonicalInterfaceProof
   :: String -> [(ExactIfaceArtifact,FilePath,String)] -> ModuleCandidate
   -> IO (Either String CanonicalInterfaceProof)
-validateCandidateCanonicalInterfaceProof producer interfaces candidate = do
+validateCandidateCanonicalInterfaceProof = validateCandidateCanonicalInterfaceProofUsing decodeCertificateBytes
+
+validateCandidateCanonicalInterfaceProofWithOwner :: ExactInputOwner -> String
+  -> [(ExactIfaceArtifact,FilePath,String)] -> ModuleCandidate -> IO (Either String CanonicalInterfaceProof)
+validateCandidateCanonicalInterfaceProofWithOwner (ExactInputOwner _ state) producer interfaces candidate =
+  validateCandidateCanonicalInterfaceProofUsing decode producer interfaces candidate
+  where
+    decode bytes = case candidateInputCustody candidate of
+      Nothing -> decodeCertificateBytes bytes
+      Just _ -> modifyMVar state $ \previous@(RetainedOriginalInputs retained decoder (DecodedOriginalFacts certificates packages native graphs)) -> do
+        let sha = candidateCertificateSha256 (candidateModuleInterface candidate)
+            content = foldl (\allContent (_,more) -> mergeCapturedOriginalContent allContent more)
+              emptyCapturedOriginalContent retained
+            retainedSeals = Set.map fst (capturedOriginalContentKeys content)
+        case Map.lookup sha certificates of
+          Just certificate -> pure (previous,certificate)
+          Nothing -> do
+            certificate <- decodeCertificateBytes bytes
+            let updated = if sha `Set.member` retainedSeals then Map.insert sha certificate certificates else certificates
+            pure (RetainedOriginalInputs retained decoder (DecodedOriginalFacts updated packages native graphs),certificate)
+
+validateCandidateCanonicalInterfaceProofUsing :: (BS.ByteString -> IO CanonicalModuleCertificate)
+  -> String -> [(ExactIfaceArtifact,FilePath,String)] -> ModuleCandidate -> IO (Either String CanonicalInterfaceProof)
+validateCandidateCanonicalInterfaceProofUsing decodeCertificate producer interfaces candidate = do
   let descriptor = candidateModuleInterface candidate
       key = (candidateUnit candidate,candidateModule candidate)
   case [(iface,packageSha) | (iface,_,packageSha) <- interfaces
@@ -1620,7 +1659,7 @@ validateCandidateCanonicalInterfaceProof producer interfaces candidate = do
                     unless (BS.length (artifactBytes token) <= bound) (fail "candidate captured artifact exceeds bound")
                     pure (artifactBytes token)
                 certificate descriptor' = verified (descriptorCertificatePath descriptor') (4*1024*1024)
-                  (descriptorCertificateSha256 descriptor') >>= decodeCertificateBytes
+                  (descriptorCertificateSha256 descriptor') >>= decodeCertificate
             proofs <- validateCanonicalInterfacesUsing reader verified certificate producer interfaces Map.empty
               [(key,CanonicalInterfaceDescriptor (candidateCertificatePath descriptor)
                 (candidateCertificateSha256 descriptor) (Just (uncurry CanonicalCoreArtifact (candidateCoreDescriptor descriptor))) CandidateCarrier)]

@@ -7,6 +7,7 @@ import Tidepool.RequestCompletion (finishCompletion)
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
@@ -32,6 +33,9 @@ import GHC.Conc (ThreadStatus(..), threadStatus)
 import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
+import GHC (runGhc, getSession, setSessionDynFlags)
+import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts)
+import Tidepool.ExtractUtil (getLibdir)
 import GHC.Driver.Env (HscEnv(..))
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
 import GHC.Unit.Finder.Types (FinderCache(..))
@@ -43,7 +47,7 @@ import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedC
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces)
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
@@ -54,7 +58,9 @@ import Tidepool.ExactScope
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
-  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
+  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, scopeExecutionGraphs
+  , readCandidateManifestWithOwner, readCandidateInterfacesWithOwner, readScopedInterfaces
+  , validateCandidateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProofWithOwner, canonicalProofInterfaceBody )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -67,7 +73,7 @@ import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, in
 import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
-import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), readModuleCandidates, captureCandidateManifest)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
@@ -486,7 +492,132 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     (_,afterReplacement) <- captureDiagnostics (readExactScopeWithOwner replacement thirdPath >>= either fail pure)
     unless (total "original_inputs.certificate.misses" afterReplacement == 2)
       (fail "replacement owner inherited cancelled physical-worker facts")
+    -- The same genuine compiled fixture crosses the other production ingress;
+    -- scope and optional candidate acquisition must share one bounded owner.
+    writeGenuineCandidateManifestFor ["CanonicalSource","CanonicalDependency"] work fixture
+    copyFile (work </> "module-candidates.cbor") (work </> "module-candidates.fresh.cbor")
+    ownedCandidateManifest thirdPath (work </> "module-candidates.cbor")
+    candidateInputOwnerChecks owner third (prHscEnv (pprPipelineResult original))
+      (work </> "module-candidates.cbor")
     putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
+
+-- Only transport changes: use the genuine scope's sealed ranges for the same
+-- actual candidate owners, omitting the scope-only census role. The production
+-- candidate reader independently validates every remaining image association.
+ownedCandidateManifest :: FilePath -> FilePath -> IO ()
+ownedCandidateManifest scopePath candidatePath = do
+  (_,scope) <- readScopeCodecFixture scopePath
+  acquisition <- case scopeCodecAcquisition scope of
+    Just (ContinueCodecOriginals arenas (TList images)) -> do
+      let body = toStrictByteString (encodeTerm
+            (TList [TString "continue-originals",arenas,TList images]))
+      decoded <- case deserialiseFromBytes Transport.decodeInputAcquisition (BL.fromStrict body) of
+        Right (remaining,Transport.ContinueOwnedOriginals values) | BL.null remaining -> pure values
+        _ -> fail "genuine scope lost its continued-image transport"
+      rows <- forM (zip decoded images) $ \(Transport.OriginalInputImage producer owner _ parts,encoded) ->
+        case encoded of
+          TList [p,u,n,_,TList encodedParts] -> do
+            let selected = filter ((/=InputCensus) . fst) parts
+                keep (TList (TString tag:_)) = tag /= T.pack (inputKindTag InputCensus)
+                keep _ = False
+            pure (TList [p,u,n,TString (T.pack (inputImageDigest producer owner selected)),
+              TList (filter keep encodedParts)])
+          _ -> fail "genuine image lost its encoded row"
+      pure (TList [TString "continue-originals",arenas,TList rows])
+    _ -> fail "candidate transport requires a genuine continued scope"
+  frame <- readCodecTerm candidatePath
+  case frame of
+    TList fields | length fields == 8 ->
+      BS.writeFile candidatePath (toStrictByteString (encodeTerm (TList (init fields ++ [acquisition]))))
+    _ -> fail "genuine candidate manifest changed framing"
+
+candidateInputOwnerChecks :: ExactInputOwner -> ExactScope -> HscEnv -> FilePath -> IO ()
+candidateInputOwnerChecks owner scope env path = do
+  manifest <- captureCandidateManifest path >>= either fail pure
+  let acquire selected = readCandidateManifestWithOwner selected (scopeExecutionGraphs scope) manifest >>= either fail pure
+      total label = sum . counterValues label
+      rows = scopeInterfaces scope
+      validate selected candidate = validateCandidateCanonicalInterfaceProofWithOwner selected
+        (scopeProducerSha256 scope) rows candidate >>= either fail pure
+  (_,scopeAgain) <- captureDiagnostics (readExactScopeWithOwner owner (scopeManifestPath scope) >>= either fail pure)
+  (candidates,warm) <- captureDiagnostics (acquire owner)
+  unless (length candidates == 2 && total "original_inputs.content_misses" warm == 0
+      && total "original_inputs.content_hits" warm > 0
+      && counterValues "original_inputs.retained_encoded_bytes" warm
+          == counterValues "original_inputs.retained_encoded_bytes" scopeAgain)
+    (fail ("candidate ingress bypassed the retained exact-scope owner: " ++ warm))
+  (proofs,certificates) <- captureDiagnostics (mapM (validate owner) candidates)
+  unless (total "exact_scope.certificate_decodes" certificates == 0)
+    (fail "candidate admission decoded already-owned canonical certificate bodies")
+  independent <- mapM (\candidate -> validateCandidateCanonicalInterfaceProof
+    (scopeProducerSha256 scope) rows candidate >>= either fail pure) candidates
+  unless (proofs == independent) (fail "owned canonical parsing changed current candidate proof semantics")
+  let artifacts = [ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+        (candidateInterfaceRequirements candidate) | candidate <- candidates]
+      byOwner = Map.fromList (zip [(candidateUnit c,candidateModule c) | c <- candidates] proofs)
+      reader artifact = case Map.lookup (exactUnit artifact,exactModule artifact) byOwner of
+        Just proof -> canonicalProofInterfaceBody proof artifact
+        Nothing -> fail "candidate decoder escaped the current canonical closure"
+      decode current = readCandidateInterfacesWithOwner owner reader current artifacts [] >>= either fail pure
+  (first,decoded) <- captureDiagnostics (decode env)
+  (_,repeated) <- captureDiagnostics (decode env)
+  (_,scoped) <- captureDiagnostics (readScopedInterfaces env scope artifacts >>= either fail pure)
+  let reads log = sum [total ("exact_iface_read_calls." ++ candidateModule candidate) log | candidate <- candidates]
+      hits log = sum [total ("exact_iface_decode_reuse." ++ candidateModule candidate) log | candidate <- candidates]
+  unless (reads decoded == 2 && reads repeated == 0 && hits repeated == 2 && hits scoped == 2)
+    (fail ("scope/candidate NameCache decoder was split: " ++ decoded ++ repeated ++ scoped))
+  independentIfaces <- readVerifiedExactIfaceClosureWithCheckedValuesReader
+    (fmap artifactBytes . reader) env artifacts [] >>= either fail pure
+  a <- either fail pure (selectVerifiedExactInterfaces first artifacts)
+  b <- either fail pure (selectVerifiedExactInterfaces independentIfaces artifacts)
+  let identities = map (\(_,iface) -> (mi_module iface,mi_iface_hash (mi_final_exts iface)))
+  unless (identities a == identities b) (fail "shared decoding changed independently decoded interface identity")
+  libdir <- getLibdir
+  (_,otherCache) <- captureDiagnostics $ runGhc (Just libdir) $ do
+    _ <- setSessionDynFlags (hsc_dflags env)
+    fresh <- getSession
+    _ <- liftIO (decode fresh)
+    _ <- liftIO (decode fresh)
+    pure ()
+  unless (reads otherCache == 2 && hits otherCache == 2)
+    (fail ("candidate decoder crossed an actual GHC NameCache issuer: " ++ otherCache))
+  -- Invalid receiving identity must refuse even though every byte is held.
+  frame <- readCodecTerm path
+  let bad = path ++ ".wrong-producer"
+  case frame of
+    TList fields | length fields == 8 -> BS.writeFile bad (toStrictByteString
+      (encodeTerm (TList (take 6 fields ++ [TString (T.replicate 64 "f"),last fields]))))
+    _ -> fail "candidate refusal frame changed"
+  badManifest <- captureCandidateManifest bad >>= either fail pure
+  refused <- readCandidateManifestWithOwner owner (scopeExecutionGraphs scope) badManifest
+  unless (either (const True) (const False) refused) (fail "held content authorized a changed receiving producer")
+  (_,afterRefusal) <- captureDiagnostics (acquire owner)
+  unless (total "original_inputs.content_misses" afterRefusal == 0)
+    (fail "candidate refusal discarded prior complete captured ownership")
+  withFixtureEnvironment "TIDEPOOL_REQUEST_CAPTURE_BYTES" "1" $ do
+    result <- readCandidateManifestWithOwner owner (scopeExecutionGraphs scope) manifest
+    unless (either (const True) (const False) result)
+      (fail "candidate content hit bypassed the receiving request allowance")
+  freshManifest <- captureCandidateManifest (takeDirectory path </> "module-candidates.fresh.cbor") >>= either fail pure
+  freshRows <- readCandidateManifestWithOwner owner (scopeExecutionGraphs scope) freshManifest >>= either fail pure
+  case freshRows of
+    candidate:_ -> bracket (BS.readFile (candidateInterface candidate))
+      (BS.writeFile (candidateInterface candidate)) $ \_ -> do
+        BS.writeFile (candidateInterface candidate) (BS.singleton 0)
+        refusedFresh <- validateCandidateCanonicalInterfaceProofWithOwner owner
+          (scopeProducerSha256 scope) rows candidate
+        unless (either (const True) (const False) refusedFresh)
+          (fail "FreshFiles canonical admission silently used retained owned bytes")
+    [] -> fail "fresh candidate control lost its genuine owners"
+  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
+    bounded <- newExactInputOwner
+    _ <- acquire bounded
+    (_,evicted) <- captureDiagnostics (acquire bounded)
+    unless (total "original_inputs.content_misses" evicted > 0
+        && counterValues "original_inputs.retained_encoded_bytes" evicted == [0])
+      (fail "candidate acquisition created a second or unbounded retention budget")
+  putStrLn ("owned candidate inputs: shared physical/canonical/NameCache owner, independent proof/interface equality, changed issuer, refusal rollback and zero retention passed\n" ++ warm)
 
 validationTimingControl :: IO ()
 validationTimingControl = do
