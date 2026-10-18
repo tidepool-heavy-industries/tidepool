@@ -166,24 +166,52 @@ impl ExactDeclarationContext {
         }) {
             return Err(failure("published original lacks canonical source origin"));
         }
-        let compiler = self.compiler_metadata_snapshot()?;
-        // Publication selects native roots through compiler roles. Exact child
-        // carriers retain executable bytes, including historical versions,
-        // without selecting their modules in the compiler namespace.
+        let support = &self.owner.facts.compiler_support;
+        let roles = support.projection().snapshot_roles();
+        // A narrowed consumer may retain an issued dependency as its exact
+        // canonical interface. That does not replace the publication's native
+        // closure or endorse a competing compiler original.
         for entry in closure
             .root_entries()
             .iter()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
-            if compiler
-                .entries
-                .get(&entry.descriptor.owner)
-                .map(|selected| selected.descriptor.id)
-                != Some(entry.descriptor.id)
-            {
-                return Err(failure(
-                    "published selection changes a selected original dependency",
-                ));
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            let canonical = ArtifactEntry::canonical(
+                product
+                    .module_interface()
+                    .ok_or_else(|| failure("published dependency lacks its canonical interface"))?
+                    .clone(),
+            )
+            .descriptor
+            .id;
+            let issued_binding = closure.selection_snapshot().namespace.get(&canonical);
+            let current_binding = support
+                .artifacts()
+                .selection_snapshot()
+                .namespace
+                .get(&canonical);
+            let current_role = roles.get(&entry.descriptor.owner);
+            let compatible = match current_role {
+                Some(role) if role.original().is_some() => {
+                    role.original() == Some(entry.descriptor.id) && role.interface() == canonical
+                }
+                Some(CompilerInputRole::InterfaceOnly { interface })
+                    if &entry.descriptor.owner != root =>
+                {
+                    *interface == canonical
+                        && issued_binding.is_some()
+                        && current_binding == issued_binding
+                }
+                _ => false,
+            };
+            if !compatible {
+                return Err(failure(format!(
+                    "published selection changes a selected original dependency: owner={:?} issued_original={:?} issued_interface={canonical:?} issued_canonical_binding={issued_binding:?} current_role={current_role:?} current_canonical_binding={current_binding:?}",
+                    entry.descriptor.owner, entry.descriptor.id,
+                )));
             }
         }
         let bytes = serde_json::to_vec(&(
