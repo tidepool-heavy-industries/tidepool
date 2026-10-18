@@ -2425,6 +2425,7 @@ mod tests {
                     .unwrap();
             let before = source.artifacts.capture_graph_selection();
             let old_edges = source.artifacts.binding_dependencies();
+            let required_binding = source.selected[&entry.descriptor.owner].interface.0;
             let value = value_certificate("FreshAppend", vec![entry.descriptor.owner.clone()]);
             let work = inventory.metrics();
             let actual = source.admit_value_interfaces(&[value.clone()]).unwrap();
@@ -2451,6 +2452,17 @@ mod tests {
             assert!(old_edges
                 .iter()
                 .all(|edge| actual.artifacts.binding_dependencies().contains(edge)));
+            let expected_new_edge = (
+                InventoryNodeKey::Artifact(actual.artifacts.namespace()[&value.artifact_id()]),
+                InventoryNodeKey::Artifact(required_binding),
+                ArtifactDependency::Interface,
+            );
+            assert_eq!(
+                actual.artifacts.binding_dependencies().into_iter()
+                    .filter(|edge| !old_edges.contains(edge)).collect::<BTreeSet<_>>(),
+                BTreeSet::from([expected_new_edge]),
+                "a fresh type adds only its canonical interface obligation, never an original or Group edge",
+            );
             assert_eq!(actual.native_availability, source.native_availability);
             let row = actual
                 .native_availability
