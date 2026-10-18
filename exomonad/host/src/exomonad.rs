@@ -333,7 +333,7 @@ impl ExomonadConfig {
 }
 
 /// Author the exact catalog used by scripted fixtures before source capture.
-/// Provider attachment remains scripted; these credentials are never opened.
+/// Provider attachment remains scripted; retain its owned credential reference.
 #[cfg(test)]
 pub(crate) fn author_scripted_model_catalog(project: &mut ExomonadConfig) {
     use std::collections::BTreeMap;
@@ -343,6 +343,16 @@ pub(crate) fn author_scripted_model_catalog(project: &mut ExomonadConfig) {
         return;
     }
     let backend = project.defaults.model.backend();
+    let credential_file = project
+        .launch
+        .embedded
+        .as_ref()
+        .map(|embedded| embedded.credential_file.clone())
+        .filter(|path| !path.as_os_str().is_empty());
+    // Catalog-only fixtures do not attach a provider or read this reference.
+    let credential_env = credential_file
+        .is_none()
+        .then(|| "TIDEPOOL_SCRIPTED_PROVIDER_CREDENTIAL".into());
     let reasoning = project.defaults.reasoning;
     let primary = project.defaults.model.clone();
     let mut models = BTreeMap::new();
@@ -388,8 +398,8 @@ pub(crate) fn author_scripted_model_catalog(project: &mut ExomonadConfig) {
             "scripted".into(),
             ProviderConfig {
                 backend,
-                credential_file: Some("/tmp/tidepool-scripted-unread-credential".into()),
-                credential_env: None,
+                credential_file,
+                credential_env,
                 endpoint: None,
                 inference_limits: Default::default(),
             },
@@ -3034,6 +3044,57 @@ mod tests {
         clippy::disallowed_methods,
         reason = "test: launches short-lived process fixtures (a disposable runner, git one-shots) directly"
     )]
+    #[test]
+    fn scripted_catalog_preserves_owned_embedded_credential_through_application() {
+        let files = tempfile::tempdir().unwrap();
+        let credential = files.path().join("chatgpt-auth.json");
+        std::fs::write(&credential, "{}").unwrap();
+        let authored = files.path().join(".exomonad");
+        write_fixture_project_config(&authored, "test-model", |project| {
+            let mut embedded: EmbeddedLaunchConfig = toml::from_str(
+                "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096",
+            )
+            .unwrap();
+            embedded.credential_file = credential.clone();
+            project.launch.embedded = Some(embedded);
+        });
+        let mut config: ExomonadConfig =
+            toml::from_str(&std::fs::read_to_string(authored.join("config.toml")).unwrap())
+                .unwrap();
+        config.apply_inference().unwrap();
+        assert_eq!(
+            config.launch.embedded.as_ref().unwrap().credential_file,
+            credential
+        );
+        let catalog = config.resolved_catalog().unwrap().unwrap();
+        let provider = &catalog.providers["scripted"];
+        assert_eq!(provider.credential_file.as_ref(), Some(&credential));
+        assert!(provider.credential_env.is_none());
+        assert_eq!(provider.backend, Backend::OpenAIPlan);
+        assert_eq!(catalog.primary, "primary");
+        assert_eq!(catalog.models["primary"].model.value(), "test-model");
+        assert_eq!(catalog.models["sol"].model.value(), "gpt-6-sol");
+        assert_eq!(catalog.models["luna"].model.value(), "gpt-6-luna");
+        assert_eq!(std::fs::read(&credential).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn scripted_catalog_without_embedded_provider_uses_explicit_unread_environment_reference() {
+        let files = tempfile::tempdir().unwrap();
+        write_fixture_project_config(files.path(), "test-model", |_| {});
+        let config: ExomonadConfig =
+            toml::from_str(&std::fs::read_to_string(files.path().join("config.toml")).unwrap())
+                .unwrap();
+        let catalog = config.resolved_catalog().unwrap().unwrap();
+        let provider = &catalog.providers["scripted"];
+        assert!(config.launch.embedded.is_none());
+        assert!(provider.credential_file.is_none());
+        assert_eq!(
+            provider.credential_env.as_deref(),
+            Some("TIDEPOOL_SCRIPTED_PROVIDER_CREDENTIAL")
+        );
+    }
+
     #[test]
     fn preparation_directory_requires_existing_parent_and_refuses_path_escape() {
         let root = tempfile::tempdir().unwrap();
