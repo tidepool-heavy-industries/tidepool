@@ -2647,13 +2647,11 @@ mod tests {
             serde_json::to_value(&selected.model_catalog).unwrap()
         );
         assert_eq!(std::fs::read(&generated).unwrap(), bytes);
-        assert!(
-            retained
-                .verify_current_inputs(project.path())
-                .unwrap_err()
-                .to_string()
-                .contains("workspace configuration changed since preparation")
-        );
+        assert!(retained
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("workspace configuration changed since preparation"));
 
         let next_run = tempfile::tempdir().unwrap();
         let next = FrozenWorkspace::load(project.path(), next_run.path()).unwrap();
@@ -2715,13 +2713,11 @@ mod tests {
         let shadow = project.path().join(".exomonad/Exomonad/Models.hs");
         std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
         std::fs::write(shadow, "module Exomonad.Models where\n").unwrap();
-        assert!(
-            selected
-                .verify_current_inputs(project.path())
-                .unwrap_err()
-                .to_string()
-                .contains("workspace source bytes changed since preparation")
-        );
+        assert!(selected
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("workspace source bytes changed since preparation"));
         // Reopening keeps the captured source, including after an authored shadow appears.
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
         assert_eq!(
