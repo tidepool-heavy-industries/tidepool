@@ -19347,7 +19347,8 @@ mod tests {
         let mut incomplete = effective.clone();
         Arc::make_mut(&mut incomplete.program.program_support.as_mut().unwrap().imports)
             .remove(&identity("fixture", "InstanceOwner"));
-        let incomplete = (&incomplete)
+        let incomplete = incomplete
+            .receipt_admission()
             .product_admission(&admission)
             .original_execution_fixture(&artifacts)
             .unwrap();
@@ -21280,7 +21281,7 @@ mod tests {
             );
         }
         for changed in 0..3 {
-            let mut foreign = projected.clone();
+            let mut foreign = projected.receipt_admission().physical_request().clone();
             match changed {
                 0 => foreign.request_sha256 = sha256(b"another request"),
                 1 => foreign.semantic_sha256 = [9; 32],
