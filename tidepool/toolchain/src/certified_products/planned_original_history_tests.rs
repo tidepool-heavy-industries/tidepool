@@ -29,6 +29,7 @@ pub(super) struct IssuedOriginal {
     pub(super) request: ExactCompilationRequest,
     pub(super) source: ExactSourceAdmission,
     pub(super) certified: CertifiedProducts,
+    completed_output: Option<crate::declaration_context::IssuedOriginalOutput>,
 }
 
 impl IssuedOriginal {
@@ -40,13 +41,27 @@ impl IssuedOriginal {
             Some(self.request.context()),
         )
         .unwrap();
-        crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
-            &mut self.certified.source_selection,
-            self.request.compiler_inputs().artifacts(),
-            physical.entries(),
-        )
-        .unwrap();
+        let issued_view =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut self.certified.source_selection,
+                self.request.compiler_inputs().artifacts(),
+                physical.entries(),
+            )
+            .unwrap();
+        self.completed_output = Some(
+            crate::declaration_context::IssuedOriginalOutput::issue(
+                self.certified.source_selection.clone(),
+                issued_view,
+            )
+            .unwrap(),
+        );
         self
+    }
+
+    fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
+        self.completed_output
+            .as_ref()
+            .expect("this fixture completed the physical issuer")
     }
 }
 
@@ -348,6 +363,7 @@ pub(super) fn issue_planned_original_with_retained_child(
         request,
         source: source_admission,
         certified,
+        completed_output: None,
     })
 }
 
@@ -495,6 +511,7 @@ pub(super) fn issue_planned_original_with_source_value(
         request,
         source: source_admission,
         certified,
+        completed_output: None,
     }
 }
 
@@ -537,16 +554,70 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             == canonical_interface
     }));
 
-    // Source selection is supplied by the final compiler certification;
-    // inventory is independently assembled from all retained originals.
-    for ordered in [custody.clone(), custody.iter().rev().cloned().collect()] {
-        let view = crate::declaration_context::certified_product_artifact_view(
+    let key = crate::artifact_inventory::NativeGroupKey {
+        artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
             CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
-            &ordered,
-            &[],
-            None,
-        )
-        .unwrap();
+            &current.certified.recovery_products[0],
+        ),
+        original_ordinal: 7,
+    };
+    let NativeGroupCandidates::IssuedAvailability(bindings) = current
+        .certified
+        .source_selection
+        .native_group_candidates(key, &selected_owner)
+        .unwrap()
+    else {
+        panic!("the physical producer completed this native availability");
+    };
+    assert!(!bindings.is_empty());
+    let rebound = crate::declaration_context::certified_product_artifact_view(
+        CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
+        &custody,
+        &[],
+        None,
+    )
+    .unwrap();
+    for binding in &bindings {
+        assert!(current
+            .completed_output()
+            .artifacts()
+            .contains_issued_native_group(*binding));
+        assert!(
+            !rebound.contains_issued_native_group(*binding),
+            "equal payloads do not recreate an issued Group binding"
+        );
+    }
+    assert!(
+        matches!(current.certified.source_selection.selected_original_closure(&rebound),
+        Err(CertificationError::OriginalClosure(error)) if matches!(*error,
+            crate::CompileError::ArtifactInventory(error) if matches!(error.failure,
+                crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == key.artifact)))
+    );
+
+    // Retain every version through its actual physical issuer, in both orders.
+    let versions = history.iter().collect::<Vec<_>>();
+    for ordered in [versions.clone(), versions.iter().rev().copied().collect()] {
+        let mut view = current.completed_output().artifacts().clone();
+        for version in ordered {
+            view = view
+                .retain_custody(version.completed_output().artifacts())
+                .unwrap();
+        }
+        assert_eq!(
+            view.capture_graph_selection().namespace,
+            current
+                .completed_output()
+                .artifacts()
+                .capture_graph_selection()
+                .namespace
+        );
+        assert_eq!(
+            view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+            history
+                .iter()
+                .flat_map(|version| version.completed_output().artifacts().artifact_ids())
+                .collect()
+        );
         let originals = current
             .certified
             .source_selection
@@ -700,13 +771,27 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                 model_versions.len(),
                 "distinct authored bodies issue distinct native owners"
             );
-            let view = crate::declaration_context::certified_product_artifact_view(
-                CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
-                &custody,
-                &[],
-                None,
-            )
-            .unwrap();
+            let mut versions = issued_by_tag.values().collect::<Vec<_>>();
+            if reverse_custody {
+                versions.reverse();
+            }
+            let mut view = selected_issue.completed_output().artifacts().clone();
+            for version in versions {
+                view = view
+                    .retain_custody(version.completed_output().artifacts())
+                    .unwrap();
+            }
+            prop_assert_eq!(
+                view.namespace(),
+                selected_issue.completed_output().artifacts().namespace()
+            );
+            prop_assert_eq!(
+                view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+                issued_by_tag
+                    .values()
+                    .flat_map(|version| version.completed_output().artifacts().artifact_ids())
+                    .collect()
+            );
             let selected = selected_issue
                 .certified
                 .source_selection

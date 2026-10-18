@@ -532,16 +532,19 @@ impl CertifiedSegmentOriginals {
                 ),
             ));
         }
-        crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
-            &mut products.source_selection,
-            request.compiler_inputs().artifacts(),
-            artifact_entries
-                .iter()
-                .chain(&value_entries)
-                .cloned()
-                .collect(),
-        )
-        .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        // Completed selection rows already retain this physical custody. The
+        // segment owner needs their issuances, not another view handle here.
+        let _ =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut products.source_selection,
+                request.compiler_inputs().artifacts(),
+                artifact_entries
+                    .iter()
+                    .chain(&value_entries)
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let value_entry_index = value_entries
             .iter()
             .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
