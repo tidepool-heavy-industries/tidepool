@@ -2381,7 +2381,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .is_none());
     let inputs = request.compiler_inputs();
     assert!(inputs
-        .projection
+        .projection()
         .roles()
         .iter()
         .all(|role| role.original().is_none()));
@@ -2532,13 +2532,13 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     .unwrap();
     assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
     let mut fixed = inputs
-        .artifacts
+        .artifacts()
         .inventory()
         .bind_segment(&inputs.artifacts(), vec![], &selection)
         .unwrap();
     let imports = [source_import(&native, 9001)];
     let demanded = inputs
-        .artifacts
+        .artifacts()
         .inventory()
         .admit_bound_target(
             &mut fixed,
@@ -2863,7 +2863,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             assert!(wire_groups(&request)["EqualPrivateFull"].is_empty());
             let inputs = request.compiler_inputs();
             assert!(inputs
-                .projection
+                .projection()
                 .roles()
                 .iter()
                 .all(|role| role.original().is_none()));
@@ -2877,7 +2877,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 )
                 .unwrap();
             let mut fixed = inputs
-                .artifacts
+                .artifacts()
                 .inventory()
                 .bind_segment(&inputs.artifacts(), vec![], &selection)
                 .unwrap();
@@ -3706,7 +3706,7 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             offer.snapshot_facts().identity().unwrap()
         );
         assert_eq!(
-            inputs.artifacts().capture_graph_selection().roots,
+            inputs.issued_artifacts().capture_graph_selection().roots,
             before.roots
         );
         assert_eq!(context.artifact_view().capture_graph_selection(), before);
@@ -5984,7 +5984,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
             }
             assert!(request
                 .compiler_inputs()
-                .projection
+                .projection()
                 .roles()
                 .iter()
                 .all(|role| !interface_only || role.original().is_none()));
@@ -6008,13 +6008,13 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 assert!(selection.receipt_native_body_owners().next().is_none());
                 if index == 0 {
                     let mut fixed = inputs
-                        .artifacts
+                        .artifacts()
                         .inventory()
                         .bind_segment(&inputs.artifacts(), vec![], &selection)
                         .unwrap();
                     let imports = [source_import(native, 9001)];
                     let demanded = inputs
-                        .artifacts
+                        .artifacts()
                         .inventory()
                         .admit_bound_target(
                             &mut fixed,

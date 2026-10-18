@@ -11665,7 +11665,7 @@ pub(crate) mod tests {
                 assert!(request.groups.is_empty());
                 assert!(request
                     .compiler_inputs()
-                    .artifacts
+                    .artifacts()
                     .selected_native_groups()
                     .is_empty());
                 let inputs = request.compiler_inputs();
@@ -11680,7 +11680,7 @@ pub(crate) mod tests {
                     usize::from(namespace_original)
                 );
                 assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
-                assert_namespace_ids(&carried, &inputs.artifacts, namespace_original);
+                assert_namespace_ids(&carried, inputs.artifacts(), namespace_original);
             }
             if !namespace_original {
                 assert_eq!(carried.receipt_native_body_owners().count(), 0);
@@ -12750,7 +12750,7 @@ pub(crate) mod tests {
             if mode == "full" {
                 assert!(request
                     .compiler_inputs()
-                    .artifacts
+                    .artifacts()
                     .selected_native_groups()
                     .is_empty());
                 assert!(
