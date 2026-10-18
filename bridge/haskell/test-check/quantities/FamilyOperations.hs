@@ -46,7 +46,7 @@ captured = do
 
 forkHost :: Core.ForkAgent OpenAI a -> Eff '[Core.AgentLaunch] a
 forkHost (Core.ForkAgentCheckpointWith Core.OpenAIWitness "capture") = pure (Right "capture-token")
-forkHost (Core.ForkAgentSpawnWith Core.OpenAIWitness (Core.CapturedSpawn token) _ _ keys grants _ selection _ _ _ _)
+forkHost (Core.ForkAgentSpawnWith Core.OpenAIWitness _ (Core.CapturedSpawn token) _ keys grants _ selection _ _ _ _)
   | token == "capture-token", null keys
   , grants == toJSON (modelPermissionRequests noModelPermissions)
   , selection == toJSON (modelSelection alternate) =

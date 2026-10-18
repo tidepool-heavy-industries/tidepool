@@ -9,7 +9,7 @@ pub fn spawn_agent_decl() -> crate::EffectDecl {
         description: "Admit an idle agent with a fresh conversation, explicit model selection, tools, workspace and child model grants.",
         prompt_card: None,
         constructors: &[
-            "SpawnAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> SpawnAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
+            "SpawnAgentSpawnWith :: FamilyWitness modelFamily -> (Int -> Eff childEffs ()) -> SpawnContextWire -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> SpawnAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
         ],
         type_defs: &[],
         extra_imports: &[],

@@ -100,7 +100,7 @@ runHarness script action =
       Core.ForkAgentCheckpointWith Core.OpenAIWitness name -> do
         record (Checkpoint name)
         checkpointResult <$> State.get
-      Core.ForkAgentSpawnWith Core.OpenAIWitness context _ workspace _ grants _ selection _ _ _ _ -> do
+      Core.ForkAgentSpawnWith Core.OpenAIWitness _ context workspace _ grants _ selection _ _ _ _ -> do
         assert "the selected model and empty child permissions cross the family boundary"
           (selection == toJSON (modelSelection fixtureModel)
             && grants == toJSON (modelPermissionRequests noModelPermissions))

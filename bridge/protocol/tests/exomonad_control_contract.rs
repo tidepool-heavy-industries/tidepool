@@ -116,8 +116,8 @@ fn family_spawn_retains_live_spec_and_explicit_model_permissions() {
         spawn.args.iter().map(|arg| arg.name).collect::<Vec<_>>(),
         [
             "family",
-            "context",
             "install",
+            "context",
             "workspace",
             "effects",
             "modelGrants",

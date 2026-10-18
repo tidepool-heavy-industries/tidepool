@@ -9,7 +9,7 @@ pub fn fork_agent_decl() -> crate::EffectDecl {
         description: "Capture a conversation checkpoint or admit an idle agent from captured context with explicit model selection and child model grants.",
         prompt_card: None,
         constructors: &[
-            "ForkAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> ForkAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
+            "ForkAgentSpawnWith :: FamilyWitness modelFamily -> (Int -> Eff childEffs ()) -> SpawnContextWire -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> ForkAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",
             "ForkAgentCheckpointWith :: FamilyWitness modelFamily -> Text -> ForkAgent modelFamily (Either CheckpointRefusal Text)",
         ],
         type_defs: &[],

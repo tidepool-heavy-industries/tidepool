@@ -23,8 +23,8 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum SpawnAgentReq {
     SpawnAgentSpawnWith(
         tidepool_bridge_effects::ModelFamilyWitness,
-        crate::start::SpawnContextWire,
         tidepool_bridge::HaskellValue,
+        crate::start::SpawnContextWire,
         crate::fork_workspace::SpawnWorkspaceWire,
         Vec<crate::ActorEffectKeyWire>,
         tidepool_bridge::HaskellValue,
