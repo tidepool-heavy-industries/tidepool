@@ -14770,6 +14770,77 @@ mod tests {
         let original = context
             .prepare_compilation(&scratch.path().join("original"), &producer)
             .unwrap();
+        assert!(
+            original.groups.is_empty(),
+            "Full availability alone selects no compiler group"
+        );
+        {
+            let inputs = original.compiler_inputs();
+            let (id, native) = inputs
+                .metadata
+                .entries
+                .values()
+                .find_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(native)
+                        if native.owner().module == "HiddenNative" =>
+                    {
+                        Some((entry.descriptor.id, native))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(native.owner().module_version.0, [7; 32]);
+            let definitions =
+                crate::certified_products::original_native_group_definitions(native, 7).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            let imports = [crate::certified_products::PendingImportOwner::Source {
+                owner: native.owner().clone(),
+                original_ordinal: 7,
+                binder: binding.identity.clone(),
+            }];
+            assert!(matches!(
+                crate::certified_products::original_native_group_imports(native, 7).unwrap()[0],
+                crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+            ));
+            let validation = PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let mut fixed = inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .unwrap();
+            let target = inputs
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut fixed,
+                    &inputs.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selection,
+                )
+                .unwrap();
+            let groups = target
+                .selection
+                .groups_for_target(&target.artifacts, None, &imports)
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            let group = groups.iter().next().unwrap();
+            assert_eq!(group.binding.artifact(), id);
+            assert_eq!(group.original_ordinal, 7);
+            assert!(target.artifacts.selected_native_groups().is_empty());
+        }
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
         let weak = Arc::downgrade(private_owner);
@@ -14897,10 +14968,9 @@ mod tests {
             request.groups.is_empty(),
             "retained private custody is not executable demand"
         );
-        assert_eq!(
-            original.groups.len(),
-            1,
-            "the lexical parent selected its native payload"
+        assert!(
+            original.groups.is_empty(),
+            "lexical visibility and Full availability do not select compiler execution"
         );
         assert!(request
             .context()
