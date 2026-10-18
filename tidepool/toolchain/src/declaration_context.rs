@@ -14201,6 +14201,23 @@ mod tests {
             support_product("Gamma"),
             ancestor.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&gamma),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), gamma.owner());
+        assert_eq!(recovered.interface_bytes(), gamma.interface_bytes());
+        assert_eq!(recovered.product_bytes(), gamma.product_bytes());
+        assert_eq!(recovered.certification_bytes(), gamma.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let gamma = recovered;
         let descendant = Arc::new(
             ancestor
                 .as_ref()
@@ -14220,6 +14237,23 @@ mod tests {
             support_product("Delta"),
             descendant.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&delta),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), delta.owner());
+        assert_eq!(recovered.interface_bytes(), delta.interface_bytes());
+        assert_eq!(recovered.product_bytes(), delta.product_bytes());
+        assert_eq!(recovered.certification_bytes(), delta.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let delta = recovered;
         let next = Arc::new(
             descendant
                 .as_ref()
@@ -14259,6 +14293,23 @@ mod tests {
             support_product("Gamma"),
             a.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&gamma),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), gamma.owner());
+        assert_eq!(recovered.interface_bytes(), gamma.interface_bytes());
+        assert_eq!(recovered.product_bytes(), gamma.product_bytes());
+        assert_eq!(recovered.certification_bytes(), gamma.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let gamma = recovered;
         let b = Arc::new(
             a.as_ref()
                 .clone()
@@ -14796,6 +14847,26 @@ mod tests {
                     support_product(&format!("Growing{index}")),
                     context.owner.facts.producer,
                 );
+                let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+                    std::slice::from_ref(&product),
+                )
+                .remove(0)
+                .product;
+                assert_eq!(recovered.owner(), product.owner());
+                assert_eq!(recovered.interface_bytes(), product.interface_bytes());
+                assert_eq!(recovered.product_bytes(), product.product_bytes());
+                assert_eq!(
+                    recovered.certification_bytes(),
+                    product.certification_bytes()
+                );
+                assert_eq!(
+                    crate::certified_products::original_available_groups(&recovered)
+                        .unwrap()
+                        .count(),
+                    0,
+                    "empty originals still need an authenticated availability census"
+                );
+                let product = recovered;
                 context = Arc::new(
                     context
                         .as_ref()
