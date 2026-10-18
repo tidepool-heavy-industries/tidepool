@@ -94,6 +94,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    struct ObservationOnlySource;
+
+    impl crate::SourceInspection for ObservationOnlySource {}
+
+    impl crate::ActorSourceLayers for ObservationOnlySource {
+        fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
+            crate::SourceInspectionServices::new(self)
+        }
+
+        fn stage_reload(
+            self: Arc<Self>,
+            _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
+            _: &[String],
+        ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            unreachable!("support observation never prepares source")
+        }
+    }
+
+    struct ObservationOnlyJev;
+
+    impl crate::JevBackend for ObservationOnlyJev {
+        fn ask(
+            &self,
+            _: String,
+        ) -> futures_util::future::BoxFuture<'_, Result<String, crate::JevCallFailure>> {
+            unreachable!("support observation never invokes a provider")
+        }
+    }
 
     struct UnusedModelFactory;
     impl crate::CellModelFactory for UnusedModelFactory {
@@ -105,6 +136,70 @@ mod tests {
             _: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
         ) -> std::sync::Arc<dyn crate::CellModelBinding> {
             unreachable!("support observation never allocates an execution binding")
+        }
+    }
+
+    #[tokio::test]
+    async fn composed_workbench_support_survives_boundary_runner_extraction() {
+        // Exercise each service independently: another installed service must
+        // not make an absent interpreter appear available.
+        for installed in 0u8..16 {
+            let machine = tidepool_runtime::session::ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                None,
+            );
+            let (mut forest, _deployments) = ResidentForest::new(
+                crate::ActorWorkbenchSource::new("", Vec::new()),
+                tidepool_runtime::session::fresh_session_id(),
+                machine,
+                None,
+                crate::Incarnation::FIRST,
+            )
+            .await
+            .unwrap();
+            if installed & 1 != 0 {
+                forest.set_source_layers(Arc::new(ObservationOnlySource));
+            }
+            if installed & 2 != 0 {
+                forest.set_jev_backend(Arc::new(ObservationOnlyJev));
+            }
+            if installed & 4 != 0 {
+                forest = forest.with_cell_model_factory(Arc::new(UnusedModelFactory));
+            }
+            if installed & 8 != 0 {
+                forest = forest.with_conversation_reader(Arc::new(|_, _| {
+                    unreachable!("support observation never reads a conversation")
+                }));
+            }
+
+            let workbench = forest.environment.application_workbench();
+            let runner = workbench.boundary_runner();
+            let restored = runner.application_workbench().boundary_runner();
+            for (boundary, runner) in [("extracted", runner), ("restored", restored)] {
+                let source = runner.preparation_source();
+                let support = source.config().installed_effect_support();
+                for (key, flag) in [
+                    (ActorEffectKey::Source, 1),
+                    (ActorEffectKey::Jev, 2),
+                    (ActorEffectKey::ModelCallOpenAI, 4),
+                    (ActorEffectKey::ModelCallArgon, 4),
+                    (ActorEffectKey::ModelCallDeepSeek, 4),
+                    (ActorEffectKey::Reflect, 8),
+                ] {
+                    assert_eq!(
+                        support.contains(&ToolEffectKey::Actor(key)),
+                        installed & flag != 0,
+                        "{boundary} support for {key:?}, installed service mask {installed}"
+                    );
+                }
+            }
+            let shutdown = forest.shutdown().await;
+            assert!(
+                shutdown.iter().all(crate::ForestRootShutdown::is_confirmed),
+                "service mask {installed} cleanup: {shutdown:?}"
+            );
         }
     }
 
