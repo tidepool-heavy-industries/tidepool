@@ -9,10 +9,53 @@ const TYPED_INPUT: &str = "Call the installed probe twice with different numbers
 const CANCEL_INPUT: &str = "Start a cancellable resident cell.";
 const CONTINUE_INPUT: &str = "Continue after the interrupted cell.";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrowserReplyFailure {
+    ToolResult {
+        call: harness::model::CallId,
+        detail: String,
+    },
+    Protocol(String),
+}
+
+impl std::fmt::Display for BrowserReplyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolResult { call, detail } => write!(
+                f,
+                "browser call {} settled without its expected result: {detail}",
+                call.0
+            ),
+            Self::Protocol(detail) => f.write_str(detail),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserJourneyFailure {
+    Operation {
+        operation: harness::model::OperationId,
+        cause: BrowserReplyFailure,
+    },
+    Protocol(String),
+}
+
+impl std::fmt::Display for BrowserJourneyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Operation { operation, cause } => {
+                write!(f, "browser operation {operation:?}: {cause}")
+            }
+            Self::Protocol(detail) => f.write_str(detail),
+        }
+    }
+}
+
 struct Barrier {
     id: String,
     phase: &'static str,
     request_id: Option<harness::model::RequestId>,
+    issued_call: Option<harness::model::CallId>,
     request: ResponsesRequest,
     release: oneshot::Sender<()>,
 }
@@ -29,7 +72,7 @@ struct ScriptState {
 }
 
 struct BrowserTransport {
-    barriers: mpsc::UnboundedSender<Barrier>,
+    barriers: mpsc::UnboundedSender<Result<Barrier, BrowserReplyFailure>>,
     state: Mutex<ScriptState>,
 }
 
@@ -75,7 +118,7 @@ fn typed_result_matches(item: &harness::item::Item, call_id: &str, expected: &st
         })
 }
 
-fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), String> {
+fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), BrowserReplyFailure> {
     for item in input {
         let Some(call_id) = item.0["call_id"].as_str() else {
             continue;
@@ -96,13 +139,59 @@ fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), Strin
         // this call hides a settled failure behind the browser's phase timeout.
         if !matches {
             let output = item.0["output"].as_str().unwrap_or("<missing text output>");
-            return Err(format!(
-                "browser call {call_id} settled without its expected result: {}",
-                output.chars().take(1024).collect::<String>(),
-            ));
+            return Err(BrowserReplyFailure::ToolResult {
+                call: harness::model::CallId(call_id.into()),
+                detail: output.chars().take(1024).collect(),
+            });
         }
     }
     Ok(())
+}
+
+fn receive_browser_barrier(
+    event: Result<Barrier, BrowserReplyFailure>,
+    origin: &harness::model::ConversationIdentity,
+    issued: &mut BTreeMap<harness::model::CallId, harness::model::OperationId>,
+) -> Result<Barrier, BrowserJourneyFailure> {
+    match event {
+        Ok(barrier) => {
+            if let Some(call) = &barrier.issued_call {
+                let request = barrier.request_id.clone().ok_or_else(|| {
+                    BrowserJourneyFailure::Protocol(
+                        "browser tool issuance lacks its original request identity".into(),
+                    )
+                })?;
+                if issued.contains_key(call) {
+                    return Err(BrowserJourneyFailure::Protocol(format!(
+                        "browser tool call {} was issued twice",
+                        call.0
+                    )));
+                }
+                issued.insert(
+                    call.clone(),
+                    harness::model::OperationId {
+                        origin: origin.clone(),
+                        request,
+                        call: call.clone(),
+                    },
+                );
+            }
+            Ok(barrier)
+        }
+        Err(cause @ BrowserReplyFailure::ToolResult { .. }) => {
+            let BrowserReplyFailure::ToolResult { call, .. } = &cause else {
+                unreachable!()
+            };
+            let operation = issued.get(call).cloned().ok_or_else(|| {
+                BrowserJourneyFailure::Protocol(format!(
+                    "browser terminal result lacks an issued operation for {}: {cause}",
+                    call.0
+                ))
+            })?;
+            Err(BrowserJourneyFailure::Operation { operation, cause })
+        }
+        Err(BrowserReplyFailure::Protocol(detail)) => Err(BrowserJourneyFailure::Protocol(detail)),
+    }
 }
 
 fn probe_call(call_id: &str, number: i64) -> harness::item::Item {
@@ -137,12 +226,11 @@ fn typed_reply_signature(item: &harness::item::Item) -> Value {
 }
 
 impl BrowserTransport {
-    async fn create_for_request(
+    fn prepare_reply(
         &self,
-        request: ResponsesRequest,
-        request_id: Option<&harness::model::RequestId>,
-    ) -> Result<ResponsesTurn, TransportError> {
-        validate_completed_replies(&request.input).map_err(TransportError::Stream)?;
+        request: &ResponsesRequest,
+    ) -> Result<(String, &'static str, harness::item::Item), BrowserReplyFailure> {
+        validate_completed_replies(&request.input)?;
         for item in request.input.iter().filter(|item| {
             matches!(
                 item.0["call_id"].as_str(),
@@ -177,7 +265,7 @@ impl BrowserTransport {
             let mut state = self.state.lock();
             state.requests += 1;
             if state.requests > 16 {
-                return Err(TransportError::Stream(
+                return Err(BrowserReplyFailure::Protocol(
                     "browser scenario exceeded request budget".into(),
                 ));
             }
@@ -253,7 +341,7 @@ impl BrowserTransport {
                     final_answer("Waiting for the installed tool result."),
                 )
             } else {
-                return Err(TransportError::Stream(
+                return Err(BrowserReplyFailure::Protocol(
                     "unexpected browser scenario request".into(),
                 ));
             };
@@ -271,21 +359,40 @@ impl BrowserTransport {
                     && (kind != "function" || tool["strict"] == true)
                     && (item.0["async"] != true || tool["async"] == true)
             }) {
-                return Err(TransportError::Stream(format!(
+                return Err(BrowserReplyFailure::Protocol(format!(
                     "browser scripted {phase} call requires installed {kind} tool {} with its selected execution mode in its issuing request",
                     item.0["name"],
                 )));
             }
         }
+        Ok((id, phase, item))
+    }
+
+    async fn create_for_request(
+        &self,
+        request: ResponsesRequest,
+        request_id: Option<&harness::model::RequestId>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let (id, phase, item) = self.prepare_reply(&request).map_err(|failure| {
+            let detail = failure.to_string();
+            // The runtime may keep a failed provider round recoverable. The
+            // browser scenario still owns an exact terminal observation.
+            let _ = self.barriers.send(Err(failure));
+            TransportError::Stream(detail)
+        })?;
+        let issued_call = item.0["call_id"]
+            .as_str()
+            .map(|call| harness::model::CallId(call.into()));
         let (release, released) = oneshot::channel();
         self.barriers
-            .send(Barrier {
+            .send(Ok(Barrier {
                 id: id.clone(),
                 phase,
                 request_id: request_id.cloned(),
+                issued_call,
                 request,
                 release,
-            })
+            }))
             .map_err(|_| {
                 TransportError::Stream("browser host closed its barrier receiver".into())
             })?;
@@ -599,13 +706,19 @@ async fn pending_sleep_operation(
 async fn drive_browser(
     fixture: &HostedTestRuntime,
     secret: &str,
-    mut barriers: mpsc::UnboundedReceiver<Barrier>,
+    mut barriers: mpsc::UnboundedReceiver<Result<Barrier, BrowserReplyFailure>>,
 ) -> Result<(), String> {
     let node = required_path("TIDEPOOL_BROWSER_NODE")?;
     let driver = required_path("TIDEPOOL_BROWSER_DRIVER")?;
     let browsers = required_path("PLAYWRIGHT_BROWSERS_PATH")?;
     let mut process = BrowserProcess::spawn(&node, &driver, &browsers)?;
     let identity = browser_target(&fixture.context);
+    let origin = harness::model::ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    };
+    let mut issued = BTreeMap::new();
     let ready = json!({
         "type":"ready", "version":1, "base_url":format!("http://{}", fixture.address),
         "session_secret":secret, "actor":{"run":identity.run,"name":identity.actor.0,"incarnation":identity.incarnation},
@@ -669,8 +782,9 @@ async fn drive_browser(
                     return Err("browser did not acknowledge readiness".to_owned());
                 }
                 barrier = barriers.recv(), if started && waiting.is_none() => {
-                    let barrier = barrier.ok_or("scripted provider closed before browser completion")?;
-                    validate_completed_replies(&barrier.request.input)?;
+                    let event = barrier.ok_or("scripted provider closed before browser completion")?;
+                    let barrier = receive_browser_barrier(event, &origin, &mut issued)
+                        .map_err(|failure| failure.to_string())?;
                     last_phase = barrier.phase;
                     eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
                     if barrier.phase == "typed_first" {
@@ -912,6 +1026,233 @@ pub(super) async fn production_browser_journey() {
     assert!(state.raw_completed && state.typed_completed && state.cancel_issued && state.continued);
 }
 
+fn browser_request(input: Vec<harness::item::Item>) -> ResponsesRequest {
+    ResponsesRequest {
+        input,
+        instructions: String::new(),
+        tools: vec![
+            json!({"type":"custom", "name":"haskell"}),
+            json!({"type":"function", "name":"probe", "strict":true}),
+        ],
+        tools_allowed: None,
+        prompt_cache_comparison: None,
+        model: "test-model".into(),
+        pinned_effort: harness::model::Effort::Low,
+        session_id: "test-run:/root:1".into(),
+    }
+}
+
+#[tokio::test]
+async fn browser_transport_failure_reaches_runner_with_original_operation() {
+    use harness::model::{AgentPath, ConversationIdentity, RequestId};
+    let origin = ConversationIdentity::Embedded {
+        run: "browser-channel".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "1".into(),
+    };
+    for typed in [false, true] {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let transport = BrowserTransport {
+            barriers: sender,
+            state: Mutex::new(ScriptState::default()),
+        };
+        let mut issued = BTreeMap::new();
+        let original = RequestId("issuing-request".into());
+        let next = RequestId("next-request".into());
+        let mut inputs = vec![vec![harness::item::Item(json!({"content":RAW_INPUT}))]];
+        if typed {
+            inputs.push(vec![harness::item::Item(json!({"type":"custom_tool_call_output", "call_id":"browser-real-cell", "output":super::super::hosted_test_context::committed_display_response_fixture("42").to_string()}))]);
+            inputs.push(vec![harness::item::Item(json!({"content":TYPED_INPUT}))]);
+        }
+        for input in inputs {
+            let produce = transport.create_for_request(browser_request(input), Some(&original));
+            let consume = async {
+                let event = receiver.recv().await.unwrap();
+                let barrier = receive_browser_barrier(event, &origin, &mut issued)
+                    .ok()
+                    .unwrap();
+                barrier.release.send(()).unwrap();
+            };
+            let (result, ()) = tokio::join!(produce, consume);
+            assert!(result.is_ok());
+        }
+        let (kind, call) = if typed {
+            ("function_call_output", "browser-typed-first")
+        } else {
+            ("custom_tool_call_output", "browser-real-cell")
+        };
+        let output = if typed {
+            json!({"status":"completed","total":1,"nextIndex":1,"items":[{"status":"committed","output":"41"}]}).to_string()
+        } else {
+            json!({"error":"compile failed"}).to_string()
+        };
+        let request = browser_request(vec![harness::item::Item(
+            json!({"type":kind,"call_id":call,"output":output}),
+        )]);
+        let (result, failure) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(transport.create_for_request(request, Some(&next)), async {
+                match receive_browser_barrier(receiver.recv().await.unwrap(), &origin, &mut issued)
+                {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("terminal failure became a progress barrier"),
+                }
+            })
+        })
+        .await
+        .expect("terminal observation must not wait for browser progress");
+        assert!(matches!(result, Err(TransportError::Stream(_))));
+        match failure {
+            BrowserJourneyFailure::Operation { operation, cause } => {
+                assert_eq!(operation.origin, origin);
+                assert_eq!(operation.request, original);
+                assert_ne!(operation.request, next);
+                assert_eq!(operation.call.0, call);
+                assert_eq!(
+                    cause,
+                    BrowserReplyFailure::ToolResult {
+                        call: operation.call,
+                        detail: output
+                    }
+                );
+            }
+            other => panic!("lost original operation: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn browser_transport_protocol_failures_reach_runner_without_fabricated_operation() {
+    for category in 0..3 {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let transport = BrowserTransport {
+            barriers: sender,
+            state: Mutex::new(ScriptState::default()),
+        };
+        let mut request = browser_request(Vec::new());
+        if category == 1 {
+            transport.state.lock().requests = 16;
+        }
+        if category == 2 {
+            request
+                .input
+                .push(harness::item::Item(json!({"content":RAW_INPUT})));
+            request.tools.clear();
+        }
+        let result = transport
+            .create_for_request(request, Some(&harness::model::RequestId("current".into())))
+            .await;
+        assert!(matches!(result, Err(TransportError::Stream(_))));
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, Err(BrowserReplyFailure::Protocol(_))));
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn browser_barrier_preserves_progress_identity_and_teardown() {
+    use harness::model::{AgentPath, ConversationIdentity, RequestId};
+    let origin = ConversationIdentity::Embedded {
+        run: "browser-progress".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "1".into(),
+    };
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let transport = BrowserTransport {
+        barriers: sender,
+        state: Mutex::new(ScriptState::default()),
+    };
+    let original = RequestId("original".into());
+    let mut issued = BTreeMap::new();
+    for (input, phase) in [
+        (
+            vec![harness::item::Item(json!({"content":RAW_INPUT}))],
+            "raw_input",
+        ),
+        (vec![], "raw_wait"),
+        (
+            vec![harness::item::Item(
+                json!({"type":"custom_tool_call_output","call_id":"browser-cancellable-cell","output":"cancelled"}),
+            )],
+            "raw_wait",
+        ),
+    ] {
+        let (result, ()) = tokio::join!(
+            transport.create_for_request(browser_request(input), Some(&original)),
+            async {
+                let barrier =
+                    receive_browser_barrier(receiver.recv().await.unwrap(), &origin, &mut issued)
+                        .ok()
+                        .unwrap();
+                assert_eq!(barrier.phase, phase);
+                barrier.release.send(()).unwrap();
+            }
+        );
+        assert!(result.is_ok());
+    }
+    // A lost browser release is teardown, not a newly fabricated scenario failure.
+    let (result, ()) = tokio::join!(
+        transport.create_for_request(browser_request(vec![]), Some(&original)),
+        async {
+            drop(receiver.recv().await.unwrap());
+        }
+    );
+    assert!(matches!(result, Err(TransportError::Stream(_))));
+    assert!(receiver.try_recv().is_err());
+    // Reissuance cannot replace the original operation, and missing evidence
+    // must not be filled in from the provider's next request.
+    transport.state.lock().raw_issued = false;
+    let other = RequestId("other".into());
+    let (result, ()) = tokio::join!(
+        transport.create_for_request(
+            browser_request(vec![harness::item::Item(json!({"content":RAW_INPUT}))]),
+            Some(&other)
+        ),
+        async {
+            assert!(matches!(
+                receive_browser_barrier(receiver.recv().await.unwrap(), &origin, &mut issued),
+                Err(BrowserJourneyFailure::Protocol(_))
+            ));
+        }
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        issued[&harness::model::CallId("browser-real-cell".into())].request,
+        original
+    );
+    transport.state.lock().raw_issued = false;
+    let (result, ()) = tokio::join!(
+        transport.create_for_request(
+            browser_request(vec![harness::item::Item(json!({"content":RAW_INPUT}))]),
+            None
+        ),
+        async {
+            assert!(matches!(
+                receive_browser_barrier(
+                    receiver.recv().await.unwrap(),
+                    &origin,
+                    &mut BTreeMap::new()
+                ),
+                Err(BrowserJourneyFailure::Protocol(_))
+            ));
+        }
+    );
+    assert!(result.is_err());
+    assert!(matches!(
+        receive_browser_barrier(
+            Err(BrowserReplyFailure::ToolResult {
+                call: harness::model::CallId("unknown".into()),
+                detail: "failed".into()
+            }),
+            &origin,
+            &mut issued
+        ),
+        Err(BrowserJourneyFailure::Protocol(_))
+    ));
+}
+
 #[test]
 fn completed_browser_replies_report_bad_raw_receipts_and_wrong_typed_results() {
     for (kind, call_id) in [
@@ -933,7 +1274,7 @@ fn completed_browser_replies_report_bad_raw_receipts_and_wrong_typed_results() {
             let input = [harness::item::Item(json!({
                 "type":kind, "call_id":call_id, "output":output,
             }))];
-            let failure = validate_completed_replies(&input).unwrap_err();
+            let failure = validate_completed_replies(&input).unwrap_err().to_string();
             assert!(failure.contains(call_id));
             assert!(failure.contains(&output));
         }
