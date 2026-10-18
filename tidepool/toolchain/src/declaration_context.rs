@@ -15080,10 +15080,37 @@ mod tests {
                 .iter()
                 .find(|artifact| artifact.interface.module == module)
                 .unwrap();
-            assert!(
-                joined_request.artifacts.contains(physical),
-                "joined custody shares exact issued paths"
-            );
+            fn issued_row(
+                owner: &RetainedArtifactMaterialization,
+                id: ArtifactId,
+            ) -> &Arc<RetainedArtifactRow> {
+                let mut row = None;
+                owner.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                    if let Some(issued) = owner.rows.get(&id) {
+                        row = Some(issued);
+                    }
+                });
+                row.expect("physical custody retains the exact issued artifact row")
+            }
+            let id = ArtifactEntry::original(branch.producer_sha256, expected.clone())
+                .unwrap()
+                .descriptor
+                .id;
+            let joined_row = issued_row(joined_owner, id);
+            let branch_row = issued_row(branch.materialization.as_ref().unwrap(), id);
+            assert!(Arc::ptr_eq(joined_row, branch_row));
+            assert_eq!(joined_row.artifact(), *physical);
+            if expected.owner() == right_product.owner() {
+                assert!(joined_request.artifacts.iter().all(|artifact| {
+                    artifact.interface.unit != expected.owner().unit
+                        || artifact.interface.module != module
+                }));
+            } else {
+                assert!(
+                    joined_request.artifacts.contains(physical),
+                    "selected compiler inputs share exact issued paths"
+                );
+            }
         }
 
         let replacement_product = product("Native", 10, 22);
