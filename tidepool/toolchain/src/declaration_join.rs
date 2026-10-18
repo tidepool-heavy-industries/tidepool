@@ -2597,7 +2597,7 @@ mod authored_tests {
             .product()
             .module_interface()
             .unwrap()
-            .interface_sha256();
+            .clone();
         let independent_interface = independent
             .recovery_products()
             .iter()
@@ -2605,10 +2605,18 @@ mod authored_tests {
             .unwrap()
             .module_interface()
             .unwrap()
-            .interface_sha256();
+            .clone();
+        let first_identity =
+            crate::artifact_inventory::ArtifactEntry::canonical(first_interface.clone())
+                .descriptor
+                .id;
+        let independent_identity =
+            crate::artifact_inventory::ArtifactEntry::canonical(independent_interface)
+                .descriptor
+                .id;
         assert_ne!(
-            first_interface, independent_interface,
-            "the refusal control must carry two genuinely different issued canonical owners"
+            first_identity, independent_identity,
+            "the refusal control must carry different canonical artifact identities"
         );
         assert!(
             matches!(
@@ -2618,7 +2626,9 @@ mod authored_tests {
                 Err(CompileError::ArtifactInventory(error))
                     if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict {
                         owner: ExactModuleIdentity { unit: "main".into(), module: first.module_name() }
-                    }
+                    } && matches!(&error.owner_conflict,
+                        Some(crate::artifact_inventory::ArtifactOwnerConflictEvidence::CompilerRole { existing, incoming })
+                            if existing.interface() == first_identity && incoming.interface() == independent_identity)
             ),
             "independent compilation cannot replace an already selected canonical owner"
         );
@@ -2643,7 +2653,7 @@ mod authored_tests {
                 .unwrap()
                 .module_interface()
                 .unwrap()
-                .interface_sha256(),
+                .clone(),
             first_interface,
             "the exact-context successor must carry its selected first canonical owner"
         );
