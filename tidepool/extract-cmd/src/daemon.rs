@@ -2575,7 +2575,9 @@ fn serve_workers(
                     let connection = match &job {
                         Job::Transaction(connection) | Job::Request(connection, ..) => connection,
                     };
-                    if peer_disconnected(connection) {
+                    // An accepted transaction's half-close still owns a
+                    // retirement response, even before its first worker use.
+                    if matches!(&job, Job::Request(..)) && peer_disconnected(connection) {
                         continue;
                     }
                     let (connection, transaction, mut first_request) = match job {
