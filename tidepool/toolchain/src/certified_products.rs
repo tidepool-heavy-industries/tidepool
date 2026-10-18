@@ -2610,13 +2610,16 @@ impl ReceiptNativeAvailability {
             Self::NewProduct { dependencies } => dependencies.as_slice(),
             Self::Issued(_) => &[],
         };
-        let offers = match self {
-            Self::Issued(availability) => availability.offers(),
-            Self::NewProduct { .. } => &[],
+        let issued = match self {
+            Self::Issued(availability) => Some(availability),
+            Self::NewProduct { .. } => None,
         };
-        dependencies
-            .iter()
-            .chain(offers.iter().filter_map(|offer| offer.proof()))
+        dependencies.iter().chain(
+            issued
+                .into_iter()
+                .flat_map(|availability| availability.offers())
+                .filter_map(|offer| offer.proof()),
+        )
     }
 
     fn permits(&self, ordinal: u32) -> bool {
@@ -12786,7 +12789,6 @@ pub(crate) mod tests {
                 assert!(seed_availability.permits(9001));
                 assert!(seed_availability
                     .offers()
-                    .iter()
                     .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
                 full_selection = Some(
                     CertifiedSourceSelection::from_compiler_inputs(
@@ -13412,7 +13414,6 @@ pub(crate) mod tests {
         let issued = Arc::clone(issued);
         let issued_groups = issued
             .offers()
-            .iter()
             .find(|offer| offer.proof().is_some())
             .unwrap()
             .issued_group_carriers()

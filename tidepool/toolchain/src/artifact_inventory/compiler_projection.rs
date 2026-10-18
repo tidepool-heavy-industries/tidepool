@@ -994,7 +994,7 @@ impl CompilerSourceSupport {
         )?;
         let offers = selection
             .issued_native_availability()
-            .flat_map(|availability| availability.offers().iter().cloned());
+            .flat_map(|availability| availability.offers().cloned());
         self.rebuild(
             projection,
             artifacts,

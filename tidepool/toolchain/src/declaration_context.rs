@@ -1027,7 +1027,6 @@ pub(crate) struct NativeTransportAvailability {
     original: Arc<ArtifactEntry>,
     mode: NativeTransportMode,
     classification: NativeInputClassification,
-    issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
     contributions: Arc<[Arc<crate::artifact_inventory::NativeOfferContribution>]>,
 }
 
@@ -1119,8 +1118,12 @@ impl NativeTransportAvailability {
         })
     }
 
-    pub(crate) fn offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
-        &self.issuance
+    pub(crate) fn offers(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::artifact_inventory::IssuedNativeOffer> {
+        self.contributions
+            .iter()
+            .map(|contribution| contribution.offer())
     }
 
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
@@ -1215,12 +1218,8 @@ impl RequestNativeAvailability {
     pub(crate) fn requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
-        self.issued().flat_map(|availability| {
-            availability
-                .offers()
-                .iter()
-                .filter_map(|offer| offer.proof())
-        })
+        self.issued()
+            .flat_map(|availability| availability.offers().filter_map(|offer| offer.proof()))
     }
 
     pub(crate) fn permits(
@@ -1243,7 +1242,6 @@ impl RequestNativeAvailability {
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
     availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
-    private: RequestNativeAvailability,
 }
 
 impl NativeCompilerTransport {
@@ -1440,12 +1438,6 @@ impl NativeCompilerTransport {
                 } else {
                     NativeTransportMode::IssuedGroups
                 };
-                let mut issuance = Vec::new();
-                for contribution in &contributions {
-                    if !issuance.contains(contribution.offer()) {
-                        issuance.push(contribution.offer().clone());
-                    }
-                }
                 Ok((
                     id,
                     Arc::new(NativeTransportAvailability {
@@ -1457,17 +1449,14 @@ impl NativeCompilerTransport {
                             NativeInputClassification::PrivateInput
                         },
                         contributions: contributions.into(),
-                        issuance: issuance.into(),
                     }),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let availability = Arc::new(availability);
-        let private = RequestNativeAvailability(Arc::clone(&availability));
         Ok(Self {
             metadata,
             availability,
-            private,
         })
     }
 }
@@ -1562,7 +1551,7 @@ impl RequestCompilerInputs {
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        self.native_transport.private.clone()
+        RequestNativeAvailability(Arc::clone(&self.native_transport.availability))
     }
 
     pub(crate) fn available_original_sources(

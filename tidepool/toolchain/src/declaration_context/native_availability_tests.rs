@@ -1495,11 +1495,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
     assert!(receipt
         .offers()
-        .iter()
         .any(|offer| offer.original() == entries[0].descriptor.id));
     assert!(receipt
         .offers()
-        .iter()
         .all(|offer| offer.original() != entries[2].descriptor.id));
     assert!(receipt.permits(7));
     assert!(!receipt.permits(9001));
@@ -1835,7 +1833,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .native_transport
         .availability
         .values()
-        .flat_map(|availability| availability.offers().iter().cloned())
+        .flat_map(|availability| availability.offers().cloned())
         .collect::<Vec<_>>();
     let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
         request.compiler_source_support(),
@@ -1993,7 +1991,6 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         assert!(!empty.permits(9001));
         assert!(empty
             .offers()
-            .iter()
             .all(|offer| offer.proof().is_none() && !offer.is_full()));
         assert!(
             matches!(baseline.artifacts().native_requirements_from_roots(&[NativeRequirementRoot::Group {
@@ -3144,7 +3141,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             assert!(available.permits(9001));
             assert_eq!(available.offers().len(), 2);
             for offer in &offers {
-                assert!(available.offers().contains(offer));
+                assert!(available.offers().any(|available| available == offer));
             }
             let support =
                 recover_fixture_compiler_support(projection.clone(), namespace.clone(), [])
@@ -4025,7 +4022,7 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             .unwrap();
         let prepared = request.compiler_inputs();
         let carried = prepared.native_availability(entry.descriptor.id).unwrap();
-        assert_eq!(carried.offers(), &[offer]);
+        assert_eq!(carried.offers().collect::<Vec<_>>(), vec![&offer]);
     }
 }
 
