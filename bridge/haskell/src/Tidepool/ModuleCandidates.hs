@@ -8,6 +8,7 @@ module Tidepool.ModuleCandidates
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
   , CapturedCandidateManifest, captureCandidateManifest
   , readCapturedModuleCandidatesWithGraphs
+  , CapturedCandidateBatch, readCapturedModuleCandidateBatch, capturedCandidateRows, capturedCandidateContent, capturedCandidateBytes
   , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
 import Codec.CBOR.Decoding
@@ -25,7 +26,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as T
 import Tidepool.ArtifactBytes (checkArtifactSeal)
-import Tidepool.RequestInputs (RequestOriginalInputs, withCapturedRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
+import Tidepool.RequestInputs (RequestOriginalInputs, withCapturedRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, CapturedOriginalContent, selectedOriginalContent, requestInputBytes, OriginalInputReference(..))
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.BoundedRead (readFileAtMost)
 import System.FilePath (isAbsolute)
@@ -143,7 +144,25 @@ readModuleCandidatesWithGraphs exactGraphs path = do
 
 readCapturedModuleCandidatesWithGraphs
   :: [ExecutionSourceGraph] -> CapturedCandidateManifest -> IO (Either String [ModuleCandidate])
-readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest path body) = do
+readCapturedModuleCandidatesWithGraphs exactGraphs manifest =
+  fmap (fmap capturedCandidateRows) (readCapturedModuleCandidateBatch emptyCapturedOriginalContent exactGraphs manifest)
+
+-- Receiving association checks and path allowance remain request-local. Only
+-- the exact authenticated bodies may come from the existing universe owner.
+data CapturedCandidateBatch = CapturedCandidateBatch [ModuleCandidate] [(String,CapturedOriginalContent)] Integer
+
+capturedCandidateRows :: CapturedCandidateBatch -> [ModuleCandidate]
+capturedCandidateRows (CapturedCandidateBatch rows _ _) = rows
+
+capturedCandidateContent :: CapturedCandidateBatch -> [(String,CapturedOriginalContent)]
+capturedCandidateContent (CapturedCandidateBatch _ content _) = content
+
+capturedCandidateBytes :: CapturedCandidateBatch -> Integer
+capturedCandidateBytes (CapturedCandidateBatch _ _ bytes) = bytes
+
+readCapturedModuleCandidateBatch :: CapturedOriginalContent -> [ExecutionSourceGraph]
+  -> CapturedCandidateManifest -> IO (Either String CapturedCandidateBatch)
+readCapturedModuleCandidateBatch available exactGraphs (CapturedCandidateManifest path body) = do
   result <- try (do
     case deserialiseFromBytes decodeManifest (BL.fromStrict body) of
       Left failure -> pure (Left (show failure))
@@ -152,10 +171,11 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
             case acquisition of
               FreshFiles -> do
                 graphs <- readExecutionSourceGraphs path exactGraphs descriptors
-                pure (attachExecutionSources exactGraphs graphs references producer candidates)
+                pure (fmap (\rows -> CapturedCandidateBatch rows [] 0)
+                  (attachExecutionSources exactGraphs graphs references producer candidates))
               ContinueOwnedOriginals images -> do
                 either fail pure (validateCandidateImages producer candidates descriptors references images)
-                base <- continueRequestInputs emptyCapturedOriginalContent
+                base <- continueRequestInputs available
                   [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
                 (graphs,custody) <- withCapturedRequestInputTokens base $ \readToken -> do
                   forM_ candidates $ \candidate -> forM_ (candidateParts candidate) $ \(_,artifact,sha,bound) -> do
@@ -165,10 +185,15 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
                     token <- readToken artifact (64 * 1024 * 1024)
                     either fail pure (checkArtifactSeal sha token)
                     either fail pure (decodeExecutionSourceBody token)) path descriptors
-                pure (map (\candidate -> candidate {candidateInputCustody=Just custody}) <$>
+                additions <- mapM (\(OriginalInputImage _ _ key parts) -> do
+                  content <- either fail pure (selectedOriginalContent (map snd parts) custody)
+                  pure (key,content)) images
+                pure ((\rows -> CapturedCandidateBatch
+                    (map (\candidate -> candidate {candidateInputCustody=Just custody}) rows)
+                    additions (requestInputBytes custody)) <$>
                   attachExecutionSources exactGraphs graphs references producer candidates)
         | otherwise -> pure (Left "candidate manifest has trailing bytes"))
-    :: IO (Either IOException (Either String [ModuleCandidate]))
+    :: IO (Either IOException (Either String CapturedCandidateBatch))
   pure $ case result of
     Left failure -> Left (show failure)
     Right decoded -> decoded
