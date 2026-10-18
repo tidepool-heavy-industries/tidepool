@@ -6866,7 +6866,7 @@ impl ArtifactView {
     fn with_compiler_projection(
         &self,
         projection: &CompilerInputProjection,
-    ) -> Result<Self, CompileError> {
+    ) -> Result<std::borrow::Cow<'_, Self>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let nodes = &self.read_projection(&state).nodes;
         let namespace = projection
@@ -6876,7 +6876,7 @@ impl ArtifactView {
             .map(|id| self.resolve_binding(id, nodes).map(|binding| (id, binding)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         if namespace == self.namespace() {
-            return Ok(self.clone());
+            return Ok(std::borrow::Cow::Borrowed(self));
         }
         let entries = namespace
             .keys()
@@ -6886,7 +6886,7 @@ impl ArtifactView {
         let parents = vec![Arc::clone(&self.lease)];
         let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
         drop(state);
-        Ok(ArtifactView::new(ViewDraft {
+        Ok(std::borrow::Cow::Owned(ArtifactView::new(ViewDraft {
             roots: vec![],
             selection,
 
@@ -6896,7 +6896,7 @@ impl ArtifactView {
             issuing_payloads: BTreeMap::new(),
             materialization_parents: vec![],
             materialization: Mutex::new(BTreeMap::new()),
-        }))
+        })))
     }
 
     /// Join compiler inputs using each surviving role's issuing view. Other
@@ -7992,7 +7992,7 @@ mod tests {
                 for _ in 0..repeats {
                     view = {
     let projection = CompilerInputProjection::from_issued_entries(&[original.clone(), dependency.clone()]).unwrap().interface_only();
-    let issued = view.with_compiler_projection(&projection).unwrap();
+    let issued = view.with_compiler_projection(&projection).map(std::borrow::Cow::into_owned).unwrap();
     let support = crate::declaration_context::recover_fixture_compiler_support(projection, issued, []).unwrap();
     let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
     view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
@@ -8033,7 +8033,7 @@ mod tests {
                         &CompilerInputProjection::default(), &view, &roles,
                     ).unwrap().0;
                     view = {
-    let support = crate::declaration_context::recover_fixture_compiler_support(roles.clone(), view.with_compiler_projection(&roles).unwrap(), []).unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(roles.clone(), view.with_compiler_projection(&roles).map(std::borrow::Cow::into_owned).unwrap(), []).unwrap();
     let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
     view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
     };
@@ -8720,7 +8720,10 @@ mod tests {
                         CompilerInputProjection::from_issued_entries(&[hidden.clone()])
                             .unwrap()
                             .interface_only();
-                    let issued = hidden_view.with_compiler_projection(&projection).unwrap();
+                    let issued = hidden_view
+                        .with_compiler_projection(&projection)
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap();
                     let support = crate::declaration_context::recover_fixture_compiler_support(
                         projection,
                         issued,
@@ -8947,7 +8950,10 @@ mod tests {
             let projection = CompilerInputProjection::from_issued_entries(&[child.clone()])
                 .unwrap()
                 .interface_only();
-            let issued = view.with_compiler_projection(&projection).unwrap();
+            let issued = view
+                .with_compiler_projection(&projection)
+                .map(std::borrow::Cow::into_owned)
+                .unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
                 issued,
@@ -9115,7 +9121,8 @@ mod tests {
             match (|| {
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     interface_roles.clone(),
-                    view.with_compiler_projection(&interface_roles)?,
+                    view.with_compiler_projection(&interface_roles)
+                        .map(std::borrow::Cow::into_owned)?,
                     [],
                 )?;
                 let selected = support
@@ -11083,7 +11090,10 @@ mod tests {
             Arc::new(next.clone()),
         ])
         .unwrap();
-        let narrowed = changed.with_compiler_projection(&projection).unwrap();
+        let narrowed = changed
+            .with_compiler_projection(&projection)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap();
         assert!(!narrowed.namespace().contains_key(&native.descriptor.id));
         let repeated = inventory
             .admit_shared_with_intent(
@@ -11281,6 +11291,7 @@ mod tests {
                 1 => {
                     current = current
                         .with_compiler_projection(&projection.interface_only())
+                        .map(std::borrow::Cow::into_owned)
                         .unwrap();
                 }
                 2 => {
@@ -12476,6 +12487,7 @@ mod tests {
         ] {
             let narrowed = joined
                 .with_compiler_projection(&CompilerInputProjection::default())
+                .map(std::borrow::Cow::into_owned)
                 .unwrap();
             let restored_inventory = ArtifactInventory::default();
             let restored = restored_inventory
@@ -12864,7 +12876,7 @@ mod tests {
                 };
                 coverage.operations[index] += 1;
                 view = match *operation {
-                    NativeHistoryOp::Narrow => view.with_compiler_projection(&projection.interface_only()).unwrap(),
+                    NativeHistoryOp::Narrow => view.with_compiler_projection(&projection.interface_only()).map(std::borrow::Cow::into_owned).unwrap(),
                     NativeHistoryOp::Readmit => view.inventory().admit_shared_with_intent(&view,
                         vec![Arc::new(native.clone())], NativeArtifactDemand::AllGroups,
                         ArtifactRootIntent::Projected(&projection, &[])).map(|admitted| admitted.artifacts).unwrap(),
@@ -14386,7 +14398,7 @@ mod tests {
                         },
                         ExactClosureOp::Narrow => {
                             coverage.narrowings += 1;
-                            view.with_compiler_projection(&fixture.interfaces).unwrap()
+                            view.with_compiler_projection(&fixture.interfaces).map(std::borrow::Cow::into_owned).unwrap()
                         },
                         ExactClosureOp::Promote(mask) => {
                             coverage.private_subsets[usize::from(mask - 1)] += 1;
@@ -14802,7 +14814,10 @@ mod tests {
                     CompilerInputProjection::from_issued_entries(&[Arc::new(native.clone())])
                         .unwrap()
                         .interface_only();
-                let issued = view.with_compiler_projection(&projection).unwrap();
+                let issued = view
+                    .with_compiler_projection(&projection)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection,
                     issued,
@@ -14937,7 +14952,10 @@ mod tests {
                 ])
                 .unwrap()
                 .interface_only();
-                let issued = joined.with_compiler_projection(&projection).unwrap();
+                let issued = joined
+                    .with_compiler_projection(&projection)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection,
                     issued,
@@ -15386,6 +15404,7 @@ mod tests {
         let mut broad = if publication {
             issuers[0]
                 .with_compiler_projection(&roles)
+                .map(std::borrow::Cow::into_owned)
                 .unwrap()
                 .select_publication_roots(
                     root.descriptor.id,
@@ -15397,6 +15416,7 @@ mod tests {
                 .select_roots(vec![canonical.descriptor.id])
                 .unwrap()
                 .with_compiler_projection(&roles.interface_only())
+                .map(std::borrow::Cow::into_owned)
                 .unwrap()
         };
         for issued in &issuers {
@@ -16179,7 +16199,10 @@ mod tests {
                 CompilerInputProjection::from_issued_entries(&[Arc::new(first.clone())])
                     .unwrap()
                     .interface_only();
-            let issued = view.with_compiler_projection(&projection).unwrap();
+            let issued = view
+                .with_compiler_projection(&projection)
+                .map(std::borrow::Cow::into_owned)
+                .unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
                 issued,
@@ -16333,7 +16356,10 @@ mod tests {
                 ])
                 .unwrap()
                 .interface_only();
-                let issued = selected.with_compiler_projection(&projection).unwrap();
+                let issued = selected
+                    .with_compiler_projection(&projection)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection,
                     issued,

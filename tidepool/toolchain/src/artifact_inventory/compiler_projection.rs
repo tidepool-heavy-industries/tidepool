@@ -1180,11 +1180,14 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn finalize_namespace(&self) -> Result<Self, CompileError> {
-        self.rebuild(
-            self.projection.clone(),
-            self.artifacts.with_compiler_projection(&self.projection)?,
-            self.native_offers.iter().cloned(),
-        )
+        match self.artifacts.with_compiler_projection(&self.projection)? {
+            std::borrow::Cow::Borrowed(_) => Ok(self.clone()),
+            std::borrow::Cow::Owned(artifacts) => self.rebuild(
+                self.projection.clone(),
+                artifacts,
+                self.native_offers.iter().cloned(),
+            ),
+        }
     }
 
     pub(crate) fn for_source_owners(
@@ -3187,6 +3190,177 @@ mod tests {
             .into_iter()
             .map(|row| Arc::new(ArtifactEntry::original([2; 32], row.product).unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn namespace_finalization_reuses_only_an_unchanged_exact_view() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        for empty in [false, true] {
+            let mut issued = entries.clone();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                "OutsideCompilerNamespace",
+                &[],
+            )));
+            let view = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    issued,
+                    if empty {
+                        NativeArtifactDemand::ScopeInterfaces
+                    } else {
+                        NativeArtifactDemand::AllGroups
+                    },
+                )
+                .unwrap();
+            let support =
+                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            assert_eq!(support.input_decisions.facts.len(), entries.len());
+            for (entry, ordinal) in entries.iter().zip([9, 7, 3]) {
+                let choice = &support.input_decisions.facts[&entry.descriptor.owner];
+                let expected = if empty { vec![] } else { vec![ordinal] };
+                assert_eq!(choice.groups.keys().copied().collect::<Vec<_>>(), expected);
+            }
+            let parent = entries[1].descriptor.id;
+            assert_eq!(
+                support
+                    .native_offers
+                    .iter()
+                    .find(|offer| offer.original() == parent)
+                    .expect("the issued parent has an actual native offer")
+                    .is_full(),
+                !empty,
+            );
+            assert!(matches!(
+                support
+                    .artifacts
+                    .with_compiler_projection(&support.projection)
+                    .unwrap(),
+                std::borrow::Cow::Owned(_)
+            ));
+            let prior_finalize = |support: &CompilerSourceSupport| {
+                support
+                    .rebuild(
+                        support.projection.clone(),
+                        support
+                            .artifacts
+                            .with_compiler_projection(&support.projection)
+                            .unwrap()
+                            .into_owned(),
+                        support.native_offers.iter().cloned(),
+                    )
+                    .unwrap()
+            };
+            let expected = prior_finalize(&support);
+            let finalized = support.finalize_namespace().unwrap();
+            assert_eq!(finalized, expected);
+            assert_eq!(
+                finalized.artifacts.capture_graph_selection(),
+                expected.artifacts.capture_graph_selection()
+            );
+            assert!(!Arc::ptr_eq(&support.selected, &finalized.selected));
+            let expected = prior_finalize(&finalized);
+            for _ in 0..2 {
+                let _ = type_query_work::take();
+                let repeated = finalized.finalize_namespace().unwrap();
+                let work = type_query_work::take();
+                assert_eq!(work.resolved_rows, 0);
+                assert_eq!(work.canonical_checks, 0);
+                assert!(Arc::ptr_eq(&repeated.selected, &finalized.selected));
+                assert_eq!(repeated, expected);
+                assert_eq!(
+                    repeated.artifacts.namespace(),
+                    finalized.artifacts.namespace()
+                );
+                assert_eq!(
+                    repeated.artifacts.capture_graph_selection(),
+                    expected.artifacts.capture_graph_selection()
+                );
+            }
+            let type_only = finalized
+                .rebuild(
+                    finalized.projection.interface_only(),
+                    finalized.artifacts.clone(),
+                    finalized.native_offers.iter().cloned(),
+                )
+                .unwrap();
+            assert!(matches!(
+                type_only
+                    .artifacts
+                    .with_compiler_projection(&type_only.projection)
+                    .unwrap(),
+                std::borrow::Cow::Owned(_)
+            ));
+            let expected = prior_finalize(&type_only);
+            let narrowed = type_only.finalize_namespace().unwrap();
+            assert!(!Arc::ptr_eq(&type_only.selected, &narrowed.selected));
+            if !empty {
+                use crate::declaration_context::NativeTransportMode;
+                let before = type_only.native_availability.snapshot_facts().unwrap();
+                let after = narrowed.native_availability.snapshot_facts().unwrap();
+                assert_eq!(before[&parent].mode, NativeTransportMode::Full);
+                assert_eq!(after[&parent].mode, NativeTransportMode::Full);
+            }
+            assert_eq!(narrowed, expected);
+            assert_eq!(
+                narrowed.native_availability.snapshot_facts().unwrap(),
+                expected.native_availability.snapshot_facts().unwrap()
+            );
+            assert!(entries.iter().all(|entry| !narrowed
+                .artifacts
+                .namespace()
+                .contains_key(&entry.descriptor.id)));
+            assert_eq!(narrowed.input_decisions, expected.input_decisions);
+        }
+    }
+
+    #[test]
+    fn namespace_projection_preserves_exact_issuer_and_refuses_ambiguous_bindings() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let [left, right] = ["NamespaceLeft", "NamespaceRight"].map(|marker| {
+            let mut issued = entries.clone();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), issued)
+                .unwrap();
+            view.with_compiler_projection(&projection)
+                .unwrap()
+                .into_owned()
+        });
+        for entry in &entries {
+            assert_eq!(
+                left.lease.payloads[&entry.descriptor.id],
+                right.lease.payloads[&entry.descriptor.id],
+            );
+        }
+        assert_ne!(
+            left.namespace()[&entries[1].descriptor.id],
+            right.namespace()[&entries[1].descriptor.id]
+        );
+        for view in [&left, &right] {
+            let projected = view.with_compiler_projection(&projection).unwrap();
+            assert!(matches!(&projected, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(projected.namespace(), view.namespace());
+        }
+        let mut custody = left.retain_custody(&right).unwrap();
+        custody.replace_namespace(&BTreeMap::new());
+        assert!(matches!(
+            custody.with_compiler_projection(&projection),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })
+        ));
+        assert!(matches!(
+            custody
+                .with_compiler_projection(&CompilerInputProjection::default())
+                .unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
