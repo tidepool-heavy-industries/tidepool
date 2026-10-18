@@ -2210,10 +2210,20 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
                 entries[1].clone(),
                 marker("ScopedCurrentMarker", 174),
             ],
-            &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
-                artifact: a_id,
-                original_ordinal,
-            })),
+            &BTreeSet::from([
+                NativeGroupKey {
+                    artifact: a_id,
+                    original_ordinal: 7,
+                },
+                NativeGroupKey {
+                    artifact: a_id,
+                    original_ordinal: 9001,
+                },
+                NativeGroupKey {
+                    artifact: b_id,
+                    original_ordinal: 7,
+                },
+            ]),
         )
         .unwrap();
     let current_group = current
