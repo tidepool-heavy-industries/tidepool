@@ -39,6 +39,9 @@ thread_local! {
     static CONTEXT_OBSERVATION_WORK: std::cell::Cell<(usize, usize)> = const {
         std::cell::Cell::new((0, 0))
     };
+    static CONTEXT_FACT_COMPARISONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 pub struct ExactDeclarationContext {
@@ -111,7 +114,11 @@ impl Clone for ExactDeclarationContext {
 
 impl PartialEq for ExactDeclarationContext {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other) || self.owner.facts == other.owner.facts
+        Arc::ptr_eq(&self.owner, &other.owner) || {
+            #[cfg(test)]
+            CONTEXT_FACT_COMPARISONS.with(|count| count.set(count.get() + 1));
+            self.owner.facts == other.owner.facts
+        }
     }
 }
 impl Eq for ExactDeclarationContext {}
@@ -7263,7 +7270,7 @@ impl ExactDeclarationContext {
     /// Immutable owner equality includes exact dependency edges. Equal payload
     /// rows alone cannot substitute another binding's captured dependencies.
     pub fn same_authenticated_context(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
+        Arc::ptr_eq(&self.owner, &other.owner)
             || (self == other
                 && self
                     .owner
@@ -7311,7 +7318,7 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn same_display_observations(&self, other: &Self) -> bool {
-        if std::ptr::eq(self, other) {
+        if Arc::ptr_eq(&self.owner, &other.owner) {
             return true;
         }
         let left = self.observation();
@@ -9296,6 +9303,67 @@ mod tests {
     }
 
     #[test]
+    fn same_owner_context_comparisons_do_not_observe_inventory() {
+        let context = published_original_fixture();
+        let cloned = context.clone();
+        let compare = || {
+            assert_eq!(context, cloned);
+            assert!(context.same_authenticated_context(&cloned));
+            assert!(context.same_display_observations(&cloned));
+        };
+        let before = context.artifact_view().inventory().metrics();
+        let encodings = CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get);
+        let comparisons = CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get);
+        for _ in 0..8 {
+            compare();
+        }
+        assert_eq!(context.artifact_view().inventory().metrics(), before);
+        assert_eq!(
+            CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get),
+            encodings
+        );
+        assert_eq!(
+            CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get),
+            comparisons
+        );
+        assert!(context.owner.observations.get().is_none());
+
+        assert_context_observation_wire(&context);
+        let before = context.artifact_view().inventory().metrics();
+        let encodings = CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get);
+        for _ in 0..8 {
+            compare();
+        }
+        assert_eq!(context.artifact_view().inventory().metrics(), before);
+        assert_eq!(
+            CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get),
+            encodings
+        );
+        assert_eq!(
+            CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get),
+            comparisons
+        );
+    }
+
+    #[test]
+    fn independently_issued_equal_contexts_compare_authenticated_facts() {
+        use std::sync::atomic::Ordering;
+        let context = published_original_fixture();
+        let independent = context.clone().rebuild(|_| {});
+        let comparisons = CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get);
+        assert_eq!(context, independent);
+        assert!(context.same_authenticated_context(&independent));
+        assert!(CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get) > comparisons);
+        assert!(context.same_display_observations(&independent));
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            independent.owner.semantic_issuances.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(context.semantic_sha256(), independent.semantic_sha256());
+    }
+
+    #[test]
     fn changed_context_facts_cannot_reuse_initialized_observations() {
         let mut context = published_original_fixture();
         assert_context_observation_wire(&context);
@@ -10091,6 +10159,9 @@ mod tests {
         };
         let old = restore(&selections[0]).unwrap();
         let new = restore(&selections[1]).unwrap();
+        assert_ne!(old, new);
+        assert!(!old.same_authenticated_context(&new));
+        assert!(!old.same_display_observations(&new));
         assert_context_observation_wire(&old);
         assert_context_observation_wire(&new);
         assert_ne!(old.semantic_sha256(), new.semantic_sha256());
