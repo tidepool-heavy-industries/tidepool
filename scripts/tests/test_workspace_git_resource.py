@@ -63,6 +63,16 @@ class WorkspaceGitResourceTests(unittest.TestCase):
     def test_declared_bundle_has_the_real_gitlink_commit_and_complete_objects(self):
         qualification.verify_workspace_bundle(self.bundle, self.record, self.git)
 
+    def test_declared_model_call_source_preserves_haskell_suffix_and_selected_bytes(self):
+        _, workspace = self.source()
+        exported = Path(os.environ["EXOMONAD_WORKSPACE_MODEL_CALL_SOURCE"])
+        self.assertEqual(exported.suffix, ".hs")
+        expected = subprocess.check_output([
+            str(self.git), "-C", str(workspace), "show",
+            f'{self.record["revision"]}:Examples/ModelCallWorkflow.hs',
+        ])
+        self.assertEqual(exported.read_bytes(), expected)
+
     def test_missing_bundle_refuses(self):
         with self.assertRaises(subprocess.CalledProcessError):
             qualification.verify_workspace_bundle(self.root / "missing.bundle", self.record, self.git)
