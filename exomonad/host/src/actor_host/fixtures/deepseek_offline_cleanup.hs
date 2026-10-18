@@ -4,4 +4,6 @@ let offlineStopped result = case result of
       StoppedNow -> True
       AlreadyStopped -> True
       _ -> False
-display (offlineStopped offlineEditorStopped && offlineStopped offlineTesterStopped)
+if offlineStopped offlineEditorStopped && offlineStopped offlineTesterStopped
+  then display True
+  else display (offlineEditorStopped, offlineTesterStopped)

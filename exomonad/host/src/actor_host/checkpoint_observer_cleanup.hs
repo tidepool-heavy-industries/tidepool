@@ -1,3 +1,6 @@
 do
   outcome <- stopAgent (responseActor observerRequest)
-  display (case outcome of StoppedNow -> True; AlreadyStopped -> True; _ -> False)
+  case outcome of
+    StoppedNow -> display True
+    AlreadyStopped -> display True
+    unexpected -> display unexpected
