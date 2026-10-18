@@ -15243,6 +15243,26 @@ mod tests {
             .clone()
             .extend_checked_original_products(initial.owner.facts.producer, &[epoch(new_epoch)])
             .unwrap();
+        let epoch_owner = identity("fixture", "Epoch");
+        let epoch_original = |context: &ExactDeclarationContext| {
+            context.compiler_input_projection().snapshot_roles()[&epoch_owner]
+                .original()
+                .expect("the fixture issues one original Epoch role")
+        };
+        let old_original = epoch_original(&old);
+        let current_original = epoch_original(&child);
+        assert_eq!(old_original == current_original, old_epoch == new_epoch);
+        let (old_interface, old_product) = {
+            let metadata = old.compiler_metadata_snapshot().unwrap();
+            let ArtifactPayload::Original(product) = &metadata.entries[&epoch_owner].payload else {
+                panic!("the fixture Epoch owns authenticated original bytes");
+            };
+            (
+                product.interface_bytes().to_vec(),
+                product.product_bytes().to_vec(),
+            )
+        };
+        assert_eq!(old_interface, vec![old_epoch; 16]);
         let selected = old
             .artifact_view()
             .entries_for_owners(std::iter::once(identity(
@@ -15251,6 +15271,7 @@ mod tests {
             )))
             .unwrap();
         let root = selected.values().next().unwrap().descriptor.id;
+        drop(selected);
         let value = old.artifact_view().select_roots(vec![root]).unwrap();
         let surface = old.retain_value_source_surface(&value, &[]).unwrap();
         assert!(surface
@@ -15272,16 +15293,48 @@ mod tests {
             .artifact_view()
             .merge_fixture_selections(&surface.compiler_support.artifacts());
         assert_eq!(attached.is_ok(), !demands_epoch || old_epoch == new_epoch);
-        if old_epoch != new_epoch {
-            assert!(child
+        let selects_old = surface.artifacts.contains_namespace_artifact(old_original);
+        assert_eq!(selects_old, root == old_original);
+        assert_eq!(selects_old, demands_epoch);
+        assert_eq!(
+            surface
+                .compiler_support
+                .projection()
+                .snapshot_roles()
+                .get(&epoch_owner)
+                .and_then(CompilerInputRole::original),
+            demands_epoch.then_some(old_original),
+        );
+        {
+            let joined = child
                 .artifact_view()
-                .merge_fixture_selections(&surface.artifacts)
-                .is_err());
+                .merge_fixture_selections(&surface.artifacts);
+            assert_eq!(
+                joined.is_ok(),
+                !selects_old || old_original == current_original
+            );
+            if let Ok(joined) = joined {
+                assert!(joined.artifact_ids().contains(&old_original));
+                assert!(joined.contains_namespace_artifact(current_original));
+                if old_original != current_original {
+                    assert!(!joined.contains_namespace_artifact(old_original));
+                }
+            }
         }
         // Retiring the issuing source cannot revoke byte custody owned by the value.
         let old_ids = surface.artifacts.artifact_ids();
         drop(old);
         assert_eq!(surface.artifacts.artifact_ids(), old_ids);
+        let retained = surface.artifacts.entries();
+        let retained_epoch = retained
+            .iter()
+            .find(|entry| entry.descriptor.id == old_original)
+            .unwrap();
+        let ArtifactPayload::Original(product) = &retained_epoch.payload else {
+            panic!("retained historical Epoch remains an original byte owner");
+        };
+        assert_eq!(product.interface_bytes(), old_interface.as_slice());
+        assert_eq!(product.product_bytes(), old_product.as_slice());
     }
 
     #[test]
