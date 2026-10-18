@@ -488,17 +488,25 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                 let exomonad_actor::ResidentToolError::Invocation(failure) = refused else {
                     panic!("actor admission must retain its typed execution refusal: {refused:?}");
                 };
+                let exomonad_actor::KernelInvocationFailure::Workbench(failure) = failure else {
+                    panic!("actor admission must reject its workbench input: {failure:?}");
+                };
+                assert_eq!(
+                    failure.point,
+                    tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 }
+                );
+                assert_eq!(failure.total, 1);
+                assert_eq!(
+                    failure.detail,
+                    "actor protocol violation: declared model effects differ from model permissions"
+                );
                 let receipt = failure
-                    .receipts()
+                    .receipts
                     .last()
                     .expect("admission failure retains the input receipt");
                 assert_eq!(
                     receipt.status,
                     tidepool_runtime::session::WorkbenchItemStatus::Rejected
-                );
-                assert_eq!(
-                    receipt.failure_layer,
-                    Some(tidepool_runtime::session::WorkbenchFailureLayer::Effect)
                 );
                 assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
                 assert_eq!(script.requests.lock().unwrap().len(), 4);
