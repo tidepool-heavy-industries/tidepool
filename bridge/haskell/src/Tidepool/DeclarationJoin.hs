@@ -565,7 +565,7 @@ decodeDeclarationJoin = do
       array 2
       iface <- exact
       product <- optional snapshot
-      unless (isNothing product) (fail "declaration joins consume interface observations only")
+      unless (not (isJust product)) (fail "declaration joins consume interface observations only")
       pure (DeclarationArtifact iface Nothing)
     exact = array 5 >> ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolutePath
       <*> digest <*> vector (array 2 >> (,) <$> nonempty <*> nonempty)
