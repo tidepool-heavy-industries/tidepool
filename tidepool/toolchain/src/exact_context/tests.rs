@@ -637,7 +637,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3] {
+    for version in [2, 3, 4] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -646,12 +646,13 @@ fn old_selection_and_context_versions_are_rejected() {
             roles: roles.root().clone(),
             lexical: lexical.root().clone(),
             offers: lexical.root().clone(),
+            native_availability: lexical.root().clone(),
             input_decisions: None,
         };
         let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
         install(&store, materializer.finish().unwrap());
         assert!(
-            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 4 with issued input decisions")
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 5 with normalized native availability")
         );
     }
 }
@@ -830,5 +831,344 @@ fn input_decision_codec_refuses_non_original_roles_and_duplicate_ordinals() {
     );
     assert!(
         matches!(InputNativeDecisionCodec::decode(&reader, duplicate_fact), Err(SnapshotError::Malformed(message)) if message == "input decision repeats an ordinal")
+    );
+}
+
+// Serializer fixtures are untrusted facts; they never enter a native issuer.
+fn availability_wire_snapshot(
+    mode: NativeTransportMode,
+    reachable: Option<Vec<ArtifactBindingNode>>,
+) -> ExactContextSnapshot {
+    let original = ArtifactId([1; 32]);
+    let offer = NativeOfferSnapshotFacts {
+        original,
+        interface: ArtifactId([2; 32]),
+        owner: ExactModuleIdentity {
+            unit: "home".into(),
+            module: "Availability".into(),
+        },
+        body: NativeOfferSnapshotBody::Full(
+            crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(
+                ExactSelectionSnapshot::default(),
+            )),
+        ),
+    };
+    let offer_id = offer.identity().unwrap();
+    let mut snapshot = ExactContextSnapshot::empty();
+    snapshot.offers.insert(offer_id, offer);
+    let mut contributions = OrdMap::new();
+    if let Some(reachable) = reachable {
+        let fact = NativeContributionSnapshotFacts {
+            offer: offer_id,
+            reachable: reachable.into_iter().collect(),
+        };
+        contributions.insert(fact.identity().unwrap(), fact);
+    }
+    snapshot.native_availability.insert(
+        original,
+        NativeAvailabilitySnapshotFacts {
+            original,
+            owner: tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: "home".into(),
+                module: "Availability".into(),
+                module_version: tidepool_repr::execution_schema::ModuleVersion([3; 32]),
+                skinny_iface_sha256: [4; 32],
+                product_sha256: [5; 32],
+            },
+            mode,
+            contributions,
+        },
+    );
+    snapshot
+}
+
+#[test]
+fn normalized_availability_wire_preserves_modes_membership_and_unchanged_sharing() {
+    let store = MemoryBlockstore::new();
+    let nodes = (0..64u8)
+        .map(|byte| {
+            ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: ArtifactId([byte; 32]),
+                selection: ArtifactSelectionId([9; 32]),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut roots = Vec::new();
+    for snapshot in [
+        ExactContextSnapshot::empty(),
+        availability_wire_snapshot(NativeTransportMode::IssuedGroups, None),
+        availability_wire_snapshot(NativeTransportMode::IssuedGroups, Some(nodes.clone())),
+        availability_wire_snapshot(NativeTransportMode::Full, Some(nodes.clone())),
+    ] {
+        let mut writer = Materializer::new(&store);
+        let receipt = writer.materialize_context(None, &snapshot).unwrap();
+        install(&store, writer.finish().unwrap());
+        let reopened = hydrate_context(&store, receipt.root()).unwrap();
+        assert_eq!(
+            reopened.snapshot().native_availability,
+            snapshot.native_availability
+        );
+        let mut writer = Materializer::new(&store);
+        let same = writer
+            .materialize_context(Some(&reopened), &snapshot)
+            .unwrap();
+        assert_eq!(same.root(), receipt.root());
+        assert_eq!(
+            writer.finish().unwrap().metrics(),
+            MaterializationMetrics::default()
+        );
+        roots.push(receipt.root().clone());
+    }
+    assert_eq!(
+        roots
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        4
+    );
+
+    let subset = availability_wire_snapshot(NativeTransportMode::IssuedGroups, Some(nodes));
+    let mut full = subset.clone();
+    full.native_availability
+        .get_mut(&ArtifactId([1; 32]))
+        .unwrap()
+        .mode = NativeTransportMode::Full;
+    let mut writer = Materializer::new(&store);
+    let subset_row = NativeAvailabilityCodec::encode(
+        &mut writer,
+        &subset.native_availability[&ArtifactId([1; 32])],
+    )
+    .unwrap();
+    let full_row = NativeAvailabilityCodec::encode(
+        &mut writer,
+        &full.native_availability[&ArtifactId([1; 32])],
+    )
+    .unwrap();
+    install(&store, writer.finish().unwrap());
+    let reader = SnapshotHydrator::new(&store);
+    let subset_wire: NativeAvailabilityWire = read_value(&reader, &subset_row).unwrap();
+    let full_wire: NativeAvailabilityWire = read_value(&reader, &full_row).unwrap();
+    assert_ne!(subset_row, full_row);
+    assert_eq!(
+        subset_wire.contributions, full_wire.contributions,
+        "mode changes reuse the contribution and membership maps"
+    );
+}
+
+#[test]
+fn normalized_availability_hydration_refuses_broken_structural_references() {
+    let store = MemoryBlockstore::new();
+    for wrong_row_key in [false, true] {
+        let mut snapshot =
+            availability_wire_snapshot(NativeTransportMode::IssuedGroups, Some(vec![]));
+        if wrong_row_key {
+            let row = snapshot
+                .native_availability
+                .remove(&ArtifactId([1; 32]))
+                .unwrap();
+            snapshot
+                .native_availability
+                .insert(ArtifactId([99; 32]), row);
+        } else {
+            snapshot.offers.clear();
+        }
+        let mut writer = Materializer::new(&store);
+        let receipt = writer.materialize_context(None, &snapshot).unwrap();
+        install(&store, writer.finish().unwrap());
+        let expected = if wrong_row_key {
+            "native availability key differs from original"
+        } else {
+            "native availability references a missing offer"
+        };
+        assert!(matches!(hydrate_context(&store, receipt.root()),
+            Err(SnapshotError::Malformed(message)) if message == expected));
+    }
+    let mut snapshot = availability_wire_snapshot(NativeTransportMode::IssuedGroups, Some(vec![]));
+    let row = snapshot
+        .native_availability
+        .get_mut(&ArtifactId([1; 32]))
+        .unwrap();
+    let fact = row.contributions.values().next().unwrap().clone();
+    row.contributions = OrdMap::new();
+    row.contributions.insert([99; 32], fact);
+    let mut writer = Materializer::new(&store);
+    let receipt = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    assert!(matches!(hydrate_context(&store, receipt.root()),
+        Err(SnapshotError::Malformed(message)) if message == "native contribution key differs from fact identity"));
+
+    let mut writer = Materializer::new(&store);
+    let broken = writer
+        .materialize_value(&NativeContributionWire {
+            offer: [1; 32],
+            reachable: SnapshotMapRoot(Cid::new_v1(
+                DAG_CBOR,
+                Code::Blake2b256.digest(b"absent membership"),
+            )),
+        })
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    assert!(NativeContributionCodec::decode(&SnapshotHydrator::new(&store), broken).is_err());
+}
+
+#[test]
+fn context_v5_requires_normalized_availability_root() {
+    #[derive(Serialize)]
+    struct MissingAvailability {
+        version: u32,
+        producer: [u8; 32],
+        selection: SelectionRoot,
+        roles: SnapshotMapRoot,
+        lexical: SnapshotMapRoot,
+        offers: SnapshotMapRoot,
+        input_decisions: Option<SnapshotMapRoot>,
+    }
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let valid = writer
+        .materialize_context(None, &ExactContextSnapshot::empty())
+        .unwrap();
+    let missing = ContextRoot(
+        writer
+            .materialize_value(&MissingAvailability {
+                version: 5,
+                producer: [0; 32],
+                selection: valid.selection.root.clone(),
+                roles: valid.roles.root.clone(),
+                lexical: valid.lexical.root.clone(),
+                offers: valid.offers.root.clone(),
+                input_decisions: Some(valid.input_decisions.root.clone()),
+            })
+            .unwrap(),
+    );
+    install(&store, writer.finish().unwrap());
+    assert!(
+        matches!(hydrate_context(&store, &missing), Err(SnapshotError::Malformed(message))
+        if message.contains("native_availability"))
+    );
+}
+
+#[test]
+fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
+    use crate::artifact_inventory::{
+        ArtifactEntry, ArtifactInventory, IssuedNativeOffer, NativeGroupKey,
+        NativeOriginalRequirement,
+    };
+    use crate::certified_products::tests::{
+        original_groups_fixture_with_interface, recovered_witness_fixtures,
+    };
+    use crate::certified_products::{
+        fixture_finalized_product, original_native_group_definitions, PendingImportOwner,
+    };
+    let producer = [2; 32];
+    let hidden = recovered_witness_fixtures(&[fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "CodecHidden",
+            vec![(7, vec![]), (9, vec![])],
+            7,
+            &BTreeMap::new(),
+            b"CodecHidden".to_vec(),
+        ),
+        producer,
+    )])
+    .remove(0)
+    .product;
+    let source = |ordinal| {
+        let definitions = original_native_group_definitions(&hidden, ordinal).unwrap();
+        let binding = match &definitions.bindings()[0] {
+            tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+            tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+        };
+        PendingImportOwner::Source {
+            owner: hidden.owner().clone(),
+            original_ordinal: ordinal,
+            binder: binding.identity.clone(),
+        }
+    };
+    let root = recovered_witness_fixtures(&[fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "CodecRoot",
+            vec![(0, vec![source(7)]), (1, vec![source(9)])],
+            8,
+            &BTreeMap::new(),
+            b"CodecRoot".to_vec(),
+        ),
+        producer,
+    )])
+    .remove(0)
+    .product;
+    let root = Arc::new(ArtifactEntry::original(producer, root).unwrap());
+    let hidden_entry = Arc::new(ArtifactEntry::original(producer, hidden.clone()).unwrap());
+    let inventory = ArtifactInventory::default();
+    let mut snapshot = ExactContextSnapshot::empty();
+    let mut contributions = OrdMap::new();
+    let mut observed = std::collections::BTreeSet::new();
+    for (root_ordinal, hidden_ordinal) in [(0, 7), (1, 9)] {
+        let view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![root.clone(), hidden_entry.clone()],
+                &std::collections::BTreeSet::from([
+                    NativeGroupKey {
+                        artifact: root.descriptor.id,
+                        original_ordinal: root_ordinal,
+                    },
+                    NativeGroupKey {
+                        artifact: hidden_entry.descriptor.id,
+                        original_ordinal: hidden_ordinal,
+                    },
+                ]),
+            )
+            .unwrap();
+        let proof = NativeOriginalRequirement::from_selected_view(root.descriptor.id, &view)
+            .unwrap()
+            .unwrap();
+        let offer = IssuedNativeOffer::issue(root.descriptor.id, &view, Some(proof)).unwrap();
+        let facts = offer.snapshot_facts();
+        let offer_id = facts.identity().unwrap();
+        assert_ne!(facts.original, hidden_entry.descriptor.id);
+        let reachable = offer
+            .proof()
+            .unwrap()
+            .selection
+            .graph_selection()
+            .native_groups
+            .iter()
+            .copied()
+            .filter(|group| group.binding.artifact() == hidden_entry.descriptor.id)
+            .map(|group| {
+                observed.insert(group.original_ordinal);
+                ArtifactBindingNode::Group(group)
+            })
+            .collect();
+        let contribution = NativeContributionSnapshotFacts {
+            offer: offer_id,
+            reachable,
+        };
+        assert_eq!(contribution.reachable.len(), 1);
+        contributions.insert(contribution.identity().unwrap(), contribution);
+        snapshot.offers.insert(offer_id, facts);
+    }
+    assert_eq!(observed, std::collections::BTreeSet::from([7, 9]));
+    assert_eq!(contributions.len(), 2);
+    snapshot.native_availability.insert(
+        hidden_entry.descriptor.id,
+        NativeAvailabilitySnapshotFacts {
+            original: hidden_entry.descriptor.id,
+            owner: hidden.owner().clone(),
+            mode: NativeTransportMode::IssuedGroups,
+            contributions,
+        },
+    );
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let receipt = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    assert_eq!(
+        hydrate_context(&store, receipt.root())
+            .unwrap()
+            .snapshot()
+            .native_availability,
+        snapshot.native_availability
     );
 }

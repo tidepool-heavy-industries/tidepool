@@ -18,6 +18,9 @@ use crate::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,
     CompilerInputRole, ScopeProofV3,
 };
+use crate::declaration_context::{
+    NativeAvailabilitySnapshotFacts, NativeContributionSnapshotFacts, NativeTransportMode,
+};
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 
 const HAMT_CONFIG: Config = Config {
@@ -1233,6 +1236,133 @@ impl SnapshotValueCodec<NativeOfferSnapshotFacts> for NativeOfferCodec {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeContributionWire {
+    offer: [u8; 32],
+    reachable: SnapshotMapRoot,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeContributionCodec;
+impl SnapshotValueCodec<NativeContributionSnapshotFacts> for NativeContributionCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        facts: &NativeContributionSnapshotFacts,
+    ) -> Result<Cid, SnapshotError> {
+        let reachable = facts
+            .reachable
+            .iter()
+            .copied()
+            .map(|node| (node, ()))
+            .collect();
+        let reachable = store.materialize_map::<ArtifactBindingNode, ()>(None, &reachable)?;
+        store.materialize_value(&NativeContributionWire {
+            offer: facts.offer,
+            reachable: reachable.root,
+        })
+    }
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        cid: Cid,
+    ) -> Result<NativeContributionSnapshotFacts, SnapshotError> {
+        let wire: NativeContributionWire = read_value(store, &cid)?;
+        let reachable =
+            hydrate_map_owned::<ArtifactBindingNode, (), InlineValues, _>(store, &wire.reachable)?;
+        Ok(NativeContributionSnapshotFacts {
+            offer: wire.offer,
+            reachable: reachable.facts.keys().copied().collect(),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeAvailabilityModeWire {
+    Full,
+    IssuedGroups,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeAvailabilityOwnerWire {
+    unit: String,
+    module: String,
+    module_version: [u8; 32],
+    skinny_iface_sha256: [u8; 32],
+    product_sha256: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeAvailabilityWire {
+    original: ArtifactId,
+    owner: NativeAvailabilityOwnerWire,
+    mode: NativeAvailabilityModeWire,
+    contributions: SnapshotMapRoot,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeAvailabilityCodec;
+impl SnapshotValueCodec<NativeAvailabilitySnapshotFacts> for NativeAvailabilityCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        facts: &NativeAvailabilitySnapshotFacts,
+    ) -> Result<Cid, SnapshotError> {
+        let contributions = store
+            .materialize_map_with::<_, _, NativeContributionCodec>(None, &facts.contributions)?;
+        store.materialize_value(&NativeAvailabilityWire {
+            original: facts.original,
+            owner: NativeAvailabilityOwnerWire {
+                unit: facts.owner.unit.clone(),
+                module: facts.owner.module.clone(),
+                module_version: facts.owner.module_version.0,
+                skinny_iface_sha256: facts.owner.skinny_iface_sha256,
+                product_sha256: facts.owner.product_sha256,
+            },
+            mode: match &facts.mode {
+                NativeTransportMode::Full => NativeAvailabilityModeWire::Full,
+                NativeTransportMode::IssuedGroups => NativeAvailabilityModeWire::IssuedGroups,
+            },
+            contributions: contributions.root,
+        })
+    }
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        cid: Cid,
+    ) -> Result<NativeAvailabilitySnapshotFacts, SnapshotError> {
+        let wire: NativeAvailabilityWire = read_value(store, &cid)?;
+        let contributions =
+            hydrate_map_owned::<_, _, NativeContributionCodec, _>(store, &wire.contributions)?;
+        for (identity, fact) in &contributions.facts {
+            if *identity != fact.identity().map_err(malformed)? {
+                return Err(malformed(
+                    "native contribution key differs from fact identity",
+                ));
+            }
+        }
+        Ok(NativeAvailabilitySnapshotFacts {
+            original: wire.original,
+            owner: tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: wire.owner.unit,
+                module: wire.owner.module,
+                module_version: tidepool_repr::execution_schema::ModuleVersion(
+                    wire.owner.module_version,
+                ),
+                skinny_iface_sha256: wire.owner.skinny_iface_sha256,
+                product_sha256: wire.owner.product_sha256,
+            },
+            mode: match wire.mode {
+                NativeAvailabilityModeWire::Full => NativeTransportMode::Full,
+                NativeAvailabilityModeWire::IssuedGroups => NativeTransportMode::IssuedGroups,
+            },
+            contributions: contributions.facts,
+        })
+    }
+}
+
 /// Exact compiler facts. Source-instance authority remains with the live
 /// declaration/transaction owner and is deliberately absent from this snapshot.
 #[derive(Clone, Debug, Default)]
@@ -1242,6 +1372,7 @@ pub struct ExactContextSnapshot {
     pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
     pub(crate) lexical: ExactLexicalSnapshot,
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
+    pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
     pub(crate) input_decisions:
         OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
 }
@@ -1437,6 +1568,7 @@ struct ContextDescriptor {
     roles: SnapshotMapRoot,
     lexical: SnapshotMapRoot,
     offers: SnapshotMapRoot,
+    native_availability: SnapshotMapRoot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_decisions: Option<SnapshotMapRoot>,
 }
@@ -1448,6 +1580,8 @@ pub struct MaterializedContext {
     roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
+    native_availability:
+        MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
     input_decisions: MaterializedMap<
         ExactModuleIdentity,
         crate::artifact_inventory::RecordedInputNativeDecision,
@@ -1483,17 +1617,22 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.offers),
             &next.offers,
         )?;
+        let native_availability = self.materialize_map_with::<_, _, NativeAvailabilityCodec>(
+            base.map(|base| &base.native_availability),
+            &next.native_availability,
+        )?;
         let input_decisions = self.materialize_map_with::<_, _, InputNativeDecisionCodec>(
             base.map(|base| &base.input_decisions),
             &next.input_decisions,
         )?;
         let descriptor = ContextDescriptor {
-            version: 4,
+            version: 5,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
             lexical: lexical.root.clone(),
             offers: offers.root.clone(),
+            native_availability: native_availability.root.clone(),
             input_decisions: Some(input_decisions.root.clone()),
         };
         let root = if base.is_some_and(|base| {
@@ -1502,6 +1641,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 && base.roles.root == roles.root
                 && base.lexical.root == lexical.root
                 && base.offers.root == offers.root
+                && base.native_availability.root == native_availability.root
                 && base.input_decisions.root == input_decisions.root
         }) {
             base.expect("equal context implies base").root.clone()
@@ -1515,6 +1655,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             roles,
             lexical,
             offers,
+            native_availability,
             input_decisions,
         })
     }
@@ -1526,9 +1667,9 @@ pub fn hydrate_context<BS: Blockstore>(
     let hydrator = SnapshotHydrator::new(store);
     let store = &hydrator;
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 4 {
+    if descriptor.version != 5 {
         return Err(malformed(
-            "context encoding requires version 4 with issued input decisions",
+            "context encoding requires version 5 with normalized native availability",
         ));
     }
     let selection = store.selection(&descriptor.selection)?;
@@ -1548,18 +1689,33 @@ pub fn hydrate_context<BS: Blockstore>(
             return Err(malformed("native offer key differs from fact identity"));
         }
     }
+    let native_availability = hydrate_map_owned::<_, _, NativeAvailabilityCodec, _>(
+        store,
+        &descriptor.native_availability,
+    )?;
+    for (original, row) in &native_availability.facts {
+        if *original != row.original {
+            return Err(malformed("native availability key differs from original"));
+        }
+        for contribution in row.contributions.values() {
+            if !offers.facts.contains_key(&contribution.offer) {
+                return Err(malformed("native availability references a missing offer"));
+            }
+        }
+    }
     let input_decisions = hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(
         store,
         descriptor
             .input_decisions
             .as_ref()
-            .ok_or_else(|| malformed("context version 4 omits input decisions"))?,
+            .ok_or_else(|| malformed("context version 5 omits input decisions"))?,
     )?;
     let snapshot = ExactContextSnapshot {
         producer: descriptor.producer,
         selection: selection.snapshot.clone(),
         roles: roles.facts.clone(),
         offers: offers.facts.clone(),
+        native_availability: native_availability.facts.clone(),
         input_decisions: input_decisions.facts.clone(),
         lexical: ExactLexicalSnapshot {
             facts: lexical.facts.clone(),
@@ -1573,6 +1729,7 @@ pub fn hydrate_context<BS: Blockstore>(
         roles,
         lexical,
         offers,
+        native_availability,
         input_decisions,
     })
 }
