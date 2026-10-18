@@ -253,6 +253,8 @@ pub struct PersistentSession {
     stub_revision: u64,
     #[cfg(test)]
     compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
     /// resolution, retained-import pairs, live module names, root-slot
     /// aliasing refcounts), kept in sync at every bind/evict site below so
@@ -377,6 +379,8 @@ impl PersistentSession {
             stub_revision: 1,
             #[cfg(test)]
             compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
@@ -655,6 +659,8 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
+        #[cfg(test)]
+        self.certified_resolution_work[0].fetch_add(1, Ordering::Relaxed);
         let retained = std::cell::OnceCell::new();
         let mut source_evidence = BTreeMap::new();
         let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
@@ -770,6 +776,8 @@ impl PersistentSession {
             .groups
             .iter()
             .map(|pending| {
+                #[cfg(test)]
+                self.certified_resolution_work[1].fetch_add(1, Ordering::Relaxed);
                 if pending.group().globals().len() != pending.imports().len() {
                     return Err(PreparedRuntimeError::CertifiedTargetOwners);
                 }
@@ -851,6 +859,14 @@ impl PersistentSession {
                 snapshot,
             },
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn certified_resolution_work(&self) -> (usize, usize) {
+        (
+            self.certified_resolution_work[0].load(Ordering::Relaxed),
+            self.certified_resolution_work[1].load(Ordering::Relaxed),
+        )
     }
 
     /// Install a certified target against this exact lexical view and place
@@ -1953,15 +1969,27 @@ impl PersistentSession {
             Arc<super::admission::RuntimeLexicalScopeLease>,
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(
+        let source = staged.scope();
+        let mut successor = None;
+        let committed = self.adopt_staged_declaration_prepared(
             staged,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
                     session.prepare_declaration_successor(staged, origin, changes, next_epoch)?;
+                successor = Some(retained.scope());
                 prepare(view, visibility, retained)
             },
-        )
+        );
+        if committed.is_ok() {
+            let context = self.lib().current_scoped_compiler_context_in(source);
+            self.lib_mut()
+                .tips
+                .get_mut(&successor.expect("prepared declaration successor"))
+                .expect("installed declaration successor scope")
+                .exact_context = context;
+        }
+        committed
     }
 
     fn adopt_staged_declaration_prepared<A: FnOnce()>(
@@ -2094,7 +2122,9 @@ impl PersistentSession {
             .cloned()
             .ok_or(SessionError::StaleStagedDeclaration)?;
         tip.tip = staged.generation;
-        tip.exact_context = Some(certificate.projection.context().clone());
+        tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(
+            certificate.projection.context().clone(),
+        ));
         lib.tips.insert(child, tip);
 
         let entries = self
@@ -2497,7 +2527,7 @@ impl PersistentSession {
         let recovered_context = lib.recovered_public_compiler_context(owner)?;
         let published_sources = recovered_context
             .as_ref()
-            .map(|context| context.published_source_original_selections())
+            .map(|context| context.exact().published_source_original_selections())
             .transpose()?
             .unwrap_or_default();
         if generation != Generation(0)
@@ -2746,13 +2776,17 @@ impl PersistentSession {
             .graph
             .surface(&owner)
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
-        let exact_context = lib.current_exact_context_in(target);
-        let (graph, context_root) = super::recovery_hydration::materialize_public_compiler_context(
+        let scoped_context = lib.current_scoped_compiler_context_in(target);
+        let (graph, context) = super::recovery_hydration::stage_public_compiler_context(
             &state.graph,
             &state.artifact_root,
-            exact_context.as_ref(),
+            scoped_context.as_ref(),
             previous.as_ref().and_then(|s| s.context_root.as_ref()),
         )?;
+        let context_root = context.as_ref().map(|context| context.root().clone());
+        let installing_context = context
+            .as_ref()
+            .map(|context| super::recovery::ScopedCompilerContext::new(context.exact().clone()));
         let bindings = snapshot
             .bindings
             .iter()
@@ -2802,6 +2836,7 @@ impl PersistentSession {
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         let staged = candidate
             .prepare(state.store_revision, state.allocation_ceiling)
+            .and_then(|staged| staged.with_compiler_context(context))
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         let readiness =
             self.prepare_durable_public_readiness(&owner, target, self.admission_owner().epoch());
@@ -2812,7 +2847,7 @@ impl PersistentSession {
             target,
             super::ScopeDeclarationState {
                 tip: snapshot.declaration_tip,
-                exact_context,
+                exact_context: installing_context,
                 published_sources: lib.published_source_selections_in(target).to_vec(),
             },
         );
@@ -2825,13 +2860,22 @@ impl PersistentSession {
         let outcome = match staged.commit() {
             super::StoreDisposition::Committed((graph, receipt)) => {
                 let lib = self.lib_mut();
-                lib.install_committed_recovery_graph(graph, receipt.state.clone());
+                lib.install_committed_recovery_graph(graph, receipt.state().clone());
                 lib.durable_public_scopes = public_scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(target, next_epoch);
                 self.recovery_initialization = None;
                 match receipt.installed_blocking() {
-                    Ok(()) => super::StoreDisposition::Committed(readiness),
+                    Ok(context) => {
+                        // Native graph, scope and epoch installation precedes acknowledgement.
+                        // Promotion only replaces this already installed exact compiler owner.
+                        self.lib_mut()
+                            .tips
+                            .get_mut(&target)
+                            .expect("public scope installed before acknowledgement")
+                            .exact_context = context;
+                        super::StoreDisposition::Committed(readiness)
+                    }
                     Err(error) => super::StoreDisposition::RecoveryRequired(error),
                 }
             }
@@ -2912,7 +2956,7 @@ impl PersistentSession {
         let context = lib.recovered_public_compiler_context(predecessor)?;
         let published_sources = context
             .as_ref()
-            .map(|context| context.published_source_original_selections())
+            .map(|context| context.exact().published_source_original_selections())
             .transpose()?
             .unwrap_or_default();
         if generation.0 > 0 && (context.is_none() || lib.log.recovered_at(generation).is_none()) {
@@ -3056,14 +3100,20 @@ impl PersistentSession {
             .epoch
             .checked_add(1)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let (graph, context_root) = super::recovery_hydration::materialize_public_compiler_context(
+        let scoped_context = lib.current_scoped_compiler_context_in(scope);
+        let (graph, prepared_context) = super::recovery_hydration::stage_public_compiler_context(
             &state.graph,
             &state.artifact_root,
-            context.as_ref(),
+            scoped_context.as_ref(),
             surface.context_root.as_ref(),
         )?;
+        let installing_context = prepared_context
+            .as_ref()
+            .map(|context| super::recovery::ScopedCompilerContext::new(context.exact().clone()));
         let mut replacement = (*surface).clone();
-        replacement.context_root = context_root;
+        replacement.context_root = prepared_context
+            .as_ref()
+            .map(|context| context.root().clone());
         replacement.epoch = next_epoch;
         let bindings = current
             .bindings
@@ -3086,6 +3136,7 @@ impl PersistentSession {
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         let staged = candidate
             .prepare(state.store_revision, state.allocation_ceiling)
+            .and_then(|staged| staged.with_compiler_context(prepared_context))
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         self.public_visibility_epochs.try_reserve(1).map_err(|e| {
             SessionError::RecoveryManifest {
@@ -3096,10 +3147,22 @@ impl PersistentSession {
         match super::publication_disposition(staged.commit()) {
             Ok((graph, receipt)) => {
                 self.lib_mut()
-                    .install_committed_recovery_graph(graph, receipt.state.clone());
+                    .install_committed_recovery_graph(graph, receipt.state().clone());
+                self.lib_mut()
+                    .tips
+                    .get_mut(&scope)
+                    .expect("validated bootstrap scope")
+                    .exact_context = installing_context;
                 self.public_visibility_epochs.insert(scope, next_epoch);
                 match receipt.installed_blocking() {
-                    Ok(()) => Ok(PublicManifestCommit::Durable),
+                    Ok(context) => {
+                        self.lib_mut()
+                            .tips
+                            .get_mut(&scope)
+                            .expect("installed bootstrap scope")
+                            .exact_context = context;
+                        Ok(PublicManifestCommit::Durable)
+                    }
                     Err(error) => Ok(PublicManifestCommit::RecoveryRequired {
                         error: Box::new(SessionError::RecoveryStore(Box::new(error))),
                     }),
@@ -7625,7 +7688,7 @@ impl PersistentSession {
                 .with_published_source_originals(&selection)?;
                 Ok::<_, SessionError>(super::notebook_generation::PreparedGenerationSource {
                     selection,
-                    context: Arc::new(context),
+                    context: super::recovery::ScopedCompilerContext::new(Arc::new(context)),
                 })
             })
             .transpose()?;
@@ -7666,12 +7729,13 @@ impl PersistentSession {
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let (graph, source_root) = super::recovery_hydration::materialize_public_compiler_context(
+        let (graph, context) = super::recovery_hydration::stage_public_compiler_context(
             &state.graph,
             &state.artifact_root,
             source.as_ref().map(|seed| &seed.context),
             None,
         )?;
+        let source_root = context.as_ref().map(|context| context.root().clone());
         let mut candidate = graph.candidate();
         let epoch = if expected.is_none() {
             let surface = state
@@ -7704,6 +7768,9 @@ impl PersistentSession {
             expected: expected.clone(),
             next: next.clone(),
         });
+        let staged = staged
+            .with_compiler_context(context)
+            .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         Ok(super::PreparedNotebookGeneration {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             domain: state.domain_id,
@@ -7790,20 +7857,20 @@ impl PersistentSession {
             .read_domain(state.domain_id)
             .map_err(|e| SessionError::RecoveryStore(Box::new(e)))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if current.revision != staged.prepared.expected_revision {
+        if current.revision != staged.expected_revision() {
             let graph = super::recovery::load_domain_graph(state.store.clone(), state.domain_id)
                 .map_err(|e| super::recovery::graph_error(&state.path, e))?;
-            let (graph, source_root) =
-                super::recovery_hydration::materialize_public_compiler_context(
-                    &graph,
-                    &state.artifact_root,
-                    source.as_ref().map(|seed| &seed.context),
-                    None,
-                )?;
+            let (graph, context) = super::recovery_hydration::stage_public_compiler_context(
+                &graph,
+                &state.artifact_root,
+                source.as_ref().map(|seed| &seed.context),
+                None,
+            )?;
+            let source_root = context.as_ref().map(|context| context.root().clone());
             let mut candidate = graph.candidate();
             if expected.is_some() {
                 let surface = staged
-                    .graph
+                    .graph()
                     .surface(&next.owner)
                     .map_err(|e| super::recovery::graph_error(&state.path, e))?
                     .ok_or(SessionError::WrongPublicManifestTicket)?;
@@ -7813,21 +7880,24 @@ impl PersistentSession {
                     .replace_surface(surface)
                     .map_err(|e| super::recovery::graph_error(&state.path, e))?;
             }
-            staged = candidate
+            let mut replacement = candidate
                 .prepare(current.revision, current.allocation_ceiling)
                 .map_err(|e| super::recovery::graph_error(&state.path, e))?;
-            staged.prepared.generation_change =
+            replacement.prepared.generation_change =
                 Some(super::recovery_store::PreparedGenerationChange {
                     expected: expected.clone(),
                     next: next.clone(),
                 });
+            staged = replacement
+                .with_compiler_context(context)
+                .map_err(|e| super::recovery::graph_error(&state.path, e))?;
         }
         let store = state.store.clone();
         let domain = state.domain_id;
         let path = state.path.clone();
         let artifact_root = state.artifact_root.clone();
         let surface = staged
-            .graph
+            .graph()
             .surface(&next.owner)
             .map_err(|e| super::recovery::graph_error(&path, e))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
@@ -7867,7 +7937,7 @@ impl PersistentSession {
                     // StaleRevision proves this write rolled back. Errors
                     // while rebuilding are previsibility failures, so settle
                     // that claim rather than leave it falsely unconfirmed.
-                    let retry = (|| -> Result<Option<super::recovery::StagedRecoveryManifest>, SessionError> {
+                    let retry = (|| -> Result<Option<super::recovery::StagedCompilerContextPublication>, SessionError> {
                         if store.active_notebook_generation(domain, &next.owner)
                             .map_err(|e| SessionError::RecoveryStore(Box::new(e)))? != expected {
                             return Ok(None);
@@ -7876,9 +7946,10 @@ impl PersistentSession {
                             .map_err(|e| super::recovery::graph_error(&path, e))?;
                         let revision = graph.store_revision();
                         let ceiling = graph.high_water();
-                        let (graph, source_root) = super::recovery_hydration::materialize_public_compiler_context(
+                        let (graph, context) = super::recovery_hydration::stage_public_compiler_context(
                             &graph, &artifact_root, source.as_ref().map(|seed| &seed.context), None,
                         )?;
+                        let source_root = context.as_ref().map(|context| context.root().clone());
                         let mut candidate = graph.candidate();
                         if expected.is_some() {
                             let mut surface = (*surface).clone();
@@ -7891,7 +7962,8 @@ impl PersistentSession {
                         retry.prepared.generation_change = Some(super::recovery_store::PreparedGenerationChange {
                             expected: expected.clone(), next: next.clone(),
                         });
-                        Ok(Some(retry))
+                        Ok(Some(retry.with_compiler_context(context)
+                            .map_err(|e| super::recovery::graph_error(&path, e))?))
                     })();
                     match retry {
                         Ok(Some(retry)) => staged = retry,
@@ -7911,13 +7983,20 @@ impl PersistentSession {
         let outcome = match committed {
             super::StoreDisposition::Committed((graph, receipt)) => {
                 let lib = self.lib_mut();
-                lib.install_committed_recovery_graph(graph, receipt.state.clone());
+                lib.install_committed_recovery_graph(graph, receipt.state().clone());
                 lib.durable_public_scopes = scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(scope, epoch);
                 on_visible(readiness.clone());
                 match receipt.installed_blocking() {
-                    Ok(()) => {
+                    Ok(context) => {
+                        if let Some(context) = context {
+                            self.lib_mut()
+                                .tips
+                                .get_mut(&scope)
+                                .expect("installed notebook scope")
+                                .exact_context = Some(context);
+                        }
                         if continuing {
                             cancellation_pending = Some(claim.published_continuing());
                         } else {

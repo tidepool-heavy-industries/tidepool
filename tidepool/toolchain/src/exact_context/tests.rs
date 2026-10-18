@@ -9,6 +9,304 @@ fn install(store: &MemoryBlockstore, packet: StagedBlocks) {
     }
 }
 
+struct CountingStore<'a> {
+    inner: &'a MemoryBlockstore,
+    reads: RefCell<BTreeMap<Cid, (u64, u64)>>,
+}
+
+impl Blockstore for CountingStore<'_> {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        let bytes = self.inner.get(cid)?;
+        let mut reads = self.reads.borrow_mut();
+        let (calls, total) = reads.entry(*cid).or_default();
+        *calls += 1;
+        *total += bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        Ok(bytes)
+    }
+
+    fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+        unreachable!("the materializer owns staged writes")
+    }
+}
+
+// These are transport facts for the serializer, not compiler/native authority.
+fn shared_scope_snapshots() -> (ImmutableScopeProofRef, Vec<Arc<ExactSelectionSnapshot>>) {
+    let selection = ArtifactSelectionId([7; 32]);
+    let bindings = (1..=8)
+        .map(|byte| ArtifactBinding {
+            artifact: ArtifactId([byte; 32]),
+            selection,
+        })
+        .collect::<Vec<_>>();
+    let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+        selection,
+        nodes: bindings
+            .iter()
+            .copied()
+            .map(ArtifactBindingNode::Artifact)
+            .collect(),
+        dependencies: Vec::new(),
+    }));
+    let mut snapshots = [0..8, 0..4, 2..6]
+        .into_iter()
+        .map(|range| {
+            let selected = &bindings[range];
+            Arc::new(ExactSelectionSnapshot {
+                scopes: [(selection, proof.clone())].into_iter().collect(),
+                roots: selected
+                    .iter()
+                    .copied()
+                    .map(|binding| (ArtifactBindingNode::Artifact(binding), ()))
+                    .collect(),
+                namespace: selected
+                    .iter()
+                    .map(|binding| (binding.artifact, *binding))
+                    .collect(),
+                custody_roots: OrdMap::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    snapshots.push(Arc::new(ExactSelectionSnapshot {
+        scopes: [(selection, proof.clone())].into_iter().collect(),
+        roots: OrdMap::new(),
+        namespace: OrdMap::new(),
+        custody_roots: [(ArtifactBindingNode::Artifact(bindings[0]), ())]
+            .into_iter()
+            .collect(),
+    }));
+    (proof, snapshots)
+}
+
+#[test]
+fn shared_scope_and_selection_materialization_work_is_operation_local() {
+    let (proof, snapshots) = shared_scope_snapshots();
+    let expected = fvm_ipld_encoding::to_vec(proof.proof().as_ref()).unwrap();
+    let proof_cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&expected));
+    let store = MemoryBlockstore::new();
+    // Derive each canonical root independently, without a preceding selection.
+    let canonical = snapshots
+        .iter()
+        .map(|snapshot| {
+            let mut materializer = Materializer::new(&store);
+            let receipt = materializer.materialize_selection(None, snapshot).unwrap();
+            install(&store, materializer.finish().unwrap());
+            receipt.root().clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(store.get(&proof_cid).unwrap().unwrap(), expected);
+    let full_base = hydrate_selection(&store, &canonical[0]).unwrap();
+    let partial_base = hydrate_selection(&store, &canonical[1]).unwrap();
+    for (snapshot, canonical) in snapshots.iter().zip(&canonical) {
+        let mut materializer = Materializer::new(&store);
+        // Canonical identity is independent of the base chosen before or after
+        // the operation issues a receipt, including custody-only selections.
+        for base in [Some(&full_base), None, Some(&partial_base)] {
+            assert_eq!(
+                materializer
+                    .materialize_selection(base, snapshot)
+                    .unwrap()
+                    .root(),
+                canonical
+            );
+        }
+    }
+    // The canonical oracle warms the immutable encoding owner in both arms;
+    // this comparison varies physical store custody, not proof encoder warmth.
+    for warm in [false, true] {
+        let empty = MemoryBlockstore::new();
+        let base = if warm { &store } else { &empty };
+        let mut observations = Vec::new();
+        for repetitions in [1, 4] {
+            let observed = CountingStore {
+                inner: base,
+                reads: Default::default(),
+            };
+            let mut materializer = Materializer::new(&observed);
+            for _ in 0..repetitions {
+                for (snapshot, canonical) in snapshots.iter().zip(&canonical) {
+                    let receipt = materializer.materialize_selection(None, snapshot).unwrap();
+                    assert_eq!(receipt.root(), canonical);
+                }
+            }
+            let packet = materializer.finish().unwrap();
+            let scope_reads = observed.reads.borrow().get(&proof_cid).copied().unwrap();
+            eprintln!("scope-materialization-work warm={warm} selections={} repetitions={repetitions} scope_gets={} scope_read_bytes={} metrics={:?}", snapshots.len(), scope_reads.0, scope_reads.1, packet.metrics());
+            assert_eq!(scope_reads.0, 1);
+            assert_eq!(scope_reads.1, if warm { expected.len() as u64 } else { 0 });
+            observations.push(packet.metrics());
+            let reloaded = MemoryBlockstore::new();
+            if !warm {
+                install(&reloaded, packet);
+            }
+            let roundtrip = if warm { &store } else { &reloaded };
+            for (root, snapshot) in canonical.iter().zip(&snapshots) {
+                assert_eq!(
+                    hydrate_selection(roundtrip, root)
+                        .unwrap()
+                        .snapshot()
+                        .as_ref(),
+                    snapshot.as_ref()
+                );
+            }
+        }
+        assert_eq!(observations[0], observations[1]);
+    }
+}
+
+#[test]
+fn independent_scope_owners_authenticate_and_contradictory_bodies_refuse() {
+    let (proof, snapshots) = shared_scope_snapshots();
+    let store = MemoryBlockstore::new();
+    let mut first = Materializer::new(&store);
+    first.materialize_selection(None, &snapshots[0]).unwrap();
+    install(&store, first.finish().unwrap());
+    let (cid, bytes) = proof.encoded().unwrap();
+    let observed = CountingStore {
+        inner: &store,
+        reads: Default::default(),
+    };
+    let mut materializer = Materializer::new(&observed);
+    let first = materializer
+        .materialize_selection(None, &snapshots[0])
+        .unwrap();
+    let independent = ImmutableScopeProofRef::from_issued(Arc::new(proof.proof().as_ref().clone()));
+    let before = materializer.cid_validation_bytes.get();
+    assert_eq!(
+        ScopeProofCodec::encode(&mut materializer, &independent).unwrap(),
+        *cid
+    );
+    assert_eq!(
+        materializer.cid_validation_bytes.get() - before,
+        bytes.len() as u64
+    );
+    let checked = materializer.cid_validation_bytes.get();
+    assert_eq!(
+        ScopeProofCodec::encode(&mut materializer, &independent).unwrap(),
+        *cid
+    );
+    assert_eq!(materializer.cid_validation_bytes.get(), checked);
+    let mut equal = snapshots[0].as_ref().clone();
+    equal
+        .scopes
+        .insert(independent.proof().selection, independent);
+    let equal = Arc::new(equal);
+    assert_eq!(
+        materializer
+            .materialize_selection(None, &equal)
+            .unwrap()
+            .root(),
+        first.root()
+    );
+    let work = materializer.finish().unwrap().metrics();
+    assert_eq!(observed.reads.borrow().get(cid).unwrap().0, 1);
+    assert!(work.cid_validation_bytes >= checked);
+
+    let corrupt = MemoryBlockstore::new();
+    corrupt.put_keyed(cid, b"untrusted incoming proof").unwrap();
+    assert!(
+        matches!(ScopeProofCodec::decode(&SnapshotHydrator::new(&corrupt), *cid), Err(SnapshotError::Integrity(found)) if found == *cid)
+    );
+
+    let mut contradictory = proof.proof().as_ref().clone();
+    contradictory.nodes.pop();
+    let contradictory = ImmutableScopeProofRef::from_issued(Arc::new(contradictory));
+    let mut changed = snapshots[0].as_ref().clone();
+    changed
+        .scopes
+        .insert(contradictory.proof().selection, contradictory);
+    let mut materializer = Materializer::new(&store);
+    materializer
+        .materialize_selection(None, &snapshots[0])
+        .unwrap();
+    assert!(
+        matches!(materializer.materialize_selection(None, &Arc::new(changed)), Err(SnapshotError::Malformed(message)) if message == "conflicting immutable scope proof")
+    );
+    assert_eq!(
+        materializer
+            .materialize_selection(None, &snapshots[0])
+            .unwrap()
+            .root(),
+        first.root()
+    );
+    let other = materializer
+        .materialize_selection(None, &snapshots[1])
+        .unwrap();
+    install(&store, materializer.finish().unwrap());
+    assert_eq!(
+        hydrate_selection(&store, other.root())
+            .unwrap()
+            .snapshot()
+            .as_ref(),
+        snapshots[1].as_ref()
+    );
+}
+
+#[test]
+fn scope_receipts_do_not_cross_store_or_failed_operation_boundaries() {
+    let (proof, snapshots) = shared_scope_snapshots();
+    let store = MemoryBlockstore::new();
+    let mut first = Materializer::new(&store);
+    let receipt = first.materialize_selection(None, &snapshots[0]).unwrap();
+    install(&store, first.finish().unwrap());
+    let (cid, bytes) = proof.encoded().unwrap();
+    store.put_keyed(cid, b"corrupt physical scope").unwrap();
+    let mut next = Materializer::new(&store);
+    assert!(
+        matches!(next.materialize_selection(None, &snapshots[0]), Err(SnapshotError::Integrity(found)) if found == *cid)
+    );
+    drop(next);
+    // Generic incoming writes retain their independent verification contract.
+    let materializer = Materializer::new(&store);
+    assert!(materializer.put_keyed(cid, bytes).is_err());
+    let other = MemoryBlockstore::new();
+    assert!(matches!(
+        hydrate_selection(&other, receipt.root()),
+        Err(SnapshotError::MissingBlock(_))
+    ));
+    let mut fresh = Materializer::new(&other);
+    fresh.materialize_selection(None, &snapshots[0]).unwrap();
+    let packet = fresh.finish().unwrap();
+    assert!(packet
+        .blocks()
+        .iter()
+        .any(|(found, body)| found == cid && body.as_ref() == bytes.as_ref()));
+    install(&other, packet);
+    assert_eq!(
+        hydrate_selection(&other, receipt.root())
+            .unwrap()
+            .snapshot()
+            .as_ref(),
+        snapshots[0].as_ref()
+    );
+}
+
+#[test]
+fn materialization_retains_exact_owners_once_and_releases_them_at_finish() {
+    let (proof, snapshots) = shared_scope_snapshots();
+    let snapshot = Arc::clone(&snapshots[0]);
+    drop(snapshots);
+    let snapshot_owner = Arc::downgrade(&snapshot);
+    let scope_owner = Arc::downgrade(&proof.0);
+    let store = MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    materializer.materialize_selection(None, &snapshot).unwrap();
+    let snapshot_refs = Arc::strong_count(&snapshot);
+    let scope_refs = Arc::strong_count(&proof.0);
+    for _ in 0..64 {
+        materializer.materialize_selection(None, &snapshot).unwrap();
+    }
+    assert_eq!(Arc::strong_count(&snapshot), snapshot_refs);
+    assert_eq!(Arc::strong_count(&proof.0), scope_refs);
+    drop(snapshot);
+    drop(proof);
+    assert!(snapshot_owner.upgrade().is_some());
+    assert!(scope_owner.upgrade().is_some());
+    let packet = materializer.finish().unwrap();
+    assert!(snapshot_owner.upgrade().is_none());
+    assert!(scope_owner.upgrade().is_none());
+    assert!(!packet.blocks().is_empty());
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
     #[test]
@@ -318,7 +616,7 @@ fn old_selection_and_context_versions_are_rejected() {
     let store = MemoryBlockstore::new();
     let mut materializer = Materializer::new(&store);
     let selection = materializer
-        .materialize_selection(None, &ExactSelectionSnapshot::default())
+        .materialize_selection(None, &Arc::new(ExactSelectionSnapshot::default()))
         .unwrap();
     install(&store, materializer.finish().unwrap());
     assert!(hydrate_selection(&store, selection.root()).is_ok());
@@ -338,19 +636,24 @@ fn old_selection_and_context_versions_are_rejected() {
     let lexical = materializer
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
-    let descriptor = ContextDescriptor {
-        version: 2,
-        producer: [0; 32],
-        selection: selection.root().clone(),
-        roles: roles.root().clone(),
-        lexical: lexical.root().clone(),
-        offers: lexical.root().clone(),
-    };
-    let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
     install(&store, materializer.finish().unwrap());
-    assert!(
-        matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
-    );
+    for version in [2, 3] {
+        let mut materializer = Materializer::new(&store);
+        let descriptor = ContextDescriptor {
+            version,
+            producer: [0; 32],
+            selection: selection.root().clone(),
+            roles: roles.root().clone(),
+            lexical: lexical.root().clone(),
+            offers: lexical.root().clone(),
+            input_decisions: None,
+        };
+        let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
+        install(&store, materializer.finish().unwrap());
+        assert!(
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 4 with issued input decisions")
+        );
+    }
 }
 
 #[test]
@@ -439,5 +742,93 @@ fn native_offer_classes_round_trip_and_change_context_identity() {
             .offers
             .len(),
         2
+    );
+}
+
+#[test]
+fn recorded_input_domain_distinguishes_empty_from_absent_without_issuing_authority() {
+    let store = MemoryBlockstore::new();
+    let owner = ExactModuleIdentity {
+        unit: "home".into(),
+        module: "RecordedOnly".into(),
+    };
+    // These are untrusted wire facts. Hydration is deliberately not a compiler
+    // admission and this test never constructs an issued decision owner.
+    let mut snapshot = ExactContextSnapshot::empty();
+    let mut writer = Materializer::new(&store);
+    let absent = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    snapshot.input_decisions.insert(
+        owner.clone(),
+        crate::artifact_inventory::RecordedInputNativeDecision {
+            role: CompilerInputRole::ReusableOriginal {
+                interface: ArtifactId([1; 32]),
+                original: ArtifactId([2; 32]),
+            },
+            groups: OrdMap::new(),
+        },
+    );
+    let mut writer = Materializer::new(&store);
+    let empty = writer
+        .materialize_context(Some(&absent), &snapshot)
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    assert_ne!(absent.root(), empty.root());
+    let reopened = hydrate_context(&store, empty.root()).unwrap();
+    assert_eq!(
+        reopened.snapshot().input_decisions,
+        snapshot.input_decisions
+    );
+    assert!(reopened.snapshot().input_decisions[&owner]
+        .groups
+        .is_empty());
+    assert!(hydrate_context(&store, absent.root())
+        .unwrap()
+        .snapshot()
+        .input_decisions
+        .is_empty());
+}
+
+#[test]
+fn input_decision_codec_refuses_non_original_roles_and_duplicate_ordinals() {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let no_original = CompilerRoleCodec::encode(
+        &mut writer,
+        &CompilerInputRole::InterfaceOnly {
+            interface: ArtifactId([1; 32]),
+        },
+    )
+    .unwrap();
+    let original = CompilerRoleCodec::encode(
+        &mut writer,
+        &CompilerInputRole::ReusableOriginal {
+            interface: ArtifactId([1; 32]),
+            original: ArtifactId([2; 32]),
+        },
+    )
+    .unwrap();
+    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(serde_json::json!({
+        "binding": { "artifact": vec![2u8; 32], "selection": vec![3u8; 32] }, "original_ordinal": 7
+    })).unwrap();
+    let interface_fact = writer
+        .materialize_value(&InputNativeDecisionWire {
+            role: no_original,
+            groups: vec![],
+        })
+        .unwrap();
+    let duplicate_fact = writer
+        .materialize_value(&InputNativeDecisionWire {
+            role: original,
+            groups: vec![group, group],
+        })
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    let reader = SnapshotHydrator::new(&store);
+    assert!(
+        matches!(InputNativeDecisionCodec::decode(&reader, interface_fact), Err(SnapshotError::Malformed(message)) if message == "input decision has no original role")
+    );
+    assert!(
+        matches!(InputNativeDecisionCodec::decode(&reader, duplicate_fact), Err(SnapshotError::Malformed(message)) if message == "input decision repeats an ordinal")
     );
 }

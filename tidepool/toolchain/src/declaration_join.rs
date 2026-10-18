@@ -192,7 +192,7 @@ impl NativeAuthoredDeclarationAdmission {
             module: module.module_name(),
         };
         let mut matching = source
-            .evidence
+            .evidence()
             .modules
             .iter()
             .filter(|row| row.unit == owner.unit && row.module == owner.module && !row.boot);
@@ -212,8 +212,8 @@ impl NativeAuthoredDeclarationAdmission {
         Ok(Self {
             owner,
             generation: module.gen.0,
-            source_path: source.witness.source_path().to_owned(),
-            source_sha256: *source.witness.source_sha256(),
+            source_path: source.witness().source_path().to_owned(),
+            source_sha256: *source.witness().source_sha256(),
         })
     }
 
@@ -2643,7 +2643,7 @@ mod authored_tests {
             .compiler_source_support()
             .native_offers()
             .iter()
-            .map(|offer| offer.custody().selection_snapshot().clone())
+            .map(|offer| offer.custody_snapshot().clone())
             .collect::<Vec<_>>();
 
         let worker_root = Arc::new(tempfile::tempdir().unwrap());
@@ -2736,7 +2736,7 @@ mod authored_tests {
             .iter()
             .zip(&offer_snapshots)
         {
-            assert!(Arc::ptr_eq(offer.custody().selection_snapshot(), snapshot));
+            assert!(Arc::ptr_eq(offer.custody_snapshot(), snapshot));
         }
         let joined_binding = *accepted_graph
             .namespace
@@ -3428,11 +3428,11 @@ mod authored_tests {
             .as_ref()
             .expect("frontdoor must retain exact source admission");
         assert!(admitted
-            .witness
-            .matches_source(admitted.witness.source_path(), downstream));
-        assert!(admitted.evidence.valid(downstream));
+            .witness()
+            .matches_source(admitted.witness().source_path(), downstream));
+        assert!(admitted.evidence().valid(downstream));
         let mut raw_evidence: serde_json::Value =
-            serde_json::from_slice(&admitted.evidence_bytes).unwrap();
+            serde_json::from_slice(&admitted.evidence_bytes()).unwrap();
         raw_evidence["cache_safe"] = false.into();
         raw_evidence["selection_complete"] = false.into();
         admitted
@@ -3443,7 +3443,7 @@ mod authored_tests {
         assert!(admitted
             .validate_ineligible_evidence(&serde_json::to_vec(&raw_evidence).unwrap())
             .is_err());
-        let mut ordinary_evidence = (*admitted.evidence).clone().into_evidence();
+        let mut ordinary_evidence = admitted.evidence().as_ref().clone().into_evidence();
         ordinary_evidence.cache_safe = false;
         ordinary_evidence.selection_complete = false;
         assert!(!ordinary_evidence.valid(downstream));

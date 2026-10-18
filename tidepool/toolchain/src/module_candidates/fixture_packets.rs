@@ -437,12 +437,6 @@ fn source_boot_candidate_packet_producer() {
         // supplies only the original bytes and payloads emitted at that path.
         let source = fs::read_to_string(capture.join("original-source.hs")).unwrap();
         let evidence_bytes = fs::read(capture.join("dependencies.json")).unwrap();
-        let evidence = crate::cache::CompletedSourceEvidence::from_worker(
-            &evidence_bytes,
-            &source_path,
-            &source,
-        )
-        .expect("actual consumed source and resolution evidence");
         let receipt_bytes = fs::read(capture.join("certified-products.cbor")).unwrap();
         let receipt = decode_receipt_in(&receipt_bytes, Some(&capture)).unwrap();
         assert!(
@@ -457,18 +451,23 @@ fn source_boot_candidate_packet_producer() {
         let product_bytes = fs::read(capture.join("module-products.cbor")).unwrap();
         let package_bytes = fs::read(capture.join("module-package-imports.cbor")).unwrap();
         let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bytes).unwrap();
+        let operation = std::sync::Arc::clone(parsed.operation());
+        let source_admission = crate::artifacts::admit_compiler_source(
+            &operation,
+            &evidence_bytes,
+            &source_path,
+            &source,
+        )
+        .expect("actual consumed source and resolution evidence");
+        let evidence = source_admission.completed();
         let certified = certify_products(
             None,
             &receipt,
             &parsed,
-            &evidence_bytes,
-            &source_path,
+            &source_admission,
             &capture,
-            &evidence,
-            &source,
             producer,
             &include,
-            None,
             None,
         )
         .unwrap();

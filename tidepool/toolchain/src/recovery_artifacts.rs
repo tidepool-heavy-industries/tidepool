@@ -802,6 +802,11 @@ pub enum RecoveryAdmissionFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("input native decision for {owner:?} refused: {reason:?}")]
+    InputDecision {
+        owner: crate::declaration_join::ExactModuleIdentity,
+        reason: crate::certified_products::InputDecisionRefusal,
+    },
     #[error("completed source evidence for {} failed: {failure:?}", input.display())]
     CompletedSourceEvidence {
         input: PathBuf,
@@ -862,6 +867,9 @@ fn recovery_validation_error(
     use tidepool_repr::execution_schema::ParseError;
     match error {
         CertificationError::Interrupted(error) => RecoveryArtifactError::Io(error),
+        CertificationError::InputDecision { owner, reason } => {
+            RecoveryArtifactError::InputDecision { owner, reason }
+        }
         CertificationError::CompletedSourceEvidence { input, failure } => {
             RecoveryArtifactError::CompletedSourceEvidence { input, failure }
         }
@@ -1016,6 +1024,48 @@ pub fn capture_recovery_artifact_observations<T, E>(
 }
 
 impl RetainedRecoveryArtifactObservations {
+    #[cfg(test)]
+    pub(crate) fn entry_owned_paths(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.files
+            .iter()
+            .filter(|(_, file)| file.owned)
+            .filter_map(|(path, _)| path.strip_prefix(&self.root).ok().map(Path::to_owned))
+            .collect()
+    }
+
+    pub(crate) fn verify_entry_inventory(
+        &self,
+        root: &Path,
+        inventory: &BTreeMap<PathBuf, String>,
+    ) -> Result<(), RecoveryArtifactError> {
+        if fs::canonicalize(root)? != self.root {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        for (path, observed) in self.files.iter() {
+            // Physical membership and semantic witness role are independent:
+            // an external package witness may still live inside this container.
+            let canonical;
+            let relative = match path.strip_prefix(&self.root) {
+                // A lexically owned name must itself remain confined. Do not
+                // turn an escaping symlink into an external dependency.
+                Ok(relative) => relative,
+                Err(_) if observed.owned => return Err(RecoveryArtifactError::InvalidReference),
+                Err(_) => {
+                    canonical = fs::canonicalize(path)?;
+                    match canonical.strip_prefix(&self.root) {
+                        Ok(relative) => relative,
+                        Err(_) => continue,
+                    }
+                }
+            };
+            resolve_owned(root, relative)?;
+            if inventory.get(relative) != Some(&hex(&observed.sha256)) {
+                return Err(RecoveryArtifactError::DigestMismatch(path.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Recheck owned path confinement and every file, including external
     /// package interfaces, without decoding their unchanged certificates.
     pub fn observe(
@@ -1144,6 +1194,37 @@ struct CapturedPackageInterface {
 }
 
 impl PackageInterfaceValidation {
+    /// The entry admission owns one complete verification scope. Physical
+    /// observations leave it only with successfully admitted semantic facts.
+    pub(crate) fn capture_entry<T, E>(
+        root: &Path,
+        inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<(T, RetainedRecoveryArtifactObservations), E> {
+        let mut validation = Self::with_inventory(inventory);
+        validation.observed = Some(BTreeMap::new());
+        let value = operation(&mut validation)?;
+        Ok((
+            value,
+            RetainedRecoveryArtifactObservations {
+                root: root.to_path_buf(),
+                files: Arc::new(validation.observed.take().expect("entry observation scope")),
+            },
+        ))
+    }
+
+    pub(crate) fn record_captured_bytes(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), RecoveryArtifactError> {
+        if self.observed.is_some() {
+            let digest = self.digest(bytes);
+            self.record_observed(path, digest, bytes.len() as u64, true)?;
+        }
+        Ok(())
+    }
+
     fn record_observed(
         &mut self,
         path: &Path,
@@ -1170,6 +1251,13 @@ impl PackageInterfaceValidation {
             );
         }
         Ok(())
+    }
+
+    fn admitted_digest(&mut self, path: &Path, bytes: &[u8]) -> [u8; 32] {
+        match self.observed.as_ref().and_then(|files| files.get(path)) {
+            Some(observed) => observed.sha256,
+            None => self.digest(bytes),
+        }
     }
 
     pub(crate) fn with_inventory(
@@ -1432,7 +1520,8 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    if expected_sha256.is_some_and(|expected| &validation.digest(&bytes) != expected) {
+    if expected_sha256.is_some_and(|expected| &validation.admitted_digest(path, &bytes) != expected)
+    {
         return Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(
             path.to_path_buf(),
         ));
@@ -1478,7 +1567,7 @@ fn read_package_imports(
         ));
     }
     if let Some(expected) = expected_sha256 {
-        if &validation.digest(&bytes) != expected {
+        if &validation.admitted_digest(path, &bytes) != expected {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
         validation.record_observed(path, *expected, bytes.len() as u64, true)?;
@@ -1759,7 +1848,7 @@ fn classify_certification_path_error(error: RecoveryArtifactError) -> RecoveryAr
 fn read_admission_bytes(
     path: &Path,
     limit: u64,
-    validation: &PackageInterfaceValidation,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     crate::host_work::checkpoint()?;
     let file = File::open(path).map_err(|error| {
@@ -1789,6 +1878,7 @@ fn read_admission_bytes(
             path.to_path_buf(),
         ));
     }
+    validation.record_captured_bytes(path, &bytes)?;
     Ok(bytes)
 }
 
@@ -1800,7 +1890,7 @@ fn read_checked(
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     let bytes = read_admission_bytes(path, limit, validation)?;
     validation.read_bytes += bytes.len() as u64;
-    if &validation.digest(&bytes) != expected {
+    if &validation.admitted_digest(path, &bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
     }
     validation.record_observed(path, *expected, bytes.len() as u64, true)?;
@@ -2913,11 +3003,189 @@ pub(crate) fn verify_materialized_join_with_validation(
     })
 }
 
+// This consumer control accepts only an already compiler-certified product;
+// it cannot create one or manufacture source/native authority.
+#[cfg(test)]
+pub(crate) fn check_entry_unsealed_input_observations(product: &CertifiedRecoveryProduct) {
+    let root = tempfile::tempdir().unwrap();
+    let certificate = root.path().join("original.census");
+    let packages = root.path().join("original.packages");
+    fs::write(&certificate, product.certification_bytes()).unwrap();
+    fs::write(&packages, product.package_imports_bytes()).unwrap();
+    let (_, observations) = PackageInterfaceValidation::capture_entry(
+        root.path(),
+        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        )),
+        |validation| {
+            let owner = product.owner();
+            read_certification(&certificate, None, owner, validation)?;
+            read_package_imports(
+                &packages,
+                None,
+                &owner.unit,
+                &owner.module,
+                &owner.skinny_iface_sha256,
+                validation,
+            )?;
+            Ok::<_, RecoveryArtifactError>(())
+        },
+    )
+    .unwrap();
+    let observed = observations.entry_owned_paths();
+    assert!(
+        observed.contains(Path::new("original.census")),
+        "unsealed certification reader escaped capture"
+    );
+    assert!(
+        observed.contains(Path::new("original.packages")),
+        "unsealed package reader escaped capture"
+    );
+    observations
+        .verify_entry_inventory(
+            root.path(),
+            &BTreeMap::from([
+                (
+                    PathBuf::from("original.census"),
+                    hex(&Sha256::digest(product.certification_bytes()).into()),
+                ),
+                (
+                    PathBuf::from("original.packages"),
+                    hex(&Sha256::digest(product.package_imports_bytes()).into()),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(observations
+        .verify_entry_inventory(root.path(), &BTreeMap::new())
+        .is_err());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ciborium::value::Value;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[test]
+    fn entry_observations_bind_consumed_bytes_before_manifest_and_refuse_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        // This primitive control does not establish production reader coverage.
+        for name in ["admitted.bin"] {
+            let path = root.join(name);
+            fs::write(&path, b"admitted").unwrap();
+            let (bytes, observations) = PackageInterfaceValidation::capture_entry(
+                &root,
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
+                |validation| read_admission_bytes(&path, 64, validation),
+            )
+            .unwrap();
+            assert_eq!(bytes, b"admitted");
+            let mut inventory =
+                BTreeMap::from([(PathBuf::from(name), hex(&Sha256::digest(&bytes).into()))]);
+            observations
+                .verify_entry_inventory(&root, &inventory)
+                .unwrap();
+            observations
+                .observe(&root, &mut Default::default())
+                .unwrap();
+            fs::write(&path, b"mutated-after-admission").unwrap();
+            inventory.insert(
+                PathBuf::from(name),
+                hex(&Sha256::digest(b"mutated-after-admission").into()),
+            );
+            assert!(matches!(
+                observations.verify_entry_inventory(&root, &inventory),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            assert!(matches!(
+                observations.observe(&root, &mut Default::default()),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+        }
+        let inside_package = root.join("Package.hi");
+        fs::write(&inside_package, b"package-interface").unwrap();
+        let digest: [u8; 32] = Sha256::digest(b"package-interface").into();
+        let (_, package_observations) = PackageInterfaceValidation::capture_entry(
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
+            |validation| validation.verify(&inside_package, &digest),
+        )
+        .unwrap();
+        // The package reader issues an external witness role. Its physical
+        // presence under raw still requires equality with the entry manifest.
+        assert!(matches!(
+            package_observations.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        package_observations
+            .verify_entry_inventory(
+                &root,
+                &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))]),
+            )
+            .unwrap();
+        #[cfg(unix)]
+        {
+            let aliases = tempfile::tempdir().unwrap();
+            let alias = aliases.path().join("Package.hi");
+            std::os::unix::fs::symlink(&inside_package, &alias).unwrap();
+            let (_, alias_observations) = PackageInterfaceValidation::capture_entry(
+                &root,
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
+                |validation| validation.verify(&alias, &digest),
+            )
+            .unwrap();
+            let stale_inventory = BTreeMap::from([(PathBuf::from("Package.hi"), hex(&[42; 32]))]);
+            assert!(matches!(
+                alias_observations.verify_entry_inventory(&root, &stale_inventory),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            alias_observations
+                .verify_entry_inventory(
+                    &root,
+                    &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))]),
+                )
+                .unwrap();
+        }
+        let external = tempfile::NamedTempFile::new().unwrap();
+        fs::write(external.path(), b"not-owned-by-entry").unwrap();
+        let (_, escaped) = PackageInterfaceValidation::capture_entry(
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
+            |validation| read_admission_bytes(external.path(), 64, validation),
+        )
+        .unwrap();
+        assert!(matches!(
+            escaped.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        let path = root.join("conflicting-read");
+        fs::write(&path, b"first").unwrap();
+        let conflict = PackageInterfaceValidation::capture_entry(
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
+            |validation| {
+                read_admission_bytes(&path, 64, validation)?;
+                fs::write(&path, b"second")?;
+                read_admission_bytes(&path, 64, validation)
+            },
+        );
+        assert!(matches!(
+            conflict,
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+    }
 
     #[cfg(unix)]
     proptest::proptest! {

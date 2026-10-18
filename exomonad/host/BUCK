@@ -857,6 +857,7 @@ rust_filegroup(
         "src/actor_host/fixtures/m3_recursive_root.hs": "exomonad/host/src/actor_host/fixtures/m3_recursive_root.hs",
         "src/actor_host/fixtures/m3_recursive_setup.hs": "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs",
         "src/actor_host/fixtures/narrow_parent_forwarding.hs": "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs",
+        "src/actor_host/fixtures/ordinary_demand_probe.hs": "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
         "src/actor_host/fixtures/persona_snapshot_refusals.hs": "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
@@ -938,6 +939,7 @@ rust_filegroup(
         "src/actor_host/native_prefix_publication_tests.rs": "exomonad/host/src/actor_host/native_prefix_publication_tests.rs",
         "src/actor_host/observation_budget_tests.rs": "exomonad/host/src/actor_host/observation_budget_tests.rs",
         "src/actor_host/operation_observation.rs": "exomonad/host/src/actor_host/operation_observation.rs",
+        "src/actor_host/ordinary_demand_history_tests.rs": "exomonad/host/src/actor_host/ordinary_demand_history_tests.rs",
         "src/actor_host/overlay_resource.rs": "exomonad/host/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "exomonad/host/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/packaged_catalog_tests.rs": "exomonad/host/src/actor_host/packaged_catalog_tests.rs",
@@ -1073,6 +1075,7 @@ tidepool_rust_binary(
         "exomonad/host/src/actor_host/m1_request_reload_tests.rs",
         "exomonad/host/src/actor_host/m1_warm_cell_performance.rs",
         "exomonad/host/src/actor_host/native_prefix_publication_tests.rs",
+        "exomonad/host/src/actor_host/ordinary_demand_history_tests.rs",
         "exomonad/host/src/actor_host/prepared_display_tests.rs",
         "exomonad/host/src/actor_host/prepared_runtime_acceptance.rs",
         "exomonad/host/src/actor_host/recipe_checks/prepared_contract_tests.rs",
@@ -1116,6 +1119,7 @@ tidepool_rust_binary(
         "exomonad/host/src/actor_host/fixtures/m3_recursive_grandchild_reply.hs",
         "exomonad/host/src/actor_host/fixtures/m3_recursive_root.hs",
         "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
         "exomonad/host/src/actor_host/fixtures/request_reload_agent_spec.hs",
         "exomonad/host/src/actor_host/fixtures/retained_handler_agent_spec.hs",
         "exomonad/host/src/actor_host/fixtures/retained_handler_tools.hs",
@@ -2827,6 +2831,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/m3_recursive_root.hs": "src/actor_host/fixtures/m3_recursive_root.hs",
         "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs": "src/actor_host/fixtures/m3_recursive_setup.hs",
         "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs": "src/actor_host/fixtures/narrow_parent_forwarding.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs": "src/actor_host/fixtures/ordinary_demand_probe.hs",
         "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs": "src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
@@ -2908,6 +2913,7 @@ filegroup(
         "exomonad/host/src/actor_host/native_prefix_publication_tests.rs": "src/actor_host/native_prefix_publication_tests.rs",
         "exomonad/host/src/actor_host/observation_budget_tests.rs": "src/actor_host/observation_budget_tests.rs",
         "exomonad/host/src/actor_host/operation_observation.rs": "src/actor_host/operation_observation.rs",
+        "exomonad/host/src/actor_host/ordinary_demand_history_tests.rs": "src/actor_host/ordinary_demand_history_tests.rs",
         "exomonad/host/src/actor_host/overlay_resource.rs": "src/actor_host/overlay_resource.rs",
         "exomonad/host/src/actor_host/overlay_resource/worker.sh": "src/actor_host/overlay_resource/worker.sh",
         "exomonad/host/src/actor_host/packaged_catalog_tests.rs": "src/actor_host/packaged_catalog_tests.rs",
@@ -4011,6 +4017,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6c6f6f6b75705f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
     out = "notebook_lookup_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f64656d616e645f70726f62652e6873",
+    src = "src/actor_host/fixtures/ordinary_demand_probe.hs",
+    out = "ordinary_demand_probe.hs",
     visibility = ["PUBLIC"],
 )
 

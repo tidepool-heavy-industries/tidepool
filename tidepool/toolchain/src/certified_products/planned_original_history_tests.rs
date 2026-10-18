@@ -178,7 +178,6 @@ pub(super) fn issue_planned_original_with_retained_child(
     admitted.modules[0].module = module_name.clone();
     // sourceEvidenceGraph carries retained exact imports in the owner receipt;
     // its fresh dependency graph contains only this newly authored module.
-    let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
     assert_canonical_materialization_premises(context);
     let context = Arc::new(context.clone());
     let request = context
@@ -227,7 +226,7 @@ pub(super) fn issue_planned_original_with_retained_child(
         .admit_source(&input, &source, &evidence_bytes)
         .unwrap();
     let home_imports = source_admission.home_imports()?;
-    assert_eq!(source_admission.evidence.modules.len(), 1);
+    assert_eq!(source_admission.evidence().modules.len(), 1);
     assert_eq!(
         home_imports[&crate::declaration_join::ExactModuleIdentity {
             unit: "main".into(),
@@ -308,14 +307,21 @@ pub(super) fn issue_planned_original_with_retained_child(
         None,
         &packet,
         &parsed,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    &source,
+                    &evidence_bytes,
+                    (&parsed).operation(),
+                )
+                .unwrap(),
+        ),
         root,
-        &normalized,
-        &source,
         producer,
         include,
-        Some(&exact),
         Some(&authored),
     )
     .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
@@ -356,7 +362,6 @@ pub(super) fn issue_planned_original_with_source_value(
     std::fs::write(&input, &source).unwrap();
     let mut admitted = evidence(&source);
     admitted.modules[0].module = module_name.clone();
-    let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
     let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
     let context = Arc::new(
         ExactDeclarationContext::new(&[], &[], vec![])
@@ -439,14 +444,21 @@ pub(super) fn issue_planned_original_with_source_value(
         None,
         &packet,
         &parsed,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    &source,
+                    &evidence_bytes,
+                    (&parsed).operation(),
+                )
+                .unwrap(),
+        ),
         root,
-        &normalized,
-        &source,
         producer,
         include,
-        Some(&exact),
         Some(&authored),
     )
     .unwrap();

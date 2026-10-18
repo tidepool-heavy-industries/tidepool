@@ -1117,8 +1117,8 @@ fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscribe
         CampaignTraceProfile::Full => {
             "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
              tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
-             exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
-             tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
+             exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,tidepool_runtime::prepared=debug,\
+             tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=debug,\
              tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
              tidepool_runtime::activation_renderer_install=info,tidepool_extract_cmd::endpoint=debug,\
              exomonad_actor::request=info,tidepool_toolchain::module_candidates=debug,\
@@ -2848,7 +2848,9 @@ mod tests {
                         profile,
                         writer: None,
                     }
-                    .emit()
+                    .emit();
+                    tracing::debug!(target: "tidepool_runtime::prepared", "source-work-profile-control");
+                    tracing::debug!(target: "tidepool_codegen::image_registry", "image-work-profile-control");
                 });
             });
             let captured = std::fs::read_to_string(path).unwrap();
@@ -2864,6 +2866,13 @@ mod tests {
             assert_eq!(applied["fields"]["profile"], profile.name());
             assert_eq!(applied["fields"]["filter_contract"], 1);
             assert_eq!(applied["span"]["name"], "host_run");
+            for message in ["source-work-profile-control", "image-work-profile-control"] {
+                assert_eq!(
+                    rows.iter().any(|row| row["fields"]["message"] == message),
+                    profile == CampaignTraceProfile::Full,
+                    "complete work details belong to the full profile"
+                );
+            }
         }
     }
 

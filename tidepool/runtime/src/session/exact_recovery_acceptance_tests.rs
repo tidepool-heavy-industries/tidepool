@@ -529,6 +529,45 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     ));
 }
 
+fn capture_earned_context(
+    producer: &mut PersistentSession,
+    source: ScopeId,
+    public_owner: RecoveryPublicOwner,
+) -> (ScopeId, tidepool_toolchain::exact_context::ContextRoot) {
+    let original = producer
+        .lib()
+        .current_exact_context_in(source)
+        .expect("the actual authored declaration issued a compiler context");
+    assert!(!original.compiler_input_roles().is_empty());
+    let selection = original.snapshot().graph_selection().unwrap();
+    let child = producer.mint_detached_scope(source).unwrap();
+    let before = producer.public_visibility_snapshot_in(child).unwrap();
+    let (outcome, work) = super::recovery::observe_context_materialization(|| {
+        producer.initialize_durable_public_scope(public_owner.clone(), child)
+    });
+    assert!(matches!(outcome.unwrap(), PublicManifestCommit::Durable));
+    assert_eq!(work, super::recovery::ContextMaterializationWork::default());
+    let after = producer.public_visibility_snapshot_in(child).unwrap();
+    assert_eq!(after.bindings, before.bindings);
+    assert_eq!(after.source_instances, before.source_instances);
+    assert_eq!(after.declaration_tip, before.declaration_tip);
+    assert_eq!(after.epoch, before.epoch + 1);
+    let captured = producer.lib().current_exact_context_in(child).unwrap();
+    assert!(Arc::ptr_eq(&original, &captured));
+    assert_eq!(captured.snapshot().graph_selection().unwrap(), selection);
+    let root = graph(producer.lib())
+        .surface(&public_owner)
+        .unwrap()
+        .unwrap()
+        .context_root
+        .clone()
+        .expect("a nonempty published context has a durable root");
+    eprintln!(
+        "earned context capture owner={public_owner:?} scope={child:?} root={root:?} work={work:?}"
+    );
+    (child, root)
+}
+
 #[test]
 fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_dependencies_and_retractions(
 ) {
@@ -574,11 +613,76 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         &effects,
         include_str!("fixtures/recovery-original.hs"),
     );
+    let (retained_a, root_a) =
+        capture_earned_context(&mut producer, admission.private_scope(), owner(41));
     let dependent = adopt_recovery_declaration(
         &mut producer,
         admission.clone(),
         &effects,
         include_str!("fixtures/recovery-dependent.hs"),
+    );
+    let (retained_b, root_b) =
+        capture_earned_context(&mut producer, admission.private_scope(), owner(42));
+    assert_ne!(
+        root_a, root_b,
+        "the dependent declaration changes exact compiler facts"
+    );
+    let (retained_a_again, root_a_again) =
+        capture_earned_context(&mut producer, retained_a, owner(43));
+    assert_ne!(retained_a_again, retained_b);
+    assert_eq!(
+        root_a_again, root_a,
+        "a historical child retains A after parent B"
+    );
+    let refused_child = producer.mint_detached_scope(retained_a).unwrap();
+    let before_refusal = producer
+        .public_visibility_snapshot_in(refused_child)
+        .unwrap();
+    let store_before = domain_state(producer.lib());
+    let exact_before = producer
+        .lib()
+        .current_exact_context_in(refused_child)
+        .unwrap();
+    recovery
+        .store
+        .inject_fault(super::recovery_store::StoreFault::BeforeCommit);
+    let (refused, work) = super::recovery::observe_context_materialization(|| {
+        producer.initialize_durable_public_scope(owner(44), refused_child)
+    });
+    assert!(matches!(
+        refused.unwrap(),
+        PublicManifestCommit::Refused { .. }
+    ));
+    assert_eq!(work, super::recovery::ContextMaterializationWork::default());
+    assert_eq!(
+        producer.public_visibility_snapshot_in(refused_child),
+        Some(before_refusal)
+    );
+    assert_eq!(domain_state(producer.lib()), store_before);
+    assert!(graph(producer.lib()).surface(&owner(44)).unwrap().is_none());
+    assert!(Arc::ptr_eq(
+        &producer
+            .lib()
+            .current_exact_context_in(refused_child)
+            .unwrap(),
+        &exact_before,
+    ));
+    let (retried, retry_work) = super::recovery::observe_context_materialization(|| {
+        producer.initialize_durable_public_scope(owner(44), refused_child)
+    });
+    assert!(matches!(retried.unwrap(), PublicManifestCommit::Durable));
+    assert_eq!(
+        retry_work,
+        super::recovery::ContextMaterializationWork::default()
+    );
+    assert_eq!(
+        graph(producer.lib())
+            .surface(&owner(44))
+            .unwrap()
+            .unwrap()
+            .context_root
+            .as_ref(),
+        Some(&root_a),
     );
     tidepool_testing::with_settlement(|settlement| {
         producer.retract_in(admission.private_scope(), "HiddenResult", settlement)

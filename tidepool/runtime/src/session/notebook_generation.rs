@@ -145,8 +145,7 @@ impl ActiveNotebookGeneration {
 pub(crate) struct PreparedGenerationSource {
     pub(crate) selection:
         std::sync::Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
-    pub(crate) context:
-        std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    pub(crate) context: super::recovery::ScopedCompilerContext,
 }
 
 /// Prepared under one session view; only commit can publish its issued owner.
@@ -154,7 +153,7 @@ pub struct PreparedNotebookGeneration {
     pub(crate) owner_stamp: super::OwnerStamp,
     pub(crate) domain: super::RecoveryDomainId,
     pub(crate) database_id: [u8; 16],
-    pub(crate) staged: super::recovery::StagedRecoveryManifest,
+    pub(crate) staged: super::recovery::StagedCompilerContextPublication,
     pub(crate) scope: ScopeId,
     pub(crate) epoch: u64,
     pub(crate) snapshot: super::PublicVisibilitySnapshot,

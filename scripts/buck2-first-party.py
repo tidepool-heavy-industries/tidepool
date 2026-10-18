@@ -1631,7 +1631,7 @@ tidepool_buildscript_run(
         env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
         unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-toolchain":
-            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},'
+            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},'
         if package_name == "tidepool":
             unit_extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         if package_name == "exomonad-host":
@@ -1664,6 +1664,7 @@ tidepool_buildscript_run(
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_source_proof_pairing_test",',
+                '    case_compiler_modes = {"artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
@@ -1679,6 +1680,20 @@ tidepool_buildscript_run(
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "declaration_join::authored_tests::accepted_join_preserves_selected_dependencies_with_historical_interface_custody",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_catalog_captured_inputs_test", unit=True)
+            env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
+            resources.append("//build/package:native_catalog")
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_catalog_captured_inputs_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "artifacts::module_product_tests::real_deployment_package_reuses_cohort_and_invalidates_source_shadow",',
                 "    ],", "    expected_count = 1,", "    ignored = True,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                 runtime_arguments(env, resources, worker),

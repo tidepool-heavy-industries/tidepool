@@ -59,14 +59,11 @@ pub(super) fn issued_original(
         None,
         &packet,
         &parsed,
-        &worker,
-        &input,
+        &crate::artifacts::admit_compiler_source((&parsed).operation(), &worker, &input, &source)
+            .unwrap(),
         root,
-        &CompletedSourceEvidence::from_normalized(complete, &source).unwrap(),
-        &source,
         &[3; 32],
         &[root.to_path_buf()],
-        None,
         None,
     )
     .unwrap();

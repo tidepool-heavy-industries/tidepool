@@ -65,6 +65,8 @@ mod embedded_service;
 mod form_output;
 mod operation_observation;
 #[cfg(test)]
+mod ordinary_demand_history_tests;
+#[cfg(test)]
 mod scaffold_admission_tests;
 
 #[cfg(test)]

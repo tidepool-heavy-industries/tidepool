@@ -60,7 +60,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
@@ -80,6 +80,7 @@ import Tidepool.ExecutionProjection
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductBinders, rawOriginalProductDemands
+  , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings )
 import Tidepool.ExecutionSchema
@@ -121,7 +122,8 @@ import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
   ( readTimingEnabled, timePhase, timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), emitCount
   , ReuseContext, ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
-  , ReuseVersionKind(..), emitReuse, emitReuseComplete )
+  , ReuseVersionKind(..), emitReuse, emitReuseComplete
+  , ProjectionObservation, OriginalGroupWork(..), emitOriginalGroupWork )
 
 -- The production worker and original-product fixtures share the compiler
 -- profile and native package/type authorities. Callers select only their real
@@ -235,9 +237,15 @@ data PreparedProductContext = PreparedProductContext
 -- This owner issues the batch only after original Core, exact interface bytes,
 -- and package witnesses have passed the publication checks. The writer consumes
 -- these same immutable encodings rather than making a second availability choice.
+data ObservedOriginalProduct = ObservedOriginalProduct
+  ModuleProductEncoding (Maybe ProjectionObservation)
+
+originalProductEncoding :: ObservedOriginalProduct -> ModuleProductEncoding
+originalProductEncoding (ObservedOriginalProduct encoding _) = encoding
+
 data CurrentOriginalInventory = CurrentOriginalInventory
   { currentOriginalAvailability :: Map.Map (String,String) ProductAvailability
-  , currentOriginalProducts :: [ModuleProductEncoding]
+  , currentOriginalProducts :: [ObservedOriginalProduct]
   , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
   , currentOriginalFinalized :: FinalizedModuleArtifacts
     -- Kept with these immutable products through item output selection; both
@@ -252,7 +260,7 @@ currentOriginalBinders :: CurrentOriginalInventory -> Set.Set SymbolIdentity
 currentOriginalBinders inventory = Set.fromList (Map.elems (currentOriginalExternalNames inventory))
   `Set.union` Set.fromList
   [binder | product' <- currentOriginalProducts inventory
-    , let (_,_,_,groups) = moduleProductInput product'
+    , let (_,_,_,groups) = moduleProductInput (originalProductEncoding product')
     , group <- groups, binder <- projectedBinders group]
 
 -- Entries and auxiliary roots retain their complete original recursive group.
@@ -264,7 +272,7 @@ currentOriginalBindingsExcept inventory roots = Map.union (currentOriginalExtern
   where
     imported = Set.fromList
       [binder | product' <- currentOriginalProducts inventory
-        , let (_,_,_,groups) = moduleProductInput product'
+        , let (_,_,_,groups) = moduleProductInput (originalProductEncoding product')
         , group <- groups
         , Set.null (Set.fromList (projectedBinders group) `Set.intersection` roots)
         , binder <- projectedBinders group]
@@ -300,7 +308,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
         (compilationScope <$> preparedExactCompilation prepared)
         [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
-          | product <- products, let (unit,name,_,groups) = moduleProductInput product])
+          | product <- products, let (unit,name,_,groups) = moduleProductInput (originalProductEncoding product)])
       let inventory = CurrentOriginalInventory
             { currentOriginalAvailability = availability
             , currentOriginalProducts = products
@@ -457,13 +465,18 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner = case exact of
+      acquireOriginal siblings owner producer missing = case exact of
         Nothing -> pure Nothing
         Just scope -> do
           when (any (\original -> (originalUnit original,originalModule original) ==
               (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
             (fail ("required binder is absent from the admitted original native census: "
-              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              ++ "; producing module: "
+              ++ show (unitString (moduleUnit producer),moduleNameString (moduleName producer))
+              ++ "; missing binders: " ++ show (Set.toAscList (Set.filter (\identity ->
+                symbolUnit identity == T.pack (unitString (moduleUnit owner))
+                  && symbolModule identity == T.pack (moduleNameString (moduleName owner))) missing))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -485,6 +498,8 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
           projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
         report RawProjection (if hit then ReuseHit else ReuseMiss)
           (if hit then Matched else Recovery) version (if hit then Just 0 else Nothing)
+        observeRawOriginalGroupWork timing reuse
+          (if hit then RawProjectionReused else RawProjectionAcquired) raw
         unless hit (report RawProjection ReuseWork Recovery version Nothing)
         atomicModifyIORef' workRef (\(projected,hits) ->
           (if hit then (projected,hits + 1) else (projected + 1,hits),()))
@@ -497,8 +512,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modules <- readIORef modulesRef
         attempted <- readIORef attemptedRef
         known <- readIORef knownRef
-        let pending = Set.toAscList (Set.fromList
-              [owner | identity <- Set.toAscList (rawOriginalProductDemands raw `Set.difference` known)
+        let missing = rawOriginalProductDemands raw `Set.difference` known
+            pending = Set.toAscList (Set.fromList
+              [owner | identity <- Set.toAscList missing
                 , let owner = mkModule
                         (stringToUnit (T.unpack (symbolUnit identity)))
                         (mkModuleName (T.unpack (symbolModule identity)))
@@ -508,7 +524,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> do
-          original <- acquireOriginal siblings owner
+          original <- acquireOriginal siblings owner (rawOriginalProductOwner raw) missing
           let version = ownerVersion interfaces owner
           -- A present canonical owner checks the current artifact bytes. A
           -- prepared hit avoids decoding and lowering, not validation work.
@@ -710,10 +726,11 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     (finalized,finalizedOutputs) <- materializeFinalizedModuleArtifactsWithOutputs outDir capturedFinalization
     let inventory = issued >>= preparedCurrentOriginalInventory
         availability = maybe Map.empty currentOriginalAvailability inventory
-        freshProducts = maybe [] currentOriginalProducts inventory
+        freshEncodings = maybe [] currentOriginalProducts inventory
+        freshProducts = map originalProductEncoding freshEncodings
         productPackages = maybe Map.empty currentOriginalPackages inventory
     (productBytes,inventoryOutputs) <- timeDetailPhase timing "module_products" "write_products" $
-      writeProductInventory outDir freshProducts
+      writeProductInventory outDir freshEncodings
         [(unit,name,bytes) | ((unit,name),bytes) <- Map.toAscList productPackages]
     let withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
@@ -806,7 +823,7 @@ admitModuleProducts :: OriginalInterfaceArtifacts -> PreparedProductContext
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
-         [ModuleProductEncoding], Map.Map (String,String) BS.ByteString)
+         [ObservedOriginalProduct], Map.Map (String,String) BS.ByteString)
 admitModuleProducts originalInterfaces productContext finalized interfaces packageRoots = do
   let inventory = preparedProductInventory productContext
   timing <- readTimingEnabled
@@ -870,14 +887,19 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
         ioError (userError "direct package import witness exceeds four MiB")
       let encoded = prepareModuleProductEncodingFromGroups
             (T.pack (fst key)) (T.pack (snd key)) bytes groups
-      pure (key, ProductReady, Just encoded, Just sidecar)
+          observation = do
+            raw <- preparedRawProducts productContext
+            case filter ((== owner) . rawOriginalProductOwner) raw of
+              [selected] -> rawProjectionObservation selected
+              _ -> Nothing
+      pure (key, ProductReady, Just (ObservedOriginalProduct encoded observation), Just sidecar)
 
 -- Interface-only captures emit the same valid inventory framing with no native
 -- rows. Product absence never prevents retaining the actual finalization.
-writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO (BS.ByteString,[(FilePath,BS.ByteString)])
+writeProductInventory :: FilePath -> [ObservedOriginalProduct] -> [(String,String,BS.ByteString)] -> IO (BS.ByteString,[(FilePath,BS.ByteString)])
 writeProductInventory outDir products packageBundles = do
   timing <- readTimingEnabled
-  let productBytes = encodeModuleProductInventory products
+  let productBytes = encodeModuleProductInventory (map originalProductEncoding products)
       packageBytes = toStrictByteString (encodeListLen 3
         <> encodeString (T.pack "TPPKGBUNDLES") <> encodeWord 1
         <> encodeListLen (fromIntegral (length packageBundles))
@@ -886,6 +908,12 @@ writeProductInventory outDir products packageBundles = do
           <> encodeBytes sidecar) packageBundles)
   timeDetailPhase timing "module_products" "encode_products" $
     BS.writeFile (outDir </> "module-products.cbor") productBytes
+  when timing $ forM_ products $ \(ObservedOriginalProduct encoding observation) -> do
+    let (unit,owner,_,groups) = moduleProductInput encoding
+    emitOriginalGroupWork timing Nothing AcceptedOriginalOutput (T.unpack unit) (T.unpack owner)
+      observation (map projectedOriginalOrdinal groups) []
+      (Just (outDir </> "module-products.cbor")) Nothing
+  emitCount timing "original_inventory_written_bytes" (fromIntegral (BS.length productBytes))
   timeDetailPhase timing "module_products" "encode_package_bundles" $
     BS.writeFile (outDir </> "module-package-imports.cbor") packageBytes
   pure (productBytes,
@@ -930,7 +958,7 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
-              retained = map originalIdentity (scopeProducts scope)
+              retained = map originalIdentity (scopeRecipeOriginals scope)
                 ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
                     (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
                     (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
@@ -1035,7 +1063,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
   (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached outputWrites) finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
-  admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
+  admitted <- extendExactScopeGeneration cached additions (map CompilerOriginal pendingProducts) pendingLexical >>= either fail pure
   promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
@@ -1202,7 +1230,8 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       writeFresh outputWrites productPath productBytes
-      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+      extendExactScopeGeneration scope [] [if Map.member key (certifiedRetainedOriginals certified)
+        then PrivateNative original else CompilerOriginal original] [] >>= either fail pure
     writeFresh outputWrites path bytes = do
       BS.writeFile path bytes
       modifyIORef' outputWrites (++ [(path,bytes)])

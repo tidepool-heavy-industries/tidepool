@@ -89,6 +89,10 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         .prepare_compilation(&scratch.path().join("base"), &producer)
         .unwrap();
     let mut issued_row_counts = vec![base.materialization.as_ref().unwrap().rows.len()];
+    let mut previous_artifacts = base.artifacts.clone();
+    let mut directory_files = vec![private_directory_file_bytes(
+        base.materialization.as_ref().unwrap().directory().path(),
+    )];
     let mut owners = vec![Arc::downgrade(base.materialization.as_ref().unwrap())];
     let mut directories = vec![base
         .materialization
@@ -156,7 +160,56 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
             1,
             "growing contexts still store one new row"
         );
-        assert_eq!(owner._parents.len(), 1, "full-context deltas remain shared");
+        assert!(owner.rows.contains_key(&ids[index]));
+        for artifact in &previous_artifacts {
+            assert!(request.artifacts.contains(artifact));
+        }
+        let mut stored_rows = 0;
+        let mut physical_sources = BTreeSet::new();
+        owner.visit_owners(&mut BTreeSet::new(), &mut |ancestor| {
+            stored_rows += ancestor.rows.len();
+            for (id, row) in &ancestor.rows {
+                let native = match &row.payload {
+                    RetainedArtifactPayload::InterfaceOnly => None,
+                    RetainedArtifactPayload::Native {
+                        product,
+                        certification_path,
+                        ..
+                    } => Some((product.path.clone(), certification_path.clone())),
+                };
+                physical_sources.insert((
+                    *id,
+                    row._directory.path().to_path_buf(),
+                    row.interface.path.clone(),
+                    native,
+                ));
+            }
+        });
+        assert_eq!(
+            stored_rows,
+            issued_row_counts.iter().sum::<usize>() + 1,
+            "retained row metadata grows only with newly issued physical rows"
+        );
+        assert_eq!(
+            stored_rows,
+            physical_sources.len(),
+            "physical rows have one retained metadata owner"
+        );
+        for (root, files) in directories.iter().zip(&directory_files) {
+            assert_eq!(&private_directory_file_bytes(root), files);
+        }
+        let new_files = private_directory_file_bytes(owner.directory().path());
+        let new_bytes = new_files
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+        assert_eq!(
+            owner.payload_work.written_bytes, new_bytes,
+            "only newly issued payloads are written"
+        );
+        assert!(new_bytes > 0);
+        directory_files.push(new_files);
+        previous_artifacts = request.artifacts.clone();
         issued_row_counts.push(owner.rows.len());
         owners.push(Arc::downgrade(owner));
         directories.push(owner.directory().path().to_path_buf());
@@ -530,10 +583,8 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     // the production host input/materialization owners without pretending to
     // qualify a compiler endpoint whose producer bytes cannot match it.
     let extend = |context: &Arc<ExactDeclarationContext>, module: &str| {
-        let product = crate::certified_products::fixture_finalized_product(
-            support_product(module),
-            [7; 32],
-        );
+        let product =
+            crate::certified_products::fixture_finalized_product(support_product(module), [7; 32]);
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
             std::slice::from_ref(&product),
         )
@@ -542,7 +593,10 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         assert_eq!(recovered.owner(), product.owner());
         assert_eq!(recovered.interface_bytes(), product.interface_bytes());
         assert_eq!(recovered.product_bytes(), product.product_bytes());
-        assert_eq!(recovered.certification_bytes(), product.certification_bytes());
+        assert_eq!(
+            recovered.certification_bytes(),
+            product.certification_bytes()
+        );
         assert_eq!(
             crate::certified_products::original_available_groups(&recovered)
                 .unwrap()
@@ -680,7 +734,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     }
     let mut captured = next.as_ref().clone();
     let selected = support
-        .retain_custody(&inputs.artifacts)
+        .retain_custody(inputs.artifacts())
         .unwrap()
         .select_support_roots(roots)
         .unwrap();

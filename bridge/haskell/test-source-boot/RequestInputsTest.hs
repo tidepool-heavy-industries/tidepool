@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -339,6 +339,19 @@ missingCapturedProofPartsRefuse scope = do
       (fail ("captured canonical promotion read a missing part from disk: " ++ missing))
     unchanged <- BS.readFile missing
     unless (unchanged == trap) (fail "refused canonical promotion changed its readable trap")
+
+-- This reached-reader control needs an actual admitted canonical proof, not a
+-- reconstructed native scope or a replacement owned acquisition envelope.
+capturedCanonicalPromotionRefusesReadableMissingInputs :: IO ()
+capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> do
+  forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "CanonicalSource.hs") [work] Nothing
+  fixture <- capturePreparedFixture work original
+  path <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+  scope <- readExactScope path >>= either fail pure
+  missingCapturedProofPartsRefuse scope
 
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->

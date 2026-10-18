@@ -216,8 +216,12 @@ New acquisition validates the catalog, every artifact, canonical companion and
 source observation. Borrowing uses the captured original bytes and single decoded
 products until release or reload; it checks current source/import witnesses,
 package interfaces and exact declaration compatibility without reauthenticating
-the static acquired image. Private compiler paths are materialized once by that
-owner, and certified originals retain their custody after a run is released.
+the static acquired image. Catalog receiving aliases name sealed captured parts and never promise readable
+payload files. Catalog acquisition keeps one eager arena, including native Census
+and execution graphs, and creates no duplicate payload tree. Continued requests
+consume those parts strictly; selected exact-context writers and GHC mutable
+interface views remain separate materializers. Certified originals retain their
+captured custody after a run is released.
 Deployment records share a dependency proof only after every distinct physical
 evidence file authenticates its exact SHA-256 and length. Each fresh source
 validation stage walks shared proofs once, including negative import witnesses.
@@ -254,6 +258,12 @@ using the compiler request's exact issued availability. Carry that evidence into
 issuance before validation; do not attach it afterward or reconstruct it from
 all retained artifacts. Temporary private issuance must restore the caller's
 namespace and executable roots while retaining the exact dependency bindings.
+Certified admission keeps issued availability attached to its opaque owner;
+only a demanded key may consume its checked exact closure. A carrier-only view
+cannot authenticate that offer's Group proof. Raw inherited constraints of a new
+product still require their original receiving-view validation; an issued input
+miss cannot enter fresh graph issuance. Regressions cross `bind_segment` and
+actual target admission, rather than querying a carrier view as an offer owner.
 Adding issued offer custody preserves the receiving namespace exactly. Historical
 canonical interfaces may coexist in separate authenticated scopes; uniqueness
 applies to selected compiler roles, not every retained payload. Compiler input
@@ -284,7 +294,13 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Older snapshots require regeneration.
+Context snapshots use version 4 and persist the input issuer's per-original
+decision domain alongside compact exact Group references. An explicitly empty
+decision differs from no issued choice; neither grants native availability or
+executes a group. Older context versions require regeneration and are refused.
+Custody attachment preserves these decisions, narrowing withdraws removed
+choices, and only the checked publication endorsement can rebind a decision to
+its new published role. Arbitrary role replacement cannot inherit a choice.
 
 Compiler transport combines authenticated body availability while retaining each
 offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct
@@ -292,6 +308,11 @@ issuance scopes; transport neither selects nor collapses those bindings. Full
 availability requires an individual offer's complete proof. Combining issued
 subsets cannot create Full. The inventory owns execution selection through exact
 root and carrier choices, and refuses any remaining demand ambiguity.
+An interface-only role may consume an existing Full body's exact canonical and
+carrier qualification without selecting an Original role or executable roots.
+Transport refuses different Original payloads competing for one compiler owner.
+Multiple qualified histories for the same payload remain available; a demanded
+execution binding requires an exact choice among their carrier and group issuers.
 Target admission uses exact offered graph candidates before explicit execution
 root qualification. Retained custody cannot fill an empty or partial request
 offer, including dependency-only originals absent from its compiler namespace.
@@ -306,6 +327,10 @@ Full with no demand, and divergent carried availability and selected demand.
 Check exact scoped execution and refusal of unqualified ambiguous demand,
 unavailable dependencies and conflicting selected products or interfaces. Run
 the owning toolchain target and a real actor/compiler consumer on the join.
+Histories assert demanded identities and edges, physical work, and lifetime
+through the real owner operation; internal parent counts or diagnostic rendering
+are observations, not the behavioral contract. Investigate a failing oracle
+against that producer-to-consumer contract before changing its expectation.
 
 Fixture imports read exact binder identities from authenticated original-group
 definitions. Ordinals and naming patterns do not issue binder identity.

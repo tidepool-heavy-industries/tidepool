@@ -380,14 +380,21 @@ fn certify_promotion(
         None,
         &packet,
         parsed,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (parsed).operation(),
+                )
+                .unwrap(),
+        ),
         root,
-        &CompletedSourceEvidence::from_normalized(evidence.clone(), target_source).unwrap(),
-        target_source,
         producer,
         include,
-        Some(&exact),
         None,
     )
     .unwrap()
@@ -423,8 +430,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         sha256: hex(&sha(target_source.as_bytes())),
     });
     let initial_evidence_bytes = serde_json::to_vec(&initial_worker).unwrap();
-    let normalized =
-        CompletedSourceEvidence::from_normalized(initial_worker.clone(), target_source).unwrap();
     let parsed = ParsedModuleProducts::decode(&initial_bytes, &package_bundle()).unwrap();
     assert_eq!(parsed.products().len(), 2);
     let accepted = ordinary_receipts(&initial_bytes, &parsed, &initial_worker);
@@ -439,14 +444,16 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &packet,
         &parsed,
-        &initial_evidence_bytes,
-        &initial_input,
+        &crate::artifacts::admit_compiler_source(
+            (&parsed).operation(),
+            &initial_evidence_bytes,
+            &initial_input,
+            target_source,
+        )
+        .unwrap(),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        None,
         None,
     )
     .unwrap();
@@ -489,8 +496,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
     // retained Core rather than observed as fresh source modules.
     let mut current_evidence = evidence(target_source);
     current_evidence.modules[0].module = "Target".into();
-    let normalized =
-        CompletedSourceEvidence::from_normalized(current_evidence.clone(), target_source).unwrap();
     let mut worker = current_evidence.clone();
     worker.sources.last_mut().unwrap().path = input.clone();
     let complete_evidence = serde_json::to_vec(&worker).unwrap();
@@ -595,35 +600,49 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &failed,
         &promoted,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&promoted).operation()
+                )
+                .unwrap()
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
-        None
+        None,
     )
     .is_err());
     let certified = certify_products(
         None,
         &promoted_packet,
         &promoted,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&promoted).operation(),
+                )
+                .unwrap(),
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
         None,
     )
     .unwrap();
     let selected_owners = certified
         .source_selection
-        .selected_original_owners()
+        .receipt_native_body_owners()
         .cloned()
         .collect::<BTreeSet<_>>();
     assert_eq!(selected_owners.len(), 2);
@@ -736,17 +755,25 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &validation.inventory,
     )
     .unwrap();
+    let inventory = validation.inventory.clone();
+    let bound_source = exact
+        .source
+        .match_product(
+            exact.request,
+            &input,
+            target_source,
+            &evidence_bytes,
+            &inventory,
+        )
+        .unwrap();
     let shared = CertifiedSegmentOriginals::issue(
         shared_raw,
         shared_receipt,
-        &evidence_bytes,
-        &input,
+        bound_source,
         root.path(),
-        target_source,
         &producer,
         &include,
         None,
-        &exact,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
         &mut validation,
@@ -802,7 +829,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert_eq!(
             selected
                 .source_selection
-                .selected_original_owners()
+                .receipt_native_body_owners()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             selected_owners
@@ -951,14 +978,21 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &promoted_packet,
         &independent,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&independent).operation(),
+                )
+                .unwrap(),
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
         None,
     )
     .unwrap();
@@ -1090,14 +1124,21 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &changed_import,
         &promoted,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&promoted).operation()
+                )
+                .unwrap()
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
         None,
     )
     .is_err());
@@ -1113,14 +1154,21 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &duplicate,
         &promoted,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&promoted).operation()
+                )
+                .unwrap()
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
         None,
     )
     .is_err());
@@ -1131,15 +1179,22 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &changed_source,
         &promoted,
-        &evidence_bytes,
-        &input,
+        &crate::artifacts::SourceEvidenceAdmission::from_exact(
+            (&exact)
+                .source
+                .match_product(
+                    (&exact).request,
+                    &input,
+                    target_source,
+                    &evidence_bytes,
+                    (&promoted).operation()
+                )
+                .unwrap()
+        ),
         root.path(),
-        &normalized,
-        target_source,
         &producer,
         &include,
-        Some(&exact),
-        None
+        None,
     )
     .is_err());
     let first_a_owner = current_a.owner().clone();
@@ -1189,7 +1244,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         );
         let selected = next
             .source_selection
-            .selected_original_owners()
+            .receipt_native_body_owners()
             .cloned()
             .collect::<BTreeSet<_>>();
         assert_eq!(selected.len(), 2);
