@@ -193,10 +193,24 @@ impl InferenceConfig {
             .iter()
             .map(|name| (name.clone(), resolved[name].clone()))
             .collect();
-        let providers = models
+        let providers: BTreeMap<_, _> = models
             .values()
             .map(|m| (m.provider.clone(), self.providers[&m.provider].clone()))
             .collect();
+        // OpenAI account selection belongs to the run, not a provider key.
+        // Several models may share that account owner through one provider.
+        let openai_providers = providers
+            .iter()
+            .filter(|(_, provider)| provider.backend == Backend::OpenAIPlan)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        if openai_providers.len() > 1 {
+            return Err(format!(
+                "profile {} selects multiple OpenAI providers ({}); OpenAI account selection is shared by the run, so reference one shared provider key from all OpenAI models",
+                self.profile,
+                openai_providers.join(", ")
+            ));
+        }
         let mut catalog = ResolvedCatalog {
             identity: String::new(),
             primary: profile.default.clone(),
@@ -492,6 +506,123 @@ mod tests {
         config.models.get_mut("flash").unwrap().effort = "high".into();
         config.providers.get_mut("deepseek").unwrap().credential_env = Some("OTHER_KEY".into());
         assert_ne!(initial.identity, config.resolve().unwrap().identity);
+    }
+
+    fn add_openai_model(config: &mut InferenceConfig, key: &str, provider: &str, path: &str) {
+        config.providers.insert(
+            provider.into(),
+            ProviderConfig {
+                backend: Backend::OpenAIPlan,
+                credential_file: Some(path.into()),
+                credential_env: None,
+                endpoint: None,
+                inference_limits: InferenceLimitOverrides::default(),
+            },
+        );
+        config.models.insert(
+            key.into(),
+            ModelConfig {
+                provider: provider.into(),
+                model: format!("gpt-{key}"),
+                constructor: format!("OpenAI{key}"),
+                effort: "low".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn selected_profile_refuses_multiple_openai_providers_regardless_of_credential_location() {
+        for (first, second) in [
+            ("/not-read/accounts/one.json", "/not-read/accounts/two.json"),
+            ("/not-read/one/account.json", "/not-read/two/account.json"),
+            (
+                "/not-read/accounts/same.json",
+                "/not-read/accounts/same.json",
+            ),
+        ] {
+            let mut config = fixture_config();
+            add_openai_model(&mut config, "One", "openai-one", first);
+            add_openai_model(&mut config, "Two", "openai-two", second);
+            config
+                .profiles
+                .get_mut("work")
+                .unwrap()
+                .allowed
+                .extend(["One".into(), "Two".into()]);
+            assert_eq!(
+                config.resolve().unwrap_err(),
+                "profile work selects multiple OpenAI providers (openai-one, openai-two); OpenAI account selection is shared by the run, so reference one shared provider key from all OpenAI models"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_profile_admits_multiple_openai_models_sharing_one_provider() {
+        let mut config = fixture_config();
+        add_openai_model(
+            &mut config,
+            "One",
+            "openai",
+            "/not-read/accounts/openai.json",
+        );
+        let mut second = config.models["One"].clone();
+        second.model = "gpt-two".into();
+        second.constructor = "OpenAITwo".into();
+        config.models.insert("Two".into(), second);
+        let profile = config.profiles.get_mut("work").unwrap();
+        profile.default = "One".into();
+        profile.allowed.extend(["One".into(), "Two".into()]);
+        let catalog = config.resolve().unwrap();
+        assert_eq!(catalog.primary, "One");
+        assert_eq!(catalog.providers.len(), 2);
+        assert_eq!(catalog.models["One"].provider, "openai");
+        assert_eq!(catalog.models["Two"].provider, "openai");
+        assert_eq!(catalog.models["One"].model.value(), "gpt-One");
+        assert_eq!(catalog.models["Two"].model.value(), "gpt-two");
+    }
+
+    #[test]
+    fn unselected_openai_providers_do_not_block_the_selected_profile() {
+        let mut config = fixture_config();
+        let original = config.resolve().unwrap();
+        add_openai_model(
+            &mut config,
+            "One",
+            "openai-one",
+            "/not-read/one/account.json",
+        );
+        add_openai_model(
+            &mut config,
+            "Two",
+            "openai-two",
+            "/not-read/two/account.json",
+        );
+        config.profiles.insert(
+            "other".into(),
+            ProfileConfig {
+                default: "One".into(),
+                allowed: vec!["One".into(), "Two".into()],
+            },
+        );
+        let catalog = config.resolve().unwrap();
+        assert_eq!(catalog.identity, original.identity);
+        assert_eq!(
+            catalog
+                .providers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["deepseek"]
+        );
+        config
+            .profiles
+            .get_mut("work")
+            .unwrap()
+            .allowed
+            .push("One".into());
+        let catalog = config.resolve().unwrap();
+        assert!(catalog.providers.contains_key("openai-one"));
+        assert!(!catalog.providers.contains_key("openai-two"));
     }
 
     #[test]
