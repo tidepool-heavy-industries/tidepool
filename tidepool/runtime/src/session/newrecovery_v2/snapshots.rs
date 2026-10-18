@@ -684,10 +684,8 @@ impl RecoveryGraph {
         &self,
         inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
         root: &ContextRoot,
+        receipt: Arc<MaterializedContext>,
     ) -> Result<ScopedCompilerContext, crate::session::SessionError> {
-        let receipt = self
-            .acquire_context(root)
-            .map_err(|error| crate::session::recovery::graph_error(self.store.path(), error))?;
         let exact = inventory.context_for_expected_snapshot(root, &receipt)?;
         if exact.toolchain_identity_sha256() != receipt.snapshot().producer_sha256() {
             return Err(crate::session::SessionError::WrongPublicManifestTicket);

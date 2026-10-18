@@ -188,8 +188,8 @@ fn hydrate_context_roots(
         )
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let mut restored = Vec::new();
-    for (root, _receipt) in receipts {
-        let context = graph.recover_compiler_context(&inventory, &root)?;
+    for (root, receipt) in receipts {
+        let context = graph.recover_compiler_context(&inventory, &root, receipt)?;
         restored.push((root, context));
     }
     owner.validate_owner()?;
