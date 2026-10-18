@@ -3691,6 +3691,21 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  let emittedOwners = Set.fromList [(unit,owner)
+        | product' <- certifiedOriginalProducts currentCertificate
+        , let (unit,owner,_,_) = moduleProductInput product']
+      packageRows = [TList [TString unit,TString owner,TBytes (encodePackageImports iface facts)]
+        | ((unit,owner),_) <- Map.toAscList (Map.fromSet (const ()) emittedOwners)
+        , Just admission <- [Map.lookup (T.unpack unit,T.unpack owner)
+            (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))]
+        , let (iface,_,_) = localFinalizedInterface admission
+        , Just facts <- [Map.lookup (mkModuleName (T.unpack owner)) (pprPackageImports paired)]]
+  unless (length packageRows == Set.size emittedOwners) $
+    fail "native package-byte oracle omitted a genuine published owner"
+  emittedPackages <- BS.readFile (captureDirectory </> "module-package-imports.cbor")
+  unless (emittedPackages == toStrictByteString
+      (encodeTerm (TList [TString "TPPKGBUNDLES",TInt 1,TList packageRows]))) $
+    fail "native package publication changed original package codec bytes"
   let segmentDirectory = captureDirectory </> "segment-originals"
   sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")
