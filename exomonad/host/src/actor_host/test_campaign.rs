@@ -641,6 +641,22 @@ impl TestCampaign {
         store: &harness::store::Store,
         future: F,
     ) -> F::Output {
+        self.drive_operation(store, future, false).await
+    }
+
+    /// Act as the model-free host while an operation admits native children.
+    /// Exact installation events remain available to the scenario's observers.
+    pub async fn drive_native_admission<F: std::future::Future>(&mut self, future: F) -> F::Output {
+        let store = super::display_output::open_run_store(self.session_root.path()).unwrap();
+        self.drive_operation(&store, future, true).await
+    }
+
+    async fn drive_operation<F: std::future::Future>(
+        &mut self,
+        store: &harness::store::Store,
+        future: F,
+        acknowledge_native: bool,
+    ) -> F::Output {
         let run = super::runtime_namespace(self.session_root.path());
         let mut index = 0;
         while index < self.pending.len() {
@@ -655,6 +671,11 @@ impl TestCampaign {
                 };
                 super::display_output::publish(&self.forest, store, &run, None, None, &request);
             } else {
+                if acknowledge_native {
+                    if let LocalResidentDeployment::PolicyInstalled(child) = &self.pending[index] {
+                        self.acknowledge_pending_native_spawn(child);
+                    }
+                }
                 index += 1;
             }
         }
@@ -666,9 +687,29 @@ impl TestCampaign {
                     LocalResidentDeployment::DisplayPublished(request) => {
                         super::display_output::publish(&self.forest, store, &run, None, None, &request);
                     }
-                    event => self.pending.push_back(event),
+                    event => {
+                        if acknowledge_native {
+                            if let LocalResidentDeployment::PolicyInstalled(child) = &event {
+                                self.acknowledge_pending_native_spawn(child);
+                            }
+                        }
+                        self.pending.push_back(event);
+                    }
                 }
             }
+        }
+    }
+
+    fn acknowledge_pending_native_spawn(&self, child: &exomonad_actor::LocalResidentInstallation) {
+        let Some(admission) = &child.spawn_admission else {
+            return;
+        };
+        match admission.outcome() {
+            exomonad_actor::SpawnAdmissionOutcome::Pending => self.acknowledge_native_spawn(child),
+            exomonad_actor::SpawnAdmissionOutcome::Ready(actor) => {
+                assert_eq!(actor, child.actor.identity());
+            }
+            exomonad_actor::SpawnAdmissionOutcome::Failed { .. } => {}
         }
     }
 
