@@ -5666,7 +5666,7 @@ fn replay_native_transport_history(
         .compiler_inputs(&actual_context, Some(&private[0]))
         .unwrap();
     let produced = OriginalCompilerInputs::from_checked_support_products(
-        actual_request.shared_compiler_source_support(),
+        &actual_request.shared_compiler_source_support(),
         producer.sha256(),
         std::slice::from_ref(&dependent),
     )

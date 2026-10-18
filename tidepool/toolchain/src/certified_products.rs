@@ -12196,7 +12196,7 @@ pub(crate) mod tests {
             NativeGroupKey,
         };
         use crate::declaration_context::{
-            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
+            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
         };
         let producer_bytes = b"completed-request-input-permissions";
         let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -12263,9 +12263,11 @@ pub(crate) mod tests {
                 &[],
             )
             .unwrap();
-            let request = ProtectedScaffoldRequirements::default()
-                .compiler_inputs(&context, None)
+            let root = tempfile::tempdir().unwrap();
+            let exact_request = ExactCompileContext::new(Arc::new(context))
+                .prepare_compilation(root.path(), producer_bytes)
                 .unwrap();
+            let request = exact_request.compiler_inputs();
             let row = request.native_availability(input.descriptor.id).unwrap();
             assert_eq!(row.permits(3), permitted);
             assert_eq!(
