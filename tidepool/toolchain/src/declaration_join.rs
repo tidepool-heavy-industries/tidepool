@@ -2591,6 +2591,23 @@ mod authored_tests {
             root.path(),
         )
         .unwrap();
+        let first_interface = first_certificate
+            .product()
+            .module_interface()
+            .unwrap()
+            .interface_sha256();
+        let independent_interface = independent
+            .recovery_products()
+            .iter()
+            .find(|product| product.owner().module == first.module_name())
+            .unwrap()
+            .module_interface()
+            .unwrap()
+            .interface_sha256();
+        assert_ne!(
+            first_interface, independent_interface,
+            "the refusal control must carry two genuinely different issued canonical owners"
+        );
         assert!(
             matches!(
                 ExactDeclarationContext::new(
@@ -2616,6 +2633,18 @@ mod authored_tests {
             context,
         )
         .unwrap();
+        assert_eq!(
+            result
+                .recovery_products()
+                .iter()
+                .find(|product| product.owner().module == first.module_name())
+                .unwrap()
+                .module_interface()
+                .unwrap()
+                .interface_sha256(),
+            first_interface,
+            "the exact-context successor must carry its selected first canonical owner"
+        );
         for module in [first, second] {
             assert!(result.recovery_products().iter().any(|product| {
                 product.owner().module == module.module_name() && product.source_sha256().is_some()
