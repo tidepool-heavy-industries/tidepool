@@ -317,6 +317,7 @@ impl ResolvedCompilerRole {
 /// resolves their scoped bindings. Historical custody cannot choose a row.
 pub(crate) struct SelectedCompilerInterfaces<'a> {
     artifacts: &'a ArtifactView,
+    selected: &'a BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
     entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
 }
 
@@ -348,7 +349,32 @@ impl SelectedCompilerInterfaces<'_> {
             )?;
         }
         let artifacts = self.select_owners(projection.roles.keys().cloned().collect())?;
-        CompilerSourceSupport::new(projection, artifacts, [])
+        let mut selected = projection
+            .roles
+            .keys()
+            .map(|owner| {
+                let mut row = self.selected[owner].clone();
+                row.original = None;
+                (owner.clone(), row)
+            })
+            .collect::<BTreeMap<_, _>>();
+        // The rows retain their issuer's exact bindings. Demotion still checks
+        // the canonical interface's own dependency closure and seals.
+        let entries = selected
+            .values()
+            .map(|row| (row.interface.0.artifact, Arc::clone(&row.interface.1)))
+            .collect();
+        projection.entries_from_artifacts(&entries)?;
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        Ok(CompilerSourceSupport {
+            projection,
+            artifacts,
+            native_offers: Arc::from([]),
+            selected: Arc::new(selected),
+            input_decisions: IssuedInputNativeDecisions::default(),
+        })
     }
 
     pub(crate) fn select_owners(
@@ -371,15 +397,10 @@ impl SelectedCompilerInterfaces<'_> {
             .0
             .lock()
             .expect("inventory lock");
-        let owned = &self.artifacts.read_projection(&state).nodes;
-        let roots = ids
+        let roots = owners
             .iter()
-            .map(|id| {
-                self.artifacts
-                    .resolve_binding(*id, owned)
-                    .map(InventoryNodeKey::Artifact)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|owner| InventoryNodeKey::Artifact(self.selected[owner].interface.0))
+            .collect::<Vec<_>>();
         let interfaces = admitted_closure(&state, roots.into_iter());
         let namespace = artifact_ids(&interfaces)
             .into_iter()
@@ -551,6 +572,7 @@ impl CompilerSourceSupport {
             .collect();
         Ok(SelectedCompilerInterfaces {
             artifacts: &self.artifacts,
+            selected: &self.selected,
             entries,
         })
     }
@@ -1194,19 +1216,68 @@ impl CompilerSourceSupport {
         &self,
         owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
-        let selected = self.projection.source_support(&self.artifacts, owners)?;
+        let mut projection = CompilerInputProjection::default();
+        let mut selected = BTreeMap::new();
+        let mut pending = owners
+            .iter()
+            .filter(|owner| self.projection.roles.contains_key(*owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(owner) = pending.pop() {
+            if projection.roles.contains_key(&owner) {
+                continue;
+            }
+            let previous = self
+                .projection
+                .roles
+                .get(&owner)
+                .ok_or_else(|| failure("source compiler dependency lacks its issued role"))?;
+            let role = if owners.contains(&owner) {
+                previous.clone()
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: previous.interface(),
+                }
+            };
+            let mut row = self.selected[&owner].clone();
+            if role.original().is_none() {
+                row.original = None;
+            }
+            let entry = row.original.as_ref().unwrap_or(&row.interface);
+            pending.extend(entry.1.requirements.iter().cloned());
+            selected.insert(owner.clone(), row);
+            projection.admit_role(owner, role)?;
+        }
+        let entries = selected
+            .values()
+            .flat_map(|row| std::iter::once(&row.interface).chain(row.original.iter()))
+            .map(|(binding, entry)| (binding.artifact, Arc::clone(entry)))
+            .collect();
+        projection.entries_from_artifacts(&entries)?;
+        // Keep the existing topology/custody transition. Only its already
+        // authenticated role rows bypass metadata reconstruction afterward.
+        let artifacts = self.artifacts.select_compiler_support(&projection)?;
         let offers = self
             .native_offers
             .iter()
-            .filter_map(
-                |offer| match offer.is_relevant_to_support(&selected.projection) {
-                    Ok(true) => Some(Ok(offer.clone())),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                },
-            )
+            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
+                Ok(true) => Some(Ok(offer.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        self.rebuild_narrowed(selected.projection, selected.artifacts, offers)
+        let decisions = self.input_decisions.restricted(&projection, &artifacts);
+        let artifacts = artifacts.retain_issued_offer_custody(offers.iter().cloned())?;
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        Ok(Self {
+            projection,
+            artifacts,
+            native_offers: offers.into(),
+            selected: Arc::new(selected),
+            input_decisions: decisions,
+        })
     }
 
     /// Type evidence adds selected interfaces while the receiver continues to
@@ -1835,6 +1906,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closed_interface_narrowing_preserves_rows_without_output_metadata() {
+        for unrelated in [1, 16, 64] {
+            let inventory = ArtifactInventory::default();
+            let selected = Arc::new(crate::artifact_inventory::tests::entry(
+                "Selected",
+                &["Required"],
+            ));
+            let required = Arc::new(crate::artifact_inventory::tests::entry("Required", &[]));
+            let mut entries = vec![selected.clone(), required.clone()];
+            entries.extend((0..unrelated).map(|index| {
+                Arc::new(crate::artifact_inventory::tests::entry(
+                    &format!("Unrelated{index}"),
+                    &[],
+                ))
+            }));
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            // Expected bindings and bytes come from the original issued view,
+            // before either narrowing implementation is called.
+            let expected_issued = [&selected, &required]
+                .into_iter()
+                .map(|entry| {
+                    let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                        panic!("canonical fixture")
+                    };
+                    (
+                        entry.descriptor.owner.clone(),
+                        (
+                            view.lease.selection.namespace[&entry.descriptor.id],
+                            interface.interface_bytes().to_vec(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[selected.clone(), required])
+                    .unwrap();
+            let support = CompilerSourceSupport::new(projection, view, []).unwrap();
+            let before = inventory.metrics();
+            let interfaces = support.selected_interfaces().unwrap();
+            let owner = selected.descriptor.owner.clone();
+            let narrowed = interfaces.support_for_owners(vec![owner.clone()]).unwrap();
+            let candidate = inventory.metrics();
+            assert!(narrowed
+                .artifacts
+                .reads
+                .read_projection
+                .get()
+                .is_none_or(|projection| projection.metadata.get().is_none()));
+            for (owner, (binding, bytes)) in &expected_issued {
+                let row = &narrowed.selected[owner];
+                assert_eq!(row.interface.0, *binding);
+                let ArtifactPayload::Canonical(interface) = &row.interface.1.payload else {
+                    panic!("canonical narrowed row")
+                };
+                assert_eq!(interface.interface_bytes(), bytes.as_slice());
+                assert!(row.original.is_none());
+            }
+            // This independently validates the constructor, not the old
+            // selection topology: both routes use select_owners. The legacy
+            // route also gets an already-warm parent, explicitly reported below.
+            let baseline_view = interfaces
+                .select_owners(narrowed.projection.roles.keys().cloned().collect())
+                .unwrap();
+            let baseline =
+                CompilerSourceSupport::new(narrowed.projection.clone(), baseline_view, []).unwrap();
+            let after = inventory.metrics();
+            assert_eq!(narrowed.projection, baseline.projection);
+            assert_eq!(narrowed.selected, baseline.selected);
+            assert_eq!(
+                narrowed.artifacts.selection_snapshot(),
+                baseline.artifacts.selection_snapshot()
+            );
+            assert_eq!(narrowed.input_decisions, baseline.input_decisions);
+            assert!(
+                baseline
+                    .artifacts
+                    .reads
+                    .read_projection
+                    .get()
+                    .is_some_and(|projection| projection.metadata.get().is_some()),
+                "legacy constructor must sensitize the output metadata observation"
+            );
+            eprintln!("closed-role-work unrelated={unrelated} candidate_graph={} candidate_handles={} legacy_warm_parent_graph={} legacy_warm_parent_handles={}",
+                candidate.graph_visits - before.graph_visits,
+                candidate.entry_handle_copies - before.entry_handle_copies,
+                after.graph_visits - candidate.graph_visits,
+                after.entry_handle_copies - candidate.entry_handle_copies);
+            assert!(interfaces
+                .support_for_owners(vec![ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: "Absent".into()
+                }])
+                .is_err());
+            let owners = BTreeSet::from([owner]);
+            let source = support.source_support(&owners).unwrap();
+            let legacy = support
+                .projection
+                .source_support(&support.artifacts, &owners)
+                .unwrap();
+            let legacy = support
+                .rebuild_narrowed(legacy.projection, legacy.artifacts, [])
+                .unwrap();
+            assert_eq!(source.projection, legacy.projection);
+            assert_eq!(source.selected, legacy.selected);
+            assert_eq!(
+                source.artifacts.selection_snapshot(),
+                legacy.artifacts.selection_snapshot()
+            );
+            assert_eq!(source.input_decisions, legacy.input_decisions);
+            drop(interfaces);
+            drop(support);
+            drop(baseline);
+            drop(legacy);
+            // This checks retained semantic facts, not physical materialization
+            // release: the fixture still holds its original entry handle.
+            assert_eq!(
+                source.selected[&selected.descriptor.owner]
+                    .interface
+                    .1
+                    .descriptor
+                    .id,
+                selected.descriptor.id
+            );
+        }
+    }
+
+    #[test]
     fn resolved_selected_reads_do_not_visit_historical_custody() {
         for group_count in [1, 4, 16] {
             let inventory = ArtifactInventory::default();
@@ -1930,6 +2130,8 @@ mod tests {
             assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
             assert!(Arc::ptr_eq(&view_owner, &support.artifacts.lease));
 
+            assert!(support.artifacts.reads.read_projection.get().is_none());
+            let before_narrowing = inventory.metrics();
             let interfaces = support.selected_interfaces().unwrap();
             let selected_support = interfaces
                 .support_for_owners(vec![selected.descriptor.owner.clone()])
@@ -1947,6 +2149,11 @@ mod tests {
                 .artifacts
                 .selected_native_groups()
                 .is_empty());
+
+            let after_narrowing = inventory.metrics();
+            eprintln!("closed-role-native-work unrelated_groups={group_count} whole_chain_graph={} whole_chain_handles={}",
+                after_narrowing.graph_visits - before_narrowing.graph_visits,
+                after_narrowing.entry_handle_copies - before_narrowing.entry_handle_copies);
 
             let reusable = CompilerSourceSupport::new(
                 historical_projection,
@@ -1989,6 +2196,52 @@ mod tests {
                 interface_only.artifacts.capture_graph_selection(),
                 original_graph
             );
+
+            // Real recovered native custody remains private while closed-role
+            // source narrowing agrees with the independent validating route.
+            let owners = BTreeSet::from([historical.descriptor.owner.clone()]);
+            let narrowed = reusable.source_support(&owners).unwrap();
+            let legacy = reusable
+                .projection
+                .source_support(&reusable.artifacts, &owners)
+                .unwrap();
+            let offers = reusable
+                .native_offers
+                .iter()
+                .filter_map(
+                    |offer| match offer.is_relevant_to_support(&legacy.projection) {
+                        Ok(true) => Some(Ok(offer.clone())),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let legacy = reusable
+                .rebuild_narrowed(legacy.projection, legacy.artifacts, offers)
+                .unwrap();
+            assert_eq!(narrowed.selected, legacy.selected);
+            assert_eq!(narrowed.projection, legacy.projection);
+            assert_eq!(narrowed.input_decisions, legacy.input_decisions);
+            assert_eq!(
+                narrowed.artifacts.selection_snapshot(),
+                legacy.artifacts.selection_snapshot()
+            );
+            assert_eq!(
+                narrowed.native_offer_observations().unwrap(),
+                legacy.native_offer_observations().unwrap()
+            );
+            let expected_binding = legacy.selected[&historical.descriptor.owner].interface.0;
+            drop(legacy);
+            drop(reusable);
+            // Retained semantic payload/canonical pairing; this fixture does
+            // not establish last physical materialization release.
+            let row = &narrowed.selected[&historical.descriptor.owner];
+            assert_eq!(
+                row.original.as_ref().unwrap().1.descriptor.id,
+                historical.descriptor.id
+            );
+            assert_eq!(row.interface.0, expected_binding);
 
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
