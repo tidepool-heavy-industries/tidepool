@@ -172,7 +172,7 @@ pub(super) fn entry_observed_inputs() -> std::collections::BTreeSet<PathBuf> {
 
 // Publication-only coupling of the existing semantic owner to the exact
 // physical bytes admitted by its private constructor.
-struct AdmittedOriginalEntry {
+pub(super) struct AdmittedOriginalEntry {
     output: ProductionEntryOutput,
     physical: crate::recovery_artifacts::RetainedRecoveryArtifactObservations,
     dependency_selection: Option<certified_products::EntryDependencySelection>,
@@ -275,6 +275,8 @@ fn admit_original_entry(
         )?;
     #[cfg(test)]
     ENTRY_OBSERVED_INPUTS.with(|inputs| *inputs.borrow_mut() = physical.entry_owned_paths());
+    #[cfg(test)]
+    ENTRY_ADMISSIONS.with(|count| count.set(count.get() + 1));
     Ok(AdmittedOriginalEntry {
         output,
         physical,
@@ -414,9 +416,7 @@ pub fn prepare_frozen_production_entry_with_catalog(
             settlement,
         },
     )?;
-    output
-        .original_entry
-        .ok_or_else(|| invalid("fresh preparation lacks its published original entry"))
+    output.into_original()
 }
 
 /// Compile a settled entry under one declared frozen native source selection.
@@ -557,14 +557,40 @@ impl EntryPreparation {
             })
     }
 
+    pub(super) fn admit(
+        &self,
+        source_path: &Path,
+        source: &str,
+        bundle: &invocation_output::InvocationOutputBundle,
+        offer: &SelectedModuleCandidateOffer,
+    ) -> Result<AdmittedOriginalEntry, CompileError> {
+        let targets = bundle.targets();
+        let [target] = targets.as_slice() else {
+            return Err(invalid("original output requires one named target"));
+        };
+        if target.target != "__prepared" {
+            return Err(invalid("original output requires its settled target"));
+        }
+        admit_original_entry(
+            self.raw(),
+            source_path,
+            source.to_owned(),
+            &target.prepared_bytes,
+            bundle.metadata(),
+            &target.asks_bytes,
+            offer,
+            Arc::clone(bundle.operation()),
+        )
+    }
+
     pub(super) fn seal(
         self,
+        admitted: AdmittedOriginalEntry,
         source: &Path,
         sources: &ProductionEntrySources,
         deployment: &AdmittedCompilerDeployment,
         targets: &[&str],
         catalog: Option<&Arc<crate::toolchain::DeploymentModulePackage>>,
-        dependency_selection: Option<certified_products::EntryDependencySelection>,
     ) -> Result<ProductionEntryOutput, CompileError> {
         if targets != ["__prepared"] {
             return Err(invalid(
@@ -572,6 +598,37 @@ impl EntryPreparation {
             ));
         }
         require_absent_output(&self.output)?;
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().map_err(invalid)?
+        else {
+            return Err(invalid("configured compiler deployment unavailable"));
+        };
+        authority
+            .admit(
+                deployment.producer_identity,
+                deployment.consumed_worker_identity,
+            )
+            .map_err(invalid)?;
+        sources.revalidate(source)?;
+        if admitted.output.source_path() != source {
+            return Err(invalid("admitted original selects another source"));
+        }
+        if let Some(catalog) = catalog {
+            catalog.validate_deployment(deployment)?;
+            catalog.validate_current_sources()?;
+        }
+        if admitted.dependency_selection.is_some()
+            && !matches!(sources, ProductionEntrySources::FrozenWorkspace(_))
+        {
+            return Err(invalid(
+                "native build entry cannot link catalog dependencies",
+            ));
+        }
+        let files = inventory(self.raw())?;
+        admitted
+            .physical
+            .verify_entry_inventory(self.raw(), &files)
+            .map_err(invalid)?;
         let manifest = EntryManifest {
             schema: ENTRY_SCHEMA,
             purpose: EntryPurpose::OriginalSource,
@@ -580,8 +637,8 @@ impl EntryPreparation {
             target: "__prepared".into(),
             source: source.to_owned(),
             sources: sources.clone(),
-            files: inventory(self.raw())?,
-            dependencies: match (catalog, dependency_selection) {
+            files,
+            dependencies: match (catalog, admitted.dependency_selection.clone()) {
                 (Some(catalog), Some(selection)) => Some(CatalogDependencies {
                     catalog_path: catalog.catalog_path(),
                     catalog_identity: catalog.catalog_identity().to_owned(),
@@ -590,26 +647,25 @@ impl EntryPreparation {
                     sources: catalog.source_selection().clone(),
                     selection,
                 }),
-                (None, None) => None,
+                (_, None) => None,
                 _ => return Err(invalid("linked entry selection has no catalog owner")),
             },
         };
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid)?;
+        if manifest_bytes.len() as u64 > MANIFEST_BYTES_LIMIT {
+            return Err(invalid("original manifest exceeds its read budget"));
+        }
         checkpoint(EntryCheckpoint::ManifestWrite)?;
-        std::fs::write(
-            self.staging.join(MANIFEST),
-            serde_json::to_vec(&manifest).map_err(invalid)?,
-        )?;
-        let CompilerDeploymentConfiguration::Configured(authority) =
-            CompilerDeploymentConfiguration::from_env().map_err(invalid)?
-        else {
-            return Err(invalid("configured compiler deployment unavailable"));
-        };
-        let validated = load_selected_production_entry_with_catalog(
-            &self.staging,
-            &authority,
-            sources,
-            &crate::toolchain::CatalogSelection::Acquired(catalog.cloned()),
-        )?;
+        std::fs::write(self.staging.join(MANIFEST), &manifest_bytes)?;
+        if crate::checked_cell::read(self.staging.join(MANIFEST), MANIFEST_BYTES_LIMIT)?
+            != manifest_bytes
+        {
+            return Err(invalid("original manifest changed before publication"));
+        }
+        if inventory(self.raw())? != manifest.files {
+            return Err(invalid("complete original container differs"));
+        }
+        admitted.verify_physical(self.raw(), &manifest.files)?;
         checkpoint(EntryCheckpoint::TreeSync)?;
         sync_entry_tree(&self.staging)?;
         checkpoint(EntryCheckpoint::ReadyRename)?;
@@ -630,7 +686,7 @@ impl EntryPreparation {
         checkpoint(EntryCheckpoint::SourceRevalidation)?;
         sources.revalidate(source)?;
         checkpoint(EntryCheckpoint::Handoff)?;
-        Ok(validated)
+        Ok(admitted.output)
     }
 }
 
@@ -684,6 +740,12 @@ thread_local! { static FAILURE: std::cell::Cell<Option<(EntryCheckpoint, bool)>>
 thread_local! {
     static OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(EntryCheckpoint)>>> = const { std::cell::RefCell::new(None) };
     static ENTRY_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ENTRY_ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn entry_admission_count() -> usize {
+    ENTRY_ADMISSIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

@@ -4125,7 +4125,7 @@ pub fn compile_invocation(
         &mut on_stage,
         CompilationPolicy::Runtime { settlement },
     )
-    .map(|output| output.artifacts)
+    .and_then(CompilationOutput::into_artifacts)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -4145,7 +4145,7 @@ pub fn compile_invocation_in_context(
             settlement,
         },
     )
-    .map(|output| output.artifacts)
+    .and_then(CompilationOutput::into_artifacts)
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -4177,7 +4177,7 @@ pub(crate) fn compile_authored_products(
             settlement,
         },
     )
-    .map(|output| output.artifacts)
+    .and_then(CompilationOutput::into_artifacts)
 }
 
 /// Build an explicitly selected immutable source cohort at its final deployment
@@ -4763,9 +4763,29 @@ impl DeclaredSourceSet {
     }
 }
 
-struct CompilationOutput {
-    artifacts: CompiledArtifacts,
-    original_entry: Option<ProductionEntryOutput>,
+enum CompilationOutput {
+    Ordinary(CompiledArtifacts),
+    Original(ProductionEntryOutput),
+}
+
+impl CompilationOutput {
+    fn into_artifacts(self) -> Result<CompiledArtifacts, CompileError> {
+        match self {
+            Self::Ordinary(artifacts) => Ok(artifacts),
+            Self::Original(_) => Err(CompileError::ExtractFailed(
+                "original output is not an ordinary artifact result".into(),
+            )),
+        }
+    }
+
+    fn into_original(self) -> Result<ProductionEntryOutput, CompileError> {
+        match self {
+            Self::Original(original) => Ok(original),
+            Self::Ordinary(_) => Err(CompileError::ExtractFailed(
+                "fresh preparation lacks its published original entry".into(),
+            )),
+        }
+    }
 }
 
 fn compile_invocation_inner(
@@ -5225,10 +5245,7 @@ fn compile_invocation_inner(
                     target.asks_bytes.as_slice(),
                 )?;
             }
-            Ok(CompilationOutput {
-                artifacts,
-                original_entry: None,
-            })
+            Ok(CompilationOutput::Ordinary(artifacts))
         })();
         let portable = portable.map_err(|error| {
             invocation_timing.retry("failure_retention");
@@ -5260,6 +5277,72 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
+    if let CompilationOutputOwner::Original(preparation) = output_owner {
+        let admitted = (|| {
+            if let CompilationPolicy::BuildAction { source_path, .. } = &policy {
+                let evidence =
+                    CompilerSidecar::Dependencies.read(preparation.raw(), bundle.operation())?;
+                ParsedSourceEvidence::parse(
+                    bundle.operation(),
+                    &evidence,
+                    SourceEvidenceUse::BuildAction,
+                    source_path,
+                )?
+                .admit_build_action(source_path, inv.include, inv.source)?;
+            }
+            let offer = SelectedModuleCandidateOffer {
+                offer: ModuleCandidateOffer {
+                    selected: candidate_set.map(Arc::new),
+                    producer: producer.to_vec(),
+                    include: inv.include.to_vec(),
+                    exact: None,
+                    checked_cell: None,
+                    planned_cell: None,
+                    checked_values: None,
+                    checked_projections: Vec::new(),
+                    activation_preview: None,
+                },
+                selected_session_values,
+            };
+            preparation.admit(&input_path, inv.source, &bundle, &offer)
+        })()
+        .map_err(|error| match &policy {
+            CompilationPolicy::BuildAction { .. } => error,
+            _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
+        })?;
+        invocation_timing.advance("retained_entry_seal");
+        let (source_path, sources, catalog) = match &policy {
+            CompilationPolicy::RetainedEntry {
+                source_path,
+                sources,
+                catalog,
+                ..
+            } => (*source_path, *sources, catalog.as_ref()),
+            CompilationPolicy::BuildAction {
+                source_path,
+                export:
+                    BuildActionExport::ProductionEntry {
+                        source_selection, ..
+                    },
+                ..
+            } => (*source_path, *source_selection, None),
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "original output owner has a different compilation policy".into(),
+                ))
+            }
+        };
+        let original = preparation.seal(
+            admitted,
+            source_path,
+            sources,
+            &deployment,
+            inv.targets,
+            catalog,
+        )?;
+        invocation_timing.finish(true);
+        return Ok(CompilationOutput::Original(original));
+    }
     let meta_bytes = bundle.metadata();
     let raw = bundle.targets();
     let product_bytes = bundle.products();
@@ -5639,75 +5722,8 @@ fn compile_invocation_inner(
         error
     })?;
     invocation_timing.advance("retained_entry_seal");
-    let original_entry = if let CompilationOutputOwner::Original(preparation) = output_owner {
-        match &policy {
-            CompilationPolicy::RetainedEntry {
-                source_path,
-                sources,
-                catalog,
-                ..
-            } => {
-                let selection = match (&catalog, &candidate_set) {
-                    (Some(_), Some(candidates)) => Some(
-                        artifacts
-                            .source_selection
-                            .as_ref()
-                            .ok_or_else(|| {
-                                CompileError::ExtractFailed(
-                                    "entry source selection unavailable".into(),
-                                )
-                            })?
-                            .entry_dependency_selection(&artifacts.artifact_view, candidates)
-                            .map_err(compiler_evidence_failure)?,
-                    ),
-                    (_, None) => None,
-                    _ => {
-                        return Err(CompileError::ExtractFailed(
-                            "entry catalog selection unavailable".into(),
-                        ))
-                    }
-                };
-                let selection = selection.filter(|selection| selection.has_linked_originals());
-                let selected_catalog = selection.as_ref().and(catalog.as_ref());
-                Some(preparation.seal(
-                    source_path,
-                    sources,
-                    &deployment,
-                    inv.targets,
-                    selected_catalog,
-                    selection,
-                )?)
-            }
-            CompilationPolicy::BuildAction {
-                source_path,
-                export:
-                    BuildActionExport::ProductionEntry {
-                        source_selection: sources,
-                        ..
-                    },
-                ..
-            } => Some(preparation.seal(
-                source_path,
-                sources,
-                &deployment,
-                inv.targets,
-                None,
-                None,
-            )?),
-            _ => {
-                return Err(CompileError::ExtractFailed(
-                    "original output owner has a different compilation policy".into(),
-                ))
-            }
-        }
-    } else {
-        None
-    };
     invocation_timing.finish(true);
-    Ok(CompilationOutput {
-        artifacts,
-        original_entry,
-    })
+    Ok(CompilationOutput::Ordinary(artifacts))
 }
 
 /// Retain worker outputs and stderr after compilation or final sealing fails.
@@ -8412,6 +8428,52 @@ mod module_product_tests {
 
     #[test]
     #[serial_test::serial]
+    fn retained_entry_post_manifest_changes_refuse_before_publication() {
+        use production_entry::EntryCheckpoint;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        for captured in [false, true] {
+            let output = root
+                .path()
+                .join(if captured { "captured" } else { "extra" });
+            let raw = output.with_extension("preparing").join("raw");
+            let changed = raw.clone();
+            let loads = production_entry::entry_load_count();
+            let admissions = production_entry::entry_admission_count();
+            let error = production_entry::with_checkpoint_observer(
+                move |stage| {
+                    if stage == EntryCheckpoint::ManifestWrite {
+                        let path = if captured {
+                            changed.join("meta.cbor")
+                        } else {
+                            changed.join("unconsumed-extra")
+                        };
+                        std::fs::write(path, b"changed after semantic admission").unwrap();
+                    }
+                },
+                || {
+                    crate::artifacts::test_support::prepare_frozen_production_entry(
+                        &sources,
+                        root.path(),
+                        &output,
+                    )
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, CompileError::ExtractFailed(_)));
+            assert!(!output.exists());
+            assert!(raw.join("certified-products.cbor").exists());
+            assert_eq!(production_entry::entry_load_count() - loads, 0);
+            assert_eq!(production_entry::entry_admission_count() - admissions, 1);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn retained_entry_final_source_drift_refuses_handoff_without_reexecution() {
         use crate::toolchain::CompilerDeploymentConfiguration;
         use production_entry::EntryCheckpoint;
@@ -8500,6 +8562,7 @@ mod module_product_tests {
             let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let reached = Arc::clone(&observed);
             let loads = production_entry::entry_load_count();
+            let admissions = production_entry::entry_admission_count();
             let outcome = production_entry::with_checkpoint_observer(
                 move |actual| {
                     if actual == stage {
@@ -8524,8 +8587,13 @@ mod module_product_tests {
             assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
             assert_eq!(
                 production_entry::entry_load_count() - loads,
+                0,
+                "fresh staging never invokes the independent cold reader"
+            );
+            assert_eq!(
+                production_entry::entry_admission_count() - admissions,
                 1,
-                "cancellation follows complete staging validation"
+                "cancellation follows the one complete original admission"
             );
             let error = outcome.action.unwrap_err();
             if stage == EntryCheckpoint::PublicationSync {
@@ -8600,6 +8668,7 @@ mod module_product_tests {
         let sources = FrozenEntrySources::capture(&[authored.clone()], &source).unwrap();
         let output = root.path().join("entry");
         let before = production_entry::entry_load_count();
+        let admissions = production_entry::entry_admission_count();
         let first = crate::artifacts::test_support::prepare_frozen_production_entry(
             &sources,
             root.path(),
@@ -8608,8 +8677,13 @@ mod module_product_tests {
         .unwrap();
         assert_eq!(
             production_entry::entry_load_count() - before,
+            0,
+            "fresh preparation hands off the original issuer without cold loading"
+        );
+        assert_eq!(
+            production_entry::entry_admission_count() - admissions,
             1,
-            "fresh preparation hands off its staging validation without loading again"
+            "fresh output is admitted exactly once"
         );
         let observed = production_entry::entry_observed_inputs();
         for name in [
@@ -8644,6 +8718,12 @@ mod module_product_tests {
             &ProductionEntrySources::FrozenWorkspace(sources.clone()),
         )
         .unwrap();
+        assert_eq!(production_entry::entry_load_count() - before, 1);
+        assert_eq!(
+            production_entry::entry_admission_count() - admissions,
+            2,
+            "independent cold reopen authenticates its own observation once"
+        );
         assert_eq!(first.target_owned(), reopened.target_owned());
         assert_eq!(first.source(), reopened.source());
         assert_eq!(

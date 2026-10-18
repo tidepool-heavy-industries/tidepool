@@ -589,7 +589,7 @@ impl DeploymentModulePackage {
         Ok(())
     }
 
-    pub(super) fn validate_current_sources(&self) -> Result<(), ModulePackageError> {
+    pub(crate) fn validate_current_sources(&self) -> Result<(), ModulePackageError> {
         self.catalog
             .source_selection
             .validate_under(self.source_policy)
