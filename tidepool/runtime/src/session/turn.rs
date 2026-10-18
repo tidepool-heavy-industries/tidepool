@@ -3008,10 +3008,16 @@ pub fn finish_cell_program_admitted(
         .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
     let outcome = outcome.into_outcome();
     let prepared = outcome.action?;
+    match &outcome.close {
+        crate::CompilerTransactionClose::Unconfirmed(_)
+        | crate::CompilerTransactionClose::Retired(_) => {
+            tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?outcome.close, "cell program publication refused");
+        }
+        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
+    }
     match outcome.close {
         crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
         crate::CompilerTransactionClose::Unconfirmed(evidence) => {
-            tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?evidence, "cell program publication refused");
             return Err(
                 CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
             );
@@ -7445,7 +7451,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn completed_cell_preparation_with_unconfirmed_end_retains_exact_scratch() {
+    fn completed_cell_preparation_with_observed_retirement_refuses_publication_without_retaining_scratch(
+    ) {
         let mut fixture = CheckedHomeFixture::new();
         let admission = CheckedHomeFixture::admit_in(
             &mut fixture.resident,
@@ -7475,7 +7482,7 @@ mod tests {
         );
         assert!(matches!(
             outcome.close(),
-            crate::CompilerTransactionClose::Unconfirmed(_)
+            crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = outcome.action().as_ref().unwrap();
         let root = prepared.root.path().to_owned();
@@ -7486,18 +7493,19 @@ mod tests {
         let failure = finish_cell_program_admitted(outcome).unwrap_err();
         assert!(matches!(
             failure.error,
-            CompileError::CompilerPreparationCloseUnconfirmed(_)
+            CompileError::CompilerPreparationRetired(_)
         ));
         drop(failure);
         assert!(
-            weak.upgrade().is_some(),
-            "retained close owns the original scratch"
+            weak.upgrade().is_none(),
+            "confirmed retirement does not retain released request scratch"
         );
-        assert!(root.join("cell.cbor").exists());
+        assert!(observed.borrow().as_ref().unwrap().resources_retired());
+        assert!(!observed.borrow().as_ref().unwrap().is_clean());
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
             after,
-            "uncertainty permits no replay"
+            "abnormal retirement permits no publication or replay"
         );
         drop(observed.into_inner());
         assert!(weak.upgrade().is_none());
@@ -7534,11 +7542,12 @@ mod tests {
         );
         assert!(matches!(
             original.close,
-            crate::CompilerTransactionClose::Unconfirmed(_)
+            crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = original.action.as_ref().unwrap();
         let weak = Arc::downgrade(&prepared.root);
         let root = prepared.root.path().to_owned();
+        assert!(root.join("cell.cbor").exists());
         let fresh = crate::CompilerTransactionCancellation::new();
         let reassociated =
             crate::settle_compiler_transaction_cancellable(fresh, |_| {}, || original.action);
@@ -7554,8 +7563,12 @@ mod tests {
             )
         ));
         assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
-        assert!(weak.upgrade().is_some());
-        assert!(root.join("cell.cbor").exists());
+        assert!(
+            weak.upgrade().is_none(),
+            "refusal drops preparation after its actual resource retirement"
+        );
+        assert!(original.close.resources_retired());
+        assert!(!original.close.is_clean());
         drop(original.close);
         drop(observed);
         assert!(weak.upgrade().is_none());
