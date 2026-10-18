@@ -1550,7 +1550,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let transport_metadata = projection
         .project_metadata(base.metadata_snapshot())
         .unwrap();
-    let transport = NativeCompilerTransport::issue_checked(
+    let transport = NativeInputSelection::issue_checked(
         &projection,
         &transport_metadata,
         &full,
@@ -2661,7 +2661,7 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .project_metadata(current.metadata_snapshot())
         .unwrap();
     let transport =
-        NativeCompilerTransport::issue_checked(&projection, &metadata, &current, &[offer]).unwrap();
+        NativeInputSelection::issue_checked(&projection, &metadata, &current, &[offer]).unwrap();
     let support = transport.availability[&a_id]
         .dependency_support(
             NativeGroupKey {
@@ -3097,7 +3097,7 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
             .project_metadata(full.metadata_snapshot())
             .unwrap();
         let transport =
-            NativeCompilerTransport::issue_checked(&projection, &metadata, &full, &offers).unwrap();
+            NativeInputSelection::issue_checked(&projection, &metadata, &full, &offers).unwrap();
         assert!(
             !transport.availability.contains_key(&entry.descriptor.id),
             "neither complete byte custody nor unions of subsets create a Full witness"
@@ -3248,7 +3248,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         let metadata = projection
             .project_metadata(unrelated.metadata_snapshot())
             .unwrap();
-        let transport = NativeCompilerTransport::receive(
+        let transport = NativeInputSelection::receive(
             projection,
             &metadata,
             &unrelated,
@@ -3257,7 +3257,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         )
         .unwrap();
         assert!(matches!(
-            transport.metadata.entries[&owner].payload,
+            metadata.entries[&owner].payload,
             ArtifactPayload::Canonical(_)
         ));
         assert!(
@@ -3273,7 +3273,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         let metadata = selected_projection
             .project_metadata(selected.metadata_snapshot())
             .unwrap();
-        let error = NativeCompilerTransport::receive(
+        let error = NativeInputSelection::receive(
             selected_projection,
             &metadata,
             &selected,
@@ -3727,7 +3727,7 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         .unwrap()
         .into_rows();
     let error =
-        NativeCompilerTransport::receive(&projection, &metadata, &custody, &normalized, &offers)
+        NativeInputSelection::receive(&projection, &metadata, &custody, &normalized, &offers)
             .err()
             .expect(
                 "two distinct IDs affine to the same exact canonical remain ambiguous at receive",
@@ -3744,14 +3744,14 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
             offers.clone()
         };
         let error =
-            NativeCompilerTransport::issue_checked(&projection, &metadata, &custody, &selected)
+            NativeInputSelection::issue_checked(&projection, &metadata, &custody, &selected)
                 .err()
                 .expect("type-only role cannot choose among distinct qualified historical Fulls");
         assert!(matches!(error, CompileError::ArtifactInventory(error)
             if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { ref owner }
                 if owner == &entries[0].descriptor.owner)));
     }
-    let duplicate = NativeCompilerTransport::issue_checked(
+    let duplicate = NativeInputSelection::issue_checked(
         &projection,
         &metadata,
         &custody,
@@ -3779,7 +3779,7 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         let view = views[index].retain_custody(&views[1 - index]).unwrap();
         let metadata = selected.project_metadata(view.metadata_snapshot()).unwrap();
         let transport =
-            NativeCompilerTransport::issue_checked(&selected, &metadata, &view, &offers).unwrap();
+            NativeInputSelection::issue_checked(&selected, &metadata, &view, &offers).unwrap();
         assert!(transport.availability[&entries[index].descriptor.id].permits(9001));
         assert!(!transport
             .availability
@@ -3893,13 +3893,9 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             .project_metadata(namespace.metadata_snapshot())
             .unwrap();
         for selected in [offers.clone(), vec![offers[1].clone(), offers[0].clone()]] {
-            let transport = NativeCompilerTransport::issue_checked(
-                &projection,
-                &metadata,
-                &namespace,
-                &selected,
-            )
-            .unwrap();
+            let transport =
+                NativeInputSelection::issue_checked(&projection, &metadata, &namespace, &selected)
+                    .unwrap();
             let available = &transport.availability[&entry.descriptor.id];
             assert!(available.permits(9001));
             assert_eq!(available.offers().len(), 2);
@@ -3971,7 +3967,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 .project_metadata(namespace.metadata_snapshot())
                 .unwrap();
             let transport =
-                NativeCompilerTransport::issue_checked(&projection, &metadata, &namespace, &offers)
+                NativeInputSelection::issue_checked(&projection, &metadata, &namespace, &offers)
                     .unwrap();
             assert!(transport.availability[&entry.descriptor.id].permits(9001));
         }
@@ -4034,8 +4030,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
             offers.push(complete.clone());
         }
         let transport =
-            NativeCompilerTransport::issue_checked(&projection, &no_demand, &full, &offers)
-                .unwrap();
+            NativeInputSelection::issue_checked(&projection, &no_demand, &full, &offers).unwrap();
         assert_eq!(
             transport.availability[&entry.descriptor.id].permits(7),
             other
@@ -4045,9 +4040,8 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     let empty_offer =
         crate::artifact_inventory::IssuedNativeOffer::issue(entry.descriptor.id, &full, None)
             .unwrap();
-    let empty =
-        NativeCompilerTransport::issue_checked(&projection, &no_demand, &full, &[empty_offer])
-            .unwrap();
+    let empty = NativeInputSelection::issue_checked(&projection, &no_demand, &full, &[empty_offer])
+        .unwrap();
     assert!(!empty.availability[&entry.descriptor.id].permits(7));
 }
 
@@ -4127,7 +4121,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         let metadata = projection
             .project_metadata(view.metadata_snapshot())
             .unwrap();
-        let error = NativeCompilerTransport::issue_checked(
+        let error = NativeInputSelection::issue_checked(
             &projection,
             &metadata,
             &view,
@@ -10594,14 +10588,10 @@ fn whole_selected_input_still_refuses_group_outside_its_issued_availability() {
     Arc::make_mut(&mut metadata.retained)
         .selected_native_groups
         .insert(unsupported);
-    let error = NativeCompilerTransport::issue_checked(
-        &projection,
-        &metadata,
-        &view,
-        support.native_offers(),
-    )
-    .err()
-    .expect("whole selected ingress must validate all its own selected obligations");
+    let error =
+        NativeInputSelection::issue_checked(&projection, &metadata, &view, support.native_offers())
+            .err()
+            .expect("whole selected ingress must validate all its own selected obligations");
     assert!(matches!(error, CompileError::ExtractFailed(message)
     if message == format!(
         "exact declaration context: selected native group is outside issued availability: stage=whole-selected owner={:?} group={unsupported:?}",

@@ -784,7 +784,7 @@ mod tests {
             .native_groups
             .iter()
             .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
-        let transport = NativeCompilerTransport::issue_checked(
+        let transport = NativeInputSelection::issue_checked(
             context.compiler_input_projection(),
             &context.compiler_metadata_snapshot().unwrap(),
             context.artifact_view(),
