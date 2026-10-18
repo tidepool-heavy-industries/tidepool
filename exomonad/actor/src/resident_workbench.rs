@@ -1567,17 +1567,27 @@ impl InstalledToolLease {
             }
     }
 
-    fn generation_references(
-        &self,
-        source: tidepool_runtime::session::GenerationArtifactReference,
-        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
-        let installation = PersistedActorInstallation::capture(self, &source)?;
-        let bytes = serde_json::to_vec(&installation).map_err(|error| error.to_string())?;
-        Ok(tidepool_runtime::session::DurableGenerationReferences {
+    fn observe_generation(self) -> Result<ObservedInstallation, String> {
+        let evidence = self
+            .source()
+            .generation_evidence()
+            .ok_or("generation preparation has no issued source evidence")?;
+        let source = evidence.reference.clone();
+        let configuration_digest = evidence.configuration_digest;
+        let facts = PersistedActorInstallation::capture(&self, &source)?;
+        source.validate().map_err(|error| {
+            ActorInstallationRecoveryError::Corrupt(error.to_string()).to_string()
+        })?;
+        Ok(ObservedInstallation {
+            lease: self,
             source,
-            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
-            prompts,
+            facts,
+            configuration_digest,
+            #[cfg(test)]
+            work: InstallationObservationWork {
+                captures: 1,
+                ..Default::default()
+            },
         })
     }
 
@@ -1589,6 +1599,81 @@ impl InstalledToolLease {
             PersistedActorInstallation::decode(&references.installation, &references.source)?;
         installation.verify(self, &references.source)
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct InstallationObservationWork {
+    // Successful owner observations, not a census of all capture API calls.
+    captures: usize,
+    encodings: usize,
+    restored_decodes: usize,
+}
+
+/// Installation facts derived from this exact retained lease. Durable encoding
+/// is a projection for a new stored generation, not preparation authority.
+struct ObservedInstallation {
+    lease: InstalledToolLease,
+    source: tidepool_runtime::session::GenerationArtifactReference,
+    facts: PersistedActorInstallation,
+    configuration_digest: [u8; 32],
+    #[cfg(test)]
+    work: InstallationObservationWork,
+}
+
+impl ObservedInstallation {
+    fn into_durable_references(
+        self,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<EncodedInstallation, String> {
+        #[cfg(test)]
+        let work = InstallationObservationWork {
+            encodings: self.work.encodings + 1,
+            ..self.work
+        };
+        let bytes = serde_json::to_vec(&self.facts).map_err(|error| error.to_string())?;
+        Ok(EncodedInstallation {
+            lease: self.lease,
+            references: tidepool_runtime::session::DurableGenerationReferences {
+                source: self.source,
+                installation: tidepool_runtime::session::GenerationArtifactReference::capture(
+                    bytes,
+                ),
+                prompts,
+            },
+            #[cfg(test)]
+            work,
+        })
+    }
+
+    fn verify_restored(
+        &mut self,
+        references: &tidepool_runtime::session::DurableGenerationReferences,
+        prompts: &tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<(), String> {
+        references.validate().map_err(|error| error.to_string())?;
+        if self.source != references.source || prompts != &references.prompts {
+            return Err("restored generation must retain its source and prompt references".into());
+        }
+        #[cfg(test)]
+        {
+            self.work.restored_decodes += 1;
+        }
+        let persisted =
+            PersistedActorInstallation::decode(&references.installation, &references.source)
+                .map_err(|error| error.to_string())?;
+        persisted
+            .verify_facts(&self.facts)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Consuming durable projection of the same observed lease and source bytes.
+struct EncodedInstallation {
+    lease: InstalledToolLease,
+    references: tidepool_runtime::session::DurableGenerationReferences,
+    #[cfg(test)]
+    work: InstallationObservationWork,
 }
 
 /// Immutable actor configuration and its notebook publication domain.
@@ -1654,6 +1739,8 @@ pub(crate) struct PreparedActorGeneration {
     scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     commit: PreparedGenerationCommit,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
+    #[cfg(test)]
+    installation_work: InstallationObservationWork,
 }
 
 #[cfg(test)]
@@ -2147,15 +2234,10 @@ where
                 "generation preparation actor does not own installation".into(),
             ));
         }
-        let evidence = installation.source().generation_evidence().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "generation preparation has no issued source evidence".into(),
-            )
-        })?;
-        let configuration_digest = evidence.configuration_digest;
-        let references = installation
-            .generation_references(evidence.reference.clone(), prompts.clone())
+        let mut observed = installation
+            .observe_generation()
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let configuration_digest = observed.configuration_digest;
         let expected = expected_snapshot.generation().cloned();
         let checkout_context = context.clone();
         // Erasing the generic registry retains its actual allocation identity.
@@ -2163,12 +2245,9 @@ where
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
             Arc::downgrade(&owner)
         };
-        installation
-            .verify_recovered_generation(&references)
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let source = expected
             .as_ref()
-            .and_then(|_| installation.tools.as_ref())
+            .and_then(|_| observed.lease.tools.as_ref())
             .and_then(|tools| tools._source_original.clone());
         self.access
             .with_machine(context, move |session, context, _| {
@@ -2187,10 +2266,18 @@ where
                         .map_err(ResidentError::Session)?
                 };
                 session.validate_lexical_scope_lease(scope.scope(), &scope)?;
+                let installation;
+                #[cfg(test)]
+                let installation_work;
                 let commit = match descriptor.persistence_policy() {
                     crate::ActorPersistencePolicy::Ephemeral => {
-                        PreparedGenerationCommit::Ephemeral { id:
-                            expected
+                        #[cfg(test)]
+                        {
+                            installation_work = observed.work;
+                        }
+                        installation = observed.lease;
+                        PreparedGenerationCommit::Ephemeral {
+                            id: expected
                                 .as_ref()
                                 .map_or(
                                     Ok(tidepool_runtime::session::NotebookGenerationId::INITIAL),
@@ -2199,7 +2286,14 @@ where
                                 .map_err(|error| {
                                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                                 })?,
-                            source: source.map(|selection| session.stage_published_source_originals_in(scope.scope(), selection)).transpose()?,
+                            source: source
+                                .map(|selection| {
+                                    session.stage_published_source_originals_in(
+                                        scope.scope(),
+                                        selection,
+                                    )
+                                })
+                                .transpose()?,
                         }
                     }
                     crate::ActorPersistencePolicy::Durable => {
@@ -2217,32 +2311,51 @@ where
                                 )
                             })?;
                         let restored = if expected.is_none() {
-                            session.active_notebook_generation(&owner).map_err(ResidentError::Session)?
-                        } else { None };
-                        if let Some(selected) = restored {
-                            selected.references.validate().map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            if references.source != selected.references.source || references.prompts != selected.references.prompts {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol("restored generation must retain its source and prompt references".into()));
-                            }
-                            let persisted = PersistedActorInstallation::decode(&selected.references.installation, &selected.references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            let actual = PersistedActorInstallation::decode(&references.installation, &references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            persisted.verify_facts(&actual).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            let readiness = session.durable_public_readiness(&selected.owner, scope.scope()).map_err(ResidentError::Session)?;
-                            PreparedGenerationCommit::Restored { selected, readiness }
+                            session
+                                .active_notebook_generation(&owner)
+                                .map_err(ResidentError::Session)?
                         } else {
-                        let prepared = session
-                            .prepare_notebook_generation(
-                                scope.scope(),
-                                &owner,
-                                expected
-                                    .as_ref()
-                                    .and_then(|generation| generation.durable.clone()),
-                                references,
-                                source,
-                            )
-                            .map_err(ResidentError::Session)?;
-                        let selected = prepared.selection();
-                        PreparedGenerationCommit::Durable { prepared, selected }
+                            None
+                        };
+                        if let Some(selected) = restored {
+                            observed
+                                .verify_restored(&selected.references, &prompts)
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                            let readiness = session
+                                .durable_public_readiness(&selected.owner, scope.scope())
+                                .map_err(ResidentError::Session)?;
+                            #[cfg(test)]
+                            {
+                                installation_work = observed.work;
+                            }
+                            installation = observed.lease;
+                            PreparedGenerationCommit::Restored {
+                                selected,
+                                readiness,
+                            }
+                        } else {
+                            let encoded = observed
+                                .into_durable_references(prompts.clone())
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                            #[cfg(test)]
+                            {
+                                installation_work = encoded.work;
+                            }
+                            installation = encoded.lease;
+                            let references = encoded.references;
+                            let prepared = session
+                                .prepare_notebook_generation(
+                                    scope.scope(),
+                                    &owner,
+                                    expected
+                                        .as_ref()
+                                        .and_then(|generation| generation.durable.clone()),
+                                    references,
+                                    source,
+                                )
+                                .map_err(ResidentError::Session)?;
+                            let selected = prepared.selection();
+                            PreparedGenerationCommit::Durable { prepared, selected }
                         }
                     }
                 };
@@ -2264,6 +2377,8 @@ where
                     prompts,
                     configuration_digest,
                     reload_report: None,
+                    #[cfg(test)]
+                    installation_work,
                     installation,
                     context: next_context,
                     scope,
@@ -7786,16 +7901,12 @@ where
                         &prepared.injected,
                         &source.workspace_modules,
                         usage,
-                        |queries| {
-                            if queries.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                Err(crate::lookup::LookupInspectionError::Compiler(
-                                    CompileError::ExtractFailed(
-                                        "lookup inspection was not admitted".into(),
-                                    ),
-                                ))
-                            }
+                        |_| {
+                            Err(crate::lookup::LookupInspectionError::Compiler(
+                                CompileError::ExtractFailed(
+                                    "lookup inspection was not admitted".into(),
+                                ),
+                            ))
                         },
                     );
                     if !request_pending {
@@ -7868,7 +7979,7 @@ where
                             &workspace_modules,
                             usage,
                             |queries| {
-                                inspect_lookup_queries(
+                                inspect_hosted_lookup(
                                     &inspection_view,
                                     Some(&inspection_values),
                                     &preamble,
@@ -7916,16 +8027,10 @@ where
                 &prepared.injected,
                 &source.workspace_modules,
                 usage,
-                |queries| {
-                    if queries.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        Err(crate::lookup::LookupInspectionError::Compiler(
-                            CompileError::ExtractFailed(
-                                "lookup inspection was not admitted".into(),
-                            ),
-                        ))
-                    }
+                |_| {
+                    Err(crate::lookup::LookupInspectionError::Compiler(
+                        CompileError::ExtractFailed("lookup inspection was not admitted".into()),
+                    ))
                 },
             )
         };
@@ -13514,6 +13619,51 @@ fn structured_introspection_answer(
     }
 }
 
+fn inspect_hosted_lookup(
+    view: &crate::ActorCompileView,
+    values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
+    preamble: &str,
+    imports: &str,
+    include: &[PathBuf],
+    injected: &[String],
+    effects: &tidepool_runtime::session::HaskellTypeSource,
+    batch: &tidepool_runtime::session::inspection::HostedLookupBatch,
+    timing: Option<&crate::call_timing::CallTimingRegistration>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<
+    tidepool_runtime::session::inspection::HostedLookupOutput,
+    crate::lookup::LookupInspectionError,
+> {
+    use tidepool_runtime::session::inspection::{
+        run_admitted_hosted_lookup, run_hosted_lookup, HostedLookupRequest,
+    };
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let mut inspect = || {
+        let request = HostedLookupRequest {
+            exact_context: view.exact_compile_context(),
+            preamble,
+            imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: injected,
+            batch,
+            effects: Some(effects),
+        };
+        match values {
+            Some(inputs) => {
+                run_admitted_hosted_lookup(request, view.session_view(), inputs, settlement)
+            }
+            None => run_hosted_lookup(request, settlement),
+        }
+        .map_err(crate::lookup::LookupInspectionError::Compiler)
+    };
+    match timing {
+        Some(timing) => timing.timed_compile_sync(inspect),
+        None => inspect(),
+    }
+}
+
+#[cfg(test)]
 fn inspect_lookup_queries(
     view: &crate::ActorCompileView,
     values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
@@ -16790,17 +16940,23 @@ pub(crate) mod request_tests {
             r#"{"examples":[{"module":"Tidepool.Effects.Core","name":"lookupRaw","namespace":"value","source":"checks/captured.hs","prerequisites":[],"requirements":"Lookup effect required"}]}"#).unwrap();
         let examples = crate::UsagePointerTable::discover(modules.path()).unwrap();
         let answer = crate::lookup::execute(
-            real_lookup_request(vec![
-                "LookupPlanParent.ModuleOnly".into(),
-                "LookupPlanParent.Choice".into(),
-                "LookupPlanParent.ConstructorOnly".into(),
-                "LookupApi.lookupRaw".into(),
-                "doc workbench".into(),
-                "Fs.writeCheckedIf".into(),
-                "Fs.fileHash".into(),
-                "writeCheckedIf".into(),
-                "lookupRaw".into(),
-            ]),
+            {
+                let mut request = real_lookup_request(vec![
+                    "LookupPlanParent.ModuleOnly".into(),
+                    "LookupPlanParent.Choice".into(),
+                    "LookupPlanParent.ConstructorOnly".into(),
+                    "LookupApi.lookupRaw".into(),
+                    "doc workbench".into(),
+                    "Fs.writeCheckedIf".into(),
+                    "Fs.fileHash".into(),
+                    "writeCheckedIf".into(),
+                    "lookupRaw".into(),
+                ]);
+                request.queries.push("LookupPlanParent.missing".into());
+                request.discover = true;
+                request.candidate_limit = 4;
+                request
+            },
             "view".into(),
             &prepared.imports,
             &prepared.injected,
@@ -16809,7 +16965,7 @@ pub(crate) mod request_tests {
             |queries| {
                 calls.set(calls.get() + 1);
                 let result = tidepool_testing::with_settlement(|settlement| {
-                    inspect_lookup_queries(
+                    inspect_hosted_lookup(
                         &view,
                         Some(&inputs),
                         &prepared.preamble,
@@ -16838,14 +16994,30 @@ pub(crate) mod request_tests {
             "successful module/name/doc batch must execute exactly one real worker request"
         );
         assert!(answer.issue.is_none(), "typed row witness must compile");
+        assert!(answer.candidates.len() <= 4);
+        assert!(
+            !answer.candidates.is_empty(),
+            "mixed native selection must retain actual candidates"
+        );
+
         let inspected = inspected.into_inner().expect("lookup inspections");
+        assert!(
+            matches!(&inspected.discovery, Some(selection) if matches!(&selection.fallback,
+            tidepool_runtime::session::inspection::HostedFallback::Attempted(scopes) if !scopes.is_empty()))
+        );
+
         let lookup = inspected
+            .answers
             .iter()
             .find_map(|result| match result {
-                tidepool_runtime::session::InspectionResult::Lookup {
-                    answer: tidepool_runtime::session::LookupAnswer::Info(entries),
+                tidepool_runtime::session::inspection::HostedLookupAnswer::Name {
+                    answer:
+                        tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches),
                     ..
-                } => entries.iter().find(|entry| entry.name == "lookupRaw"),
+                } => matches
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == "lookupRaw"),
                 _ => None,
             })
             .expect("lookupRaw inspection");
@@ -17062,6 +17234,52 @@ pub(crate) mod request_tests {
                 if entries.iter().any(|entry| entry.name == "checkedLookupValue"))
             );
         }
+        // Qualification selects an already-visible protected nominal name;
+        // it does not grant PublicModule browse authority over that owner.
+        let owner = inputs.view().reachable_values()[0].module_name();
+        let protected_batch = tidepool_runtime::session::inspection::HostedLookupBatch {
+            operations: vec![
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![0],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::Current,
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: format!("{owner}.checkedLookupValue"),
+                    },
+                },
+                tidepool_runtime::session::inspection::HostedLookupOperation::ExactReference {
+                    destinations: vec![1],
+                    query: tidepool_extract_cmd::ExactNameInspection {
+                        scope: tidepool_extract_cmd::InspectionScope::PublicModule(owner.clone()),
+                        namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                        name: "checkedLookupValue".into(),
+                    },
+                },
+            ],
+            discovery: None,
+        };
+        let protected = tidepool_testing::with_settlement(|settlement| {
+            inspect_hosted_lookup(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &protected_batch,
+                None,
+                settlement,
+            )
+        })
+        .expect("protected nominal Current address resolves through the existing checked owner");
+        assert!(matches!(&protected.answers[..], [
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::Info(matches), scopes, .. },
+            tidepool_runtime::session::inspection::HostedLookupAnswer::Reference {
+                answer: tidepool_runtime::session::inspection::SelectedLookupAnswer::ModuleNotFound(refused), scopes: refused_scopes, .. },
+        ] if matches.entries.len() == 1 && matches.entries[0].name == "checkedLookupValue"
+            && scopes == &[tidepool_runtime::session::NameScope::Current] && refused == &owner && refused_scopes.is_empty()));
         let query = tidepool_runtime::session::NameQuery {
             scope: tidepool_runtime::session::NameScope::Current,
             namespace: tidepool_runtime::session::NameNamespace::Value,
@@ -19612,6 +19830,14 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .unwrap();
+            let expected_work = InstallationObservationWork {
+                captures: 1,
+                encodings: usize::from(
+                    descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable,
+                ),
+                restored_decodes: 0,
+            };
+            assert_eq!(prepared.installation_work, expected_work);
             let initial = match workbench
                 .generation_publisher(state.clone())
                 .publish(
@@ -19633,6 +19859,43 @@ pub(crate) mod request_tests {
                 Err(BootstrapInstallationError::PublishedGeneration)
             );
             assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+            if let Some(selected) = &initial.durable {
+                // The stored reference is produced by real generation publication;
+                // this control does not manufacture native or source authority.
+                let mut observed = installation.clone().observe_generation().unwrap();
+                observed
+                    .verify_restored(&selected.references, &prompts)
+                    .unwrap();
+                assert_eq!(
+                    observed.work,
+                    InstallationObservationWork {
+                        captures: 1,
+                        encodings: 0,
+                        restored_decodes: 1,
+                    }
+                );
+                assert!(observed.lease.same_installation(&installation));
+                let mut corrupt = selected.references.clone();
+                corrupt.installation =
+                    tidepool_runtime::session::GenerationArtifactReference::capture(
+                        b"not installation json".to_vec(),
+                    );
+                assert!(observed.verify_restored(&corrupt, &prompts).is_err());
+                assert!(observed.lease.same_installation(&installation));
+                assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+                let source_bytes = observed.source.bytes().as_ptr();
+                let encoded = observed.into_durable_references(prompts.clone()).unwrap();
+                assert_eq!(
+                    encoded.references.source.bytes().as_ptr(),
+                    source_bytes,
+                    "durable projection moves the exact observed source bytes"
+                );
+                assert!(encoded.lease.same_installation(&installation));
+                encoded
+                    .lease
+                    .verify_recovered_generation(&encoded.references)
+                    .unwrap();
+            }
             let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
             let (before, before_visibility) = workbench
                 .access
@@ -19676,6 +19939,7 @@ pub(crate) mod request_tests {
                     )
                     .await
                     .unwrap();
+                assert_eq!(rejected.installation_work, expected_work);
                 let rejected_scope = rejected.scope.clone();
                 let decision = tidepool_runtime::session::PublicationDecision::new();
                 if cancelled {
@@ -19800,6 +20064,7 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .unwrap();
+            assert_eq!(prepared.installation_work, expected_work);
             let next_scope = prepared.scope.scope();
             workbench
                 .access

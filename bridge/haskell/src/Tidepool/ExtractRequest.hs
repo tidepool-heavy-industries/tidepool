@@ -4,6 +4,7 @@
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
   , RequestField(..)
+  , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
   , InspectionRequest(..)
   , StructuredInspection(..)
   , ExactNameInspection(..), LookupNameInspection(..), LookupNameMode(..)
@@ -21,6 +22,7 @@ module Tidepool.ExtractRequest
   ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as T
@@ -65,6 +67,7 @@ data RequestField
   | InspectInfo String
   | InspectLookupName LookupNameInspection
   | InspectExactName ExactNameInspection
+  | HostedLookup HostedLookupBatch
   | InspectBrowse String
   | InspectBrowseExpanded String
   | InspectScopeBrowse
@@ -120,6 +123,7 @@ data WorkerRequest = WorkerRequest
   , requestDeclarationJoin :: Maybe FilePath
   , requestDeclarationJoinOut :: Maybe FilePath
   , requestInspections :: [InspectionRequest]
+  , requestHostedLookup :: Maybe HostedLookupBatch
   , requestInspectOut :: Maybe FilePath
   , requestInspectTypeBatch :: Maybe FilePath
   -- | Executable imports: symbols the caller has already retained at a prior
@@ -156,6 +160,7 @@ data RequestShapeError
   | IncompleteDeclarationOperation
   | ConflictingRequestOperations
   | PreviewRequiresTurn
+  | InvalidHostedLookupShape
   deriving (Eq, Show)
 
 -- Keep mode shape policy pure. Manifest contents and exact-scope authority are
@@ -165,6 +170,11 @@ validateRequestShape args = () <$ admitRequestOperation args
 
 admitRequestOperation :: WorkerRequest -> Either RequestShapeError RequestOperation
 admitRequestOperation args
+  | Just batch <- requestHostedLookup args,
+      not (validHostedLookup batch) || not (null (requestInspections args))
+        || present (requestInspectTypeBatch args)
+        || not (validHostedSources batch (requestFiles args))
+      = Left InvalidHostedLookupShape
   | requestCheckSource args && not validSourceCheck = Left InvalidSourceCheckShape
   | requestCellPlan args && not validCellPlan = Left InvalidCellPlanShape
   | requestActivationPreview args && not (requestTurn args) = Left PreviewRequiresTurn
@@ -185,7 +195,7 @@ admitRequestOperation args
     operations = [operation | (selected, operation) <-
       [ (requestTurn args, if requestActivationPreview args then ActivationPreviewOperation else TurnOperation)
       , (requestClassify args, ClassificationOperation)
-      , (not (null (requestInspections args)), InspectionOperation)
+      , (not (null (requestInspections args)) || present (requestHostedLookup args), InspectionOperation)
       , (requestCell args, CellOperation)
       , (requestCellPlan args, CellPlanOperation)
       , (requestCheckSource args, SourceCheckOperation)
@@ -260,6 +270,7 @@ emptyWorkerRequest = WorkerRequest
   , requestDeclarationJoin = Nothing
   , requestDeclarationJoinOut = Nothing
   , requestInspections = []
+  , requestHostedLookup = Nothing
   , requestInspectOut = Nothing
   , requestInspectTypeBatch = Nothing
   , requestRetainedGenerations = Map.empty
@@ -267,6 +278,59 @@ emptyWorkerRequest = WorkerRequest
   , requestPortableOutput = False
   , requestInspectionStrict = False
   }
+
+data HostedLookupBatch = HostedLookupBatch
+  { hostedLookupOperations :: [HostedLookupOperation]
+  , hostedLookupDiscovery :: Maybe HostedLookupDiscovery
+  } deriving (Eq, Show)
+
+data HostedLookupOperation
+  = HostedLookupPrimary Word32 String HostedLookupQuery
+  | HostedLookupExactReference [Word32] ExactNameInspection
+  deriving (Eq, Show)
+
+data HostedLookupQuery
+  = HostedLookupName LookupNameInspection
+  | HostedLookupTypeSearch String
+  deriving (Eq, Show)
+
+data HostedLookupDiscovery = HostedLookupDiscovery
+  { hostedCandidateLimit :: Word32
+  , hostedDiscoveryScopes :: [StructuredNameScope]
+  , hostedEligibleModules :: Word32
+  } deriving (Eq, Show)
+
+validHostedLookup :: HostedLookupBatch -> Bool
+validHostedLookup batch = not (null operations)
+  && distinct [ordinal | HostedLookupPrimary ordinal _ _ <- operations]
+  && distinct (concat [ordinals | HostedLookupExactReference ordinals _ <- operations])
+  && all validOperation operations
+  && maybe True validDiscovery (hostedLookupDiscovery batch)
+  where
+    operations = hostedLookupOperations batch
+    distinct xs = Set.size (Set.fromList xs) == length xs
+    validOperation (HostedLookupExactReference ordinals query) =
+      not (null ordinals) && exactNameNamespace query /= StructuredAnyName
+    validOperation _ = True
+    validDiscovery discovery =
+      let scopes = hostedDiscoveryScopes discovery
+          modules = length [() | StructuredPublicModule _ <- scopes]
+       in hostedCandidateLimit discovery <= 128 && modules <= 128
+          && fromIntegral modules <= hostedEligibleModules discovery
+          && length [() | StructuredCurrentScope <- scopes] == 1
+          && and [scope `notElem` take index scopes | (index, scope) <- zip [0..] scopes]
+
+-- Hosted fallback can only use the exact successful metadata cohort that issued its misses.
+-- Type-search probes keep their separate wildcard-normalized source policy.
+validHostedSources :: HostedLookupBatch -> [FilePath] -> Bool
+validHostedSources batch sources = length sources == length operations
+  && case [path | (path, operation) <- zip sources operations, metadata operation] of
+    [] -> True
+    first : rest -> all (== first) rest
+  where
+    operations = hostedLookupOperations batch
+    metadata (HostedLookupPrimary _ _ (HostedLookupTypeSearch _)) = False
+    metadata _ = True
 
 data InspectionRequest
   = InspectTypeOf String
@@ -366,6 +430,7 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
         { requestInspections = InspectLookupNameOf query : requestInspections request }
       InspectExactName query -> request
         { requestInspections = InspectExactNameOf query : requestInspections request }
+      HostedLookup batch -> request { requestHostedLookup = Just batch }
       InspectBrowse name -> request
         { requestInspections = InspectModule name False : requestInspections request }
       InspectBrowseExpanded name -> request
@@ -388,7 +453,7 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       PortableOutput -> request { requestPortableOutput = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v20"
+workerRequestFlag = "--worker-request-v21"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -402,6 +467,7 @@ workerRequestFromArgv [flag, payload]
   | flag == workerRequestFlag = do
       (workload, jobs, capabilities, fields) <- decodeHex payload >>= decodeRequest
       validateCertificationFields fields
+      validateHostedLookupFields fields
       pure (Just ((requestFromFields fields)
         { requestWorkload = workload, requestCompilerJobs = jobs
         , requestCompilerCapabilities = capabilities }))
@@ -410,6 +476,28 @@ workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 -- Certification produces originals for every fresh home module. Authenticated
 -- candidates may supply unchanged originals through the same compiler pipeline;
 -- another dispatch mode cannot replace certification of the fresh source graph.
+validateHostedLookupFields :: [RequestField] -> Either String ()
+validateHostedLookupFields fields = case [batch | HostedLookup batch <- fields] of
+  [] -> Right ()
+  [batch]
+    | validHostedLookup batch && not (any generic fields)
+      && validHostedSources batch [path | Input path <- fields] -> Right ()
+  _ -> Left "worker request: invalid or mixed hosted lookup batch"
+  where
+    generic field = case field of
+      InspectType _ -> True
+      InspectInfo _ -> True
+      InspectLookupName _ -> True
+      InspectExactName _ -> True
+      InspectBrowse _ -> True
+      InspectBrowseExpanded _ -> True
+      InspectScopeBrowse -> True
+      InspectSearch _ -> True
+      InspectStructuredInfo _ -> True
+      InspectStructuredType _ -> True
+      InspectTypeBatch _ -> True
+      _ -> False
+
 validateCertificationFields :: [RequestField] -> Either String ()
 validateCertificationFields fields
   | CertifyHomeProducts `notElem` fields = Right ()
@@ -437,7 +525,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ020"
+  if magic /= "TPREQ021"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -457,7 +545,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ020" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ021" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -490,6 +578,7 @@ encodeField field = case field of
     <> maybe (BS.singleton 0) (\value -> BS.singleton 1 <> textFrame value) (lookupQualifierModule query)
     <> BS.singleton (case lookupNameMode query of LookupNameOnly -> 0; LookupNameOrModule -> 1)
   InspectExactName query -> BS.singleton 55 <> encodeExactNameInspection query
+  HostedLookup batch -> BS.singleton 56 <> encodeHostedLookup batch
   InspectOut value -> taggedText 28 value
   InspectBrowse value -> taggedText 29 value
   InspectBrowseExpanded value -> taggedText 30 value
@@ -520,6 +609,30 @@ encodeSymbolIdentity identity =
 encodeMaybeText :: Maybe T.Text -> BS.ByteString
 encodeMaybeText Nothing = BS.singleton 0
 encodeMaybeText (Just value) = BS.singleton 1 <> textFrame (T.unpack value)
+
+encodeHostedLookup :: HostedLookupBatch -> BS.ByteString
+encodeHostedLookup batch = encodeList encodeOperation (hostedLookupOperations batch)
+  <> case hostedLookupDiscovery batch of
+    Nothing -> BS.singleton 0
+    Just discovery -> BS.singleton 1
+      <> putU32 (fromIntegral (hostedCandidateLimit discovery))
+      <> putU32 (fromIntegral (hostedEligibleModules discovery))
+      <> encodeList encodeScope (hostedDiscoveryScopes discovery)
+  where
+    encodeList :: (a -> BS.ByteString) -> [a] -> BS.ByteString
+    encodeList encoder xs = putU32 (length xs) <> BS.concat (map encoder xs)
+    encodeOperation (HostedLookupPrimary ordinal origin query) =
+      BS.singleton 0 <> putU32 (fromIntegral ordinal) <> textFrame origin <> case query of
+        HostedLookupName name -> BS.singleton 0 <> textFrame (lookupNameQuery name)
+          <> (case lookupQualifierModule name of
+            Nothing -> BS.singleton 0
+            Just mdl -> BS.singleton 1 <> textFrame mdl)
+          <> BS.singleton (case lookupNameMode name of LookupNameOnly -> 0; LookupNameOrModule -> 1)
+        HostedLookupTypeSearch queryType -> BS.singleton 1 <> textFrame queryType
+    encodeOperation (HostedLookupExactReference ordinals query) =
+      BS.singleton 1 <> encodeList (putU32 . fromIntegral) ordinals <> encodeExactNameInspection query
+    encodeScope StructuredCurrentScope = BS.singleton 0
+    encodeScope (StructuredPublicModule mdl) = BS.singleton 1 <> textFrame mdl
 
 encodeStructuredInspection :: StructuredInspection -> BS.ByteString
 encodeStructuredInspection query =
@@ -603,6 +716,7 @@ pField bytes = do
     27 -> mapParser InspectInfo pText rest
     54 -> mapParser InspectLookupName pLookupNameInspection rest
     55 -> mapParser InspectExactName pExactNameInspection rest
+    56 -> mapParser HostedLookup pHostedLookup rest
     28 -> mapParser InspectOut pText rest
     29 -> mapParser InspectBrowse pText rest
     30 -> mapParser InspectBrowseExpanded pText rest
@@ -634,6 +748,53 @@ mapParser :: (a -> b) -> Parser a -> Parser b
 mapParser f parser bytes = do
   (value, rest) <- parser bytes
   Right (f value, rest)
+
+pHostedLookup :: Parser HostedLookupBatch
+pHostedLookup bytes = do
+  (operations, afterOperations) <- pHostedList pOperation bytes
+  (tag, afterTag) <- pWord8 afterOperations
+  (discovery, rest) <- case tag of
+    0 -> Right (Nothing, afterTag)
+    1 -> do
+      (limit, afterLimit) <- pWord32 afterTag
+      (eligible, afterEligible) <- pWord32 afterLimit
+      (scopes, trailing) <- pHostedList pScope afterEligible
+      Right (Just (HostedLookupDiscovery limit scopes eligible), trailing)
+    _ -> Left "worker request: invalid hosted discovery tag"
+  let batch = HostedLookupBatch operations discovery
+  if validHostedLookup batch then Right (batch, rest)
+    else Left "worker request: invalid hosted lookup batch"
+  where
+    pOperation input = do
+      (tag, afterTag) <- pWord8 input
+      case tag of
+        0 -> do
+          (ordinal, afterOrdinal) <- pWord32 afterTag
+          (origin, afterOrigin) <- pText afterOrdinal
+          (kind, afterKind) <- pWord8 afterOrigin
+          (query, rest) <- case kind of
+            0 -> mapParser HostedLookupName pLookupNameInspection afterKind
+            1 -> mapParser HostedLookupTypeSearch pText afterKind
+            _ -> Left "worker request: invalid hosted query tag"
+          Right (HostedLookupPrimary ordinal origin query, rest)
+        1 -> do
+          (ordinals, afterOrdinals) <- pHostedList pWord32 afterTag
+          (query, rest) <- pExactNameInspection afterOrdinals
+          Right (HostedLookupExactReference ordinals query, rest)
+        _ -> Left "worker request: invalid hosted operation tag"
+    pScope input = do
+      (tag, rest) <- pWord8 input
+      case tag of
+        0 -> Right (StructuredCurrentScope, rest)
+        1 -> mapParser StructuredPublicModule pText rest
+        _ -> Left "worker request: invalid hosted scope tag"
+
+pHostedList :: Parser a -> Parser [a]
+pHostedList parser bytes = do
+  (count, rest) <- pWord32 bytes
+  if toInteger count > toInteger (BS.length rest)
+    then Left "worker request: truncated hosted lookup collection"
+    else pN (fromIntegral count) parser rest
 
 pLookupNameInspection :: Parser LookupNameInspection
 pLookupNameInspection bytes = do

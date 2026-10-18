@@ -52,7 +52,8 @@ pub use endpoint::{
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    CompileWorkload, ExactNameInspection, ExtractRequest, InspectionNamespace, InspectionScope,
+    CompileWorkload, ExactNameInspection, ExtractRequest, HostedLookupBatch, HostedLookupDiscovery,
+    HostedLookupOperation, HostedLookupQuery, InspectionNamespace, InspectionScope,
     LookupNameInspection, LookupNameMode, ProtocolError, StructuredInspection, SymbolIdentity,
 };
 
@@ -828,6 +829,12 @@ impl ExtractCmd {
     /// Ask the compiler worker for GHC's information about an in-scope name.
     pub fn inspect_lookup_name(&mut self, query: LookupNameInspection) -> &mut Self {
         self.request.inspect_lookup_name(query);
+        self
+    }
+
+    /// Submit one hosted lookup batch; generic inspection remains complete.
+    pub fn hosted_lookup(&mut self, batch: HostedLookupBatch) -> &mut Self {
+        self.request.hosted_lookup(batch);
         self
     }
 

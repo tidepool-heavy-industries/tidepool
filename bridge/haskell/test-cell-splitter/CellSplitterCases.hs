@@ -86,6 +86,8 @@ import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transfor
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
+  , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
+  , LookupNameInspection(..), LookupNameMode(..), ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
   , admitRequestOperation, validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
@@ -974,6 +976,41 @@ checkingSourceRequestRoundTrip = do
       Left message | "retired field tag" `isInfixOf` message -> pure ()
       other -> fail ("retired fold/type-pin field accepted: " ++ show other)
 
+  let hosted = HostedLookupBatch
+        [ HostedLookupPrimary 1 "name α" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly))
+        , HostedLookupPrimary 3 "Int -> Int" (HostedLookupTypeSearch "Int -> Int")
+        , HostedLookupExactReference [0,2] (ExactNameInspection (StructuredPublicModule "Project.Work") StructuredTypeName "Token")
+        ] (Just (HostedLookupDiscovery 2 [StructuredCurrentScope, StructuredPublicModule "Project.Work"] 7))
+      hostedFields = [Input "metadata.hs", Input "type.hs", Input "metadata.hs", HostedLookup hosted, InspectOut "out.cbor"]
+  [_, hostedPayload] <- pure (workerArgv hostedFields)
+  assertEqual "hosted codec matches independently encoded shared Rust fixture"
+    "545052455130323100010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72" hostedPayload
+  case workerRequestFromArgv (workerArgv hostedFields) of
+    Right (Just request) -> do
+      assertEqual "hosted keeps original gapped ordinals and separate reference domain" (Just hosted) (requestHostedLookup request)
+      assertEqual "hosted selects one inspection operation" (Right InspectionOperation) (admitRequestOperation request)
+      assertEqual "hosted is not a generic inspection list" [] (requestInspections request)
+    other -> fail ("hosted request rejected: " ++ show other)
+  let overlapping = hosted { hostedLookupOperations = hostedLookupOperations hosted
+        ++ [HostedLookupPrimary 0 "name α" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly))] }
+      repeatedFields = [Input "metadata.hs", Input "type.hs", Input "metadata.hs", Input "metadata.hs", HostedLookup overlapping]
+  case workerRequestFromArgv (workerArgv repeatedFields) of
+    Right (Just request) -> assertEqual "repeated spelling and overlapping ordinal domains are retained"
+      (Just overlapping) (requestHostedLookup request)
+    other -> fail ("valid repeated hosted operation rejected: " ++ show other)
+  forM_ [ hostedFields ++ [InspectInfo "value"]
+        , hostedFields ++ [HostedLookup hosted]
+        , Input "different.hs" : tail hostedFields
+        , take 2 hostedFields ++ drop 3 hostedFields
+        , [Input "metadata.hs", HostedLookup (HostedLookupBatch
+            [HostedLookupExactReference [] (ExactNameInspection StructuredCurrentScope StructuredTypeName "Token")] Nothing)]
+        ] $ \bad -> case workerRequestFromArgv (workerArgv bad) of
+          Left _ -> pure ()
+          other -> fail ("invalid hosted request accepted: " ++ show other)
+  case workerRequestFromArgv ["--worker-request-v20", hostedPayload] of
+    Left _ -> pure ()
+    other -> fail ("previous hosted worker version accepted: " ++ show other)
+
 portableOutputRequestValidation :: IO ()
 portableOutputRequestValidation = do
   let valid = [Input "Fixture.hs", Targets ["first", "second"], OutputDir "out", PortableOutput]
@@ -983,6 +1020,15 @@ portableOutputRequestValidation = do
   (decoded, accepted) <- admit valid
   assertEqual "portable intent survives typed transport" True (requestPortableOutput decoded)
   assertEqual "portable source operation" (Right SourceOperation) accepted
+  let hosted = HostedLookup (HostedLookupBatch
+        [HostedLookupPrimary 7 "value" (HostedLookupName
+          (LookupNameInspection "value" Nothing LookupNameOnly))] Nothing)
+  (_, hostedAccepted) <- admit [Input "Fixture.hs", hosted]
+  assertEqual "hosted positive uses the inspection operation"
+    (Right InspectionOperation) hostedAccepted
+  (_, mixedAccepted) <- admit (valid ++ [hosted])
+  assertEqual "hosted inspection cannot acquire portable output intent"
+    (Left InvalidPortableOutputShape) mixedAccepted
   forM_ [Turn, Cell, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
     , SessionArtifacts "scope", CertifyHomeProducts, TargetModuleOnly, InjectVal "Binding"
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do

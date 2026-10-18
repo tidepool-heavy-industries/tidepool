@@ -8,6 +8,9 @@ use ciborium::value::Value as CborValue;
 use serde::Serialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
+pub use tidepool_extract_cmd::{
+    HostedLookupBatch, HostedLookupDiscovery, HostedLookupOperation, HostedLookupQuery,
+};
 
 use crate::{timing, CompileError};
 
@@ -235,6 +238,112 @@ pub enum LookupAnswer {
     ModuleNotFound(String),
 }
 
+/// A compiler-issued hosted prefix and the complete size observed before admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedMatches<T> {
+    pub entries: Vec<T>,
+    pub observed: usize,
+    pub limit: usize,
+}
+
+impl<T> SelectedMatches<T> {
+    pub fn truncated(&self) -> bool {
+        self.observed > self.entries.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectedLookupAnswer {
+    Info(SelectedMatches<InfoEntry>),
+    Ambiguous(SelectedMatches<InfoEntry>),
+    Module {
+        module: String,
+        matches: SelectedMatches<InfoEntry>,
+    },
+    Missing {
+        export_names: Vec<String>,
+    },
+    ModuleNotFound(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostedOperationIdentity {
+    Primary(u32),
+    Reference(Vec<u32>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostedLookupAnswer {
+    Name {
+        ordinal: u32,
+        scopes: Vec<NameScope>,
+        answer: SelectedLookupAnswer,
+    },
+    Type {
+        ordinal: u32,
+        matches: SelectedMatches<TypeMatch>,
+    },
+    Reference {
+        destinations: Vec<u32>,
+        scopes: Vec<NameScope>,
+        answer: SelectedLookupAnswer,
+    },
+    Rejected {
+        operation: HostedOperationIdentity,
+        diagnostic: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostedFallback {
+    NotNeeded,
+    ZeroBudget,
+    Unavailable(String),
+    Attempted(Vec<NameScope>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedDiscoveryCandidate {
+    pub query: String,
+    pub origins: Vec<String>,
+    pub summary: String,
+    pub local: bool,
+    pub reference: Option<IdentifierRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedDiscoverySelection {
+    pub candidates: Vec<HostedDiscoveryCandidate>,
+    pub fallback: HostedFallback,
+    pub eligible_modules: usize,
+    pub submitted_modules: usize,
+    pub enumerated_occurrences: usize,
+    pub discarded_occurrences: usize,
+    pub candidate_limit: usize,
+    pub issue: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedLookupOutput {
+    pub answers: Vec<HostedLookupAnswer>,
+    pub discovery: Option<HostedDiscoverySelection>,
+}
+
+impl HostedLookupOutput {
+    /// Check the issuing operation coverage and discovery receipt without reordering results.
+    pub fn validate_for(&self, batch: &HostedLookupBatch) -> Result<(), CompileError> {
+        batch
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        validate_hosted_output(batch, self)
+    }
+}
+
+enum InspectionOutput {
+    Complete(Vec<InspectionResult>),
+    Hosted(HostedLookupOutput),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionResult {
     Lookup {
@@ -433,6 +542,118 @@ pub struct InspectionRequest<'a> {
     pub effects: Option<&'a super::HaskellTypeSource>,
 }
 
+/// Hosted lookup shares the ordinary admitted input owner but carries one
+/// closed batch instead of an independent query/ordinal registry.
+pub struct HostedLookupRequest<'a> {
+    pub exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
+    pub preamble: &'a str,
+    pub imports: &'a str,
+    pub include: &'a [&'a Path],
+    pub session_root: &'a Path,
+    pub inject_modules: &'a [String],
+    pub batch: &'a HostedLookupBatch,
+    pub effects: Option<&'a super::HaskellTypeSource>,
+}
+
+fn hosted_queries(batch: &HostedLookupBatch) -> Result<Vec<InspectionQuery>, CompileError> {
+    batch
+        .operations
+        .iter()
+        .map(|operation| {
+            Ok(match operation {
+                HostedLookupOperation::Primary {
+                    query: HostedLookupQuery::Name(query),
+                    ..
+                } => InspectionQuery::LookupName {
+                    query: query.query.clone(),
+                    qualifier_module: query.qualifier_module.clone(),
+                    mode: query.mode,
+                },
+                HostedLookupOperation::Primary {
+                    query: HostedLookupQuery::TypeSearch(query),
+                    ..
+                } => InspectionQuery::TypeSearch(query.clone()),
+                HostedLookupOperation::ExactReference { query, .. } => {
+                    InspectionQuery::ExactName(ExactNameQuery {
+                        scope: match &query.scope {
+                            tidepool_extract_cmd::InspectionScope::Current => NameScope::Current,
+                            tidepool_extract_cmd::InspectionScope::PublicModule(owner) => {
+                                NameScope::PublicModule(owner.clone())
+                            }
+                        },
+                        namespace: match query.namespace {
+                            tidepool_extract_cmd::InspectionNamespace::Value => {
+                                IdentifierNamespace::Value
+                            }
+                            tidepool_extract_cmd::InspectionNamespace::Type => {
+                                IdentifierNamespace::Type
+                            }
+                            tidepool_extract_cmd::InspectionNamespace::Constructor => {
+                                IdentifierNamespace::Constructor
+                            }
+                            tidepool_extract_cmd::InspectionNamespace::Field => {
+                                IdentifierNamespace::Field
+                            }
+                            tidepool_extract_cmd::InspectionNamespace::Any => {
+                                return Err(invalid(
+                                    "exact reference requires an identifier namespace",
+                                ))
+                            }
+                        },
+                        name: query.name.clone(),
+                    })
+                }
+            })
+        })
+        .collect()
+}
+
+pub fn run_hosted_lookup(
+    request: HostedLookupRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<HostedLookupOutput, CompileError> {
+    run_hosted_lookup_with_inputs(request, None, settlement)
+}
+
+pub fn run_admitted_hosted_lookup(
+    request: HostedLookupRequest<'_>,
+    view: &super::SessionCompileView,
+    inputs: &AdmittedInspectionInputs,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<HostedLookupOutput, CompileError> {
+    validate_inspection_view(&request.exact_context, view, inputs)?;
+    run_hosted_lookup_with_inputs(request, Some(inputs), settlement)
+}
+
+fn run_hosted_lookup_with_inputs(
+    request: HostedLookupRequest<'_>,
+    inputs: Option<&AdmittedInspectionInputs>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<HostedLookupOutput, CompileError> {
+    request
+        .batch
+        .validate()
+        .map_err(|error| invalid(error.to_string()))?;
+    let queries = hosted_queries(request.batch)?;
+    let common = InspectionRequest {
+        exact_context: request.exact_context,
+        preamble: request.preamble,
+        imports: request.imports,
+        include: request.include,
+        session_root: request.session_root,
+        inject_modules: request.inject_modules,
+        queries: &queries,
+        effects: request.effects,
+    };
+    match run_inspection_batch(common, false, inputs, Some(request.batch), settlement)? {
+        InspectionOutput::Hosted(output) => Ok(output),
+        InspectionOutput::Complete(_) => Err(invalid(
+            "complete inspection output cannot satisfy hosted lookup",
+        )),
+    }
+}
+
 /// Inspect an ordered batch without evaluating it or mutating the resident
 /// session. Every query sees the same preamble, imports, session modules, and
 /// injected value interfaces as the next ordinary turn. The worker serves the
@@ -454,14 +675,25 @@ pub fn run_admitted_inspections(
     inputs: &AdmittedInspectionInputs,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
+    validate_inspection_view(&request.exact_context, view, inputs)?;
+    run_inspections_with_policy(request, false, Some(inputs), settlement)
+}
+
+fn validate_inspection_view(
+    exact_context: &Option<
+        std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
+    >,
+    view: &super::SessionCompileView,
+    inputs: &AdmittedInspectionInputs,
+) -> Result<(), CompileError> {
     if view.session() != inputs.view.session()
         || view.lexical_scope() != inputs.view.lexical_scope()
         || !view.is_current_for(&inputs.view)
-        || request.exact_context != view.exact_compile_context()
+        || *exact_context != view.exact_compile_context()
     {
         return Err(invalid("inspection inputs belong to another compile view"));
     }
-    run_inspections_with_policy(request, false, Some(inputs), settlement)
+    Ok(())
 }
 
 /// Declaration staging variant: source rejection must remain a request-level
@@ -479,6 +711,21 @@ fn run_inspections_with_policy(
     inputs: Option<&AdmittedInspectionInputs>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
+    match run_inspection_batch(request, strict, inputs, None, settlement)? {
+        InspectionOutput::Complete(results) => Ok(results),
+        InspectionOutput::Hosted(_) => {
+            Err(invalid("hosted output cannot satisfy complete inspection"))
+        }
+    }
+}
+
+fn run_inspection_batch(
+    request: InspectionRequest<'_>,
+    strict: bool,
+    inputs: Option<&AdmittedInspectionInputs>,
+    hosted: Option<&HostedLookupBatch>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<InspectionOutput, CompileError> {
     if inputs.is_some_and(|inputs| !inputs.matches_request(&request)) {
         return Err(invalid(
             "inspection request differs from its admitted scope snapshot",
@@ -486,7 +733,11 @@ fn run_inspections_with_policy(
     }
     let values = inputs.map(|inputs| inputs.values.as_slice());
     if request.queries.is_empty() {
-        return Ok(Vec::new());
+        return if hosted.is_some() {
+            Err(invalid("hosted lookup has no physical operations"))
+        } else {
+            Ok(InspectionOutput::Complete(Vec::new()))
+        };
     }
     let temp = TempDir::new()?;
     let output_path = temp.path().join("inspection.cbor");
@@ -582,60 +833,65 @@ fn run_inspections_with_policy(
         sources.insert(source_path.clone(), source);
         query_sources.push(source_path.clone());
         command.input(&source_path);
-        match query {
-            InspectionQuery::TypeOf(expression) => {
-                command.inspect_type(expression);
-            }
-            InspectionQuery::LookupName {
-                query,
-                qualifier_module,
-                mode,
-            } => {
-                command.inspect_lookup_name(tidepool_extract_cmd::LookupNameInspection {
-                    query: query.clone(),
-                    qualifier_module: qualifier_module.clone(),
-                    mode: *mode,
-                });
-            }
-            InspectionQuery::ExactName(query) => {
-                command.inspect_exact_name(tidepool_extract_cmd::ExactNameInspection {
-                    scope: request_scope(&query.scope),
-                    namespace: match query.namespace {
-                        IdentifierNamespace::Value => {
-                            tidepool_extract_cmd::InspectionNamespace::Value
-                        }
-                        IdentifierNamespace::Type => {
-                            tidepool_extract_cmd::InspectionNamespace::Type
-                        }
-                        IdentifierNamespace::Constructor => {
-                            tidepool_extract_cmd::InspectionNamespace::Constructor
-                        }
-                        IdentifierNamespace::Field => {
-                            tidepool_extract_cmd::InspectionNamespace::Field
-                        }
-                    },
-                    name: query.name.clone(),
-                });
-            }
-            InspectionQuery::Info(name) => {
-                command.inspect_info(name);
-            }
-            InspectionQuery::TypeSearch(query) => {
-                command.inspect_search(query);
-            }
-            InspectionQuery::ScopeBrowse => {
-                command.inspect_scope_browse();
-            }
-            InspectionQuery::Browse { module, expanded } => {
-                command.inspect_browse(module, *expanded);
-            }
-            InspectionQuery::StructuredInfo { query, provenance } => {
-                command.inspect_structured_info(structured_request(query, provenance));
-            }
-            InspectionQuery::StructuredType { query, provenance } => {
-                command.inspect_structured_type(structured_request(query, provenance));
+        if hosted.is_none() {
+            match query {
+                InspectionQuery::TypeOf(expression) => {
+                    command.inspect_type(expression);
+                }
+                InspectionQuery::LookupName {
+                    query,
+                    qualifier_module,
+                    mode,
+                } => {
+                    command.inspect_lookup_name(tidepool_extract_cmd::LookupNameInspection {
+                        query: query.clone(),
+                        qualifier_module: qualifier_module.clone(),
+                        mode: *mode,
+                    });
+                }
+                InspectionQuery::ExactName(query) => {
+                    command.inspect_exact_name(tidepool_extract_cmd::ExactNameInspection {
+                        scope: request_scope(&query.scope),
+                        namespace: match query.namespace {
+                            IdentifierNamespace::Value => {
+                                tidepool_extract_cmd::InspectionNamespace::Value
+                            }
+                            IdentifierNamespace::Type => {
+                                tidepool_extract_cmd::InspectionNamespace::Type
+                            }
+                            IdentifierNamespace::Constructor => {
+                                tidepool_extract_cmd::InspectionNamespace::Constructor
+                            }
+                            IdentifierNamespace::Field => {
+                                tidepool_extract_cmd::InspectionNamespace::Field
+                            }
+                        },
+                        name: query.name.clone(),
+                    });
+                }
+                InspectionQuery::Info(name) => {
+                    command.inspect_info(name);
+                }
+                InspectionQuery::TypeSearch(query) => {
+                    command.inspect_search(query);
+                }
+                InspectionQuery::ScopeBrowse => {
+                    command.inspect_scope_browse();
+                }
+                InspectionQuery::Browse { module, expanded } => {
+                    command.inspect_browse(module, *expanded);
+                }
+                InspectionQuery::StructuredInfo { query, provenance } => {
+                    command.inspect_structured_info(structured_request(query, provenance));
+                }
+                InspectionQuery::StructuredType { query, provenance } => {
+                    command.inspect_structured_type(structured_request(query, provenance));
+                }
             }
         }
+    }
+    if let Some(batch) = hosted {
+        command.hosted_lookup(batch.clone());
     }
     let mut batch_source = None;
     if let Some(expressions) = type_batch {
@@ -764,14 +1020,28 @@ fn run_inspections_with_policy(
             CompileError::Io(error)
         }
     })?;
-    let results = decode_inspections(&bytes)?;
-    if results.len() != request.queries.len() {
-        return Err(invalid(format!(
-            "worker returned {} results for {} queries",
-            results.len(),
-            request.queries.len()
-        )));
-    }
+    let output = decode_inspection_output(&bytes)?;
+    let successes = match (&output, hosted) {
+        (InspectionOutput::Complete(results), None) if results.len() == request.queries.len() => {
+            results
+                .iter()
+                .map(|result| !matches!(result, InspectionResult::Rejected { .. }))
+                .collect::<Vec<_>>()
+        }
+        (InspectionOutput::Hosted(output), Some(batch)) => {
+            output.validate_for(batch)?;
+            output
+                .answers
+                .iter()
+                .map(|answer| !matches!(answer, HostedLookupAnswer::Rejected { .. }))
+                .collect()
+        }
+        _ => {
+            return Err(invalid(
+                "inspection output kind or operation coverage differs from the submitted batch",
+            ))
+        }
+    };
     #[cfg(test)]
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
         if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
@@ -823,11 +1093,7 @@ fn run_inspections_with_policy(
             }
         }
     }
-    if offer.exact_scope_path().is_some()
-        && results
-            .iter()
-            .any(|result| !matches!(result, InspectionResult::Rejected { .. }))
-    {
+    if offer.exact_scope_path().is_some() && successes.iter().any(|success| *success) {
         let validated = (|| {
             let directories = sources
                 .keys()
@@ -854,11 +1120,8 @@ fn run_inspections_with_policy(
             let batch_admitted = batch_source
                 .as_ref()
                 .is_some_and(|path| admitted.contains(path));
-            for (index, result) in results.iter().enumerate() {
-                if !matches!(result, InspectionResult::Rejected { .. })
-                    && !admitted.contains(&query_sources[index])
-                    && !batch_admitted
-                {
+            for (index, success) in successes.iter().enumerate() {
+                if *success && !admitted.contains(&query_sources[index]) && !batch_admitted {
                     return Err(invalid(
                         "inspection result lacks its exact consumed source receipt",
                     ));
@@ -870,18 +1133,23 @@ fn run_inspections_with_policy(
             offer.retain_failure(temp.path(), &command, &run.output.stderr, error)
         })?;
     }
-    Ok(request
-        .queries
-        .iter()
-        .zip(results)
-        .map(|(query, result)| match (query, result) {
-            (
-                InspectionQuery::StructuredType { .. },
-                InspectionResult::StructuredInfo(Err(error)),
-            ) => InspectionResult::StructuredType(Err(error)),
-            (_, result) => result,
-        })
-        .collect())
+    Ok(match output {
+        InspectionOutput::Complete(results) => InspectionOutput::Complete(
+            request
+                .queries
+                .iter()
+                .zip(results)
+                .map(|(query, result)| match (query, result) {
+                    (
+                        InspectionQuery::StructuredType { .. },
+                        InspectionResult::StructuredInfo(Err(error)),
+                    ) => InspectionResult::StructuredType(Err(error)),
+                    (_, result) => result,
+                })
+                .collect(),
+        ),
+        hosted @ InspectionOutput::Hosted(_) => hosted,
+    })
 }
 
 fn structured_request(
@@ -924,7 +1192,17 @@ fn map_spawn(error: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(error.source))
 }
 
+#[cfg(test)]
 fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileError> {
+    match decode_inspection_output(bytes)? {
+        InspectionOutput::Complete(results) => Ok(results),
+        InspectionOutput::Hosted(_) => Err(invalid(
+            "hosted lookup output cannot satisfy a complete inspection",
+        )),
+    }
+}
+
+fn decode_inspection_output(bytes: &[u8]) -> Result<InspectionOutput, CompileError> {
     let mut reader = std::io::Cursor::new(bytes);
     let value: CborValue = ciborium::de::from_reader(&mut reader)
         .map_err(|error| invalid(format!("malformed CBOR: {error}")))?;
@@ -932,13 +1210,624 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP007" {
+    if text(&root[0], "version")? != "TPINSP008" {
         return Err(invalid("unsupported receipt version"));
     }
-    array(&root[1], "results")?
+    let body = array(&root[1], "inspection output")?;
+    match body
+        .first()
+        .ok_or_else(|| invalid("empty inspection output"))
+        .and_then(|v| text(v, "output kind"))?
+    {
+        "Complete" => {
+            let fields = array_len(&root[1], 2, "complete output")?;
+            Ok(InspectionOutput::Complete(
+                array(&fields[1], "results")?
+                    .iter()
+                    .map(decode_inspection_result)
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        "HostedLookup" => {
+            let fields = array_len(&root[1], 3, "hosted output")?;
+            let output = HostedLookupOutput {
+                answers: array(&fields[1], "hosted answers")?
+                    .iter()
+                    .map(decode_hosted_answer)
+                    .collect::<Result<_, _>>()?,
+                discovery: match &fields[2] {
+                    CborValue::Null => None,
+                    value => Some(decode_hosted_discovery(value)?),
+                },
+            };
+            validate_hosted_shapes(&output)?;
+            Ok(InspectionOutput::Hosted(output))
+        }
+        other => Err(invalid(format!("unknown inspection output kind {other:?}"))),
+    }
+}
+
+fn ordinal(value: &CborValue) -> Result<u32, CompileError> {
+    u32::try_from(unsigned(value, "operation ordinal")?)
+        .map_err(|_| invalid("operation ordinal exceeds u32"))
+}
+
+fn count(value: &CborValue, what: &str) -> Result<usize, CompileError> {
+    usize::try_from(unsigned(value, what)?).map_err(|_| invalid(format!("{what} exceeds usize")))
+}
+
+fn validate_selected_shape(
+    observed: usize,
+    limit: usize,
+    retained: usize,
+) -> Result<(), CompileError> {
+    if limit != 20 || retained != observed.min(limit) {
+        return Err(invalid(
+            "selected matches have inconsistent observed count or limit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_selected_lookup(answer: &SelectedLookupAnswer) -> Result<(), CompileError> {
+    match answer {
+        SelectedLookupAnswer::Info(selected) | SelectedLookupAnswer::Ambiguous(selected) => {
+            validate_selected_shape(selected.observed, selected.limit, selected.entries.len())?;
+            if (matches!(answer, SelectedLookupAnswer::Info(_)) && selected.observed != 1)
+                || (matches!(answer, SelectedLookupAnswer::Ambiguous(_)) && selected.observed < 2)
+            {
+                return Err(invalid(
+                    "selected name status disagrees with complete match count",
+                ));
+            }
+        }
+        SelectedLookupAnswer::Module { matches, .. } => {
+            validate_selected_shape(matches.observed, matches.limit, matches.entries.len())?
+        }
+        SelectedLookupAnswer::Missing { .. } | SelectedLookupAnswer::ModuleNotFound(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_discovery_shape(selected: &HostedDiscoverySelection) -> Result<(), CompileError> {
+    if selected.candidate_limit > 128
+        || selected.candidates.len() > selected.candidate_limit
+        || selected.submitted_modules > selected.eligible_modules.min(128)
+        || selected.discarded_occurrences > selected.enumerated_occurrences
+        || selected.candidates.len()
+            > selected.enumerated_occurrences - selected.discarded_occurrences
+    {
+        return Err(invalid("inconsistent discovery frontier counts"));
+    }
+    Ok(())
+}
+
+fn validate_hosted_shapes(output: &HostedLookupOutput) -> Result<(), CompileError> {
+    for answer in &output.answers {
+        match answer {
+            HostedLookupAnswer::Name { answer, .. }
+            | HostedLookupAnswer::Reference { answer, .. } => validate_selected_lookup(answer)?,
+            HostedLookupAnswer::Type { matches, .. } => {
+                validate_selected_shape(matches.observed, matches.limit, matches.entries.len())?
+            }
+            HostedLookupAnswer::Rejected { .. } => {}
+        }
+    }
+    if let Some(selected) = &output.discovery {
+        validate_discovery_shape(selected)?;
+    }
+    Ok(())
+}
+
+fn validate_scope_subsequence(
+    scopes: &[NameScope],
+    admitted: &[NameScope],
+) -> Result<(), CompileError> {
+    let mut cursor = 0;
+    for (index, observed) in scopes.iter().enumerate() {
+        if scopes[..index].contains(observed) {
+            return Err(invalid("duplicate searched scope"));
+        }
+        let Some(offset) = admitted[cursor..]
+            .iter()
+            .position(|allowed| allowed == observed)
+        else {
+            return Err(invalid("answer claims an unsubmitted or reordered scope"));
+        };
+        cursor += offset + 1;
+    }
+    Ok(())
+}
+
+fn decode_selected<T>(
+    value: &CborValue,
+    decode: fn(&CborValue) -> Result<T, CompileError>,
+) -> Result<SelectedMatches<T>, CompileError> {
+    let fields = array_len(value, 3, "selected matches")?;
+    let observed = count(&fields[0], "observed matches")?;
+    let limit = count(&fields[1], "match limit")?;
+    let retained = array(&fields[2], "retained matches")?;
+    validate_selected_shape(observed, limit, retained.len())?;
+    let entries = retained.iter().map(decode).collect::<Result<Vec<_>, _>>()?;
+    Ok(SelectedMatches {
+        entries,
+        observed,
+        limit,
+    })
+}
+
+fn decode_selected_lookup(value: &CborValue) -> Result<SelectedLookupAnswer, CompileError> {
+    let body = array(value, "selected lookup")?;
+    let tag = body
+        .first()
+        .ok_or_else(|| invalid("empty selected lookup"))
+        .and_then(|v| text(v, "selected lookup tag"))?;
+    match tag {
+        "Info" | "Ambiguous" => {
+            let row = array_len(value, 2, "selected name")?;
+            let selected = decode_selected(&row[1], decode_info_entry)?;
+            Ok(if tag == "Info" {
+                SelectedLookupAnswer::Info(selected)
+            } else {
+                SelectedLookupAnswer::Ambiguous(selected)
+            })
+        }
+        "Module" => {
+            let row = array_len(value, 3, "selected module")?;
+            Ok(SelectedLookupAnswer::Module {
+                module: text(&row[1], "selected module")?.into(),
+                matches: decode_selected(&row[2], decode_info_entry)?,
+            })
+        }
+        "Missing" => {
+            let row = array_len(value, 2, "selected miss")?;
+            Ok(SelectedLookupAnswer::Missing {
+                export_names: decode_texts(&row[1], "nearby names")?,
+            })
+        }
+        "ModuleNotFound" => {
+            let row = array_len(value, 2, "selected missing module")?;
+            Ok(SelectedLookupAnswer::ModuleNotFound(
+                text(&row[1], "missing module")?.into(),
+            ))
+        }
+        other => Err(invalid(format!("unknown selected lookup {other:?}"))),
+    }
+}
+
+fn exact_entry_address_matches(query: &str, entry: &InfoEntry) -> bool {
+    if query == entry.name {
+        return true;
+    }
+    match &entry.module {
+        Some(owner) => query == format!("{owner}.{}", entry.name),
+        // Local preamble declarations intentionally omit their defining module
+        // in generic InfoEntry presentation. Check the actual occurrence suffix
+        // without inventing that missing identity. The retained GHC Name and
+        // consumed-source owner still validate the nominal qualifier at issuance.
+        None => query
+            .strip_suffix(&format!(".{}", entry.name))
+            .is_some_and(|prefix| !prefix.is_empty()),
+    }
+}
+
+fn validate_hosted_output(
+    batch: &HostedLookupBatch,
+    output: &HostedLookupOutput,
+) -> Result<(), CompileError> {
+    validate_hosted_shapes(output)?;
+    if batch.operations.len() != output.answers.len() {
+        return Err(invalid(
+            "hosted output omitted or added a physical operation",
+        ));
+    }
+    let mut named_miss = false;
+    let mut rejected_name = false;
+    for (operation, answer) in batch.operations.iter().zip(&output.answers) {
+        let valid = match (operation, answer) {
+            (
+                HostedLookupOperation::Primary {
+                    ordinal,
+                    query: HostedLookupQuery::Name(query),
+                    ..
+                },
+                HostedLookupAnswer::Name {
+                    ordinal: returned,
+                    scopes,
+                    answer,
+                },
+            ) => {
+                let mut admitted = vec![NameScope::Current];
+                if let Some(owner) = &query.qualifier_module {
+                    let scope = NameScope::PublicModule(owner.clone());
+                    if !admitted.contains(&scope) {
+                        admitted.push(scope);
+                    }
+                }
+                if query.mode == LookupNameMode::NameOrModule {
+                    let scope = NameScope::PublicModule(query.query.clone());
+                    if !admitted.contains(&scope) {
+                        admitted.push(scope);
+                    }
+                }
+                validate_scope_subsequence(scopes, &admitted)?;
+                if scopes.first() != Some(&NameScope::Current) {
+                    return Err(invalid(
+                        "successful name observation omitted current-scope search",
+                    ));
+                }
+                match answer {
+                    SelectedLookupAnswer::Module { module, .. } => {
+                        if query.mode != LookupNameMode::NameOrModule
+                            || module != &query.query
+                            || scopes.last() != Some(&NameScope::PublicModule(module.clone()))
+                        {
+                            return Err(invalid(
+                                "module answer differs from its name-or-module request",
+                            ));
+                        }
+                    }
+                    SelectedLookupAnswer::ModuleNotFound(module) => {
+                        if query.mode != LookupNameMode::NameOrModule || module != &query.query {
+                            return Err(invalid(
+                                "missing module differs from its name-or-module request",
+                            ));
+                        }
+                    }
+                    SelectedLookupAnswer::Missing { .. } if query.mode != LookupNameMode::Name => {
+                        return Err(invalid(
+                            "name-or-module request omitted its module decision",
+                        ))
+                    }
+                    _ => {}
+                }
+                named_miss |= matches!(
+                    answer,
+                    SelectedLookupAnswer::Missing { .. } | SelectedLookupAnswer::ModuleNotFound(_)
+                );
+                ordinal == returned
+            }
+            (
+                HostedLookupOperation::Primary {
+                    ordinal,
+                    query: HostedLookupQuery::TypeSearch(_),
+                    ..
+                },
+                HostedLookupAnswer::Type {
+                    ordinal: returned, ..
+                },
+            ) => ordinal == returned,
+            (
+                HostedLookupOperation::ExactReference {
+                    destinations,
+                    query,
+                },
+                HostedLookupAnswer::Reference {
+                    destinations: returned,
+                    scopes,
+                    answer,
+                },
+            ) => {
+                let scope = match &query.scope {
+                    tidepool_extract_cmd::InspectionScope::Current => NameScope::Current,
+                    tidepool_extract_cmd::InspectionScope::PublicModule(owner) => {
+                        NameScope::PublicModule(owner.clone())
+                    }
+                };
+                validate_scope_subsequence(scopes, std::slice::from_ref(&scope))?;
+                match answer {
+                    SelectedLookupAnswer::Module { .. } => {
+                        return Err(invalid("exact reference cannot issue module browse"))
+                    }
+                    SelectedLookupAnswer::ModuleNotFound(owner) => {
+                        if !matches!(&scope, NameScope::PublicModule(expected) if expected == owner)
+                        {
+                            return Err(invalid("exact reference refused another module"));
+                        }
+                    }
+                    _ if scopes != std::slice::from_ref(&scope) => {
+                        return Err(invalid("exact reference answer omitted its searched scope"))
+                    }
+                    _ => {}
+                }
+                let entries = match answer {
+                    SelectedLookupAnswer::Info(matches)
+                    | SelectedLookupAnswer::Ambiguous(matches) => matches.entries.as_slice(),
+                    _ => &[],
+                };
+                if entries
+                    .iter()
+                    .any(|entry| !exact_entry_address_matches(&query.name, entry))
+                {
+                    return Err(invalid("exact reference entry differs from its submitted occurrence or known defining owner"));
+                }
+                if entries.iter().any(|entry| match query.namespace {
+                    tidepool_extract_cmd::InspectionNamespace::Value => matches!(
+                        entry.kind.as_str(),
+                        "type" | "constructor" | "record-selector"
+                    ),
+                    tidepool_extract_cmd::InspectionNamespace::Type => entry.kind != "type",
+                    tidepool_extract_cmd::InspectionNamespace::Constructor => {
+                        entry.kind != "constructor"
+                    }
+                    tidepool_extract_cmd::InspectionNamespace::Field => {
+                        entry.kind != "record-selector"
+                    }
+                    tidepool_extract_cmd::InspectionNamespace::Any => true,
+                }) {
+                    return Err(invalid(
+                        "exact reference entry belongs to another namespace",
+                    ));
+                }
+                destinations == returned
+            }
+            (
+                HostedLookupOperation::Primary { ordinal, query, .. },
+                HostedLookupAnswer::Rejected {
+                    operation: HostedOperationIdentity::Primary(returned),
+                    ..
+                },
+            ) => {
+                rejected_name |= matches!(query, HostedLookupQuery::Name(_));
+                ordinal == returned
+            }
+            (
+                HostedLookupOperation::ExactReference { destinations, .. },
+                HostedLookupAnswer::Rejected {
+                    operation: HostedOperationIdentity::Reference(returned),
+                    ..
+                },
+            ) => destinations == returned,
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid(
+                "hosted answer belongs to another operation or ordinal domain",
+            ));
+        }
+    }
+    match (&batch.discovery, &output.discovery) {
+        (None, None) => {}
+        (Some(policy), Some(selected)) => {
+            if selected.candidate_limit != policy.candidate_limit as usize
+                || selected.eligible_modules != policy.eligible_modules as usize
+            {
+                return Err(invalid(
+                    "hosted discovery frontier differs from submitted policy",
+                ));
+            }
+            let scopes = match &selected.fallback {
+                HostedFallback::Attempted(scopes) => {
+                    if policy.candidate_limit == 0 || !named_miss {
+                        return Err(invalid(
+                            "fallback search has no genuine successful named miss",
+                        ));
+                    }
+                    if selected.submitted_modules
+                        != policy
+                            .scopes
+                            .iter()
+                            .filter(|scope| {
+                                matches!(
+                                    scope,
+                                    tidepool_extract_cmd::InspectionScope::PublicModule(_)
+                                )
+                            })
+                            .count()
+                    {
+                        return Err(invalid(
+                            "fallback submission count differs from admitted scopes",
+                        ));
+                    }
+                    scopes.as_slice()
+                }
+                HostedFallback::ZeroBudget => {
+                    if policy.candidate_limit != 0
+                        || !selected.candidates.is_empty()
+                        || selected.enumerated_occurrences != 0
+                    {
+                        return Err(invalid(
+                            "zero discovery budget performed candidate enumeration",
+                        ));
+                    }
+                    &[]
+                }
+                HostedFallback::NotNeeded => {
+                    if policy.candidate_limit == 0 || named_miss {
+                        return Err(invalid("required fallback was reported unneeded"));
+                    }
+                    &[]
+                }
+                HostedFallback::Unavailable(_) => {
+                    if policy.candidate_limit == 0 || named_miss || !rejected_name {
+                        return Err(invalid(
+                            "unavailable fallback lacks a rejected metadata name operation",
+                        ));
+                    }
+                    &[]
+                }
+            };
+            if !matches!(selected.fallback, HostedFallback::Attempted(_))
+                && selected.submitted_modules != 0
+            {
+                return Err(invalid("unattempted fallback claims submitted modules"));
+            }
+            let admitted = policy
+                .scopes
+                .iter()
+                .map(|scope| match scope {
+                    tidepool_extract_cmd::InspectionScope::Current => NameScope::Current,
+                    tidepool_extract_cmd::InspectionScope::PublicModule(owner) => {
+                        NameScope::PublicModule(owner.clone())
+                    }
+                })
+                .collect::<Vec<_>>();
+            validate_scope_subsequence(scopes, &admitted)?;
+            let origins = batch
+                .operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    HostedLookupOperation::Primary { origin, .. } => Some(origin),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for (index, candidate) in selected.candidates.iter().enumerate() {
+                if candidate.origins.is_empty()
+                    || candidate
+                        .origins
+                        .iter()
+                        .any(|origin| !origins.contains(&origin))
+                    || candidate
+                        .origins
+                        .iter()
+                        .enumerate()
+                        .any(|(index, origin)| candidate.origins[..index].contains(origin))
+                    || selected.candidates[..index].iter().any(|previous| {
+                        previous.query == candidate.query
+                            && previous.reference == candidate.reference
+                    })
+                {
+                    return Err(invalid(
+                        "candidate identity or origins do not belong to this hosted batch",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "hosted output changed whether discovery was requested",
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn reference_destinations(value: &CborValue) -> Result<Vec<u32>, CompileError> {
+    let destinations = array(value, "reference destinations")?
         .iter()
-        .map(decode_inspection_result)
-        .collect()
+        .map(ordinal)
+        .collect::<Result<Vec<_>, _>>()?;
+    if destinations.is_empty()
+        || destinations.iter().copied().collect::<BTreeSet<_>>().len() != destinations.len()
+    {
+        return Err(invalid("invalid reference destination identities"));
+    }
+    Ok(destinations)
+}
+
+fn decode_hosted_answer(value: &CborValue) -> Result<HostedLookupAnswer, CompileError> {
+    let body = array(value, "hosted answer")?;
+    let tag = body
+        .first()
+        .ok_or_else(|| invalid("empty hosted answer"))
+        .and_then(|v| text(v, "hosted answer tag"))?;
+    match tag {
+        "Name" => {
+            let row = array_len(value, 4, "hosted name")?;
+            Ok(HostedLookupAnswer::Name {
+                ordinal: ordinal(&row[1])?,
+                scopes: decode_scopes(&row[2])?,
+                answer: decode_selected_lookup(&row[3])?,
+            })
+        }
+        "Type" => {
+            let row = array_len(value, 3, "hosted type")?;
+            Ok(HostedLookupAnswer::Type {
+                ordinal: ordinal(&row[1])?,
+                matches: decode_selected(&row[2], decode_type_match)?,
+            })
+        }
+        "Reference" => {
+            let row = array_len(value, 4, "hosted reference")?;
+            Ok(HostedLookupAnswer::Reference {
+                destinations: reference_destinations(&row[1])?,
+                scopes: decode_scopes(&row[2])?,
+                answer: decode_selected_lookup(&row[3])?,
+            })
+        }
+        "Rejected" => {
+            let row = array_len(value, 3, "hosted rejection")?;
+            let identity = array_len(&row[1], 2, "rejected operation")?;
+            let operation = match text(&identity[0], "rejected operation kind")? {
+                "Primary" => HostedOperationIdentity::Primary(ordinal(&identity[1])?),
+                "Reference" => {
+                    HostedOperationIdentity::Reference(reference_destinations(&identity[1])?)
+                }
+                other => return Err(invalid(format!("unknown rejected operation {other:?}"))),
+            };
+            Ok(HostedLookupAnswer::Rejected {
+                operation,
+                diagnostic: text(&row[2], "hosted diagnostic")?.into(),
+            })
+        }
+        other => Err(invalid(format!("unknown hosted answer {other:?}"))),
+    }
+}
+
+fn decode_hosted_discovery(value: &CborValue) -> Result<HostedDiscoverySelection, CompileError> {
+    let row = array_len(value, 9, "hosted discovery")?;
+    let candidate_rows = array(&row[0], "selected candidates")?;
+    if candidate_rows.len() > 128 {
+        return Err(invalid("hosted candidate count exceeds its maximum budget"));
+    }
+    let candidates = candidate_rows
+        .iter()
+        .map(|value| {
+            let fields = array_len(value, 5, "discovery candidate")?;
+            Ok(HostedDiscoveryCandidate {
+                query: text(&fields[0], "candidate query")?.into(),
+                origins: decode_texts(&fields[1], "candidate origins")?,
+                summary: text(&fields[2], "complete candidate summary")?.into(),
+                local: boolean(&fields[3], "candidate locality")?,
+                reference: match &fields[4] {
+                    CborValue::Null => None,
+                    value => Some(decode_identifier_ref(value)?),
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let fallback = array(&row[1], "fallback observation")?;
+    let fallback = match fallback
+        .first()
+        .ok_or_else(|| invalid("empty fallback observation"))
+        .and_then(|v| text(v, "fallback kind"))?
+    {
+        "NotNeeded" => {
+            array_len(&row[1], 1, "unneeded fallback")?;
+            HostedFallback::NotNeeded
+        }
+        "ZeroBudget" => {
+            array_len(&row[1], 1, "zero-budget fallback")?;
+            HostedFallback::ZeroBudget
+        }
+        "Unavailable" => {
+            let fields = array_len(&row[1], 2, "unavailable fallback")?;
+            HostedFallback::Unavailable(text(&fields[1], "fallback failure")?.into())
+        }
+        "Attempted" => {
+            let fields = array_len(&row[1], 2, "attempted fallback")?;
+            HostedFallback::Attempted(decode_scopes(&fields[1])?)
+        }
+        other => return Err(invalid(format!("unknown fallback observation {other:?}"))),
+    };
+    let selected = HostedDiscoverySelection {
+        candidates,
+        fallback,
+        eligible_modules: count(&row[2], "eligible modules")?,
+        submitted_modules: count(&row[3], "submitted modules")?,
+        enumerated_occurrences: count(&row[4], "enumerated occurrences")?,
+        discarded_occurrences: count(&row[5], "discarded occurrences")?,
+        candidate_limit: count(&row[6], "candidate limit")?,
+        issue: match &row[7] {
+            CborValue::Null => None,
+            value => Some(text(value, "discovery issue")?.into()),
+        },
+    };
+    if count(&row[8], "module limit")? != 128 {
+        return Err(invalid("unsupported discovery module limit"));
+    }
+    validate_discovery_shape(&selected)?;
+    Ok(selected)
 }
 
 fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, CompileError> {
@@ -1549,48 +2438,167 @@ mod tests {
         bytes
     }
 
+    fn complete_receipt(results: Vec<CborValue>) -> CborValue {
+        CborValue::Array(vec![
+            CborValue::Text("TPINSP008".into()),
+            CborValue::Array(vec![
+                CborValue::Text("Complete".into()),
+                CborValue::Array(results),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn exact_reply_addresses_use_occurrences_and_only_available_defining_identity() {
+        for occurrence in ["value", "field", "café", ".", ".+."] {
+            let mut entry = InfoEntry {
+                name: occurrence.into(),
+                module: Some("Defining.Owner".into()),
+                kind: "value".into(),
+                display: "retained declaration".into(),
+                availability: InspectionAvailability::Unknown,
+                references: vec![],
+            };
+            assert!(exact_entry_address_matches(occurrence, &entry));
+            assert!(exact_entry_address_matches(
+                &format!("Defining.Owner.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches(
+                &format!("Facade.Owner.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches(
+                "Defining.Owner.different",
+                &entry
+            ));
+            entry.module = None;
+            assert!(exact_entry_address_matches(occurrence, &entry));
+            assert!(exact_entry_address_matches(
+                &format!("Expr.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches("Expr.different", &entry));
+        }
+    }
+
+    #[test]
+    fn hosted_decoding_and_typed_validation_share_count_and_status_refusals() {
+        let integer = |n: u64| CborValue::Integer(n.into());
+        let text = |s: &str| CborValue::Text(s.into());
+        let selected = |observed, limit, entries| {
+            CborValue::Array(vec![
+                integer(observed),
+                integer(limit),
+                CborValue::Array(entries),
+            ])
+        };
+        let receipt = |answer| {
+            encoded(CborValue::Array(vec![
+                text("TPINSP008"),
+                CborValue::Array(vec![
+                    text("HostedLookup"),
+                    CborValue::Array(vec![answer]),
+                    CborValue::Null,
+                ]),
+            ]))
+        };
+        let valid_type = CborValue::Array(vec![text("Type"), integer(0), selected(0, 20, vec![])]);
+        let bytes = receipt(valid_type);
+        assert!(matches!(
+            decode_inspection_output(&bytes).unwrap(),
+            InspectionOutput::Hosted(_)
+        ));
+        assert!(
+            decode_inspections(&bytes).is_err(),
+            "complete consumer cannot accept hosted output"
+        );
+        for (observed, limit) in [(1, 20), (0, 0), (0, 128)] {
+            let bytes = receipt(CborValue::Array(vec![
+                text("Type"),
+                integer(0),
+                selected(observed, limit, vec![]),
+            ]));
+            assert!(decode_inspection_output(&bytes).is_err());
+        }
+        for status in ["Info", "Ambiguous"] {
+            let bytes = receipt(CborValue::Array(vec![
+                text("Name"),
+                integer(0),
+                CborValue::Array(vec![]),
+                CborValue::Array(vec![text(status), selected(0, 20, vec![])]),
+            ]));
+            assert!(
+                decode_inspection_output(&bytes).is_err(),
+                "status {status} cannot claim zero complete matches"
+            );
+        }
+        let batch = HostedLookupBatch {
+            operations: vec![HostedLookupOperation::Primary {
+                ordinal: 0,
+                origin: ":: Int".into(),
+                query: HostedLookupQuery::TypeSearch("Int".into()),
+            }],
+            discovery: None,
+        };
+        for (observed, limit) in [(1, 20), (0, 0), (0, 128)] {
+            let typed = HostedLookupOutput {
+                answers: vec![HostedLookupAnswer::Type {
+                    ordinal: 0,
+                    matches: SelectedMatches {
+                        observed,
+                        limit,
+                        entries: vec![],
+                    },
+                }],
+                discovery: None,
+            };
+            assert!(
+                typed.validate_for(&batch).is_err(),
+                "structured output bypassed shared shape admission"
+            );
+        }
+    }
+
     #[test]
     fn decodes_every_result_shape() {
-        let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP007".into()),
+        let receipt = complete_receipt(vec![
             CborValue::Array(vec![
-                CborValue::Array(vec![
-                    CborValue::Text("Type".into()),
-                    CborValue::Text("fmap".into()),
-                    CborValue::Text("Functor f => (a -> b) -> f a -> f b".into()),
-                    CborValue::Text("Unknown".into()),
-                ]),
-                CborValue::Array(vec![
-                    CborValue::Text("Info".into()),
+                CborValue::Text("Type".into()),
+                CborValue::Text("fmap".into()),
+                CborValue::Text("Functor f => (a -> b) -> f a -> f b".into()),
+                CborValue::Text("Unknown".into()),
+            ]),
+            CborValue::Array(vec![
+                CborValue::Text("Info".into()),
+                CborValue::Text("Maybe".into()),
+                CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Text("Maybe".into()),
+                    CborValue::Text("GHC.Internal.Maybe".into()),
+                    CborValue::Text("type".into()),
+                    CborValue::Text("data Maybe a = Nothing | Just a".into()),
+                    CborValue::Text("Unknown".into()),
                     CborValue::Array(vec![CborValue::Array(vec![
-                        CborValue::Text("Maybe".into()),
                         CborValue::Text("GHC.Internal.Maybe".into()),
-                        CborValue::Text("type".into()),
-                        CborValue::Text("data Maybe a = Nothing | Just a".into()),
-                        CborValue::Text("Unknown".into()),
-                        CborValue::Array(vec![CborValue::Array(vec![
-                            CborValue::Text("GHC.Internal.Maybe".into()),
-                            CborValue::Text("Just".into()),
-                            CborValue::Text("Constructor".into()),
-                        ])]),
+                        CborValue::Text("Just".into()),
+                        CborValue::Text("Constructor".into()),
                     ])]),
-                ]),
-                CborValue::Array(vec![
-                    CborValue::Text("Ambiguous".into()),
-                    CborValue::Text("Result".into()),
-                    CborValue::Array(vec![]),
-                ]),
-                CborValue::Array(vec![
-                    CborValue::Text("NotFound".into()),
-                    CborValue::Text("nope".into()),
-                ]),
-                CborValue::Array(vec![
-                    CborValue::Text("Browse".into()),
-                    CborValue::Text("Tidepool.Actors.Exomonad".into()),
-                    CborValue::Bool(true),
-                    CborValue::Array(vec![]),
-                ]),
+                ])]),
+            ]),
+            CborValue::Array(vec![
+                CborValue::Text("Ambiguous".into()),
+                CborValue::Text("Result".into()),
+                CborValue::Array(vec![]),
+            ]),
+            CborValue::Array(vec![
+                CborValue::Text("NotFound".into()),
+                CborValue::Text("nope".into()),
+            ]),
+            CborValue::Array(vec![
+                CborValue::Text("Browse".into()),
+                CborValue::Text("Tidepool.Actors.Exomonad".into()),
+                CborValue::Bool(true),
+                CborValue::Array(vec![]),
             ]),
         ]);
         let decoded = decode_inspections(&encoded(receipt)).unwrap();
@@ -1654,17 +2662,14 @@ mod tests {
             CborValue::Integer(7.into()),
             CborValue::Text("scope-abc".into()),
         ]);
-        let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP007".into()),
+        let receipt = complete_receipt(vec![
             CborValue::Array(vec![
-                CborValue::Array(vec![
-                    CborValue::Text("StructuredTypeOk".into()),
-                    CborValue::Array(vec![identifier, expression, provenance]),
-                ]),
-                CborValue::Array(vec![
-                    CborValue::Text("StructuredError".into()),
-                    CborValue::Array(vec![CborValue::Text("Unknown".into()), query]),
-                ]),
+                CborValue::Text("StructuredTypeOk".into()),
+                CborValue::Array(vec![identifier, expression, provenance]),
+            ]),
+            CborValue::Array(vec![
+                CborValue::Text("StructuredError".into()),
+                CborValue::Array(vec![CborValue::Text("Unknown".into()), query]),
             ]),
         ]);
 
@@ -1702,13 +2707,10 @@ mod tests {
             assert!(decode_inspections(&encoded(value)).is_err());
         }
 
-        let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP007".into()),
-            CborValue::Array(vec![CborValue::Array(vec![
-                CborValue::Text("NotFound".into()),
-                CborValue::Text("x".into()),
-            ])]),
-        ]));
+        let mut trailing = encoded(complete_receipt(vec![CborValue::Array(vec![
+            CborValue::Text("NotFound".into()),
+            CborValue::Text("x".into()),
+        ])]));
         trailing.push(0);
         assert!(decode_inspections(&trailing).is_err());
     }
@@ -1716,21 +2718,18 @@ mod tests {
     #[test]
     fn decodes_row_availability_and_rejects_unknown_values() {
         let receipt = |availability: &str| {
-            CborValue::Array(vec![
-                CborValue::Text("TPINSP007".into()),
+            complete_receipt(vec![CborValue::Array(vec![
+                CborValue::Text("TypeMatches".into()),
+                CborValue::Text("Eff effects ()".into()),
                 CborValue::Array(vec![CborValue::Array(vec![
-                    CborValue::Text("TypeMatches".into()),
+                    CborValue::Text("run".into()),
+                    CborValue::Null,
                     CborValue::Text("Eff effects ()".into()),
-                    CborValue::Array(vec![CborValue::Array(vec![
-                        CborValue::Text("run".into()),
-                        CborValue::Null,
-                        CborValue::Text("Eff effects ()".into()),
-                        CborValue::Text("Usable".into()),
-                        CborValue::Text(availability.into()),
-                        CborValue::Array(vec![]),
-                    ])]),
+                    CborValue::Text("Usable".into()),
+                    CborValue::Text(availability.into()),
+                    CborValue::Array(vec![]),
                 ])]),
-            ])
+            ])])
         };
         for (encoded_name, expected) in [
             ("Available", InspectionAvailability::Available),
@@ -1859,6 +2858,94 @@ mod tests {
             );
             println!("lookup work unrelated_exports={unrelated} rich_entries={} availability_checks={} resolved_names={} constraint_solves={}", work.0, work.1, work.2, work.3);
             observed.push(work);
+            // Hosted fallback stays in this primary checked cohort. Its
+            // inventory may grow, but only the selected summary renders and
+            // no discovery declaration requests availability/constraint work.
+            let hosted_output = root.path().join("hosted.cbor");
+            let hosted_batch = HostedLookupBatch {
+                operations: vec![HostedLookupOperation::Primary {
+                    ordinal: 3,
+                    origin: "Work.requestedTypo".into(),
+                    query: HostedLookupQuery::Name(tidepool_extract_cmd::LookupNameInspection {
+                        query: "Work.requestedTypo".into(),
+                        qualifier_module: Some("LookupWork".into()),
+                        mode: LookupNameMode::Name,
+                    }),
+                }],
+                discovery: Some(HostedLookupDiscovery {
+                    candidate_limit: 1,
+                    scopes: vec![
+                        tidepool_extract_cmd::InspectionScope::PublicModule("LookupWork".into()),
+                        tidepool_extract_cmd::InspectionScope::Current,
+                    ],
+                    eligible_modules: 1,
+                }),
+            };
+            let mut hosted = ExtractCmd::new().unwrap();
+            hosted
+                .output_dir(root.path())
+                .inspect_out(&hosted_output)
+                .includes([root.path()])
+                .input(&source)
+                .hosted_lookup(hosted_batch.clone());
+            let run = hosted.bind().unwrap().execute(&hosted).unwrap();
+            std::fs::write(
+                root.path().join("hosted.stderr"),
+                run.stderr_lossy().as_bytes(),
+            )
+            .unwrap();
+            assert!(run.success(), "{}", run.stderr_lossy());
+            let InspectionOutput::Hosted(issued) =
+                decode_inspection_output(&std::fs::read(&hosted_output).unwrap()).unwrap()
+            else {
+                panic!("hosted output kind")
+            };
+            issued.validate_for(&hosted_batch).unwrap();
+            let discovery = issued.discovery.as_ref().unwrap();
+            assert_eq!(discovery.candidates.len(), 1);
+            assert_eq!(discovery.candidates[0].query, "LookupWork.requested");
+            assert!(
+                discovery.candidates[0].summary.contains("requested :: Int"),
+                "{:?}",
+                discovery.candidates
+            );
+            let stderr = run.stderr_lossy();
+            for (name, expected) in [
+                ("rich_entries", 1),
+                ("availability_checks", 0),
+                ("constraint_solves", 0),
+                ("compile_attempts", 1),
+            ] {
+                let prefix = format!("tidepool-count name=inspection.{name} count=");
+                let counts = stderr
+                    .lines()
+                    .filter_map(|line| line.strip_prefix(&prefix))
+                    .map(|row| {
+                        row.split_whitespace()
+                            .next()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    counts,
+                    vec![expected],
+                    "missing, duplicated or unbounded hosted work: {stderr}"
+                );
+            }
+            assert_eq!(
+                stderr
+                    .matches("tidepool-checked module=Expr target=True")
+                    .count(),
+                1,
+                "fallback recompiled metadata: {stderr}"
+            );
+            assert!(
+                !stderr.contains("tidepool-target phase=desugar"),
+                "discovery entered executable compilation: {stderr}"
+            );
+            println!("hosted work unrelated_exports={unrelated} selected_summaries=1 availability_checks=0 constraint_solves=0 compile_attempts=1 checked_targets=1");
             // A complete browse remains explicit and must expose the extra
             // entries. This control proves the census detects the old work.
             let mut browse = ExtractCmd::new().unwrap();
@@ -1887,6 +2974,75 @@ mod tests {
             assert!(run.stderr_lossy().contains(&format!(
                 "tidepool-count name=inspection.constraint_solves count={unrelated} "
             )));
+            let InspectionResult::Browse {
+                entries: complete, ..
+            } = &results[0]
+            else {
+                unreachable!()
+            };
+            // Frozen pre-migration presentation comparator is an independent
+            // oracle. It is test-only; production never re-ranks hosted output.
+            let availability_rank = |availability| match availability {
+                InspectionAvailability::Available => 0,
+                InspectionAvailability::Polymorphic => 1,
+                InspectionAvailability::Unknown => 2,
+                InspectionAvailability::Unavailable => 3,
+            };
+            let mut expected = complete.clone();
+            expected.sort_by(|left, right| {
+                (
+                    availability_rank(left.availability),
+                    &left.name,
+                    &left.module,
+                    &left.display,
+                )
+                    .cmp(&(
+                        availability_rank(right.availability),
+                        &right.name,
+                        &right.module,
+                        &right.display,
+                    ))
+            });
+            expected.truncate(20);
+            let ranked_batch = HostedLookupBatch {
+                operations: vec![HostedLookupOperation::Primary {
+                    ordinal: 17,
+                    origin: "LookupWork".into(),
+                    query: HostedLookupQuery::Name(tidepool_extract_cmd::LookupNameInspection {
+                        query: "LookupWork".into(),
+                        qualifier_module: None,
+                        mode: LookupNameMode::NameOrModule,
+                    }),
+                }],
+                discovery: None,
+            };
+            let ranked_output = root.path().join("hosted-rank.cbor");
+            let mut ranked = ExtractCmd::new().unwrap();
+            ranked
+                .output_dir(root.path())
+                .inspect_out(&ranked_output)
+                .includes([root.path()])
+                .input(&source)
+                .hosted_lookup(ranked_batch.clone());
+            let ranked_run = ranked.bind().unwrap().execute(&ranked).unwrap();
+            std::fs::write(
+                root.path().join("hosted-rank.stderr"),
+                ranked_run.stderr_lossy().as_bytes(),
+            )
+            .unwrap();
+            assert!(ranked_run.success(), "{}", ranked_run.stderr_lossy());
+            let InspectionOutput::Hosted(ranked_reply) =
+                decode_inspection_output(&std::fs::read(&ranked_output).unwrap()).unwrap()
+            else {
+                panic!("hosted rank output")
+            };
+            ranked_reply.validate_for(&ranked_batch).unwrap();
+            assert!(
+                matches!(&ranked_reply.answers[..], [HostedLookupAnswer::Name {
+                answer: SelectedLookupAnswer::Module { matches, .. }, ..
+            }] if matches.observed == unrelated + 1 && matches.limit == 20 && matches.entries == expected),
+                "hosted prefix differs from complete generic Browse oracle: {ranked_reply:#?}"
+            );
             for line in run
                 .stderr_lossy()
                 .lines()
@@ -1899,6 +3055,126 @@ mod tests {
             observed[0], observed[1],
             "unrelated exports changed rich lookup work"
         );
+    }
+
+    #[test]
+    fn hosted_lookup_keeps_failed_metadata_separate_from_successful_type_cohort() {
+        eval_harness::require_extract();
+        std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        std::env::set_var(
+            "TIDEPOOL_TEST_TRACE_PROFILE",
+            tidepool_extract_cmd::CompilerTraceProfile::Full.name(),
+        );
+        let artifact_root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT");
+        let mut root = match &artifact_root {
+            Some(parent) => tempfile::Builder::new()
+                .prefix("hosted-cohort-failure-")
+                .tempdir_in(parent)
+                .unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        root.disable_cleanup(artifact_root.is_some());
+        for directory in ["metadata", "type"] {
+            std::fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        let metadata = root.path().join("metadata/Expr.hs");
+        let type_source = root.path().join("type/Expr.hs");
+        std::fs::write(
+            &metadata,
+            "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nbroken = missingValue\n",
+        )
+        .unwrap();
+        std::fs::write(&type_source, "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport Prelude (Int)\n__tidepool_lookup_query :: Int\n__tidepool_lookup_query = __tidepool_lookup_query\n").unwrap();
+        let batch = HostedLookupBatch {
+            operations: vec![
+                HostedLookupOperation::Primary {
+                    ordinal: 2,
+                    origin: "missing".into(),
+                    query: HostedLookupQuery::Name(tidepool_extract_cmd::LookupNameInspection {
+                        query: "missing".into(),
+                        qualifier_module: None,
+                        mode: LookupNameMode::Name,
+                    }),
+                },
+                HostedLookupOperation::Primary {
+                    ordinal: 9,
+                    origin: ":: Int".into(),
+                    query: HostedLookupQuery::TypeSearch("Int".into()),
+                },
+            ],
+            discovery: Some(HostedLookupDiscovery {
+                candidate_limit: 1,
+                scopes: vec![
+                    tidepool_extract_cmd::InspectionScope::Current,
+                    tidepool_extract_cmd::InspectionScope::PublicModule("Data.Maybe".into()),
+                ],
+                eligible_modules: 1,
+            }),
+        };
+        let output = root.path().join("hosted.cbor");
+        let mut command = ExtractCmd::new().unwrap();
+        command
+            .output_dir(root.path())
+            .inspect_out(&output)
+            .input(&metadata)
+            .input(&type_source)
+            .hosted_lookup(batch.clone());
+        let run = command.bind().unwrap().execute(&command).unwrap();
+        std::fs::write(
+            root.path().join("hosted.stderr"),
+            run.stderr_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            run.success(),
+            "typed per-query rejection must preserve successful peer: {}",
+            run.stderr_lossy()
+        );
+        let InspectionOutput::Hosted(issued) =
+            decode_inspection_output(&std::fs::read(&output).unwrap()).unwrap()
+        else {
+            panic!("hosted output")
+        };
+        issued.validate_for(&batch).unwrap();
+        assert!(
+            matches!(&issued.answers[..], [
+            HostedLookupAnswer::Rejected { operation: HostedOperationIdentity::Primary(2), diagnostic },
+            HostedLookupAnswer::Type { ordinal: 9, .. },
+        ] if diagnostic.contains("missingValue")),
+            "failed metadata must not erase successful type cohort: {issued:#?}"
+        );
+        let selection = issued.discovery.unwrap();
+        assert!(
+            matches!(selection.fallback, HostedFallback::Unavailable(ref reason) if reason.contains("missingValue"))
+        );
+        assert_eq!(selection.submitted_modules, 0);
+        assert_eq!(selection.enumerated_occurrences, 0);
+        assert!(selection.candidates.is_empty());
+        let stderr = run.stderr_lossy();
+        for (name, expected) in [
+            ("compile_attempts", 2),
+            ("rich_entries", 0),
+            ("constraint_solves", 0),
+        ] {
+            let prefix = format!("tidepool-count name=inspection.{name} count=");
+            let observed = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .map(|value| {
+                    value
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                observed,
+                vec![expected],
+                "missing/duplicated census or illegal fallback/replay: {stderr}"
+            );
+        }
     }
 
     #[test]
@@ -1947,6 +3223,132 @@ mod tests {
                 InspectionResult::Browse { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn current_exact_addresses_use_nominal_names_including_dotted_operators() {
+        eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("NominalLookup.hs"),
+            concat!(
+                "module NominalLookup (clash,(.),(.+.)) where\n",
+                "import Prelude (Int,(+))\n",
+                "clash :: Int; clash = 7\n",
+                "(.) :: Int -> Int -> Int; (.) = (+)\n",
+                "(.+.) :: Int -> Int -> Int; (.+.) = (+)\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("LookupFacade.hs"),
+            "module LookupFacade (module N) where\nimport NominalLookup as N\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("OtherLookup.hs"),
+            "module OtherLookup (clash) where\nimport Prelude (Int)\nclash :: Int; clash = 8\n",
+        )
+        .unwrap();
+        let mut queries = [
+            ".",
+            "NominalLookup..",
+            ".+.",
+            "NominalLookup..+.",
+            "Alias..",
+            "Alias..+.",
+            "NominalLookup.clash",
+            "clash",
+            "OtherLookup.clash",
+            "LookupFacade.clash",
+        ]
+        .into_iter()
+        .map(|name| {
+            InspectionQuery::ExactName(ExactNameQuery {
+                scope: NameScope::Current,
+                namespace: IdentifierNamespace::Value,
+                name: name.into(),
+            })
+        })
+        .collect::<Vec<_>>();
+        queries.push(InspectionQuery::ExactName(ExactNameQuery {
+            scope: NameScope::Current,
+            namespace: IdentifierNamespace::Value,
+            name: "Expr.localValue".into(),
+        }));
+        queries.push(InspectionQuery::LookupName {
+            query: "Alias.clash".into(),
+            qualifier_module: Some("LookupFacade".into()),
+            mode: LookupNameMode::Name,
+        });
+        queries.push(InspectionQuery::ExactName(ExactNameQuery {
+            scope: NameScope::PublicModule("LookupFacade".into()),
+            namespace: IdentifierNamespace::Value,
+            name: "clash".into(),
+        }));
+        let results = tidepool_testing::with_settlement(|settlement| run_inspections(InspectionRequest {
+            exact_context: None,
+            preamble: "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport qualified LookupFacade as Alias\nimport qualified OtherLookup as Other\nlocalValue = Alias.clash\n",
+            imports: "", include: &[root.path()], session_root: root.path(), inject_modules: &[], queries: &queries, effects: None,
+        }, settlement)).unwrap();
+        for (bare, qualified) in [(0, 1), (2, 3)] {
+            let (
+                InspectionResult::Lookup {
+                    answer: LookupAnswer::Info(left),
+                    ..
+                },
+                InspectionResult::Lookup {
+                    answer: LookupAnswer::Info(right),
+                    ..
+                },
+            ) = (&results[bare], &results[qualified])
+            else {
+                panic!("operator address failed: {results:#?}")
+            };
+            assert_eq!(
+                left, right,
+                "qualification must preserve the exact nominal operator"
+            );
+        }
+        for index in [4, 5, 9] {
+            assert!(matches!(&results[index], InspectionResult::Lookup { answer: LookupAnswer::Missing { .. }, .. }), "Current exact addresses use defining owners, not arbitrary alias/facade spellings: {:?}", results[index]);
+        }
+        assert!(
+            matches!(&results[7], InspectionResult::Lookup { answer: LookupAnswer::Ambiguous(entries), .. } if entries.len() == 2),
+            "bare address must not collapse distinct visible nominals"
+        );
+        let nominal = |index| match &results[index] {
+            InspectionResult::Lookup {
+                answer: LookupAnswer::Info(entries),
+                ..
+            } => entries.clone(),
+            other => panic!("nominal lookup {index}: {other:?}"),
+        };
+        assert_eq!(nominal(6), nominal(11));
+        assert_eq!(
+            nominal(6),
+            nominal(12),
+            "public facade returns original defining identity"
+        );
+        assert_ne!(nominal(6), nominal(8), "two visible owners remain distinct");
+        let batch = HostedLookupBatch {
+            operations: vec![HostedLookupOperation::ExactReference {
+                destinations: vec![0],
+                query: tidepool_extract_cmd::ExactNameInspection {
+                    scope: tidepool_extract_cmd::InspectionScope::Current,
+                    namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                    name: "Expr.localValue".into(),
+                },
+            }],
+            discovery: None,
+        };
+        let local = tidepool_testing::with_settlement(|settlement| run_hosted_lookup(HostedLookupRequest {
+            exact_context: None,
+            preamble: "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport qualified LookupFacade as Alias\nimport qualified OtherLookup as Other\nlocalValue = Alias.clash\n",
+            imports: "", include: &[root.path()], session_root: root.path(), inject_modules: &[], batch: &batch, effects: None,
+        }, settlement)).unwrap();
+        assert!(matches!(&local.answers[..], [HostedLookupAnswer::Reference { answer: SelectedLookupAnswer::Info(matches), .. }]
+            if matches.entries == nominal(10) && matches.entries[0].module.is_none()), "local nominal qualifier must remain issued by GHC even when generic presentation omits its module: {local:#?}");
     }
 
     #[test]

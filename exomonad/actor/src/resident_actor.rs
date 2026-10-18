@@ -15576,6 +15576,72 @@ fn lookup_response(
     live_modules: &[String],
     workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
+    use tidepool_runtime::session::inspection::{
+        HostedLookupAnswer, HostedOperationIdentity, SelectedLookupAnswer, SelectedMatches,
+    };
+    use tidepool_runtime::session::{InspectionResult, LookupAnswer};
+    fn selected<T>(entries: Vec<T>) -> SelectedMatches<T> {
+        // These presentation fixtures are complete prefixes, never inventories.
+        assert!(entries.len() <= 20);
+        SelectedMatches {
+            observed: entries.len(),
+            entries,
+            limit: 20,
+        }
+    }
+    let ordinals = prepared
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, query)| {
+            (!matches!(
+                query.kind,
+                crate::lookup_tool::PreparedLookupKind::Doc(_)
+                    | crate::lookup_tool::PreparedLookupKind::Rejected(_)
+            ))
+            .then_some(ordinal)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ordinals.len(), inspected.len());
+    let inspected = ordinals
+        .into_iter()
+        .zip(inspected)
+        .map(|(ordinal, result)| {
+            let answer = match result {
+                InspectionResult::Lookup { scopes, answer, .. } => HostedLookupAnswer::Name {
+                    ordinal: ordinal as u32,
+                    scopes,
+                    answer: match answer {
+                        LookupAnswer::Info(entries) => {
+                            SelectedLookupAnswer::Info(selected(entries))
+                        }
+                        LookupAnswer::Ambiguous(entries) => {
+                            SelectedLookupAnswer::Ambiguous(selected(entries))
+                        }
+                        LookupAnswer::Module { module, entries } => SelectedLookupAnswer::Module {
+                            module,
+                            matches: selected(entries),
+                        },
+                        LookupAnswer::Missing { export_names } => {
+                            SelectedLookupAnswer::Missing { export_names }
+                        }
+                        LookupAnswer::ModuleNotFound(module) => {
+                            SelectedLookupAnswer::ModuleNotFound(module)
+                        }
+                    },
+                },
+                InspectionResult::TypeMatches { matches, .. } => HostedLookupAnswer::Type {
+                    ordinal: ordinal as u32,
+                    matches: selected(matches),
+                },
+                InspectionResult::Rejected { diagnostic } => HostedLookupAnswer::Rejected {
+                    operation: HostedOperationIdentity::Primary(ordinal as u32),
+                    diagnostic,
+                },
+                other => panic!("unexpected presentation fixture {other:?}"),
+            };
+            (ordinal, answer)
+        })
+        .collect();
     crate::lookup_tool::resolve(
         prepared,
         inspected,
