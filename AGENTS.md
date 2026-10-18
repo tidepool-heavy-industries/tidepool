@@ -329,6 +329,10 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   with independent oracles, shrinking and observable coverage. See
   [property testing](docs/property-testing.md); end-to-end gates complement these tests.
   Exercise accumulation over publication, branching, reuse and recovery histories.
+  Test transitions in composition: after narrowing, projecting or replacing a
+  value, pass that resulting value to the downstream consumer and recovery path.
+  Testing the transformation and then consuming the unchanged parent misses the
+  boundary. Keep owner-issued transformations distinct from deliberate corruption.
   For shared snapshots, cover both repeated identical references and distinct
   snapshots with overlapping contents. Check structural growth and restored
   sharing alongside semantic round trips through the production writer/reader.
