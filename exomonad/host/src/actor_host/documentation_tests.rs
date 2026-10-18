@@ -2289,17 +2289,44 @@ async fn workspace_campaign() -> TestCampaign {
     workspace_campaign_with(|_| {}).await
 }
 
+struct DeclaredWorkspaceLock(PathBuf);
+
+impl crate::exomonad::FlakeLock for DeclaredWorkspaceLock {
+    fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::copy(&self.0, workspace.join("flake.lock"))?;
+        Ok(())
+    }
+}
+
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
     TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
-            crate::exomonad::workspace::copy_authored(
-                &super::test_campaign::declared_workspace_package(),
-                &config.workspace,
+            let package = super::test_campaign::declared_workspace_package();
+            crate::exomonad::new(crate::exomonad::NewOptions {
+                path: Some(config.workspace.clone()),
+                lock: Box::new(DeclaredWorkspaceLock(package.join("flake.lock"))),
+            })
+            .unwrap();
+            let declared: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(std::env::var_os("EXOMONAD_WORKSPACE_GITLINK").unwrap()).unwrap(),
             )
             .unwrap();
+            let revision = exomonad_worktree::GitCli::new()
+                .try_read(&authored.join("workspace"), &["rev-parse", "HEAD"])
+                .unwrap();
+            assert_eq!(
+                revision.trimmed(),
+                declared["revision"].as_str().unwrap(),
+                "the hosted workspace must compile the recorded shared source"
+            );
+            crate::exomonad::edit_fixture_project_config(&authored, |project| {
+                project.defaults.model = config.model.clone();
+                project.defaults.reasoning = config.reasoning;
+                project.models.clear();
+            });
             configure(&authored);
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
