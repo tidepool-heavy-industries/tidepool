@@ -589,9 +589,9 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     }
     assert!(
         matches!(current.certified.source_selection.selected_original_closure(&rebound),
-        Err(CertificationError::OriginalClosure(error)) if matches!(*error,
-            crate::CompileError::ArtifactInventory(error) if matches!(error.failure,
-                crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == key.artifact)))
+        Err(CertificationError::OriginalClosure(error)) if matches!(error.as_ref(),
+            crate::CompileError::ArtifactInventory(error) if matches!(&error.failure,
+                crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if *artifact == key.artifact)))
     );
 
     // Retain every version through its actual physical issuer, in both orders.
