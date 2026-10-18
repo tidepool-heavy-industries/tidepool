@@ -1934,8 +1934,8 @@ def assemble(args) -> None:
         verify_native_builtin_entries(root, contract["native_catalog"])
 
 def freeze(args) -> Path:
-    browser_node = browser_node_executable(args.browser_node)
     tools = native_runtime_tools(args.bundle / "share/exomonad/runtime-tools")
+    browser_node = browser_node_executable(args.browser_node)
     source = args.source_root.resolve(strict=True)
     oid = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], text=True).strip():

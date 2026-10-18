@@ -2019,9 +2019,9 @@ class NativeQualificationTests(unittest.TestCase):
                     with self.subTest(path=invalid), self.assertRaisesRegex(ValueError, 'not an executable file'):
                         qualification.browser_node_executable(invalid)
                     with self.assertRaisesRegex(ValueError, 'not an executable file'), \
-                         patch.object(qualification, 'native_runtime_tools') as tools:
-                        qualification.freeze(SimpleNamespace(browser_node=invalid))
-                    tools.assert_not_called()
+                         patch.object(qualification, 'native_runtime_tools', return_value=root) as tools:
+                        qualification.freeze(SimpleNamespace(bundle=root, browser_node=invalid))
+                    tools.assert_called_once()
             with self.assertRaisesRegex(ValueError, 'immutable Nix paths'):
                 qualification.browser_node_executable(node)
 
