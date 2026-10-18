@@ -9440,6 +9440,10 @@ mod tests {
             let mut cursor = inventory.empty_view();
             let foreign = ArtifactInventory::default().empty_view();
             let mut expected = BTreeSet::new();
+            let expected_carriers = segment.view.namespace();
+            // First observed identities are witnesses for stability, not the
+            // independent oracle for which groups and edges should exist.
+            let mut issued_witnesses = BTreeMap::new();
             let key = |entry: &ArtifactEntry, original_ordinal| NativeGroupKey {
                 artifact: entry.descriptor.id, original_ordinal,
             };
@@ -9454,6 +9458,8 @@ mod tests {
                 let ordinal = if operation == 1 { 0 } else { 17 };
                 let imports = [issued_source(&consumer, ordinal)];
                 let before = segment.observed_binding_state();
+                let before_cursor = cursor.capture_graph_selection();
+                let before_cursor_edges = cursor.binding_dependencies();
                 let result = segment.admit_bound_target(
                     if operation == 0 { &foreign } else { &cursor },
                     NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -9462,6 +9468,8 @@ mod tests {
                 if operation == 0 {
                     proptest::prop_assert!(result.is_err());
                     proptest::prop_assert_eq!(segment.observed_binding_state(), before);
+                    proptest::prop_assert_eq!(cursor.capture_graph_selection(), before_cursor);
+                    proptest::prop_assert_eq!(cursor.binding_dependencies(), before_cursor_edges);
                 } else {
                     cursor = result.unwrap().artifacts().clone();
                     if operation == 1 {
@@ -9470,6 +9478,45 @@ mod tests {
                         expected.extend([consumer_late, dependency_group]);
                     }
                     proptest::prop_assert_eq!(cursor.selected_native_groups(), expected.clone());
+                    let graph = cursor.capture_graph_selection();
+                    let edges = cursor.binding_dependencies();
+                    let mut observed = BTreeSet::new();
+                    for group in graph.native_groups {
+                        let logical = NativeGroupKey {
+                            artifact: group.binding.artifact(),
+                            original_ordinal: group.original_ordinal,
+                        };
+                        if !expected.contains(&logical) { continue; }
+                        proptest::prop_assert!(observed.insert(logical), "one exact issuer per selected key");
+                        let outgoing = edges.iter().filter_map(|(from, to, label)| {
+                            (*from == ArtifactBindingNode::Group(group)).then_some((*to, label.clone()))
+                        }).collect::<BTreeSet<_>>();
+                        let carriers = outgoing.iter().filter_map(|(to, label)| match to {
+                            ArtifactBindingNode::Artifact(binding)
+                                if binding.artifact == logical.artifact && *label == ArtifactDependency::Interface => Some(*binding),
+                            _ => None,
+                        }).collect::<BTreeSet<_>>();
+                        proptest::prop_assert_eq!(carriers, BTreeSet::from([expected_carriers[&logical.artifact]]));
+                        let children = outgoing.iter().filter_map(|(to, label)| match to {
+                            ArtifactBindingNode::Group(child) => Some((NativeGroupKey {
+                                artifact: child.binding.artifact(), original_ordinal: child.original_ordinal,
+                            }, label.clone())),
+                            _ => None,
+                        }).collect::<BTreeSet<_>>();
+                        let expected_children = if logical == consumer_late {
+                            BTreeSet::from([(dependency_group, ArtifactDependency::NativeGroup {
+                                dependent_ordinal: 17, required_ordinal: 7,
+                            })])
+                        } else { BTreeSet::new() };
+                        proptest::prop_assert_eq!(children, expected_children);
+                        let witness = (group, outgoing);
+                        if let Some(previous) = issued_witnesses.get(&logical) {
+                            proptest::prop_assert_eq!(&witness, previous);
+                        } else {
+                            issued_witnesses.insert(logical, witness);
+                        }
+                    }
+                    proptest::prop_assert_eq!(observed, expected.clone());
                 }
             }
         }
