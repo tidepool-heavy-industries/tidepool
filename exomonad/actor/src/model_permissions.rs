@@ -530,6 +530,58 @@ mod tests {
     }
 
     #[test]
+    fn every_family_binds_identical_display_names_to_its_admitted_provider() {
+        let families = [
+            (ModelFamily::OpenAI, Backend::OpenAIPlan),
+            (ModelFamily::Argon, Backend::GeminiInteractions),
+            (ModelFamily::DeepSeek, Backend::DeepSeek),
+        ];
+        let mut grants = Vec::new();
+        let mut choices = Vec::new();
+        for (family, backend) in families {
+            let model = AdmittedModelIdentity::new(
+                "catalog".into(),
+                format!("{family:?}"),
+                format!("{family:?}-provider"),
+                Model::for_backend(backend, "same-display-name"),
+            )
+            .unwrap();
+            let reasoning = Reasoning::for_backend(backend, "low").unwrap();
+            for operation in [
+                ModelOperation::ModelCall,
+                ModelOperation::ForkAgent,
+                ModelOperation::SpawnAgent,
+            ] {
+                grants.push(
+                    ModelGrant::new(
+                        ModelPermission { operation, family },
+                        model.clone(),
+                        vec![reasoning],
+                    )
+                    .unwrap(),
+                );
+            }
+            choices.push((model, reasoning));
+        }
+        let permissions = ModelPermissions::new(grants).unwrap();
+        assert_eq!(permissions.effect_keys().len(), 9);
+        for (model, reasoning) in &choices {
+            for operation in [
+                ModelOperation::ModelCall,
+                ModelOperation::ForkAgent,
+                ModelOperation::SpawnAgent,
+            ] {
+                assert!(permissions.permits(operation, model, *reasoning));
+                for (other, _) in &choices {
+                    if other != model {
+                        assert!(!permissions.permits(operation, other, *reasoning));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn malformed_grants_and_durable_authority_are_rejected() {
         let permission = ModelPermission {
             operation: ModelOperation::ModelCall,
