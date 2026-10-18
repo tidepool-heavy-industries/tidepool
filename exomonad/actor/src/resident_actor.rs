@@ -3710,7 +3710,8 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.model(),
 
             Self::Workbench(execution) => execution.model.clone(),
-            Self::Actor { .. } | Self::Tool { .. } => None,
+            Self::Actor { ephemeral_work, .. } => ephemeral_work.model(),
+            Self::Tool { work, .. } => work.model(),
         }
     }
 
@@ -4435,12 +4436,32 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
         let control = crate::resident_workbench::execution_control();
-        let ephemeral_work = match &self.active_route_reservation_owner {
-            Some(reservation) => self
-                .workbench_executions
+        let reservation_owner = control
+            .as_ref()
+            .and_then(|control| control.reservation_owner(actor))
+            .or_else(|| self.active_route_reservation_owner.clone());
+        let retained_work = control.as_ref().and_then(|control| {
+            self.workbench_executions
                 .lock()
-                .callback_root(actor, reservation.clone()),
-            None => self.workbench_executions.lock().actor_scope_root(actor),
+                .admitted_invocation_work(&control.execution_id(actor), control.invocation.as_ref())
+        });
+        let ephemeral_work = match retained_work {
+            // Existing admission owns its binding; borrowing cannot mint a second allowance.
+            Some(work) => work,
+            None => {
+                let work = match &reservation_owner {
+                    Some(reservation) => self
+                        .workbench_executions
+                        .lock()
+                        .callback_root(actor, reservation.clone()),
+                    None => self.workbench_executions.lock().actor_scope_root(actor),
+                };
+                let _ = work.bind_model(
+                    self.environment.cell_model_factory.as_deref(),
+                    &self.descriptor,
+                );
+                work
+            }
         };
         CurrentEffectOwner::Actor {
             callback_scope: self
@@ -4454,10 +4475,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .or_else(|| self.actor_program_snapshot.clone()),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
-            reservation_owner: control
-                .as_ref()
-                .and_then(|control| control.reservation_owner(actor))
-                .or_else(|| self.active_route_reservation_owner.clone()),
+            reservation_owner,
             control,
         }
     }
@@ -12570,6 +12588,10 @@ where
             control
                 .reservation_owner(actor)
                 .expect("admitted tool reservation"),
+        );
+        let _ = work.bind_model(
+            self.environment.cell_model_factory.as_deref(),
+            &self.descriptor,
         );
         self.workbench_executions.lock().retain_invocation_work(
             work.clone(),
