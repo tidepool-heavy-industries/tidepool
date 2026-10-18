@@ -7172,6 +7172,13 @@ tidepool-reuse-error: witness failed\n";
         std::fs::write(directory.path().join("release"), b"release first END").unwrap();
         assert_eq!(first.join().unwrap().unwrap().stdout, b"1");
         let result = cancelled.join().unwrap();
+        let old_pid = std::fs::read_to_string(directory.path().join("worker-pids"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let old_reaped_at_receipt = !Path::new("/proc").join(&old_pid).exists();
         // Settle the daemon even on the counterfactual skip's missing receipt,
         // so the sensitivity failure itself cannot leak a test-owned daemon.
         let recovered = execute(
@@ -7208,9 +7215,10 @@ tidepool-reuse-error: witness failed\n";
             2,
             "exact old worker retired before replacement"
         );
-        assert!(!Path::new("/proc")
-            .join(pids.lines().next().unwrap())
-            .exists());
+        assert!(
+            old_reaped_at_receipt,
+            "retirement receipt preceded the exact old worker's observed reap"
+        );
     }
 
     #[test]
