@@ -72,11 +72,11 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation, hydrateExactScope
   , newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( CanonicalInterfaceAdmission, ExactScope , scopeProducerSha256, scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces, readScopedInterfaces, scopeInterfaceToken, validateExactScopeEnvironment )
-import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
+  ( CanonicalInterfaceAdmission, ExactScope , scopeManifestPath, scopeProducerSha256, scopeInterfaces, revalidateExactScope, scopeCanonicalInterfaces, readScopedInterfaces, scopeInterfaceToken, validateExactScopeEnvironment )
+import Tidepool.CheckedCell (resolveCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)
-import Tidepool.DeclarationJoin (BindingInterfacePurpose(..))
+import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterfacePurpose(..))
 import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImport(..), encodePackageImports, packageImportRoot)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
@@ -302,10 +302,11 @@ removeExisting paths = forM_ paths $ \path -> do
 -- Only retained compiler interfaces supply the signature's original Names.
 -- This operation emits a fresh type-only value interface without compiling code.
 emitHostBindingInterface
-  :: ExactInterfaceOperations -> String -> Word64 -> String -> CheckedSignature -> FilePath -> FilePath
-  -> BindingInterfacePurpose -> IO (BoundBinder, BindingInterfacePurpose)
-emitHostBindingInterface operations producer generation name signature manifest root purpose = runExactInterfaceOperation operations $ \initial -> do
-  scope <- readExactScope manifest >>= either fail pure
+  :: ExactInterfaceOperations -> ExactScope -> HostBindingInterfaceInput
+  -> IO (BoundBinder, BindingInterfacePurpose)
+emitHostBindingInterface operations scope input = runExactInterfaceOperation operations $ \initial -> do
+  unless (hostInterfaceScope input == scopeManifestPath scope)
+    (fail "host interface manifest differs from bound exact scope")
   unless (scopeProducerSha256 scope == producer) (fail "host interface producer differs from exact scope")
   validateExactScopeEnvironment initial scope >>= either fail pure
   let artifacts = [artifact | (artifact, _, _) <- scopeInterfaces scope]
@@ -343,9 +344,15 @@ emitHostBindingInterface operations producer generation name signature manifest 
     _ -> fail "host interface did not issue exactly one binder"
 
  where
+  producer = hostInterfaceProducer input
+  generation = hostInterfaceGeneration input
+  name = hostInterfaceBinder input
+  signature = hostInterfaceSignature input
+  root = hostInterfaceRoot input
+  purpose = hostInterfacePurpose input
   withWitnessScratch = bracket acquire removeDirectoryRecursive
   acquire = do
-    (path, handle) <- openTempFile (takeDirectory manifest) "original-input-witness"
+    (path, handle) <- openTempFile root "original-input-witness"
     hClose handle
     -- Reserve the random name before creating the transaction-local directory.
     removeFile path
