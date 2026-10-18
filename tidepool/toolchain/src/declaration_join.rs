@@ -2856,10 +2856,9 @@ mod authored_tests {
                     &selection,
                 )
                 .unwrap();
-            let actual = demanded
-                .selection
-                .groups_for_target(&demanded.artifacts, None, &imports)
-                .unwrap();
+            let demanded = demanded.bind_target(None, imports.to_vec());
+            let resolved = demanded.resolve().unwrap();
+            let actual = resolved.groups();
             assert!(actual.contains(&chosen));
             assert!(
                 actual

@@ -75,7 +75,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .original_contexts(
             &original.target_owned(),
             &products.certified_groups,
-            &products.pending_imports,
+            products.pending_imports(),
             &products.package_interfaces,
             original.table(),
             original.yield_sites(),

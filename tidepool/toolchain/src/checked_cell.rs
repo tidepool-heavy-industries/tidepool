@@ -3638,11 +3638,10 @@ impl PreparedCheckedItemOutput {
         is_program: bool,
         output: &crate::artifacts::ProgramNativeOutput,
         request: &str,
-        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
-        program_entry: Option<&CheckedTypedEntry>,
-        target_imports: &[crate::certified_products::PendingImportOwner],
-        target_native_selection: &crate::artifact_inventory::IssuedTargetNativeSelection,
     ) -> Result<Self, CompileError> {
+        let sealed = output.sealed_products()?;
+        let original_execution = Arc::clone(sealed.original_execution()?);
+        let program_entry = sealed.typed_entry();
         let root = output.directory();
         let source = output.source();
         let target = output.target();
@@ -3736,20 +3735,16 @@ impl PreparedCheckedItemOutput {
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
-        let groups = target_native_selection.groups_for_target(
-            original_execution.artifact_view(),
-            typed_entry.as_ref(),
-            target_imports,
-        )?;
+        let resolved = sealed.resolve_native_execution()?;
+        let groups = resolved.groups();
         let source_originals = original_execution
-            .published_source_original_selections_for_target(&groups, target_imports)?;
+            .published_source_original_selections_for_target(groups, resolved.imports())?;
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
                     .artifact_view()
                     .native_sites_for_groups(&groups)?;
-                let native_requirements = target_native_selection
-                    .requirements_for_entry(original_execution.artifact_view(), &entry)?;
+                let native_requirements = resolved.requirements_for_entry()?;
                 Ok::<_, CompileError>(SealedTypedEntry {
                     entry,
                     native_sites,
@@ -4710,7 +4705,7 @@ mod tests {
             .unwrap()
             .into_target()
             .unwrap();
-        let authored_only = &authored_admission.artifacts;
+        let authored_only = authored_admission.artifacts();
         let authored_groups =
             crate::declaration_context::certify_artifact_view_groups_with_validation(
                 &authored_only,
@@ -4740,7 +4735,7 @@ mod tests {
             .unwrap()
             .into_target()
             .unwrap();
-        let complete = &complete_admission.artifacts;
+        let complete = complete_admission.artifacts().clone();
         assert_eq!(
             complete.selected_native_groups(),
             BTreeSet::from([
@@ -4752,28 +4747,16 @@ mod tests {
             ])
         );
         assert_eq!(complete.artifact_ids(), baseline.artifact_ids());
-        let authored_closure = authored_admission
-            .selection
-            .groups_for_target(authored_only, Some(&entry), &[])
-            .unwrap();
-        let authored_sites = authored_only
-            .native_sites_for_groups(&authored_closure)
-            .unwrap();
+        let authored_target = authored_admission.bind_target(Some(entry.clone()), vec![]);
+        let complete_target = complete_admission.bind_target(Some(entry.clone()), imports.clone());
+        let authored_resolved = authored_target.resolve().unwrap();
+        let complete_resolved = complete_target.resolve().unwrap();
+        let authored_sites = authored_resolved.native_sites().unwrap();
         assert_eq!(authored_sites.ids().collect::<Vec<_>>(), vec![80]);
-        let complete_closure = complete_admission
-            .selection
-            .groups_for_target(complete, Some(&entry), &imports)
-            .unwrap();
-        let complete_sites = complete.native_sites_for_groups(&complete_closure).unwrap();
+        let complete_sites = complete_resolved.native_sites().unwrap();
         assert_eq!(
-            authored_admission
-                .selection
-                .requirements_for_entry(authored_only, &entry)
-                .unwrap(),
-            complete_admission
-                .selection
-                .requirements_for_entry(complete, &entry)
-                .unwrap()
+            authored_resolved.requirements_for_entry().unwrap(),
+            complete_resolved.requirements_for_entry().unwrap()
         );
         assert_eq!(complete_sites.ids().collect::<Vec<_>>(), vec![80, 81]);
         for unselected in [120, 121] {

@@ -13377,10 +13377,34 @@ mod tests {
             owner,
             original_ordinal: 7,
         }];
-        let groups = context
-            .artifact_view()
-            .native_groups_for_target(None, &imports)
+        let inputs = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&Arc::new(context.clone()), None)
             .unwrap();
+        let validation = PackageInterfaceValidation::default();
+        let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        let mut fixed = inputs
+            .artifacts()
+            .inventory()
+            .bind_segment(inputs.artifacts(), vec![], &selected)
+            .unwrap();
+        let target = inputs
+            .artifacts()
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                inputs.artifacts(),
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .bind_target(None, imports.to_vec());
+        let groups = target.resolve().unwrap().groups().clone();
         let published_original = publication
             .context()
             .compiler_input_roles()
@@ -14739,15 +14763,17 @@ mod tests {
                 )
                 .unwrap();
             let groups = target
-                .selection
-                .groups_for_target(&target.artifacts, None, &imports)
+                .clone()
+                .bind_target(None, (&imports).to_vec())
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
             assert_eq!(group.original_ordinal, 7);
             assert_eq!(
-                target.artifacts.selected_native_groups(),
+                target.artifacts().selected_native_groups(),
                 BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,
@@ -15147,15 +15173,17 @@ mod tests {
                 )
                 .unwrap();
             let groups = target
-                .selection
-                .groups_for_target(&target.artifacts, None, &imports)
+                .clone()
+                .bind_target(None, (&imports).to_vec())
+                .resolve()
+                .map(|resolved| resolved.groups().clone())
                 .unwrap();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
             assert_eq!(group.original_ordinal, 7);
             assert_eq!(
-                target.artifacts.selected_native_groups(),
+                target.artifacts().selected_native_groups(),
                 BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,
