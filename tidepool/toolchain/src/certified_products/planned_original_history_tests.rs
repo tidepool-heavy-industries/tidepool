@@ -578,10 +578,14 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     )
     .unwrap();
     for binding in &bindings {
-        assert!(current
-            .completed_output()
-            .artifacts()
-            .contains_issued_native_group(*binding));
+        let Some(CertifiedNativeGroupSupport::Issued(offer)) = current
+            .certified
+            .source_selection
+            .native_group_support(key, &selected_owner, *binding)
+        else {
+            panic!("completed availability retains its exact issuing offer");
+        };
+        assert!(offer.group_bindings(key).any(|issued| issued == *binding));
         assert!(
             !rebound.contains_issued_native_group(*binding),
             "equal payloads do not recreate an issued Group binding"
