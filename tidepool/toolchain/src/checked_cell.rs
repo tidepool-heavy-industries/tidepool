@@ -1291,12 +1291,19 @@ pub struct CheckedValueArtifact {
     authority: ([u8; 32], [u8; 32]),
     certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     artifact_view: crate::artifact_inventory::ArtifactView,
-    // Exact type/source selection; full native custody above grants no compiler role.
-    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
-    source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
-    template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
+    compiler: CheckedValueCompilerSurface,
     directory: Arc<ValueInterfaceDirectory>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
+}
+
+/// Compiler facts issued with one checked value. Its independent historical
+/// execution custody remains with `CheckedValueArtifact::artifact_view`.
+#[derive(Debug, PartialEq, Eq)]
+struct CheckedValueCompilerSurface {
+    // Selected compiler roles are distinct from historical byte custody.
+    support: crate::artifact_inventory::CompilerSourceSupport,
+    source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
+    template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
 }
 
 /// Type-only issuance purpose. Neither purpose grants runtime value transfer.
@@ -1661,10 +1668,12 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate,
-            compiler_support,
             artifact_view,
-            source_lexical: Vec::new(),
-            template_imports: None,
+            compiler: CheckedValueCompilerSurface {
+                support: compiler_support,
+                source_lexical: Vec::new(),
+                template_imports: None,
+            },
             directory: self.directory,
             original_interface_prototype: Some(self.prototype.clone()),
         });
@@ -2094,9 +2103,11 @@ impl CheckedValueInputs {
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
             artifact_view,
-            compiler_support,
-            source_lexical,
-            template_imports,
+            compiler: CheckedValueCompilerSurface {
+                support: compiler_support,
+                source_lexical,
+                template_imports,
+            },
             directory: self.directory.clone(),
             original_interface_prototype: None,
         }))
@@ -2107,12 +2118,12 @@ impl CheckedValueArtifact {
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
-        &self.compiler_support
+        &self.compiler.support
     }
     pub(crate) fn compiler_input_projection(
         &self,
     ) -> &crate::artifact_inventory::CompilerInputProjection {
-        &self.compiler_support.projection()
+        &self.compiler.support.projection()
     }
     pub fn owner(&self) -> tidepool_repr::SessionModule {
         self.interface.owner
@@ -2127,15 +2138,15 @@ impl CheckedValueArtifact {
         &self.artifact_view
     }
     pub(crate) fn compiler_artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
-        &self.compiler_support.artifacts()
+        &self.compiler.support.artifacts()
     }
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
-        &self.source_lexical
+        &self.compiler.source_lexical
     }
     pub(crate) fn template_imports(
         &self,
     ) -> Option<&Arc<crate::declaration_context::RetainedTemplateImports>> {
-        self.template_imports.as_ref()
+        self.compiler.template_imports.as_ref()
     }
 }
 
