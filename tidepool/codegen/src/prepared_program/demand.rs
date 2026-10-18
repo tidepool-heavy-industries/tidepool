@@ -429,6 +429,20 @@ pub struct SourceGroupOutline {
     imports: Vec<SourceBinder>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static OUTLINE_ROWS: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+#[cfg(test)]
+fn observe_outline_row(index: usize) {
+    OUTLINE_ROWS.with(|rows| {
+        let mut value = rows.get();
+        value[index] += 1;
+        rows.set(value);
+    });
+}
+
 impl SourceGroupOutline {
     pub fn from_projected(
         owner: CachedHomeOwner,
@@ -444,27 +458,37 @@ impl SourceGroupOutline {
         )
     }
 
-    fn from_certified(group: &CertifiedGroup) -> Result<Self, DemandError> {
+    fn from_certified(group: &CertifiedGroup) -> Self {
         let imports = group
             .imports()
             .iter()
-            .filter_map(|origin| match origin {
-                ImportOwner::Source { version, binder } => Some(SourceBinder {
-                    version: version.clone(),
-                    binder: binder.clone(),
-                }),
-                ImportOwner::Retained { .. }
-                | ImportOwner::CodeExport { .. }
-                | ImportOwner::Package { .. } => None,
+            .filter_map(|origin| {
+                #[cfg(test)]
+                observe_outline_row(3);
+                match origin {
+                    ImportOwner::Source { version, binder } => Some(SourceBinder {
+                        version: version.clone(),
+                        binder: binder.clone(),
+                    }),
+                    ImportOwner::Retained { .. }
+                    | ImportOwner::CodeExport { .. }
+                    | ImportOwner::Package { .. } => None,
+                }
             })
             .collect();
-        Self::from_definitions(
-            group.owner().clone(),
-            group.original_ordinal(),
-            group.binders(),
-            group.definitions(),
+        Self {
+            owner: group.owner().clone(),
+            original_ordinal: group.original_ordinal(),
+            tops: group
+                .exported_values()
+                .map(|(binder, value)| {
+                    #[cfg(test)]
+                    observe_outline_row(1);
+                    (binder.clone(), value)
+                })
+                .collect(),
             imports,
-        )
+        }
     }
 
     fn from_definitions(
@@ -481,7 +505,11 @@ impl SourceGroupOutline {
                 Group::NonRecursive(top) => std::slice::from_ref(top),
                 Group::Recursive(tops) => tops.as_slice(),
             })
-            .map(|top| (&top.identity, top.binding.id))
+            .map(|top| {
+                #[cfg(test)]
+                observe_outline_row(0);
+                (&top.identity, top.binding.id)
+            })
             .collect();
         let mut tops = BTreeMap::new();
         for binder in binders {
@@ -501,6 +529,8 @@ impl SourceGroupOutline {
         }
         for import in &imports {
             if !definitions.globals().iter().any(|global| {
+                #[cfg(test)]
+                observe_outline_row(2);
                 global.identity == import.binder && global.required_generation.is_none()
             }) {
                 return Err(DemandError::InvalidGroup(import.clone()));
@@ -819,7 +849,7 @@ impl<'a> GroupInventory<'a> {
         let outlines = groups
             .iter()
             .map(SourceGroupOutline::from_certified)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         Ok(Self {
             groups,
             index: DemandIndex::new(outlines)?,
@@ -1129,6 +1159,288 @@ mod tests {
         }
     }
 
+    fn outlined_fixture(
+        helpers: usize,
+        exports: usize,
+        import_count: usize,
+        reverse_names: bool,
+        split_last: bool,
+        value_offset: u32,
+    ) -> (CachedHomeOwner, ProjectedGroup, Vec<ImportOwner>) {
+        use tidepool_repr::execution_schema::{
+            parse_projected_group, DecodeLimits, ProgramRequirements,
+        };
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(template) = &wire.bindings[0] else {
+            unreachable!()
+        };
+        let tops = (0..helpers + exports)
+            .map(|index| {
+                let mut top = template.clone();
+                top.binding.id = ValueId(index as u32 + value_offset);
+                top.identity = if index < helpers {
+                    testing::identity("Helpers", &format!("helper{index}"))
+                } else {
+                    let suffix = index - helpers;
+                    let name = if reverse_names {
+                        exports - 1 - suffix
+                    } else {
+                        suffix
+                    };
+                    testing::identity("Fixture", &format!("export{name}"))
+                };
+                top
+            })
+            .collect::<Vec<_>>();
+        wire.bindings = if split_last && tops.len() > 1 {
+            vec![
+                Group::Recursive(tops[..tops.len() - 1].to_vec()),
+                Group::NonRecursive(tops.last().unwrap().clone()),
+            ]
+        } else {
+            vec![Group::Recursive(tops)]
+        };
+        let imports = (0..import_count)
+            .map(|index| {
+                let binder = testing::identity("Dependency", &format!("import{index}"));
+                let generation = matches!(index % 4, 2 | 3).then_some(9);
+                wire.globals.push(GlobalDecl {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: generation,
+                });
+                match index % 4 {
+                    0 => ImportOwner::Source {
+                        version: ModuleVersion([8; 32]),
+                        binder,
+                    },
+                    1 => ImportOwner::Package {
+                        unit: binder.unit.clone(),
+                        module: binder.module.clone(),
+                        binder,
+                        interface_digest: [7; 32],
+                    },
+                    2 => ImportOwner::Retained {
+                        id: tidepool_repr::SessionVarId::from_extract(index as u64),
+                        generation: 9,
+                    },
+                    _ => ImportOwner::CodeExport {
+                        binder,
+                        generation: 9,
+                        root_id: 11,
+                        interface_digest: None,
+                    },
+                }
+            })
+            .collect();
+        let envelope = wire.envelope.clone();
+        let requirements = ProgramRequirements {
+            schema_version: envelope.schema_version,
+            projection_profile: envelope.projection_profile,
+            toolchain: envelope.toolchain,
+            execution_abi_version: envelope.execution_abi_version,
+            target: envelope.target,
+        };
+        let all = testing::projected_group(wire, 11).unwrap();
+        let bytes = tidepool_test_data::prepared_encode::encode_projected_group(&all);
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let ciborium::value::Value::Array(fields) = &mut value else {
+            panic!("normal group encoder must emit an array")
+        };
+        // Describe a raw exported suffix, then earn admission through both
+        // normal readers. No projected-group field or proof is constructed here.
+        let ciborium::value::Value::Array(binders) = &mut fields[3] else {
+            panic!("normal group encoder must emit a binder array")
+        };
+        binders.drain(..helpers);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        let projected =
+            parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
+        (
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            projected,
+            imports,
+        )
+    }
+
+    #[test]
+    fn certified_outlines_match_full_definitions_and_visit_only_exports() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+
+        let check = |helpers, exports, imports, reverse, split, offset| {
+            let (owner, projected, owners) =
+                outlined_fixture(helpers, exports, imports, reverse, split, offset);
+            let group = CertifiedGroup::admit(owner, projected, owners).unwrap();
+            OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
+            let actual = SourceGroupOutline::from_certified(&group);
+            let touched = OUTLINE_ROWS.with(|rows| rows.get());
+            // Full recomputation never uses the certified export iterator.
+            let definitions = group.definitions();
+            let mut expected = BTreeMap::new();
+            let mut oracle_rows = 0;
+            for binding in definitions.bindings() {
+                let tops = match binding {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops.as_slice(),
+                };
+                for top in tops {
+                    oracle_rows += 1;
+                    if group.binders().contains(&top.identity) {
+                        expected.insert(top.identity.clone(), top.binding.id);
+                    }
+                }
+            }
+            let expected_imports = definitions
+                .globals()
+                .iter()
+                .zip(group.imports())
+                .filter_map(|(global, owner)| match owner {
+                    ImportOwner::Source { version, .. } => Some(SourceBinder {
+                        version: version.clone(),
+                        binder: global.identity.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            prop_assert_eq!(&actual.owner, group.owner());
+            prop_assert_eq!(actual.original_ordinal, group.original_ordinal());
+            prop_assert_eq!(&actual.tops, &expected);
+            prop_assert_eq!(&actual.imports, &expected_imports);
+            prop_assert_eq!(oracle_rows, helpers + exports);
+            prop_assert_eq!(touched, [0, exports, 0, imports]);
+
+            // The actual general route remains necessary for projected input.
+            // It also sensitizes the budget to restoring that route above.
+            OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
+            let projected = SourceGroupOutline::from_definitions(
+                group.owner().clone(),
+                group.original_ordinal(),
+                group.binders(),
+                definitions,
+                expected_imports,
+            )
+            .unwrap();
+            let general_rows = OUTLINE_ROWS.with(|rows| rows.get());
+            prop_assert_eq!(projected.tops, expected);
+            prop_assert_eq!(projected.imports, actual.imports);
+            prop_assert_eq!(general_rows[0], helpers + exports);
+            prop_assert_ne!(general_rows, touched);
+            if helpers == 512 {
+                eprintln!(
+                    "certified outline work: {}",
+                    serde_json::json!({
+                        "helpers": helpers, "exports": exports, "imports": imports,
+                        "definition_rows": touched[0], "export_rows": touched[1],
+                        "source_import_comparisons": touched[2], "import_rows": touched[3],
+                        "general_definition_rows": general_rows[0],
+                        "general_source_import_comparisons": general_rows[2],
+                        "oracle_definition_rows": oracle_rows,
+                    })
+                );
+            }
+            Ok(())
+        };
+        // Fixed large-helper/single-export and zero-export controls ensure the
+        // budget is exercised independently of generated coverage.
+        check(512, 1, 12, true, false, 3).unwrap();
+        check(8, 0, 0, false, true, 0).unwrap();
+        let strategy = (
+            1usize..65,
+            0usize..13,
+            0usize..13,
+            any::<bool>(),
+            any::<bool>(),
+            0u32..4,
+        );
+        let mut config = proptest::test_runner::contextualize_config(Config::default());
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::certified_outlines_match_full_definitions_and_visit_only_exports"
+        ));
+        TestRunner::new(config)
+            .run(&strategy, |(h, e, i, r, s, o)| check(h, e, i, r, s, o))
+            .unwrap();
+    }
+
+    #[test]
+    fn certified_outline_admission_preserves_owner_import_and_inventory_refusals() {
+        let (owner, projected, imports) = outlined_fixture(2, 2, 4, true, true, 1);
+        let mut bad_source = imports.clone();
+        let ImportOwner::Source { binder, .. } = &mut bad_source[0] else {
+            unreachable!()
+        };
+        binder.occurrence = "foreign".into();
+        let mut bad_package = imports.clone();
+        let ImportOwner::Package { unit, .. } = &mut bad_package[1] else {
+            unreachable!()
+        };
+        *unit = "foreign".into();
+        let mut bad_retained = imports.clone();
+        let ImportOwner::Retained { generation, .. } = &mut bad_retained[2] else {
+            unreachable!()
+        };
+        *generation = 10;
+        let mut bad_export = imports.clone();
+        let ImportOwner::CodeExport { generation, .. } = &mut bad_export[3] else {
+            unreachable!()
+        };
+        *generation = 10;
+        let mut bad_source_generation = imports.clone();
+        bad_source_generation[0] = ImportOwner::Retained {
+            id: tidepool_repr::SessionVarId::from_extract(1),
+            generation: 9,
+        };
+        for malformed in [
+            Vec::new(),
+            bad_source,
+            bad_package,
+            bad_retained,
+            bad_export,
+            bad_source_generation,
+        ] {
+            assert!(CertifiedGroup::admit(owner.clone(), projected.clone(), malformed).is_err());
+        }
+        for (unit, module) in [
+            ("", "Fixture"),
+            ("foreign", "Fixture"),
+            ("fixture", "Foreign"),
+        ] {
+            let mut malformed = owner.clone();
+            malformed.unit = unit.into();
+            malformed.module = module.into();
+            assert!(CertifiedGroup::admit(malformed, projected.clone(), imports.clone()).is_err());
+        }
+        let valid =
+            CertifiedGroup::admit(owner.clone(), projected.clone(), imports.clone()).unwrap();
+        assert!(matches!(
+            GroupInventory::new(&[valid.clone(), valid.clone()]),
+            Err(DemandError::DuplicateGroup { .. })
+        ));
+        let mut conflicting = owner;
+        conflicting.product_sha256 = [99; 32];
+        let other = CertifiedGroup::admit(conflicting, projected, imports).unwrap();
+        assert!(matches!(
+            GroupInventory::new(&[valid, other]),
+            Err(DemandError::ConflictingOwner { .. })
+        ));
+        assert!(matches!(
+            GroupInventory::new(&[group("same", 11, &[]), group("same", 12, &[])]),
+            Err(DemandError::DuplicateBinder(_))
+        ));
+    }
+
     #[test]
     fn recursive_source_demand_compiles_only_reachable_original_groups() {
         let groups = [
@@ -1301,8 +1613,7 @@ mod tests {
         let outlines = groups
             .iter()
             .map(SourceGroupOutline::from_certified)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .collect();
         let pending = PendingGroupInventory::new(outlines).unwrap();
         let selected = pending
             .seal_with_inherited([source("a")], &BTreeMap::new(), &HashMap::new())

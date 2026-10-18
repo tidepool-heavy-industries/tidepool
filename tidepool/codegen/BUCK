@@ -244,6 +244,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/test-data:tidepool_test_data",
         "//third-party/rust:chrono",
+        "//third-party/rust:ciborium",
         "//third-party/rust:cranelift-codegen",
         "//third-party/rust:cranelift-frontend",
         "//third-party/rust:cranelift-jit",
@@ -317,6 +318,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/test-data:tidepool_test_data",
         "//third-party/rust:chrono",
+        "//third-party/rust:ciborium",
         "//third-party/rust:cranelift-codegen",
         "//third-party/rust:cranelift-frontend",
         "//third-party/rust:cranelift-jit",
@@ -371,6 +373,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/test-data:tidepool_test_data",
         "//third-party/rust:chrono",
+        "//third-party/rust:ciborium",
         "//third-party/rust:cranelift-codegen",
         "//third-party/rust:cranelift-frontend",
         "//third-party/rust:cranelift-jit",
