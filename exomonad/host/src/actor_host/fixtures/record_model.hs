@@ -24,7 +24,7 @@ data Answer = Answer { answer :: Int }
 
 data Probe mode = Probe
   { calls :: mode R.:- R.State Int
-  , runModel :: mode R.:- R.Call Text (R.Reply (ModelResult Answer))
+  , runModel :: mode R.:- R.Call Text (R.Reply (ModelResult Answer, ModelResult Answer))
   , readCalls :: mode R.:- R.Call () (R.Reply Int)
   } deriving Generic
 
@@ -34,14 +34,15 @@ probe model granted = permissions $
   R.definition "record-model-probe" (Actor.Selected (knownEffects @'[ModelCall modelFamily])) Probe
     { calls = 0
     , runModel = \input -> do
-        result <- invokeModel
-          (withLimits (defaultLimits { requestLimit = Just 2, toolLimit = Just 2 })
-            (typedTurn @Answer model
-              (defaultSpec { specTools = EchoTools (presentWith id $ tool "Echo through the record actor state" (\args -> do
-                R.modify' (+10)
-                pure (message args))) }) "record-typed")) input
+        let bounded = withLimits (defaultLimits { requestLimit = Just 2, toolLimit = Just 2 })
+              (typedTurn @Answer model
+                (defaultSpec { specTools = EchoTools (presentWith id $ tool "Echo through the record actor state" (\args -> do
+                  R.modify' (+10)
+                  pure (message args))) }) "record-typed")
+        result <- invokeModel bounded input
+        exhausted <- invokeModel bounded "budget control"
         R.modify' (+1)
-        pure result
+        pure (result, exhausted)
     , readCalls = \() -> R.get
     }
   where

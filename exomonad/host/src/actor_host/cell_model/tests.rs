@@ -202,8 +202,31 @@ impl CellModelFactory for HoldingFactory {
         descriptor: &ActorDescriptor,
         context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding> {
-        let mut binding = self.inner.bind(execution, principal, descriptor, context);
-        if descriptor.authored_label() == Some("record-model-probe") {
+        let record = descriptor.authored_label() == Some("record-model-probe");
+        let mut binding: Arc<dyn CellModelBinding> = if record {
+            Arc::new(EmbeddedCellModelBinding(Arc::new(CellModelService::<
+                Offline,
+                Script,
+            >::new(
+                self.inner.runtime.clone(),
+                principal,
+                execution.as_str().to_owned(),
+                self.inner.store.clone(),
+                self.inner.scheduler.clone(),
+                ModelPolicy {
+                    limits: Limits {
+                        requests: 2,
+                        ..Limits::default()
+                    },
+                },
+                self.inner
+                    .selected_transport(descriptor)
+                    .expect("record fixture has exact admitted transport"),
+            ))))
+        } else {
+            self.inner.bind(execution, principal, descriptor, context)
+        };
+        if record {
             self.script.record_bindings.fetch_add(1, Ordering::SeqCst);
             binding = Arc::new(ObservedRecordBinding {
                 inner: binding,
@@ -222,6 +245,9 @@ struct ObservedRecordBinding {
     script: Arc<ScriptState>,
 }
 impl CellModelBinding for ObservedRecordBinding {
+    fn begin_request_budget(&self) {
+        self.inner.begin_request_budget();
+    }
     fn prepare(
         &self,
         request: ModelReq,
@@ -431,7 +457,7 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                         .iter()
                         .filter(|event| event.kind == "model_invocation_receipt")
                         .count(),
-                    2
+                    4
                 );
 
                 let retired = displayed(
