@@ -205,6 +205,7 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        author_scripted_model_catalog(project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -231,6 +232,7 @@ pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) 
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        author_scripted_model_catalog(project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -258,6 +260,7 @@ pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        author_scripted_model_catalog(project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -1660,87 +1663,92 @@ pub(super) fn scaffold_workspace(workspace: &Path) {
     );
 }
 
-/// Admit the exact model choices used by the model-free hosted fixtures.
+/// Author the exact catalog used by scripted fixtures before source capture.
 /// Provider attachment remains scripted; these credentials are never opened.
-pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
+pub(super) fn author_scripted_model_catalog(project: &mut crate::exomonad::ExomonadConfig) {
     use crate::exomonad::model_catalog::{
         InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
     };
-    if config
-        .workspace_inputs
-        .as_ref()
-        .is_some_and(|inputs| inputs.model_catalog.is_some())
-    {
+    if project.inference.is_some() {
+        return;
+    }
+    let backend = project.defaults.model.backend();
+    let reasoning = project.defaults.reasoning;
+    let primary = project.defaults.model.clone();
+    let mut models = BTreeMap::new();
+    let mut add = |key: &str, model: &str| {
+        models.insert(
+            key.into(),
+            ModelConfig {
+                provider: "scripted".into(),
+                model: model.into(),
+                effort: reasoning.value().into(),
+                allowed_efforts: match backend {
+                    exomonad_actor::Backend::OpenAIPlan => {
+                        vec!["low".into(), "medium".into(), "high".into()]
+                    }
+                    exomonad_actor::Backend::DeepSeek => {
+                        vec!["low".into(), "high".into(), "max".into()]
+                    }
+                    exomonad_actor::Backend::GeminiInteractions => {
+                        vec!["low".into(), "medium".into(), "high".into()]
+                    }
+                },
+            },
+        );
+    };
+    add("primary", primary.value());
+    for (key, model) in &project.models {
+        assert_eq!(
+            model.backend(),
+            backend,
+            "fixture alias retains the provider family"
+        );
+        add(key, model.value());
+    }
+    if backend == exomonad_actor::Backend::OpenAIPlan {
+        add("sol", "gpt-6-sol");
+        add("luna", "gpt-6-luna");
+        add("child-preparation-model", "child-preparation-model");
+    }
+    let allowed = models.keys().cloned().collect();
+    project.inference = Some(InferenceConfig {
+        profile: "scripted".into(),
+        providers: BTreeMap::from([(
+            "scripted".into(),
+            ProviderConfig {
+                backend,
+                credential_file: Some("/tmp/tidepool-scripted-unread-credential".into()),
+                credential_env: None,
+                endpoint: None,
+                inference_limits: Default::default(),
+            },
+        )]),
+        models,
+        profiles: BTreeMap::from([(
+            "scripted".into(),
+            ProfileConfig {
+                default: "primary".into(),
+                allowed,
+            },
+        )]),
+    });
+    project.apply_inference().unwrap();
+}
+
+/// Select ordinary scripted fixtures once; supplied frozen inputs stay authoritative.
+pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
+    if config.workspace_inputs.is_some() {
         return;
     }
     let authored = config.workspace.join(".exomonad");
-    if config.workspace_inputs.is_none() {
+    if !authored.join("config.toml").exists() {
         crate::exomonad::write_fixture_project_config(&authored, config.model.value(), |project| {
+            project.defaults.model = config.model.clone();
             project.defaults.reasoning = config.reasoning;
         });
     }
-    crate::exomonad::edit_fixture_project_config(&authored, |project| {
-        let backend = config.model.backend();
-        let mut models = BTreeMap::new();
-        let mut add = |key: &str, model: &str| {
-            models.insert(
-                key.into(),
-                ModelConfig {
-                    provider: "scripted".into(),
-                    model: model.into(),
-                    effort: config.reasoning.value().into(),
-                    allowed_efforts: match backend {
-                        exomonad_actor::Backend::OpenAIPlan => {
-                            vec!["low".into(), "medium".into(), "high".into()]
-                        }
-                        exomonad_actor::Backend::DeepSeek => {
-                            vec!["low".into(), "high".into(), "max".into()]
-                        }
-                        exomonad_actor::Backend::GeminiInteractions => {
-                            vec!["low".into(), "medium".into(), "high".into()]
-                        }
-                    },
-                },
-            );
-        };
-        add("primary", config.model.value());
-        for (key, model) in &project.models {
-            assert_eq!(
-                model.backend(),
-                backend,
-                "fixture alias retains the provider family"
-            );
-            add(key, model.value());
-        }
-        if backend == exomonad_actor::Backend::OpenAIPlan {
-            add("sol", "gpt-6-sol");
-            add("luna", "gpt-6-luna");
-            add("child-preparation-model", "child-preparation-model");
-        }
-        let allowed = models.keys().cloned().collect();
-        project.inference = Some(InferenceConfig {
-            profile: "scripted".into(),
-            providers: BTreeMap::from([(
-                "scripted".into(),
-                ProviderConfig {
-                    backend,
-                    credential_file: Some("/tmp/tidepool-scripted-unread-credential".into()),
-                    credential_env: None,
-                    endpoint: None,
-                    inference_limits: Default::default(),
-                },
-            )]),
-            models,
-            profiles: BTreeMap::from([(
-                "scripted".into(),
-                ProfileConfig {
-                    default: "primary".into(),
-                    allowed,
-                },
-            )]),
-        });
-        project.apply_inference().unwrap();
-    });
+    crate::exomonad::edit_fixture_project_config(&authored, author_scripted_model_catalog);
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -1776,6 +1784,7 @@ pub(super) fn pinned_jev_workspace_with(
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
         configure(project);
+        author_scripted_model_catalog(project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
