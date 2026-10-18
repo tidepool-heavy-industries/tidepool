@@ -4925,6 +4925,27 @@ struct ViewReadCache {
 /// so this read projection needs no invalidation and copies no artifact bytes.
 /// Neither projection nor detached metadata retains a view or request
 /// materialization. Selected handles preserve their exact original custody.
+/// Borrowed payload membership of one exact retained view, independent of its
+/// broader acquisition map and of derived native/dependency metadata.
+pub(crate) struct RetainedArtifactPayloads<'a> {
+    entries: &'a imbl::Vector<Arc<ArtifactEntry>>,
+    acquired: &'a imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+}
+
+impl RetainedArtifactPayloads<'_> {
+    pub(crate) fn get(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        let semantic = self.acquired.get(id)?;
+        let position = self
+            .entries
+            .binary_search_by(|entry| {
+                (&entry.descriptor.owner, entry.descriptor.id)
+                    .cmp(&(&semantic.descriptor.owner, *id))
+            })
+            .ok()?;
+        Some(&self.entries[position])
+    }
+}
+
 struct ViewReadProjection {
     nodes: imbl::OrdSet<InventoryNodeKey>,
     entries: imbl::Vector<Arc<ArtifactEntry>>,
@@ -5716,6 +5737,16 @@ impl ArtifactView {
             .get(&metadata.materialization_key())
             .cloned())
     }
+    pub(crate) fn retained_payloads(&self) -> RetainedArtifactPayloads<'_> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        state.view_queries.fetch_add(1, Ordering::Relaxed);
+        let projection = self.read_projection(&state);
+        RetainedArtifactPayloads {
+            entries: &projection.entries,
+            acquired: &self.lease.payloads,
+        }
+    }
+
     pub(crate) fn metadata_snapshot(&self) -> Arc<RetainedArtifactMetadata> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);

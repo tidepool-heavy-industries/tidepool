@@ -1605,6 +1605,20 @@ impl NativeNamespaceContributions {
     }
 }
 
+enum CompilerRolePayloads<'a> {
+    Retained(RetainedArtifactPayloads<'a>),
+    Metadata(&'a BTreeMap<ArtifactId, Arc<ArtifactEntry>>),
+}
+
+impl CompilerRolePayloads<'_> {
+    fn get(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        match self {
+            Self::Retained(payloads) => payloads.get(id),
+            Self::Metadata(payloads) => payloads.get(id),
+        }
+    }
+}
+
 impl CompilerInputProjection {
     /// Retained offers keep their original exact custody. Current admissions
     /// consume only contributions derived from this issued compiler namespace.
@@ -2026,7 +2040,7 @@ impl CompilerInputProjection {
     }
 
     pub(crate) fn validate(&self, view: &ArtifactView) -> Result<(), CompileError> {
-        self.entries_from_metadata(&view.metadata_snapshot())
+        self.entries_from_payloads(CompilerRolePayloads::Retained(view.retained_payloads()))
             .map(|_| ())
     }
 
@@ -2041,7 +2055,14 @@ impl CompilerInputProjection {
         &self,
         artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
-        let selected = self.associated_entries(artifacts)?;
+        self.entries_from_payloads(CompilerRolePayloads::Metadata(artifacts))
+    }
+
+    fn entries_from_payloads(
+        &self,
+        artifacts: CompilerRolePayloads<'_>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
+        let selected = self.associated_entries(&artifacts)?;
         for entry in selected.values() {
             for required in &entry.requirements {
                 let role = self.roles.get(required).ok_or_else(|| {
@@ -2053,7 +2074,12 @@ impl CompilerInputProjection {
                     })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
-                    artifacts[&role.interface()].descriptor.interface_sha256 != *seal
+                    artifacts
+                        .get(&role.interface())
+                        .expect("associated canonical interface")
+                        .descriptor
+                        .interface_sha256
+                        != *seal
                 }) {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::InterfaceSealMismatch {
@@ -2074,8 +2100,8 @@ impl CompilerInputProjection {
         &self,
         view: &ArtifactView,
     ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
-        let metadata = view.metadata_snapshot();
-        let entries = self.associated_entries(&metadata.artifacts)?;
+        let artifacts = CompilerRolePayloads::Retained(view.retained_payloads());
+        let entries = self.associated_entries(&artifacts)?;
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
         let mut selected = BTreeMap::new();
@@ -2105,7 +2131,11 @@ impl CompilerInputProjection {
                 ResolvedCompilerRole {
                     interface: (
                         canonical,
-                        Arc::clone(&metadata.artifacts[&role.interface()]),
+                        Arc::clone(
+                            artifacts
+                                .get(&role.interface())
+                                .expect("associated canonical interface"),
+                        ),
                     ),
                     original,
                 },
@@ -2116,7 +2146,7 @@ impl CompilerInputProjection {
 
     fn associated_entries(
         &self,
-        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        artifacts: &CompilerRolePayloads<'_>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
