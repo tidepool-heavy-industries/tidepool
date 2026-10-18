@@ -1921,9 +1921,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .entries
         .values()
         .any(|entry| entry.descriptor.id == replacement_a.descriptor.id));
-    assert!(!request.native_transport.availability.contains_key(&a_id));
+    assert!(!request.native_selection.availability.contains_key(&a_id));
     let offers = request
-        .native_transport
+        .native_selection
         .availability
         .values()
         .flat_map(|availability| availability.offers().cloned())
@@ -1970,7 +1970,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(b_id, 7)])
     );
-    assert!(!request.native_transport.availability[&b_id].permits(9001));
+    assert!(!request.native_selection.availability[&b_id].permits(9001));
     assert!(matches!(
         consume(&selected_view, &request_selection, &[denied_demand]),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -2079,7 +2079,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         let baseline = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&context, None)
             .unwrap();
-        let empty = &baseline.native_transport.availability[&entry.descriptor.id];
+        let empty = &baseline.native_selection.availability[&entry.descriptor.id];
         assert!(!empty.permits(7));
         assert!(!empty.permits(9001));
         assert!(empty
@@ -2888,9 +2888,8 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
             text(hex(&[7; 32])),
         ])]),
     ]);
-    assert!(inputs
-        .native_transport
-        .metadata
+    let transport_metadata = NativeCompilerTransport::lower_metadata(inputs);
+    assert!(transport_metadata
         .entries
         .values()
         .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
@@ -2907,7 +2906,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .unwrap()
         .is_empty());
     assert_eq!(
-        compiler_execution_scope(&held_graph, &inputs.native_transport.metadata).unwrap(),
+        compiler_execution_scope(&held_graph, &transport_metadata).unwrap(),
         held_graph,
         "private body metadata would incorrectly preserve this replay root if used as compiler policy"
     );
@@ -3189,9 +3188,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             .unwrap();
         let inputs = request.compiler_inputs();
         assert_eq!(
-            inputs.native_transport.metadata.entries[&owner]
-                .descriptor
-                .id,
+            request.transport_metadata.entries[&owner].descriptor.id,
             entries[winner].descriptor.id
         );
         assert!(
@@ -3384,14 +3381,12 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
         .unwrap();
     let inputs = request.compiler_inputs();
     assert_eq!(
-        inputs.native_transport.metadata.entries[&owners[0]]
-            .descriptor
-            .id,
+        request.transport_metadata.entries[&owners[0]].descriptor.id,
         ids[0]
     );
     assert!(
         matches!(
-            inputs.native_transport.metadata.entries[&owners[2]].payload,
+            request.transport_metadata.entries[&owners[2]].payload,
             ArtifactPayload::Canonical(_)
         ),
         "R's broad checked custody cannot advertise its unrelated sibling"
@@ -7133,7 +7128,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
             if interface_only && index != 0 {
                 assert!(!request
                     .compiler_inputs()
-                    .native_transport
+                    .native_selection
                     .availability
                     .contains_key(&entry.descriptor.id));
             } else {
@@ -7726,7 +7721,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
             }
         );
         let availability =
-            &request.compiler_inputs().native_transport.availability[&entry.descriptor.id];
+            &request.compiler_inputs().native_selection.availability[&entry.descriptor.id];
         for ordinal in [7, 9001] {
             assert_eq!(availability.permits(ordinal), index == 0);
         }
@@ -8171,7 +8166,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .selected_native_groups()
                             .is_empty());
                         assert_eq!(request.compiler_inputs().projection(), &projection);
-                        let availability = &request.compiler_inputs().native_transport.availability;
+                        let availability = &request.compiler_inputs().native_selection.availability;
                         if mode == 2 && same_canonical_binding {
                             assert_eq!(
                                 availability.keys().copied().collect::<BTreeSet<_>>(),
