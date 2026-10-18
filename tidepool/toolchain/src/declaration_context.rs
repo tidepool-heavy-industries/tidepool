@@ -15095,7 +15095,18 @@ mod tests {
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
             assert_eq!(group.original_ordinal, 7);
-            assert!(target.artifacts.selected_native_groups().is_empty());
+            assert_eq!(
+                target.artifacts.selected_native_groups(),
+                BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
+                    artifact: id,
+                    original_ordinal: 7,
+                }]),
+                "target selection contains exactly its authenticated demand"
+            );
+            assert!(
+                inputs.artifacts().selected_native_groups().is_empty(),
+                "target demand does not promote compiler-input selection"
+            );
         }
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
