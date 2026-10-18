@@ -1509,6 +1509,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let b_id = entries[1].descriptor.id;
     let a_id = entries[0].descriptor.id;
     let demand = source_import(&recovered[1].product, 7);
+    let denied_demand = source_import(&recovered[1].product, 9001);
     // A different selected A is unrelated to the proof that supplied B. Both
     // alternatives deliberately share canonical interfaces with their peers.
     let replacement_a = product("ReceiptAncestor", 94);
@@ -1664,9 +1665,34 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .roots
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
-    let groups = admitted
-        .native_groups_for_target(None, std::slice::from_ref(&demand))
-        .unwrap();
+    assert!(matches!(
+        admitted.native_groups_for_target(None, std::slice::from_ref(&demand)),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 7,
+            } if artifact == b_id)
+    ));
+    let consume = |view: &ArtifactView,
+                   selection: &crate::certified_products::CertifiedSourceSelection,
+                   imports: &[crate::certified_products::PendingImportOwner]| {
+        let mut fixed = view
+            .inventory()
+            .bind_segment(view, vec![], selection)
+            .expect("bind the actual receipt owner before body demand");
+        let demanded = view.inventory().admit_bound_target(
+            &mut fixed,
+            view,
+            NativeArtifactDemand::CertifiedTargetImports(imports),
+            vec![],
+            selection,
+        )?;
+        demanded
+            .selection
+            .groups_for_target(&demanded.artifacts, None, imports)
+    };
+    let groups = consume(&admitted, &selected, std::slice::from_ref(&demand))
+        .expect("the issued B receipt authorizes its exact group7");
+    assert_eq!(groups, exact);
     assert_eq!(
         groups
             .iter()
@@ -1680,6 +1706,14 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             original_ordinal: 9001
         }])
         .is_err());
+
+    assert!(matches!(
+        consume(&admitted, &selected, std::slice::from_ref(&denied_demand)),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 9001,
+            } if artifact == b_id)
+    ));
 
     let context = |view, projection| {
         ExactDeclarationContext::from_facts(DeclarationContextFacts {
@@ -1719,11 +1753,18 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         request.compiler_source_support(),
     )
     .unwrap();
-    let selected = request
+    let request_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &request,
+            &request.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+    let selected_view = request
         .projection()
         .admit_interfaces_with_native_offers(&request.artifacts(), vec![], &offers, &catalog)
         .unwrap();
-    let graph = selected.capture_graph_selection();
+    let graph = selected_view.capture_graph_selection();
     assert!(graph
         .namespace
         .iter()
@@ -1736,16 +1777,28 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .roots
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
+    let requested_groups = consume(
+        &selected_view,
+        &request_selection,
+        std::slice::from_ref(&demand),
+    )
+    .unwrap();
+    assert_eq!(requested_groups, exact);
     assert_eq!(
-        selected
-            .native_groups_for_target(None, &[demand])
-            .unwrap()
+        requested_groups
             .iter()
             .map(|group| (group.binding.artifact(), group.original_ordinal))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(b_id, 7)])
     );
     assert!(!request.native_transport.availability[&b_id].permits(9001));
+    assert!(matches!(
+        consume(&selected_view, &request_selection, &[denied_demand]),
+        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal: 9001,
+            } if artifact == b_id)
+    ));
 
     let conflicting = inventory
         .admit_shared_with_demand(
