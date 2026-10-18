@@ -1501,15 +1501,22 @@ mod tests {
         SourceImports,
     };
 
+    #[track_caller]
     pub(super) fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
-        match tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap() {
+        match tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+            .expect("certify declaration publication")
+        {
             CertifiedDeclarationPublication::Accepted(accepted) => accepted,
             CertifiedDeclarationPublication::Rejected(rejected) => {
-                panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
+                panic!(
+                    "certify declaration publication rejected: {:?}",
+                    rejected.receipt.outcome()
+                )
             }
         }
     }
 
+    #[track_caller]
     pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
         scope: ScopeId,
@@ -1518,11 +1525,11 @@ mod tests {
         let receipt = tidepool_testing::with_settlement(|settlement| {
             session.lib().declaration_receipt(&[source], settlement)
         })
-        .unwrap()
-        .unwrap();
+        .expect("compile declaration receipt")
+        .expect("nonempty source produces a declaration receipt");
         let (candidate, values) = session
             .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
-            .unwrap();
+            .expect("render declaration candidate");
         let staged = tidepool_testing::with_settlement(|settlement| {
             crate::session::validate_declaration_candidate(
                 candidate,
@@ -1530,11 +1537,11 @@ mod tests {
                 settlement,
             )
         })
-        .unwrap()
+        .expect("validate declaration candidate")
         .with_visible_values(values);
         session
             .adopt_staged_declaration_in(staged)
-            .unwrap()
+            .expect("adopt staged declaration")
             .generation
     }
 
