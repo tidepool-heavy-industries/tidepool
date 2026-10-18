@@ -1,14 +1,11 @@
 use super::*;
 
-/// Exact dependency grants remain attached to their issuing owner. Request
-/// rows retain narrower per-original permissions than their supporting proofs.
+/// Exact dependency grants remain attached to their issuing owner. Source and
+/// request rows share permissions independently of their supporting proofs.
 pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
 
 enum DependencyGrantSource<'a> {
-    Source {
-        source: &'a CompilerSourceSupport,
-        offers: Vec<IssuedNativeOffer>,
-    },
+    Source(&'a CompilerSourceSupport),
     Request(&'a crate::declaration_context::ContinuationNativeInputs<'a>),
 }
 
@@ -20,27 +17,38 @@ impl<'a> NativeDependencyCatalog<'a> {
     }
 
     pub(crate) fn from_source(source: &'a CompilerSourceSupport) -> Result<Self, CompileError> {
-        let offers = source
-            .native_offers()
-            .iter()
-            .map(|offer| offer.within_projection(source.projection(), source.artifacts()))
-            .collect::<Result<Vec<_>, _>>()?
+        Ok(Self(DependencyGrantSource::Source(source)))
+    }
+
+    fn availability_rows(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
+        let source = match &self.0 {
+            DependencyGrantSource::Source(source) => Some(source.native_availability()),
+            DependencyGrantSource::Request(_) => None,
+        };
+        let request = match &self.0 {
+            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
+            DependencyGrantSource::Source(_) => None,
+        };
+        // Classification is derived by the receiving request. Every normalized
+        // row participates here, including a former compiler-role row and Empty.
+        source
             .into_iter()
-            .flatten()
-            .collect();
-        Ok(Self(DependencyGrantSource::Source { source, offers }))
+            .flat_map(|rows| rows.rows())
+            .chain(request.into_iter().flatten())
     }
 
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
         match &self.0 {
-            DependencyGrantSource::Source { source, .. } => source.input_decisions(),
+            DependencyGrantSource::Source(source) => source.input_decisions(),
             DependencyGrantSource::Request(inputs) => inputs.input_decisions(),
         }
     }
 
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
         let projection = match &self.0 {
-            DependencyGrantSource::Source { source, .. } => source.projection(),
+            DependencyGrantSource::Source(source) => source.projection(),
             DependencyGrantSource::Request(inputs) => inputs.projection(),
         };
         match projection.snapshot_roles().get(owner) {
@@ -109,21 +117,10 @@ impl<'a> NativeDependencyCatalog<'a> {
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
     ) -> Vec<(NativeGroupBinding, &IssuedNativeOffer)> {
         let mut supports = BTreeMap::new();
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => {
-                for row in inputs.availability_rows() {
-                    if let Some(support) = row.dependency_support(key, owner) {
-                        for group in support.groups() {
-                            if let Some(offer) = support.offer_for_group(group) {
-                                supports.entry(group).or_insert(offer);
-                            }
-                        }
-                    }
-                }
-            }
-            DependencyGrantSource::Source { offers, .. } => {
-                for offer in offers {
-                    for group in offer.group_bindings(key) {
+        for row in self.availability_rows() {
+            if let Some(support) = row.dependency_support(key, owner) {
+                for group in support.groups() {
+                    if let Some(offer) = support.offer_for_group(group) {
                         supports.entry(group).or_insert(offer);
                     }
                 }
