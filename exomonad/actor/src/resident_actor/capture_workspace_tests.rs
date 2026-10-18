@@ -158,6 +158,35 @@ fn assert_committed(reply: &serde_json::Value) {
     assert_eq!(reply["status"], "committed", "{reply:?}");
 }
 
+async fn await_launch_progress<P, L>(phase: &str, progress: P, launch: L) -> P::Output
+where
+    P: std::future::Future,
+    L: std::future::Future,
+    L::Output: std::fmt::Debug,
+{
+    tokio::pin!(progress, launch);
+    tokio::select! {
+        biased;
+        outcome = &mut launch => panic!("launch completed before {phase}: {outcome:?}"),
+        result = &mut progress => result,
+    }
+}
+
+#[tokio::test]
+#[should_panic(expected = "controlled launch refusal")]
+async fn launch_failure_is_observed_before_pending_workspace_progress() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        await_launch_progress(
+            "workspace preparation",
+            std::future::pending::<()>(),
+            std::future::ready(Err::<(), _>("controlled launch refusal")),
+        ),
+    )
+    .await
+    .expect("failed launch must be observed without waiting for workspace progress");
+}
+
 fn reader_source(token: &str, label: &str, lifetime: &str) -> String {
     tidepool_testing::fixture_source("exomonad/actor/src/resident_actor/capture_workspace_child.hs")
         .replace("CHECKPOINT_TOKEN", token)
@@ -552,8 +581,18 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             )),
         )));
     }
-    let first_workspace = fixture.workspace_wait().await;
-    let second_workspace = fixture.workspace_wait().await;
+    let first_workspace = await_launch_progress(
+        "first workspace preparation",
+        fixture.workspace_wait(),
+        calls.next(),
+    )
+    .await;
+    let second_workspace = await_launch_progress(
+        "second workspace preparation",
+        fixture.workspace_wait(),
+        calls.next(),
+    )
+    .await;
     assert_ne!(first_workspace, second_workspace);
     assert!(calls.iter().all(|call| !call.is_finished()));
     assert_committed(&run_host_cell(launcher.clone(), "pure (42 :: Int)".into()).await);
@@ -627,13 +666,23 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         ],
     );
     let client = crate::resident_tools::ResidentToolClient::local(parent.clone());
-    let call = tokio::spawn(async move {
+    let mut call = tokio::spawn(async move {
         client
             .dispatch_workbench(WorkbenchRequest::from_cell_input(&source), None)
             .await
     });
-    let first = fixture.child("first").await;
-    let second = fixture.child("second").await;
+    let first = await_launch_progress(
+        "first child installation",
+        fixture.child("first"),
+        &mut call,
+    )
+    .await;
+    let second = await_launch_progress(
+        "second child installation",
+        fixture.child("second"),
+        &mut call,
+    )
+    .await;
     assert_ne!(first.actor.identity(), second.actor.identity());
     for child in [&first, &second] {
         assert_captured_reader(child).await;
@@ -675,11 +724,16 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     fixture.workspaces.release.add_permits(1);
-    let reuse = tokio::spawn(run_host_cell(
+    let mut reuse = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "reused", "Core.ActorOwned"),
     ));
-    let reused = fixture.child("reused").await;
+    let reused = await_launch_progress(
+        "reused child installation",
+        fixture.child("reused"),
+        &mut reuse,
+    )
+    .await;
     assert_committed(&reuse.await.unwrap());
     fixture.release_checkpoint(&token, scope).await;
     for child in [&first, &second, &reused] {
@@ -700,11 +754,16 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
     let (token, scope) = fixture
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
         .await;
-    let launch = tokio::spawn(run_host_cell(
+    let mut launch = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "survivor", "Core.ActorOwned"),
     ));
-    let survivor = fixture.child("survivor").await;
+    let survivor = await_launch_progress(
+        "surviving child installation",
+        fixture.child("survivor"),
+        &mut launch,
+    )
+    .await;
     assert_committed(&launch.await.unwrap());
     fixture.workspace_wait().await;
     assert_captured_reader(&survivor).await;
@@ -717,12 +776,17 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
         ],
     );
     let client = crate::resident_tools::ResidentToolClient::local(parent.clone());
-    let call = tokio::spawn(async move {
+    let mut call = tokio::spawn(async move {
         client
             .dispatch_workbench(WorkbenchRequest::from_cell_input(&source), None)
             .await
     });
-    let first = fixture.child("partial-first").await;
+    let first = await_launch_progress(
+        "partial child installation",
+        fixture.child("partial-first"),
+        &mut call,
+    )
+    .await;
     fixture.workspace_wait().await;
     fixture.workspace_wait().await;
     assert!(!call.is_finished());
@@ -776,11 +840,16 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     fixture.workspaces.release.add_permits(1);
-    let reuse = tokio::spawn(run_host_cell(
+    let mut reuse = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "fresh-reader", "Core.ActorOwned"),
     ));
-    let fresh = fixture.child("fresh-reader").await;
+    let fresh = await_launch_progress(
+        "fresh reader installation",
+        fixture.child("fresh-reader"),
+        &mut reuse,
+    )
+    .await;
     assert_committed(&reuse.await.unwrap());
     assert_ne!(fresh.actor.identity(), first.actor.identity());
     fixture.release_checkpoint(&token, scope).await;
@@ -944,11 +1013,11 @@ async fn supplied_child_publication_has_executor_admission_before_consumer_ackno
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
         .await;
     let gate = InstallationGateGuard::new(fixture.session, true);
-    let call = tokio::spawn(run_host_cell(
+    let mut call = tokio::spawn(run_host_cell(
         parent,
         reader_source(&token, "publication-ready", "Core.ActorOwned"),
     ));
-    let _kernel = gate.reached().await;
+    let _kernel = await_launch_progress("publication gate", gate.reached(), &mut call).await;
     // The publisher remains suspended. In the old inline pre_start path the
     // actual lifecycle is still Starting here and refuses this exact operation.
     let child = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -996,7 +1065,7 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
     let gate = InstallationGateGuard::new(fixture.session, false);
     let parent_id = parent.identity();
     let source = reader_source(&token, "publication-cancel", "Core.ActorOwned");
-    let call = tokio::spawn(async move {
+    let mut call = tokio::spawn(async move {
         let client = crate::resident_tools::ResidentToolClient::local(parent);
         client
             .dispatch_prepared_workbench(
@@ -1007,7 +1076,7 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
             )
             .await
     });
-    let kernel = gate.reached().await;
+    let kernel = await_launch_progress("cancellation gate", gate.reached(), &mut call).await;
     let retained = kernel.retained_exit();
     let first = ActorTerminal::new(ActorExitKind::Cancelled, "cancel before child publication");
     assert_eq!(retained.request_shutdown(first.clone()), first);
