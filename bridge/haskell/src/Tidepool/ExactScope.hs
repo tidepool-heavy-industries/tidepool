@@ -9,7 +9,7 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProofWithOwner
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact
@@ -918,25 +918,6 @@ revalidateCanonicalProofInputs proofs = pure (() <$ mapM capturedOwner proofs)
         in unless (all (\(path,sha) -> maybe False ((==sha) . artifactSha256) (Map.lookup path bodies)) required)
           (Left "canonical originals lack selected captured bodies")
       DescriptorInputs -> Left "canonical originals have not been captured for publication"
-
--- A retained support row changes paths, never its authenticated facts. The
--- request owner records aliases of the one captured payload for durable copies.
-relocateCanonicalInterfaceProof :: CanonicalInterfaceProof -> InterfaceRow -> Maybe (FilePath,String)
-  -> Either String CanonicalInterfaceProof
-relocateCanonicalInterfaceProof proof row@(iface,packages,packageSha) native = do
-  let (oldIface,oldPackages,oldPackageSha) = proofInterfaceInput proof
-  unless (iface {exactPath=exactPath oldIface} == oldIface && packageSha == oldPackageSha
-      && fmap snd native == fmap snd (proofNativeInput proof))
-    (Left "retained canonical row changes its authenticated original facts")
-  owner <- case proofInputCustody proof of
-    CapturedCanonicalInputs captured -> Right captured
-    DescriptorInputs -> Left "retained canonical row lacks captured custody"
-  relocated <- foldM (\bodies (new,old,sha) -> case Map.lookup old bodies of
-      Just body | artifactSha256 body == sha -> Right (Map.insert new body bodies)
-      _ -> Left "retained canonical alias lacks selected bytes") owner
-    ([(exactPath iface,exactPath oldIface,exactSha256 iface),(packages,oldPackages,packageSha)]
-      ++ [(new,old,sha) | Just (new,sha) <- [native], Just (old,_) <- [proofNativeInput proof]])
-  pure proof {proofInterfaceInput=row,proofNativeInput=native,proofInputCustody=CapturedCanonicalInputs relocated}
 
 scopeOriginalBytes :: ExactScope -> FilePath -> String -> IO BS.ByteString
 scopeOriginalBytes scope path sha = do

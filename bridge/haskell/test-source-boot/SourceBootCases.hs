@@ -1234,15 +1234,31 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
         try (retainProgramProducts retainedDirectory completed certified "CompletedOriginalConsumer" admitted)
           :: IO (Either IOException ExactScope)
       retained <- either (\exception -> fail ("retention rejected captured candidate bytes: " ++ show exception)) pure retainedResult
-      copied <- BS.readFile (retainedDirectory </> "retained-cached-original-0.hi")
-      unless (copied == candidateIfaceBytes)
-        (fail "retention did not publish the captured candidate interface bytes")
+      retainedNames <- listDirectory retainedDirectory
+      when (any ("retained-cached-original-" `isPrefixOf`) retainedNames)
+        (fail "retention materialized borrowed cached original bytes")
+      unless (any ("retained-original-" `isPrefixOf`) retainedNames)
+        (fail "retention omitted the genuinely fresh original output control")
+      bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
+        forM_ (zip candidatePaths candidateBytes) $ \(path,expected) -> do
+          held <- scopeOriginalBytes retained path (digest expected)
+          unless (held == expected)
+            (fail "retention lost the captured candidate body after origin path drift")
     (retained,retentionDiagnostics) <- captureDiagnostics $
       withOriginalProductReceipt work completed (const certified) $
         retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
     let finalProofs = length [() | line <- lines retentionDiagnostics
           , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
     unless (finalProofs == 1) (fail ("retention final proof count: " ++ show finalProofs))
+    when reuseCandidate $ do
+      unless (counterValues "retained_cached_original.borrowed" retentionDiagnostics == [1])
+        (fail "retention did not observe its actual borrowed cached-original branch")
+      unless (length candidateBytes == 4)
+        (fail "borrowed-output count control lost its one candidate's four captured parts")
+      forM_ (zip ["interface_bytes","package_bytes","native_bytes"] (take 3 candidateBytes)) $ \(part,bytes) ->
+        unless (counterValues ("retained_cached_original." ++ part) retentionDiagnostics
+            == [fromIntegral (BS.length bytes)])
+          (fail ("retention changed its observed captured " ++ part))
     hPutStrLn stderr ("completed retention final proofs=" ++ show finalProofs ++ " candidates=" ++ show reuseCandidate)
     let inheritedCandidateParcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates completed)
     when reuseCandidate $ bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
@@ -1251,9 +1267,9 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       case rows of
         [artifact] -> do
           captured <- scopeInterfaceBytes retained artifact
-          unless (captured == candidateIfaceBytes && exactPath artifact `notElem` candidatePaths)
-            (fail "retained candidate did not transfer the captured owner to its durable support path")
-        _ -> fail "retained candidate has no unique durable support row"
+          unless (captured == candidateIfaceBytes && exactPath artifact `elem` candidatePaths)
+            (fail "retained candidate did not preserve its captured owner and original locator")
+        _ -> fail "retained candidate has no unique captured support row"
       reused <- revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained
       unless (either (const False) (const True) reused)
         (fail "retained candidate scope reopened historical captured paths")
@@ -1276,12 +1292,13 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     unless (length initialRuns >= 2) (fail "fresh and hidden support did not execute the real quoter")
     writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
     aliased <- parsedPurpose flags "import qualified MetadataQuotedTarget as Captured\n(7 :: Int)"
-    _ <- compile CheckedEnvironment Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
-      (Just session) target includes Nothing
-    later <- compile (PreparedProducts Nothing) Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
-      (Just session) target includes Nothing
+    later <- bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
+      _ <- compile CheckedEnvironment Set.empty
+        (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
+        (Just session) target includes Nothing
+      compile (PreparedProducts Nothing) Set.empty
+        (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
+        (Just session) target includes Nothing
     unless (null (preparedNames later) || preparedNames later == ["CompletedOriginalConsumer"])
       (fail "later pass rebuilt retained authored support")
     imports' <- retainProgramSourceImports imports later (emptyFinalizedModuleArtifacts (prHscEnv (pprPipelineResult later))) retained
@@ -1292,6 +1309,7 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     -- neither need its old source nor inherit ordinary source cache authority.
     let removed = [work </> name | name <-
           ["MetadataQuotedTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"]]
+          ++ candidatePaths
         quotedTarget = T.unpack (T.replace "__result = 7" "__result = [Captured.answer|later|]"
           (T.replace "LANGUAGE PackageImports" "LANGUAGE PackageImports, QuasiQuotes"
             (T.pack (targetSource "import qualified MetadataQuotedTarget as Captured"))))
