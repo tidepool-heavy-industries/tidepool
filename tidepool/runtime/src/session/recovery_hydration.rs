@@ -48,10 +48,8 @@ pub(super) struct OwnedRecoveryManifest {
 }
 
 struct RecoveryHydration {
-    contexts: BTreeMap<
-        tidepool_toolchain::exact_context::ContextRoot,
-        Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    >,
+    contexts:
+        BTreeMap<tidepool_toolchain::exact_context::ContextRoot, recovery::ScopedCompilerContext>,
     acquisition: RecoveredArtifactAcquisition,
 }
 
@@ -132,7 +130,7 @@ fn hydrate_context_roots(
     let mut edges = BTreeSet::new();
     for root in demanded {
         let receipt = graph
-            .context(&root)
+            .acquire_context(&root)
             .map_err(|error| recovery::graph_error(&owner.path, error))?;
         let snapshot = receipt.snapshot();
         let selection = snapshot
@@ -191,13 +189,8 @@ fn hydrate_context_roots(
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let mut restored = Vec::new();
     for receipt in receipts {
-        let snapshot = receipt.snapshot();
-        let mut context = inventory.context_with_snapshot(snapshot)?;
-        if context.toolchain_identity_sha256() != snapshot.producer_sha256() {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        context.bind_snapshot_baseline(&receipt)?;
-        restored.push((receipt.root().clone(), Arc::new(context)));
+        let context = graph.recover_compiler_context(&inventory, receipt.root())?;
+        restored.push((receipt.root().clone(), context));
     }
     owner.validate_owner()?;
     graph
@@ -217,7 +210,7 @@ fn hydrate_context_roots(
 fn cached_context(
     owner: &OwnedRecoveryManifest,
     root: &tidepool_toolchain::exact_context::ContextRoot,
-) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, SessionError> {
+) -> Result<recovery::ScopedCompilerContext, SessionError> {
     owner
         .hydration
         .lock()
@@ -298,10 +291,7 @@ impl SessionLib {
     pub(super) fn recovered_public_compiler_context(
         &self,
         public_owner: &RecoveryPublicOwner,
-    ) -> Result<
-        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-        SessionError,
-    > {
+    ) -> Result<Option<recovery::ScopedCompilerContext>, SessionError> {
         if !self.validate_recovered_public_owner(public_owner)? {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -483,7 +473,7 @@ impl SessionLib {
                 .node(generation)
                 .map_err(|error| recovery::graph_error(&owner.path, error))?
                 .ok_or_else(|| invalid("recovered public root is absent".into()))?;
-            let context = cached_context(owner, &node.context_root)?;
+            let context = cached_context(owner, &node.context_root)?.exact().clone();
             let lexical = context.lexical_graph().to_vec();
             validate_recovery_native_markers(&node, &context).map_err(invalid)?;
             if node.lexical_roots.len() != 1 {
@@ -745,44 +735,26 @@ fn recovered_item(export: &DeclarationExport) -> ExportItem {
     }
 }
 
-/// Stage the exact scoped context and its selected artifact custody. The
-/// caller supplies the actual prior owner root for incremental materialization.
-pub(super) fn materialize_public_compiler_context(
+/// Stage compiler facts through their owning scoped state. Absence has no
+/// compiler representation; unchanged committed custody avoids rematerialization.
+pub(super) fn stage_public_compiler_context(
     graph: &recovery::RecoveryGraph,
     root: &Path,
-    context: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    context: Option<&recovery::ScopedCompilerContext>,
     previous: Option<&tidepool_toolchain::exact_context::ContextRoot>,
 ) -> Result<
     (
         recovery::RecoveryGraph,
-        Option<tidepool_toolchain::exact_context::ContextRoot>,
+        Option<recovery::PreparedCompilerContext>,
     ),
     SessionError,
 > {
-    let Some(context) = context else {
-        return Ok((graph.clone(), None));
-    };
-    let invalid = |detail: String| SessionError::RecoveryManifest {
-        path: root.to_path_buf(),
-        detail,
-    };
-    let mut candidate = graph.candidate();
-    let artifacts =
-        recovery::materialize_missing_context_artifacts(graph, root, context, previous)?;
-    for artifact in artifacts {
-        candidate
-            .insert_artifact(artifact)
-            .map_err(|error| invalid(error.to_string()))?;
+    match context {
+        Some(context) => graph
+            .stage_compiler_context(root, context, previous)
+            .map(|(graph, context)| (graph, Some(context))),
+        None => Ok((graph.clone(), None)),
     }
-    let context_root = candidate
-        .insert_context(context, previous)
-        .map_err(|error| recovery::graph_error(root, error))?;
-    Ok((
-        candidate
-            .seal()
-            .map_err(|error| recovery::graph_error(root, error))?,
-        Some(context_root),
-    ))
 }
 
 #[cfg(test)]
@@ -918,9 +890,25 @@ mod lazy_tests {
                 &tidepool_toolchain::exact_context::ExactContextSnapshot::empty(),
             )
             .unwrap();
-        let mut candidate = graph.candidate();
-        let root = candidate.insert_context(&context, None).unwrap();
-        let graph = candidate.seal().unwrap();
+        let (candidate, context) = graph
+            .stage_compiler_context(
+                &artifact_root,
+                &recovery::ScopedCompilerContext::new(Arc::new(context)),
+                None,
+            )
+            .unwrap();
+        let root = context.root().clone();
+        let staged = candidate
+            .candidate()
+            .prepare(graph.store_revision(), graph.high_water())
+            .unwrap()
+            .with_compiler_context(Some(context))
+            .unwrap();
+        let (graph, installation) = match staged.commit() {
+            super::StoreDisposition::Committed(value) => value,
+            _ => panic!("context fixture must commit before recovery acquisition"),
+        };
+        installation.installed_blocking().unwrap();
         let authority = Arc::new(RevocableOwner {
             held: fixture.owner.clone(),
             admitted: AtomicBool::new(true),
@@ -1102,7 +1090,7 @@ mod lazy_tests {
         assert!(fresh_old.read_bytes > 0);
         assert!(after_old.read_bytes - before_old.read_bytes < fresh_old.read_bytes);
         eprintln!("cold hydration acquisition: before_old={before_old:?} after_old={after_old:?} independent_old={fresh_old:?}");
-        let older = cached_context(retained, &old_root).unwrap();
+        let older = cached_context(retained, &old_root).unwrap().exact().clone();
         assert_eq!(
             older.artifact_view().capture_graph_selection(),
             old_selection
@@ -1110,7 +1098,9 @@ mod lazy_tests {
         let newer = cold
             .recovered_public_compiler_context(&owner())
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .exact()
+            .clone();
         let shared = older
             .artifact_view()
             .artifact_ids()

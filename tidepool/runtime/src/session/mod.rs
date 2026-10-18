@@ -609,7 +609,7 @@ impl CertifiedPublication {
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let mut ticket = match &self {
-            Self::Bindings(base) => base.clone().stage_materialized()?,
+            Self::Bindings(base) => base.clone().stage_materialized(None)?,
             Self::Declarations(accepted) => accepted.stage_materialized()?,
         };
         ticket.certified = self;
@@ -630,7 +630,7 @@ enum StagedPublicationTarget {
     Durable {
         owner: RecoveryPublicOwner,
         base_revision: StoreRevision,
-        staged: recovery::StagedRecoveryManifest,
+        staged: recovery::StagedCompilerContextPublication,
     },
     Ephemeral,
 }
@@ -672,7 +672,7 @@ impl StagedPublicManifest {
     /// Per-ticket durable work; ephemeral staging performs no recovery I/O.
     pub fn recovery_work(&self) -> RecoveryPublicationWork {
         match &self.target {
-            StagedPublicationTarget::Durable { staged, .. } => staged.work,
+            StagedPublicationTarget::Durable { staged, .. } => staged.work(),
             StagedPublicationTarget::Ephemeral => RecoveryPublicationWork::default(),
         }
     }
@@ -768,7 +768,10 @@ impl PublicManifestBase {
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         CertifiedPublication::Bindings(self).stage()
     }
-    fn stage_materialized(self) -> Result<StagedPublicManifest, SessionError> {
+    fn stage_materialized(
+        self,
+        context: Option<recovery::PreparedCompilerContext>,
+    ) -> Result<StagedPublicManifest, SessionError> {
         let target = match &self.target {
             PublicPublicationBaseline::Ephemeral => StagedPublicationTarget::Ephemeral,
             PublicPublicationBaseline::Durable(
@@ -806,6 +809,7 @@ impl PublicManifestBase {
                     .map_err(|error| recovery::graph_error(&self.path, error))?;
                 let staged = candidate
                     .prepare_publication(write_base)
+                    .and_then(|staged| staged.with_compiler_context(context))
                     .map_err(|error| recovery::graph_error(&self.path, error))?;
                 StagedPublicationTarget::Durable {
                     owner: owner.clone(),
@@ -964,8 +968,7 @@ pub struct SessionLib {
 #[derive(Clone, Default)]
 pub(crate) struct ScopeDeclarationState {
     pub(crate) tip: Generation,
-    pub(crate) exact_context:
-        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    pub(crate) exact_context: Option<recovery::ScopedCompilerContext>,
     pub(crate) published_sources:
         Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
 }
@@ -1463,6 +1466,7 @@ impl SessionLib {
         declaration: Option<paired_publication::PreparedResidentDeclaration>,
         activate: impl FnOnce(&mut Self),
     ) -> PublicManifestCommit {
+        let scope = ticket.public_scope;
         let install = |this: &mut Self| {
             if let Some(declaration) = declaration {
                 this.commit_prepared_declaration(declaration);
@@ -1475,10 +1479,18 @@ impl SessionLib {
         };
         match publication_disposition(staged.commit()) {
             Ok((graph, receipt)) => {
-                self.install_committed_recovery_graph(graph, receipt.state.clone());
+                self.install_committed_recovery_graph(graph, receipt.state().clone());
                 install(self);
                 match receipt.installed_blocking() {
-                    Ok(()) => PublicManifestCommit::Durable,
+                    Ok(context) => {
+                        if let Some(context) = context {
+                            self.tips
+                                .get_mut(&scope)
+                                .expect("installed public declaration")
+                                .exact_context = Some(context);
+                        }
+                        PublicManifestCommit::Durable
+                    }
                     Err(error) => PublicManifestCommit::RecoveryRequired {
                         error: Box::new(SessionError::RecoveryStore(Box::new(error))),
                     },
@@ -1821,7 +1833,7 @@ impl SessionLib {
             .entry(scope)
             .or_insert_with(|| ScopeDeclarationState {
                 tip: inherited,
-                exact_context: context,
+                exact_context: context.map(recovery::ScopedCompilerContext::new),
                 published_sources: Vec::new(),
             });
     }
@@ -1832,6 +1844,16 @@ impl SessionLib {
         &self,
         scope: ScopeId,
     ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
+        self.tips
+            .get(&scope)
+            .and_then(|state| state.exact_context.as_ref())
+            .map(|context| context.exact().clone())
+    }
+
+    fn current_scoped_compiler_context_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<recovery::ScopedCompilerContext> {
         self.tips
             .get(&scope)
             .and_then(|state| state.exact_context.clone())
@@ -1845,7 +1867,7 @@ impl SessionLib {
     ) {
         let state = self.tips.entry(scope).or_default();
         state.tip = tip;
-        state.exact_context = Some(context);
+        state.exact_context = Some(recovery::ScopedCompilerContext::new(context));
     }
 
     pub(crate) fn retain_published_source_selection_in(
@@ -1899,7 +1921,7 @@ impl SessionLib {
         let context = self.log.joined_context_at(tip);
         let state = self.tips.entry(scope).or_default();
         state.tip = tip;
-        state.exact_context = context;
+        state.exact_context = context.map(recovery::ScopedCompilerContext::new);
     }
 
     /// The current session-library module, or `None` before any declaration.
@@ -2582,7 +2604,9 @@ impl SessionLib {
             let evidence = staged
                 .certified_authored
                 .expect("authored evidence preflight");
-            let next_context = Some(evidence.projection.context().clone());
+            let next_context = Some(recovery::ScopedCompilerContext::new(
+                evidence.projection.context().clone(),
+            ));
             let prepared =
                 self.log
                     .prepare_certified_authored_commit(generation, staged.turn, evidence)?;
@@ -2596,13 +2620,17 @@ impl SessionLib {
             let scope = staged.scope;
             return match staged_graph.commit() {
                 recovery_store::StoreDisposition::Committed((graph, receipt)) => {
-                    self.install_committed_recovery_graph(graph, receipt.state.clone());
+                    self.install_committed_recovery_graph(graph, receipt.state().clone());
                     self.log.activate_prepared_commit(prepared);
                     *self.tips.get_mut(&scope).expect("prepared authored tip") = tip;
                     let value = activate(generation);
-                    receipt
+                    let context = receipt
                         .installed_blocking()
                         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+                    self.tips
+                        .get_mut(&scope)
+                        .expect("installed authored tip")
+                        .exact_context = context;
                     Ok(value)
                 }
                 recovery_store::StoreDisposition::Refused(reason) => {
@@ -2617,7 +2645,9 @@ impl SessionLib {
             let evidence = staged
                 .certified_authored
                 .expect("authored evidence preflight");
-            let next_context = Some(evidence.projection.context().clone());
+            let next_context = Some(recovery::ScopedCompilerContext::new(
+                evidence.projection.context().clone(),
+            ));
             let prepared = self.log.prepare_certified_authored_commit(
                 staged.generation,
                 staged.turn,
@@ -2652,8 +2682,8 @@ impl SessionLib {
     fn stage_private_authored_graph(
         &self,
         staged: &StagedDeclaration,
-        context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
-    ) -> Result<recovery::StagedRecoveryManifest, SessionError> {
+        context: &Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    ) -> Result<recovery::StagedCompilerContextPublication, SessionError> {
         let state = self
             .durable_graph
             .as_ref()
@@ -2711,10 +2741,9 @@ impl SessionLib {
         } else {
             None
         };
-        let artifacts = recovery::materialize_missing_context_artifacts(
-            &state.graph,
+        let (graph, prepared_context) = state.graph.stage_compiler_context(
             root,
-            context,
+            &recovery::ScopedCompilerContext::new(context.clone()),
             previous.as_ref(),
         )?;
         let exports = certified
@@ -2722,27 +2751,16 @@ impl SessionLib {
             .iter()
             .map(certified_recovery_export)
             .collect();
-        let mut graph = state.graph.candidate();
         let certified_root = context.authored_native_root(staged.generation.0)?;
-        if !state.graph.contains_artifact(certified_root)
-            && !artifacts
-                .iter()
-                .any(|artifact| artifact.artifact_id() == certified_root)
-        {
+        if !graph.contains_artifact(certified_root) {
             return Err(invalid(
                 "authored native root is absent from its staged exact closure",
             ));
         }
         let authored_root = certified_root;
         let live_dependencies = authored_native_dependencies(context, certified_root)?;
-        let context_root = graph
-            .insert_context(context, previous.as_ref())
-            .map_err(|e| recovery::graph_error(&state.path, e))?;
-        for artifact in artifacts {
-            graph
-                .insert_artifact(artifact)
-                .map_err(|error| recovery::graph_error(&state.path, error))?;
-        }
+        let context_root = prepared_context.root().clone();
+        let mut graph = graph.candidate();
         graph
             .insert_node(recovery::RecoveryNode {
                 id: staged.generation,
@@ -2781,6 +2799,7 @@ impl SessionLib {
             .map_err(|error| recovery::graph_error(&state.path, error))?;
         graph
             .prepare(state.store_revision, state.allocation_ceiling)
+            .and_then(|staged| staged.with_compiler_context(Some(prepared_context)))
             .map_err(|e| recovery::graph_error(&state.path, e))
     }
 
