@@ -10,7 +10,7 @@ import qualified Tidepool.Model.Selection as Selection
 
 let fixtureDeepSeek key options = Selection.deepSeek Models.catalogIdentity key options
 
-let offlineWorkerOptions :: Text -> SpawnOptions CurrentModelFamily (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
+let offlineWorkerOptions :: Text -> SpawnOptions DeepSeek (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
     offlineWorkerOptions marker = (defaultSpawnOptions currentModel Installed.agentSpec)
       { spawnLifetime = ActorOwned
       , spawnLabel = Just marker

@@ -3,7 +3,7 @@ import qualified Tidepool.Actors.Spawn as Spawn
 import qualified Tidepool.Agent.Contract as Contract
 import qualified Tidepool.Agent.Watch as Await
 import Tidepool.Agent.Reply (Replies, Request, retainRequest)
-import Tidepool.Effects.Core (Actor, AgentLaunch, SpawnAgent, Commands, WorkerLifetime(..))
+import Tidepool.Effects.Core (OpenAI, Actor, AgentLaunch, SpawnAgent, Commands, WorkerLifetime(..))
 import Tidepool.Effects.Row (knownEffects)
 let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedLeaf = Actor.ActorDefinition
@@ -15,7 +15,7 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedParent :: Actor.ActorDefinition () ((->) (Bool, Maybe (Request Int))) ()
     selectedParent = Actor.ActorDefinition
       { Actor.label = "selected-launch-parent"
-      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, SpawnAgent CurrentModelFamily, Replies, Await.Watches])
+      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, SpawnAgent OpenAI, Replies, Await.Watches])
       , Actor.initialization = \() -> pure (False, Nothing)
       , Actor.behavior = \() initial -> Actor.serve initial $ \(accepted, response) observe -> do
           next <- case response of

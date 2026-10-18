@@ -987,7 +987,7 @@ async fn record_actor_launch_publishes_and_routes_child_reply() {
 import Tidepool.Worktree (workspaceFor)
 Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
 Right launcherWorkspace <- workspaceFor launcherTree
-launcher <- R.start (R.withWorkspace launcherWorkspace (launchDefinition currentModel (knownEffects @'[AgentLaunch, SpawnAgent CurrentModelFamily, Replies, Actor])))"#,
+launcher <- R.start (R.withWorkspace launcherWorkspace (launchDefinition currentModel (knownEffects @'[AgentLaunch, SpawnAgent OpenAI, Replies, Actor])))"#,
                 )
                 .await;
                 committed(

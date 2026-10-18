@@ -8,7 +8,7 @@ import Tidepool.Actors.Exomonad
 
 Right seed <- checkpoint currentModel "checkpoint issuer context"
 Right producer <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, AgentLaunch, ForkAgent CurrentModelFamily, Actor]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, AgentLaunch, ForkAgent OpenAI, Actor]))
     { spawnPermissions = modelPermissions [allowForkAgent currentModel], spawnLabel = Just "producer", spawnLifetime = ActorOwned })
 Right producerRequest <- request @Text producer ("capture" :: Text)
   (defaultRequestOptions { requestLabel = Just "producer" })

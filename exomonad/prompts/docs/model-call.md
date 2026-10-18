@@ -16,6 +16,10 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 family types. The effect row must contain `ModelCall modelFamily`; Rust checks
 the exact catalog entry and effort against the actor's immutable permissions.
 A bounded helper can use a different provider from its parent conversation.
+The notebook's `currentModel` has type `Model OpenAI`, `Model Argon` or
+`Model DeepSeek` for its selected conversation. Use these published family names
+in signatures; reusable helpers quantify `modelFamily` and state
+`KnownFamily modelFamily` where needed.
 
 In an ordinary asynchronous program, call
 `ModelExample.invokeWithModel model input`. In a synchronous notebook, use

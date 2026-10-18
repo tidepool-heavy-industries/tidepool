@@ -333,7 +333,7 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
             "qualified Tidepool.Model.Selection as TidepoolModelSelection",
         );
         rendered.push_str(&format!(
-            "\ntype CurrentModelFamily = TidepoolModelSelection.{family}\n\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
+            "\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
             literal(identity.catalog_identity()), literal(identity.key()),
         ));
     }
@@ -13908,6 +13908,55 @@ mod tool_dispatch_tests;
 #[cfg(test)]
 pub(crate) mod request_tests {
     use super::*;
+
+    #[test]
+    fn current_model_preamble_uses_published_static_family_types() {
+        let descriptor = crate::ActorDescriptor::new(
+            "model preamble",
+            crate::ActorPlacement {
+                session: tidepool_repr::SessionId(17),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+        );
+        let mut context = descriptor.session_context(crate::ActorRef::first(crate::ActorId(7)));
+        for (model, reasoning, family) in [
+            (
+                crate::Model::OpenAIModel(crate::OpenAIModel::Gpt61Sol),
+                crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow),
+                "OpenAI",
+            ),
+            (
+                crate::Model::GeminiArgon,
+                crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
+                "Argon",
+            ),
+            (
+                crate::Model::DeepSeekFlash,
+                crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh),
+                "DeepSeek",
+            ),
+        ] {
+            context.current_model = Some((
+                crate::AdmittedModelIdentity::new(
+                    "catalog".into(),
+                    "selected".into(),
+                    "provider".into(),
+                    model,
+                )
+                .unwrap(),
+                reasoning,
+            ));
+            let rendered = actor_preamble("module Expr where\n", &context);
+            assert!(rendered.contains(&format!(
+                "currentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\n"
+            )));
+            assert!(
+                !rendered.contains("CurrentModelFamily"),
+                "currentModel metadata must not issue a scaffold-owned type alias"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn bound_source_rebinding_preserves_exact_issuer_pending_state() {

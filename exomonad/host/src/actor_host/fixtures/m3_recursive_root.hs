@@ -13,7 +13,7 @@ import qualified Tidepool.Model.Selection as Selection
 let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 
 Right rootSeed <- checkpoint currentModel "recursive root native helper"
-let recursiveSpec = Installed.agentSpec :: A.AgentSpec (Tools.WorkspaceTools (ForkAgent CurrentModelFamily ': WorkspaceEffects)) (ForkAgent CurrentModelFamily ': WorkspaceEffects)
+let recursiveSpec = Installed.agentSpec :: A.AgentSpec (Tools.WorkspaceTools (ForkAgent OpenAI ': WorkspaceEffects)) (ForkAgent OpenAI ': WorkspaceEffects)
 let recursiveOptions = (defaultSpawnOptions currentModel recursiveSpec)
       { spawnPermissions = modelPermissions [allowForkAgent (fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow))], spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
 Right recursiveChild <- spawnSubagent (ForkCtx rootSeed) (ForkWorktree projectHead) recursiveOptions
