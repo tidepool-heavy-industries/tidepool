@@ -3301,11 +3301,41 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
     let projection = complete
         .projection()
         .for_source_owners(&BTreeSet::from([owners[1].clone()]));
-    let sibling_canonical = complete.projection().snapshot_roles()[&owners[2]].interface();
+    let root_proof = complete
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == ids[1])
+        .unwrap()
+        .proof()
+        .unwrap();
+    let mut graph = complete.artifacts().capture_graph_selection();
+    assert!(
+        graph.roots.is_empty(),
+        "complete output retains available bodies without executable demand"
+    );
+    graph.roots = root_proof.selection.graph_selection().roots.clone();
     let selected = complete
         .artifacts()
-        .select_roots(vec![ids[1], sibling_canonical])
+        .select_issued(
+            vec![ids[1]],
+            &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                graph,
+            ),
+        )
         .unwrap();
+    assert_eq!(
+        selected.selected_native_groups(),
+        BTreeSet::from([
+            NativeGroupKey {
+                artifact: ids[1],
+                original_ordinal: 3
+            },
+            NativeGroupKey {
+                artifact: ids[0],
+                original_ordinal: 7
+            },
+        ])
+    );
     let issued = fixture_compiler_support(projection, selected);
     assert!(
         issued

@@ -6957,8 +6957,8 @@ fn capture_original_product_bytes_with_validation(
 }
 
 /// Authenticate every retained original once. Different lexical views may
-/// retain different versions of one module; source witnesses select a full
-/// owner here, while recovery context admission later selects one per view.
+/// retain different certificates for one cached owner; each source witness is
+/// authenticated here, while recovery context admission selects one per view.
 pub(crate) struct RecoveryOriginalRequirements {
     pub owner: CachedHomeOwner,
     pub sources: Vec<CachedHomeOwner>,
@@ -6971,24 +6971,19 @@ pub(crate) struct CertifiedRecoveredOriginal {
     pub(crate) requirements: RecoveryOriginalRequirements,
 }
 
-/// Validate one requested recovery composition, including already-held originals.
-/// Separate acquisitions may retain different certificates for the same owner.
-pub(crate) fn validate_recovery_original_owners<'a>(
-    owners: impl IntoIterator<Item = &'a CachedHomeOwner>,
-) -> CertResult<()> {
-    let mut distinct = std::collections::HashSet::new();
-    for owner in owners {
-        if !distinct.insert(owner) {
-            return Err(CertificationError::Mismatch("duplicate recovery original"));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn certify_recovery_products_with_validation(
     artifacts: Vec<crate::recovery_artifacts::VerifiedRecoveryArtifact>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedRecoveredOriginal>> {
+    let mut distinct = std::collections::HashSet::new();
+    for artifact in &artifacts {
+        let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(
+            artifact.reference(),
+        );
+        if !distinct.insert(descriptor.id) {
+            return Err(CertificationError::Mismatch("duplicate recovery original"));
+        }
+    }
     let parsed = artifacts
         .iter()
         .map(|artifact| {
@@ -6998,7 +6993,6 @@ pub(crate) fn certify_recovery_products_with_validation(
             )
         })
         .collect::<CertResult<Vec<_>>>()?;
-    validate_recovery_original_owners(parsed.iter().map(|(_, witness)| &witness.owner))?;
     for (product, witness) in &parsed {
         validate_inherited_group_headers(product, witness)?;
     }
