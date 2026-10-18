@@ -10564,70 +10564,79 @@ where
                             recoverable: false,
                         },
                     )),
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, plan)) => {
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
-                        let _ = callback;
-                        Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
-                            entry,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(label, plan)) => {
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(plan)) => {
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::AwaitWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchAwait(WatchPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after)) => {
-                        Ok(ResidentActorBoundary::WatchProgressPoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch)?,
-                            path: crate::request_effect::projection_path(path)?,
-                            request: crate::request_effect::request_id(request)?,
-                            after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchResponseWith(_, watch, path, node)) => {
-                        Ok(ResidentActorBoundary::WatchResponsePoll {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch)?,
-                            path: crate::request_effect::projection_path(path)?,
-                            node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
-                                "negative response projection node".into()
-                            ))?,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
-                        Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, path, job)) => {
-                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ReleaseAwaitWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
-                    }
-                    ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
-                        Ok(ResidentActorBoundary::WatchForget(WatchForget {
-                            continuation: hole,
-                            watch: crate::request_effect::watch_id(watch_id)?,
-                        }))
-                    }
+                    ResidentRequest::Watches(request) => match request {
+                        WatchesReq::RegisterRouteWith(label, callback, plan) => {
+                            let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
+                            let _ = callback;
+                            Ok(ResidentActorBoundary::RouteRegistration {
+                                registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                                entry,
+                            })
+                        }
+                        WatchesReq::ObserveRouteWith(watch_id) => {
+                            Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::ListRoutesWith => Ok(ResidentActorBoundary::RouteList(hole)),
+                        WatchesReq::RegisterWatchWith(label, plan) => {
+                            Ok(ResidentActorBoundary::WatchRegistration(
+                                WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                            ))
+                        }
+                        WatchesReq::RegisterAwaitWith(plan) => {
+                            Ok(ResidentActorBoundary::WatchRegistration(
+                                WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
+                            ))
+                        }
+                        WatchesReq::ObserveWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::AwaitWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchAwait(WatchPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                        WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after) => {
+                            Ok(ResidentActorBoundary::WatchProgressPoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch)?,
+                                path: crate::request_effect::projection_path(path)?,
+                                request: crate::request_effect::request_id(request)?,
+                                after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
+                            })
+                        }
+                        WatchesReq::ObserveWatchResponseWith(_, watch, path, node) => {
+                            Ok(ResidentActorBoundary::WatchResponsePoll {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch)?,
+                                path: crate::request_effect::projection_path(path)?,
+                                node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                                    "negative response projection node".into()
+                                ))?,
+                            })
+                        }
+                        WatchesReq::ObserveWatchDecisionWith(watch, path) => {
+                            Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
+                        }
+                        WatchesReq::ObserveWatchCommandWith(watch, path, job) => {
+                            Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
+                        }
+                        WatchesReq::ReleaseAwaitWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
+                        }
+                        WatchesReq::ForgetWatchWith(watch_id) => {
+                            Ok(ResidentActorBoundary::WatchForget(WatchForget {
+                                continuation: hole,
+                                watch: crate::request_effect::watch_id(watch_id)?,
+                            }))
+                        }
+                    },
                     ResidentRequest::AgentSession(
                         crate::generated::agent_session::AgentSessionReq::AgentAttachWith(
                             initial_user_message,
