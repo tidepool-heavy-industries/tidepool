@@ -18,10 +18,13 @@ use tidepool_toolchain::recovery_artifacts::{
 
 #[path = "newrecovery_v2/snapshots.rs"]
 mod snapshots;
+#[cfg(test)]
+pub(crate) use snapshots::{observe_context_materialization, ContextMaterializationWork};
 pub(crate) use snapshots::{
     PreparedCompilerContext, RecoveryDomainReader, RecoveryGraph, RecoveryPublicSurface,
     ScopedCompilerContext, StagedCompilerContextPublication, StagedRecoveryManifest,
 };
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryPublicOwner {

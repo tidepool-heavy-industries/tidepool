@@ -15,6 +15,61 @@ use tidepool_toolchain::exact_context::{
     Materializer, SnapshotMapRoot, StagedBlocks,
 };
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ContextMaterializationWork {
+    pub(crate) attempted: u64,
+    pub(crate) completed: u64,
+    pub(crate) changed_entries: u64,
+    pub(crate) offered_bytes: u64,
+    pub(crate) serialized_bytes: u64,
+    pub(crate) cid_validation_bytes: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTEXT_MATERIALIZATION_WORK: std::cell::Cell<Option<ContextMaterializationWork>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn record_context_materialization(update: impl FnOnce(&mut ContextMaterializationWork)) {
+    CONTEXT_MATERIALIZATION_WORK.with(|held| {
+        if let Some(mut work) = held.get() {
+            update(&mut work);
+            held.set(Some(work));
+        }
+    });
+}
+
+/// Observe the synchronous issuing operation on this test thread. Outside this
+/// scope the observation is absent, never an inferred zero-work measurement.
+#[cfg(test)]
+pub(crate) fn observe_context_materialization<T>(
+    operation: impl FnOnce() -> T,
+) -> (T, ContextMaterializationWork) {
+    struct Restore(Option<ContextMaterializationWork>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONTEXT_MATERIALIZATION_WORK.with(|held| held.set(self.0));
+        }
+    }
+    let previous = CONTEXT_MATERIALIZATION_WORK
+        .with(|held| held.replace(Some(ContextMaterializationWork::default())));
+    let restore = Restore(previous);
+    assert!(
+        previous.is_none(),
+        "context work observations cannot overlap"
+    );
+    let value = operation();
+    let work = CONTEXT_MATERIALIZATION_WORK
+        .with(|held| held.get())
+        .expect("active context work observation");
+    drop(restore);
+    (value, work)
+}
+
 const VERSION: u32 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -883,9 +938,20 @@ impl RecoveryGraphCandidate {
     ) -> Result<Arc<MaterializedContext>, RecoveryError> {
         let base = previous.map(|root| self.graph.context(root)).transpose()?;
         let mut materializer = Materializer::new(&self.graph);
+        #[cfg(test)]
+        record_context_materialization(|work| work.attempted += 1);
         let context =
             Arc::new(materializer.materialize_context(base.as_deref(), &context.snapshot())?);
         let packet = materializer.finish()?;
+        #[cfg(test)]
+        record_context_materialization(|work| {
+            let metrics = packet.metrics();
+            work.completed += 1;
+            work.changed_entries += metrics.changed_entries;
+            work.offered_bytes += metrics.offered_bytes;
+            work.serialized_bytes += metrics.serialized_bytes;
+            work.cid_validation_bytes += metrics.cid_validation_bytes;
+        });
         self.graph.stage_packet(packet);
         let root = context.root().clone();
         // A successful materialization may reproduce an already owned block
@@ -1107,6 +1173,90 @@ mod tests {
             .root()
             .clone()
     }
+    fn new_scoped_context() -> ScopedCompilerContext {
+        ScopedCompilerContext::new(Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        ))
+    }
+
+    fn publish_scoped_context(
+        base: &RecoveryGraph,
+        context: &ScopedCompilerContext,
+        incarnation: u64,
+    ) -> (RecoveryGraph, ScopedCompilerContext, ContextRoot) {
+        let (graph, context) = base
+            .stage_compiler_context(base.store.path().parent().unwrap(), context, None)
+            .unwrap();
+        let root = context.root().clone();
+        let installing = ScopedCompilerContext::new(context.exact().clone());
+        let mut surface = RecoveryPublicSurface::empty(owner(incarnation));
+        surface.context_root = Some(root.clone());
+        let mut candidate = graph.candidate();
+        candidate.replace_surface(surface).unwrap();
+        let staged = candidate
+            .prepare(base.store_revision(), base.high_water())
+            .unwrap()
+            .with_compiler_context(Some(context))
+            .unwrap();
+        let (graph, installation) = match staged.commit() {
+            StoreDisposition::Committed(value) => value,
+            _ => panic!("context publication must commit"),
+        };
+        // The graph and exact compiler owner are installed before acknowledgement.
+        assert!(matches!(installing, ScopedCompilerContext::New(_)));
+        let installed = installation.installed_blocking().unwrap().unwrap();
+        assert!(Arc::ptr_eq(installing.exact(), installed.exact()));
+        (graph, installed, root)
+    }
+
+    #[test]
+    fn stored_context_custody_reuses_issuer_but_equal_facts_reenter_admission() {
+        let (_directory, base) = fixture();
+        let new_a = new_scoped_context();
+        let ((graph, a, a_root), first) =
+            observe_context_materialization(|| publish_scoped_context(&base, &new_a, 1));
+        assert_eq!((first.attempted, first.completed), (1, 1));
+        assert!(first.serialized_bytes > 0 && first.offered_bytes > 0);
+        let ((graph, captured_a, root), reuse) =
+            observe_context_materialization(|| publish_scoped_context(&graph, &a.clone(), 2));
+        assert_eq!(reuse, ContextMaterializationWork::default());
+        assert_eq!(root, a_root);
+        assert!(Arc::ptr_eq(a.exact(), captured_a.exact()));
+
+        let new_b = new_scoped_context();
+        assert!(new_a.exact() == new_b.exact());
+        assert!(!Arc::ptr_eq(new_a.exact(), new_b.exact()));
+        let ((graph, b, b_root), independent) =
+            observe_context_materialization(|| publish_scoped_context(&graph, &new_b, 3));
+        assert_eq!((independent.attempted, independent.completed), (1, 1));
+        assert_eq!(
+            b_root, a_root,
+            "equal output CIDs are permitted after admission"
+        );
+        assert!(!Arc::ptr_eq(a.exact(), b.exact()));
+        let ((graph, again_a, root), again) =
+            observe_context_materialization(|| publish_scoped_context(&graph, &a, 4));
+        assert_eq!(again, ContextMaterializationWork::default());
+        assert_eq!(root, a_root);
+        assert!(Arc::ptr_eq(again_a.exact(), captured_a.exact()));
+        assert_eq!(graph.public_owners().count(), 4);
+
+        let (_other_directory, other) = fixture();
+        let ((other, copied, other_root), foreign) =
+            observe_context_materialization(|| publish_scoped_context(&other, &a, 1));
+        assert_eq!((foreign.attempted, foreign.completed), (1, 1));
+        assert_eq!(other_root, a_root);
+        assert!(Arc::ptr_eq(copied.exact(), a.exact()));
+        assert!(!other.store.shares_owner(&graph.store));
+
+        let independently_opened = Arc::new(RunRecoveryStore::open(graph.store.path()).unwrap());
+        let reopened = load_domain_graph(independently_opened, RecoveryDomainId::Root).unwrap();
+        let ((_, _, reopened_root), reopening) =
+            observe_context_materialization(|| publish_scoped_context(&reopened, &a, 5));
+        assert_eq!((reopening.attempted, reopening.completed), (1, 1));
+        assert_eq!(reopened_root, a_root);
+    }
+
     fn node(id: u64, parent: Option<u64>, context_root: ContextRoot, label: &str) -> RecoveryNode {
         RecoveryNode {
             id: Generation(id),
