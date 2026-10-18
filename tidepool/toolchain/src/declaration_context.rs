@@ -18043,6 +18043,9 @@ mod tests {
             .match_product(&second_request, &input, &source, &bytes, &operation)
             .is_err());
         assert!(first
+            .match_product(&first_request, &second_input, &source, &bytes, &operation)
+            .is_err());
+        assert!(first
             .match_product(
                 &first_request,
                 &second_input,
