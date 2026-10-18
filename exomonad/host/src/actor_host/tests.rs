@@ -410,10 +410,6 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
     let (provider, _requests) = test_campaign::hosted_script_provider();
     let configure = |config: &mut ActorHostConfig, spec: &str| {
         write_bootstrap_workspace(&config.workspace, spec);
-        crate::exomonad::edit_fixture_project_config(
-            &config.workspace.join(".exomonad"),
-            test_campaign::author_scripted_model_catalog,
-        );
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
             crate::exomonad::workspace::FrozenWorkspace::load(

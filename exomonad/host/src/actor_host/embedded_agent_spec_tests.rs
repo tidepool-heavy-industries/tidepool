@@ -59,7 +59,6 @@ fn configure_supplied_spec(config: &mut super::ActorHostConfig) {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["Project.Supplied".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
-        super::test_campaign::author_scripted_model_catalog(project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -972,7 +971,6 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
                     project.haskell.source_roots = vec![".".into()];
                     project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
                     project.haskell.spec = Some("AgentSpec.agentSpec".into());
-                    super::test_campaign::author_scripted_model_catalog(project);
                 },
             );
             commit_workspace(&config.workspace);
