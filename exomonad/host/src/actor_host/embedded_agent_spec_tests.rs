@@ -891,7 +891,7 @@ async fn child_ungranted_model_refuses_before_admission_and_parent_can_request_v
                 .await
                 .unwrap()
                 .into_iter()
-                .find(|node| node.label == "valid-after-backend-refusal")
+                .find(|node| node.label == "valid-after-model-grant-refusal")
                 .expect("subsequent child is admitted and attached");
             tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
@@ -902,15 +902,15 @@ async fn child_ungranted_model_refuses_before_admission_and_parent_can_request_v
             let child = child_path(&host.context, valid.actor);
             next_hosted_script_round(&mut requests, &mut pending, &child)
                 .await
-                .call("reply-after-backend-refusal", "respond (111 :: Int)");
+                .call("reply-after-model-grant-refusal", "respond (111 :: Int)");
             let child_after = next_hosted_script_round(&mut requests, &mut pending, &child).await;
             assert_eq!(
-                child_after.settled_output("reply-after-backend-refusal")["status"],
+                child_after.settled_output("reply-after-model-grant-refusal")["status"],
                 "replied"
             );
             child_after.finish();
             root_after.call(
-                "observe-reply-after-backend-refusal",
+                "observe-reply-after-model-grant-refusal",
                 include_str!("fixtures/child_attachment_observe_reply.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -920,7 +920,7 @@ async fn child_ungranted_model_refuses_before_admission_and_parent_can_request_v
                     host.runtime.run_identity(),
                     host.context.actor.identity(),
                 ),
-                "observe-reply-after-backend-refusal",
+                "observe-reply-after-model-grant-refusal",
                 "True",
             );
             assert!(host.context.actor.terminal().get().is_none());

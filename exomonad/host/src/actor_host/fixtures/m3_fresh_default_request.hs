@@ -10,7 +10,7 @@ import qualified Tidepool.Model.Selection as Selection
 
 let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 
-let freshDefaultOptions :: SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
+let freshDefaultOptions :: SpawnOptions CurrentModelFamily (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
     freshDefaultOptions = (defaultSpawnOptions currentModel Installed.agentSpec)
       { spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned
       , spawnInstructions = Just "Execute the shell, then settle the Text request with respond."
