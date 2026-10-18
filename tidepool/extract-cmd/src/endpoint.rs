@@ -2037,15 +2037,6 @@ fn ensure_scoped_transaction(
     }
 }
 
-fn retain_earlier_close(
-    close: CompilerTransactionClose,
-    mut earlier: Vec<CompilerTransactionCloseEvidence>,
-) -> CompilerTransactionClose {
-    earlier.drain(..).fold(close, |combined, evidence| {
-        combined.merge(CompilerTransactionClose::Unconfirmed(evidence))
-    })
-}
-
 struct TransactionScopeGuard<C: FnOnce(CompilerTransactionClose)> {
     close_sink: Option<C>,
 }
@@ -2075,7 +2066,12 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
             CompilerTransactionClose::NotStarted
         }
     };
-    let mut close = retain_earlier_close(close, scope.admission_close);
+    let mut close = scope
+        .admission_close
+        .into_iter()
+        .fold(close, |combined, evidence| {
+            combined.merge(CompilerTransactionClose::Unconfirmed(evidence))
+        });
     for observed in scope.reported_close {
         close = close.merge(observed);
     }
