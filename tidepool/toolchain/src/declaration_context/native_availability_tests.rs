@@ -8535,22 +8535,16 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .artifacts()
                 .selected_native_groups()
                 .is_empty());
-            let incoming = retained
-                .compiler_support
-                .artifacts()
-                .capture_graph_selection();
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
             retained
                 .evidence
                 .validate(producer, retained.compiler_support.artifacts())
                 .unwrap();
             let evidence = retained.evidence.clone();
-            let (retained_again, _, _) = retained
-                .into_value_support(
-                    original.artifact_view().clone(),
-                    original.compiler_source_support().clone(),
-                )
+            let (retained_support, _) = retained
+                .into_value_support(original.compiler_source_support().clone())
                 .unwrap();
+            let retained_again = retained_support.artifacts();
             assert_eq!(
                 retained_again.capture_graph_selection().namespace,
                 before.namespace
@@ -8568,31 +8562,6 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .binding_dependencies()
                 .iter()
                 .all(|edge| retained_again.binding_dependencies().contains(edge)));
-            let empty = original.artifact_view().inventory().empty_view();
-            let (custody_only, custody_support, _) =
-                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
-                    .unwrap()
-                    .unwrap()
-                    .into_value_support(
-                        empty,
-                        crate::artifact_inventory::CompilerSourceSupport::empty(),
-                    )
-                    .unwrap();
-            let custody_graph = custody_only.capture_graph_selection();
-            assert!(custody_graph.namespace.is_empty());
-            assert!(custody_graph.roots.is_empty());
-            assert!(incoming
-                .roots
-                .iter()
-                .chain(&incoming.custody_roots)
-                .all(|seed| custody_graph.custody_roots.contains(seed)));
-            let (repeated, _, _) =
-                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
-                    .unwrap()
-                    .unwrap()
-                    .into_value_support(custody_only, custody_support)
-                    .unwrap();
-            assert_eq!(repeated.capture_graph_selection(), custody_graph);
             let extended = original
                 .clone()
                 .extend_interface_context(&original)
@@ -10122,12 +10091,8 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .artifacts()
             .selected_native_groups()
             .is_empty());
-        let empty = ArtifactInventory::default().empty_view();
-        let (_, support, evidence) = captured
-            .into_value_support(
-                empty,
-                crate::artifact_inventory::CompilerSourceSupport::empty(),
-            )
+        let (support, evidence) = captured
+            .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
             .unwrap();
         let exported = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()

@@ -123,10 +123,8 @@ impl PartialEq for ExactDeclarationContext {
 }
 impl Eq for ExactDeclarationContext {}
 
-/// Value and lexical roots issue compiler selection; additional native carriers
-/// remain independently owned byte custody for future execution.
+/// Value and lexical roots select compiler support with its required native custody.
 pub(crate) struct RetainedValueSourceSurface {
-    pub(crate) artifacts: ArtifactView,
     pub(crate) compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     pub(crate) lexical: Vec<ExactLexicalNode>,
 }
@@ -257,14 +255,8 @@ impl PreparedValueSourceSupport {
             .source_support(&source_owners)?;
         timing.advance("retain_value_custody");
         let compiler_support = support.retain_custody(value)?;
-        timing.advance("retain_original_custody");
-        let artifacts = self
-            .context
-            .artifact_view()
-            .retain_original_custody(compiler_support.artifacts())?;
         timing.advance("assemble_surface");
         let surface = RetainedValueSourceSurface {
-            artifacts,
             compiler_support,
             lexical,
         };
@@ -4655,11 +4647,9 @@ impl CapturedTemplateImports {
     )]
     pub(crate) fn into_value_support(
         self,
-        artifacts: ArtifactView,
         support: crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<
         (
-            ArtifactView,
             crate::artifact_inventory::CompilerSourceSupport,
             Arc<TemplateImportEvidence>,
         ),
@@ -4667,13 +4657,11 @@ impl CapturedTemplateImports {
     > {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.template_imports.into_value_support",
-            "retain_template_custody",
+            "merge_template_support",
         );
-        let artifacts = artifacts.retain_custody(self.compiler_support.artifacts())?;
-        timing.advance("merge_template_support");
         let support = support.merge(&self.compiler_support)?;
         timing.advance("assemble_value_support");
-        let result = (artifacts, support, Arc::new(self.evidence));
+        let result = (support, Arc::new(self.evidence));
         timing.finish(true);
         Ok(result)
     }
@@ -14021,11 +14009,8 @@ mod tests {
                     let updated = CapturedTemplateImports::capture(&issued, &[template.clone()])
                         .unwrap()
                         .map(|captured| {
-                            let (_, support, evidence) = captured
-                                .into_value_support(
-                                    issued.artifact_view().clone(),
-                                    issued.compiler_source_support().clone(),
-                                )
+                            let (support, evidence) = captured
+                                .into_value_support(issued.compiler_source_support().clone())
                                 .unwrap();
                             issued = issued
                                 .clone()

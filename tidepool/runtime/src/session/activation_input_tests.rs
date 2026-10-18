@@ -4911,6 +4911,44 @@ fn activation_input_staging_does_not_publish_a_reserved_interface() {
     );
     mount_original(&mut resident, owner, interface);
     assert!(path.exists());
+    let repeated = resident
+        .state
+        .stage_checked_value_interface(certificate.clone())
+        .expect("the installed certificate remains an idempotent admission");
+    resident
+        .state
+        .validate_staged_value_interface(&repeated)
+        .unwrap();
+    drop(repeated);
+
+    let independent_root = tempfile::tempdir().unwrap();
+    let mut independent =
+        InputFixture::fresh_in(SessionId(1739), &independent_root, &fixture.recipe);
+    let (independent_owner, independent_interface) = parked_input_owner(&fixture, &mut independent);
+    let independent_certificate = independent_interface.value_interface_certificate();
+    assert_eq!(independent_certificate.owner(), certificate.owner());
+    assert_eq!(
+        independent_certificate.bytes_owned(),
+        certificate.bytes_owned()
+    );
+    mount_original(&mut independent, independent_owner, independent_interface);
+    assert!(matches!(
+        resident
+            .state
+            .stage_checked_value_interface(independent_certificate),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(Arc::ptr_eq(
+        resident
+            .state
+            .retained_checked_value_artifact(certificate.owner())
+            .unwrap(),
+        &certificate
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        certificate.bytes_owned().as_ref()
+    );
 }
 
 #[test]
