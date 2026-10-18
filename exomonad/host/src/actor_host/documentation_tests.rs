@@ -103,6 +103,87 @@ fn published_notebook_sources_match_authored_fixtures() {
 }
 
 #[tokio::test]
+async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
+    for (primary, effort_type, invalid, expected_option) in [
+        (
+            "argon",
+            "ArgonEffort",
+            "Models.Argon (Models.DeepSeekOptions Models.DeepSeekHigh)",
+            "ArgonOptions",
+        ),
+        (
+            "flash",
+            "DeepSeekReasoning",
+            "Models.Flash (Models.OpenAIOptions Models.OpenAILow)",
+            "DeepSeekOptions",
+        ),
+        (
+            "sol",
+            "OpenAIReasoning",
+            "Models.Sol (Models.ArgonOptions Models.EffortLow)",
+            "OpenAIOptions",
+        ),
+    ] {
+        let campaign = TestCampaign::start_with_config(
+            |admission| admission,
+            |config| {
+                use crate::exomonad::model_catalog::{ModelConfig, ProviderConfig};
+                let authored = config.workspace.join(".exomonad");
+                std::fs::create_dir_all(&authored).unwrap();
+                let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
+                    "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
+                )).unwrap();
+                let inference = project.inference.as_mut().unwrap();
+                inference.providers.insert("openai".into(), ProviderConfig {
+                    backend: exomonad_actor::Backend::OpenAIPlan,
+                    credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
+                    credential_env: None, endpoint: None, inference_limits: Default::default(),
+                });
+                inference.models.insert("sol".into(), ModelConfig {
+                    provider: "openai".into(), model: "gpt-6.1-sol".into(),
+                    constructor: "Sol".into(), effort: "high".into(),
+                });
+                let profile = inference.profiles.get_mut("argon").unwrap();
+                profile.default = primary.into();
+                profile.allowed.push("sol".into());
+                project.haskell = crate::exomonad::workspace::HaskellConfig {
+                    source_roots: vec![".".into()],
+                    modules: vec!["GeneratedModelChecks".into()],
+                    ..Default::default()
+                };
+                project.prompts = Default::default();
+                project.apply_inference().unwrap();
+                config.model = project.defaults.model.clone();
+                config.reasoning = project.defaults.reasoning;
+                std::fs::write(authored.join("config.toml"), toml::to_string(&project).unwrap()).unwrap();
+                let fixture = tidepool_testing::fixture_source(
+                    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs"
+                );
+                std::fs::write(authored.join("GeneratedModelChecks.hs"), format!(
+                    "{fixture}\nstagePrimary :: Member Core.ContextReadWrite effects => Models.{effort_type} -> Eff effects ()\nstagePrimary = Models.setNextEffort\n"
+                )).unwrap();
+                super::test_campaign::commit_workspace(&config.workspace);
+                config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace, &config.run_directory.path()
+                ).unwrap());
+            },
+        ).await;
+        campaign.run_scenario(|campaign| Box::pin(async move {
+            let root = campaign.root_installation.policy.clone();
+            let source = format!(
+                "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\ndisplay (GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Models.ModelSelectionEnvelope identity _ _ -> identity))"
+            );
+            let result = displayed(campaign, root.as_ref(), &source).await;
+            assert_eq!(super::test_campaign::committed_display_text(&result), "True");
+            let refusal = dispatch_haskell_script_result(root.as_ref(), &format!(
+                "let invalidChoice = {invalid}"
+            )).await.expect_err("provider-mismatched options must fail typechecking");
+            assert!(refusal.to_string().contains(expected_option), "{primary}: {refusal}");
+        })).await;
+    }
+}
+
+#[tokio::test]
 async fn captured_child_keeps_original_nominal_types_after_parent_shadowing_and_failure() {
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
