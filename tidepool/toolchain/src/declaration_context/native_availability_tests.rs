@@ -5060,7 +5060,9 @@ fn replay_native_transport_history(
     history: &NativeTransportHistory,
     coverage: &mut NativeTransportCoverage,
 ) {
-    use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
     let NativeTransportHistory {
         same_root,
         overlap,
@@ -5589,10 +5591,54 @@ fn replay_native_transport_history(
     assert!(dependent_expected
         .insert(*dependent_group, dependent_carrier)
         .is_none());
-    assert_eq!(
-        proof.issued_group_carriers(&produced.artifacts).unwrap(),
-        dependent_expected
+    let dependent_offer = produced
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == dependent_entry.descriptor.id)
+        .unwrap()
+        .clone();
+    assert!(dependent_offer.is_full());
+    assert_eq!(dependent_offer.proof(), Some(&proof));
+    assert!(
+        proof
+            .issued_group_carriers(produced.issued_artifacts())
+            .is_err(),
+        "carrier-only output cannot authenticate the opaque dependent Group proof"
     );
+    let expected_child = *expected[0]
+        .keys()
+        .find(|group| {
+            group.binding.artifact() == entries[1].descriptor.id && group.original_ordinal == 7
+        })
+        .unwrap();
+    let expected_dependency = (
+        ArtifactBindingNode::Group(*dependent_group),
+        ArtifactBindingNode::Group(expected_child),
+        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+            dependent_ordinal: 7,
+            required_ordinal: 7,
+        },
+    );
+    let assert_dependent_offer = |offers: &[IssuedNativeOffer]| {
+        let retained = offers
+            .iter()
+            .find(|offer| offer.same_issuance(&dependent_offer))
+            .expect("the exact dependent issuance retains its historical child");
+        assert!(retained.is_full());
+        assert_eq!(retained.proof(), Some(&proof));
+        assert_eq!(
+            retained.issued_group_carriers().unwrap(),
+            dependent_expected
+        );
+        let edges = retained.custody_snapshot().binding_dependencies().unwrap();
+        assert!(edges.contains(&(
+            ArtifactBindingNode::Group(*dependent_group),
+            ArtifactBindingNode::Artifact(dependent_carrier),
+            crate::artifact_inventory::ArtifactDependency::Interface,
+        )));
+        assert!(edges.contains(&expected_dependency));
+    };
+    assert_dependent_offer(produced.native_offers());
     let (admission, source) =
         generated_source_admission_fixture(&root.path().join("receipt"), &request);
     let continued = produced
@@ -5607,10 +5653,10 @@ fn replay_native_transport_history(
         continued.artifacts.capture_graph_selection().namespace,
         support.capture_graph_selection().namespace
     );
-    assert_eq!(
-        proof.issued_group_carriers(&continued.artifacts).unwrap(),
-        dependent_expected
-    );
+    assert!(proof
+        .issued_group_carriers(continued.issued_artifacts())
+        .is_err());
+    assert_dependent_offer(continued.native_offers());
     let continued_request = ExactCompileContext::new(base_context)
         .prepare_compilation_with_private_input(
             &root.path().join("continued"),
@@ -5652,10 +5698,11 @@ fn replay_native_transport_history(
         )
         .unwrap();
     coverage.recoveries += 1;
+    assert_dependent_offer(continued_inputs.compiler_source_support().native_offers());
     for view in [continued_inputs.artifacts(), &reopened] {
-        assert_eq!(
-            proof.issued_group_carriers(view).unwrap(),
-            dependent_expected
+        assert!(
+            proof.issued_group_carriers(view).is_err(),
+            "selected carrier snapshots do not reconstruct opaque Group availability"
         );
         let mut fixed = view
             .inventory()
