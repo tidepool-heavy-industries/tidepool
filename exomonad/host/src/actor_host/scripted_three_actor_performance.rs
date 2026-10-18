@@ -538,15 +538,7 @@ async fn three_actor_capture(concurrent: bool) {
         let root = host.context.actor.identity();
         let root_name = root.to_string();
         let output_origin = super::test_campaign::actor_output_origin(host.runtime.run_identity(), root);
-        let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
-        let coverage = frozen.prepared_toolset_coverage().unwrap();
-        assert_eq!(coverage.len(), 1, "one prepared root toolset");
-        assert_eq!(coverage[0].requested_effects, super::admitted_capabilities(Some(frozen)).unwrap().effect_keys());
-        let installation = host.context.observer.installation(root).await;
-        assert!(matches!(installation.acquisition.as_ref(), Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })),
-            "the unauthored default root uses its packaged built-in installer");
-        assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
-            Some(coverage[0].program.clone()), "root installs its exact prepared program");
+        host.assert_prepared_workspace_installation().await;
         host.http_input("Exercise the real three-actor capture workload.").await.unwrap();
         let mut pending = VecDeque::new();
         let mut round = next_root(host, &mut requests, &mut pending).await;
