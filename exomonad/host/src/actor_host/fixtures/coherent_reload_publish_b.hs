@@ -9,4 +9,4 @@ reloadB <- reloadSource [] >>= either (error . DiagnosticText.pack . show) pure
 aAfterReload <- pure (aClosure 1)
 display (case reloadB of
   ReloadPublished _ _ _ _ -> aAfterReload == 2 && Work.readStamp aToken == 7
-  _ -> False)
+  rejected -> error (DiagnosticText.pack (show rejected)))

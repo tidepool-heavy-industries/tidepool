@@ -2055,7 +2055,7 @@ where
                         .workbench
                         .as_ref()
                         .expect("prepared execution has its workbench")
-                        .shared_for_command_binding();
+                        .shared_view();
                     let jobs = environment.commands.clone();
                     let context = context.clone();
                     OwnedWorkbenchWait::RetainCommandBinding {

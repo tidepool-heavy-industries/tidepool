@@ -124,7 +124,7 @@ where
         }
         Ok(CoherentReloadOperation {
             preparation: crate::resident_workbench::ReloadPreparationServices::new(
-                self.environment.runner.clone(),
+                self.environment.application_workbench(),
                 self.environment.source_layers.clone().ok_or_else(|| {
                     SourceError::SourceUnavailable("actor has no editable source owner".into())
                 })?,

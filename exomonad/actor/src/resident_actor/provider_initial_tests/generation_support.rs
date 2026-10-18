@@ -288,7 +288,7 @@ impl GenerationSupport {
         let workbench = self.runner.application_workbench();
         let prepared = if let Some(expected) = fixture.installed_tools.current_generation() {
             let services = ReloadPreparationServices::new(
-                self.runner.clone(),
+                workbench.shared_view(),
                 self.owner.clone(),
                 snapshot.descriptor,
                 expected,

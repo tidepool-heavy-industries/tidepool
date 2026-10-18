@@ -5260,7 +5260,9 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         }
     }
 
-    pub(crate) fn shared_for_command_binding(&self) -> Self {
+    /// Share the same machine access and issued request/compilation evidence.
+    /// This does not mint a new operation or cancellation owner.
+    pub(crate) fn shared_view(&self) -> Self {
         Self {
             access: self.access.sharing(),
             request_scope: self.request_scope.clone(),
@@ -14026,6 +14028,113 @@ pub(crate) mod request_tests {
         assert!(checkout.machine().compile_view_in(scope).is_none());
         assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
         checkout.restore_suspended(Vec::new());
+    }
+
+    #[tokio::test]
+    async fn shared_reload_view_preserves_installed_support_without_expanding_grants() {
+        struct InstalledJev;
+        impl crate::JevBackend for InstalledJev {
+            fn ask(
+                &self,
+                _: String,
+            ) -> futures_util::future::BoxFuture<'_, Result<String, crate::JevCallFailure>>
+            {
+                unreachable!("support observation must not execute judgment")
+            }
+        }
+        for present in [false, true] {
+            let jev: crate::JevBackendHandle = if present {
+                Arc::new(InstalledJev)
+            } else {
+                crate::unconfigured_jev()
+            };
+            let conversation: crate::ConversationReader =
+                Arc::new(|_, _| Box::pin(async { Err(crate::ConversationUnavailable::Unbound) }));
+            let intrinsic = crate::installed_intrinsic_effect_support(
+                None,
+                &jev,
+                None,
+                present.then_some(&conversation),
+            );
+            let config = ActorWorkbenchSource::new("", Vec::new())
+                .with_spec("Fixture.agentSpec")
+                .with_installed_effect_support([exomonad_tool::ToolEffectKey::Actor(
+                    crate::ActorEffectKey::FsRead,
+                )]);
+            with_test_bound_source(config, move |source| async move {
+                let startup =
+                    ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+                        Arc::new(ActorMachineRegistry::new()),
+                        source,
+                        None,
+                    )
+                    .with_intrinsic_effect_support(intrinsic);
+                let reload = startup.shared_view();
+                let granted = [
+                    crate::ActorEffectKey::Replies,
+                    crate::ActorEffectKey::Reflect,
+                    crate::ActorEffectKey::Jev,
+                    crate::ActorEffectKey::Console,
+                    crate::ActorEffectKey::Lookup,
+                    crate::ActorEffectKey::FsRead,
+                    crate::ActorEffectKey::Source,
+                    crate::ActorEffectKey::ModelCallOpenAI,
+                ];
+                let recipe =
+                    |view: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>| {
+                        view.access
+                            .source
+                            .config
+                            .source_toolset_recipe(
+                                &crate::CheckpointSourceLayer::default(),
+                                &granted,
+                                view.access.source.config.installed_effect_support(),
+                            )
+                            .unwrap()
+                    };
+                let initial = recipe(&startup);
+                let candidate = recipe(&reload);
+                assert_eq!(candidate, initial);
+                let expected = granted
+                    .into_iter()
+                    .filter(|key| {
+                        !matches!(
+                            key,
+                            crate::ActorEffectKey::Source | crate::ActorEffectKey::ModelCallOpenAI
+                        ) && (present
+                            || !matches!(
+                                key,
+                                crate::ActorEffectKey::Jev | crate::ActorEffectKey::Reflect
+                            ))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(candidate.effective_effects, expected);
+                assert!(reload
+                    .access
+                    .source
+                    .config
+                    .installed_effect_support()
+                    .contains(&exomonad_tool::ToolEffectKey::Actor(
+                        crate::ActorEffectKey::Commands
+                    )));
+                assert!(
+                    !candidate
+                        .effective_effects
+                        .contains(&crate::ActorEffectKey::Commands),
+                    "installed interpreter support cannot create an ungranted effect"
+                );
+                assert!(
+                    !candidate
+                        .effective_effects
+                        .contains(&crate::ActorEffectKey::Source),
+                    "an absent source owner cannot become installed support"
+                );
+                assert!(!candidate
+                    .effective_effects
+                    .contains(&crate::ActorEffectKey::ModelCallOpenAI));
+            })
+            .await;
+        }
     }
 
     #[test]

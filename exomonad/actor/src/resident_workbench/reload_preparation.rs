@@ -43,7 +43,7 @@ impl HasReloadPreparation for ReloadPreparationServices {
 }
 
 struct WorkbenchReloadPreparation<H, O> {
-    runner: ResidentActorRunner<H, O>,
+    workbench: ResidentActorWorkbench<H, O>,
     layers: crate::ActorSourceLayerResolver,
     descriptor: crate::ActorDescriptor,
     expected: Arc<ActorGeneration>,
@@ -52,7 +52,7 @@ struct WorkbenchReloadPreparation<H, O> {
 
 impl ReloadPreparationServices {
     pub(crate) fn new<H, O>(
-        runner: ResidentActorRunner<H, O>,
+        workbench: ResidentActorWorkbench<H, O>,
         layers: crate::ActorSourceLayerResolver,
         descriptor: crate::ActorDescriptor,
         expected: Arc<ActorGeneration>,
@@ -64,7 +64,7 @@ impl ReloadPreparationServices {
     {
         Self {
             preparation: Arc::new(WorkbenchReloadPreparation {
-                runner,
+                workbench,
                 layers,
                 descriptor,
                 expected,
@@ -144,8 +144,8 @@ where
             )
             .map_err(unreadable)?;
             let workbench = self
-                .runner
-                .application_workbench()
+                .workbench
+                .shared_view()
                 .with_compilation_authority(authority);
             let install = self
                 .expected
