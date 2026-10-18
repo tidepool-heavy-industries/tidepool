@@ -19,11 +19,12 @@ do
   case rejected of
     Left (Core.SpecInputSchemaInvalid _) -> pure ()
     other -> Tidepool.Effects.error ("expected object schema refusal after intrinsic support admission: " <> tshow (either Left (const (Right ())) other))
-  started <- send (Core.AgentLaunchSpawnWith
-    (Core.CapturedSpawn "CHECKPOINT_TOKEN")
+  started <- send (Core.ForkAgentSpawnWith Core.OpenAIWitness
     (\_ -> installPreparedSpec invalidPrepared >> Agents.installRequestReceiver)
-    (Core.ForkDirectory Core.CurrentCheckout) [] (Just "forged-spec-child")
-    Nothing Nothing Nothing Core.ActorOwned Nothing
+    (Core.CapturedSpawn "CHECKPOINT_TOKEN")
+    (Core.ForkDirectory Core.CurrentCheckout) [] (toJSON ([] :: [Text])) (Just "forged-spec-child")
+    (toJSON (Selection.modelSelection (Selection.openAI "capture-catalog" "reader" (Selection.OpenAIOptions Selection.OpenAILow))))
+    Nothing Core.ActorOwned Nothing
     (preparedAgentSpecMetadata validPrepared))
   case started of
     Left failure@(Core.SpawnPartialFailure (Core.SpawnRetainedActor _ _) Core.SpawnCleanupConfirmed _) -> pure (tshow failure)

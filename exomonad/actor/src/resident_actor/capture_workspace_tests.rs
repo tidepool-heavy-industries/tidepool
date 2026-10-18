@@ -179,6 +179,38 @@ fn reader_steps(token: &str, children: &[(&str, &str)]) -> String {
     source
 }
 
+fn capture_capabilities() -> crate::ActorCapabilities {
+    let identity = crate::AdmittedModelIdentity::new(
+        "capture-catalog".into(),
+        "reader".into(),
+        "capture-provider".into(),
+        crate::Model::OpenAIModel(crate::OpenAIModel::Gpt61Sol),
+    )
+    .unwrap();
+    let efforts = vec![crate::Reasoning::OpenAIReasoning(
+        crate::OpenAIReasoning::OpenAILow,
+    )];
+    let permissions = crate::ModelPermissions::new(vec![crate::ModelGrant::new(
+        crate::ModelPermission {
+            operation: crate::ModelOperation::ForkAgent,
+            family: crate::ModelFamily::OpenAI,
+        },
+        identity.clone(),
+        efforts.clone(),
+    )
+    .unwrap()])
+    .unwrap();
+    crate::ActorCapabilities::admit(
+        vec![
+            crate::ActorEffectKey::AgentLaunch,
+            crate::ActorEffectKey::ForkAgentOpenAI,
+        ],
+        permissions,
+        Some(crate::ConversationPermission::new(identity, efforts).unwrap()),
+    )
+    .unwrap()
+}
+
 struct CaptureFixture {
     _root: tempfile::TempDir,
     forest: ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -194,6 +226,10 @@ impl CaptureFixture {
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::agent_launch_decl(),
+            tidepool_mcp::fork_agent_decl().for_model_permission(crate::ModelPermission {
+                operation: crate::ModelOperation::ForkAgent,
+                family: crate::ModelFamily::OpenAI,
+            }),
             tidepool_mcp::actor_decl(),
             tidepool_mcp::actor_kernel_decl(),
             tidepool_mcp::actor_local_decl(),
@@ -214,6 +250,8 @@ impl CaptureFixture {
             &preamble,
             "qualified Tidepool.Actors.Internal.Agent as Agents",
         );
+        let preamble =
+            insert_preamble_imports(&preamble, "qualified Tidepool.Model.Selection as Selection");
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -255,11 +293,7 @@ impl CaptureFixture {
     async fn parent(&self, label: &str) -> LocalActorRef {
         let parent = self
             .forest
-            .new_workbench(
-                label.into(),
-                crate::ActorCapabilities::default()
-                    .with_effect_keys(vec![crate::ActorEffectKey::AgentLaunch]),
-            )
+            .new_workbench(label.into(), capture_capabilities())
             .await
             .expect("capture fixture parent");
         assert_committed(
@@ -294,6 +328,19 @@ impl CaptureFixture {
             .capture_retained_context_scope(context)
             .await
             .expect("real native checkpoint lease");
+        let capabilities = self
+            .forest
+            .environment
+            .actors
+            .lock()
+            .get(&issuer.identity())
+            .expect("checkpoint issuer's admitted descriptor")
+            .descriptor
+            .capabilities()
+            .clone();
+        let conversation = capabilities.conversation_permission().unwrap();
+        let model = conversation.model().model().clone();
+        let reasoning = conversation.efforts()[0];
         let token = self
             .forest
             .environment
@@ -301,10 +348,9 @@ impl CaptureFixture {
             .capture_checkpoint_with_retained_scope(
                 "completed-private".into(),
                 issuer.identity(),
-                crate::ActorCapabilities::default()
-                    .with_effect_keys(vec![crate::ActorEffectKey::AgentLaunch]),
-                None,
-                None,
+                capabilities,
+                Some(model),
+                Some(reasoning),
                 source,
                 self.session,
                 scope,
@@ -415,6 +461,11 @@ impl CaptureFixture {
 }
 
 async fn assert_captured_reader(child: &LocalResidentInstallation) {
+    assert!(child.capabilities.model_permissions().grants().is_empty());
+    let conversation = child.capabilities.conversation_permission().unwrap();
+    assert_eq!(conversation.model().catalog_identity(), "capture-catalog");
+    assert_eq!(conversation.model().provider(), "capture-provider");
+    assert_eq!(conversation.model().key(), "reader");
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(240),
         child.policy.dispatch_boxed(ToolInvocation {
