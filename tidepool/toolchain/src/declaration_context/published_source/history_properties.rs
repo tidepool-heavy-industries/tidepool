@@ -421,6 +421,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             original.artifact_view().capture_graph_selection());
         let mut expected_roles = original.compiler_input_roles();
         let mut expected_artifacts = original.artifact_view().artifact_ids();
+        let mut expected_lexical = original.lexical_graph().iter()
+            .map(|node| (node.owner.clone(), node.clone())).collect::<BTreeMap<_, _>>();
         let initial_groups = std::iter::once(NativeGroupKey {
             artifact: root.descriptor.id,
             original_ordinal: ORDINALS[initial],
@@ -491,6 +493,15 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
                     let support = context.compiler_source_support().admit_available_checked_products([2; 32], &[product]).unwrap();
                     context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
+                    prop_assert_eq!(&output.requirements, &vec![root.descriptor.owner.clone()]);
+                    let output_lexical = ExactLexicalNode {
+                        owner: output.descriptor.owner.clone(),
+                        imports: vec![root.descriptor.owner.clone()],
+                    };
+                    let mut lexical = context.lexical_graph().to_vec();
+                    lexical.push(output_lexical.clone());
+                    context = context.extend(&[], &[], lexical).unwrap();
+                    expected_lexical.insert(output_lexical.owner.clone(), output_lexical);
                     let definitions = crate::certified_products::original_native_group_definitions(
                         match &output.payload { ArtifactPayload::Original(product) => product, _ => unreachable!() }, 0,
                     ).unwrap();
@@ -618,7 +629,11 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             let actual_roles = context.compiler_input_roles();
             prop_assert_eq!(actual_roles.len(), expected_roles.len());
             prop_assert!(expected_roles.iter().all(|role| actual_roles.contains(role)));
-            prop_assert_eq!(context.lexical_graph(), original.lexical_graph());
+            prop_assert_eq!(context.lexical_graph().iter()
+                .map(|node| (node.owner.clone(), node.clone())).collect::<BTreeMap<_, _>>(),
+                expected_lexical.clone());
+            prop_assert_eq!(actual_roles.iter().find(|role| role.is_published_source_original()).unwrap(),
+                &expected_publication);
             let mut actual_artifacts = context.artifact_view().artifact_ids();
             actual_artifacts.sort_unstable();
             let mut expected_artifacts_sorted = expected_artifacts.clone();
