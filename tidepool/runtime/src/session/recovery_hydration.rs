@@ -1148,8 +1148,10 @@ mod lazy_tests {
                 .context_for_expected_snapshot(&old_root, &other)
                 .unwrap_err();
             assert!(matches!(error,
-                tidepool_toolchain::CompileError::ExtractFailed(message)
-                if message == "acquired compiler snapshot root differs from expected context"));
+            tidepool_toolchain::CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(
+                "acquired compiler snapshot root differs from expected context"
+            ))));
         }
         let shared = older
             .artifact_view()
