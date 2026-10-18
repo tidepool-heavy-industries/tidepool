@@ -339,6 +339,8 @@ pub struct FrozenWorkspace {
     pub(crate) prompts: BTreeMap<String, String>,
     #[serde(default, with = "super::inference_selection::models_config")]
     pub(crate) models: BTreeMap<String, exomonad_actor::Model>,
+    #[serde(default)]
+    pub(crate) model_catalog: Option<super::model_catalog::ResolvedCatalog>,
     files: BTreeMap<PathBuf, String>,
     config: String,
     library_identity: String,
@@ -424,7 +426,7 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(9) {
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(10) {
                 return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
             let mut frozen: Self = serde_json::from_value(selection).map_err(|error| {
@@ -537,6 +539,11 @@ impl FrozenWorkspace {
                 return Err("model aliases and provider model names must be non-empty".into());
             }
         }
+        let model_catalog = match &config.inference {
+            Some(inference) => Some(inference.resolve()?),
+            None => config.launch.embedded.as_ref().map(|embedded|
+                super::model_catalog::InferenceConfig::synthesize_legacy(&config.defaults, &config.models, embedded)?.resolve()).transpose()?,
+        };
         let base = workspace.join(".exomonad");
         let runtime_sources = crate::haskell_sources::runtime_source_roots(
             deployment.as_ref().map(|selection| &selection.sources),
@@ -661,7 +668,7 @@ impl FrozenWorkspace {
         let resources_path = PathBuf::from("resources/Exomonad/Workspace.hs");
         if include.iter().any(|root| generates_workspace_module(root)) {
             return Err(
-                "Exomonad.Workspace is reserved for the generated workspace interface".into(),
+                "Exomonad.Workspace and Exomonad.Models are reserved for generated interfaces".into(),
             );
         }
         std::fs::create_dir_all(directory.join("resources/Exomonad"))?;
@@ -673,9 +680,15 @@ impl FrozenWorkspace {
             resources_path,
             blake3::hash(resources.as_bytes()).to_hex().to_string(),
         );
+        if let Some(catalog) = &model_catalog {
+            let source = catalog.render_haskell_models()?;
+            let path = PathBuf::from("resources/Exomonad/Models.hs");
+            tidepool_atomic_write::write_durable(&directory.join(&path), source.as_bytes())?;
+            files.insert(path, blake3::hash(source.as_bytes()).to_hex().to_string());
+        }
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 9,
+            version: 10,
             identity,
             include,
             modules: config.haskell.modules,
@@ -683,6 +696,7 @@ impl FrozenWorkspace {
             spec: config.haskell.spec,
             prompts,
             models: config.models,
+            model_catalog,
             files,
             config: config_text,
             library_identity,
@@ -1098,7 +1112,7 @@ fn seal_prepared_directory(directory: &Path) -> Result<()> {
 fn generates_workspace_module(root: &Path) -> bool {
     ["hs", "lhs", "hs-boot", "lhs-boot"]
         .into_iter()
-        .any(|suffix| root.join(format!("Exomonad/Workspace.{suffix}")).is_file())
+        .any(|suffix| ["Workspace", "Models"].iter().any(|name| root.join(format!("Exomonad/{name}.{suffix}")).is_file()))
 }
 
 fn generated_core_identity() -> Result<String> {
@@ -2385,7 +2399,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 9);
+        assert_eq!(selection["version"], 10);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();

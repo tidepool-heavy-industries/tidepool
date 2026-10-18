@@ -28,6 +28,7 @@ pub(super) struct EmbeddedCellModelFactory<A, C> {
     default_reasoning: Reasoning,
     launch_config: Option<Arc<ActorHostConfig>>,
     transport: Arc<dyn Fn() -> C + Send + Sync>,
+    selection: Option<Arc<crate::model_turn::SelectedTransport<C>>>,
     auth: PhantomData<fn() -> A>,
 }
 
@@ -47,6 +48,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
             default_reasoning,
             launch_config: None,
             transport,
+            selection: None,
             auth: PhantomData,
         }
     }
@@ -127,7 +129,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelFactory
                 self.scheduler.clone(),
                 policy,
                 self.transport.clone(),
-            ),
+            ).with_selection(self.selection.clone()),
         )))
     }
 }
@@ -235,16 +237,23 @@ pub(super) fn admitted_runtime_factory(
 ) -> Arc<dyn CellModelFactory> {
     let _ = settings;
     let auth = runtime.inference_auth().clone();
-    Arc::new(
-        EmbeddedCellModelFactory::<RunAuth, _>::new(
+    let mut factory = EmbeddedCellModelFactory::<RunAuth, _>::new(
             runtime.store(),
             runtime.scheduler(),
             config.model.clone(),
             config.reasoning,
             Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
-        )
-        .with_launch_config(config),
-    )
+        ).with_launch_config(config);
+    if let (Some(catalog), Some(providers)) = (config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.clone()), runtime.inference_providers().cloned()) {
+        factory.selection = Some(Arc::new(move |selection| {
+            if selection.catalog_identity != catalog.identity { return Err("model choice belongs to another frozen catalog".into()); }
+            let selected = catalog.models.get(&selection.key).ok_or("model is not admitted by this profile")?;
+            if selection.reasoning.backend() != selected.model.backend() { return Err("model options select a different provider".into()); }
+            let auth = providers.get(&selected.provider).ok_or("model provider is unavailable")?.clone();
+            Ok((harness::transport::ResponsesClient::new(auth), selected.model.value().to_owned(), super::reasoning_effort(&selection.reasoning)))
+        }));
+    }
+    Arc::new(factory)
 }
 
 #[cfg(test)]

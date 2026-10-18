@@ -16,14 +16,8 @@ module Tidepool.Model
   , textTurn
   , typedTurn
   , withModel
-  , withReasoning
   , withLimits
-  , Model (..)
-  , Reasoning (..)
-  , DeepSeekReasoning (..)
-  , OpenAIReasoning (..)
-  , OpenAIModel (..)
-  , Backend (..)
+  , module Tidepool.Model.Selection
   , ModelLimits (..)
   , defaultLimits
   , invokeModel
@@ -42,9 +36,10 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson
+import Tidepool.Model.Selection
 import Tidepool.Internal.ModelControl
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Model (..), Reasoning (..), DeepSeekReasoning (..), OpenAIReasoning (..), OpenAIModel (..), Backend (..), ModelCall (..), ModelBoundaryError (..))
+import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..))
 
 -- | Optional narrower limits. Missing fields retain the cell's limits;
 -- negative values are refused before any provider request. Reported token
@@ -67,23 +62,20 @@ data ModelTurn tools effects a = ModelTurn
   { turnSpec :: AgentSpec tools effects
   , turnInstructions :: Text
   , turnFormat :: ResultFormat a
-  , turnModel :: Maybe Model
-  , turnReasoning :: Maybe Reasoning
+  , turnModel :: Maybe ModelSelectionEnvelope
   , turnLimits :: ModelLimits
   }
 
 textTurn :: AgentSpec tools effects -> Text -> ModelTurn tools effects Text
-textTurn spec instructions = ModelTurn spec instructions TextResult Nothing Nothing defaultLimits
+textTurn spec instructions = ModelTurn spec instructions TextResult Nothing defaultLimits
 
 typedTurn :: forall a tools effects. (FromJSON a, JsonSchema a) => AgentSpec tools effects -> Text -> ModelTurn tools effects a
-typedTurn spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) Nothing Nothing defaultLimits
+typedTurn spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) Nothing defaultLimits
 
 -- | Select through the caller's frozen workspace model configuration. Omitting
 -- this option inherits the caller's resolved model; the host bounds all choices.
-withModel :: Model -> ModelTurn tools effects a -> ModelTurn tools effects a
-withModel model turn = turn { turnModel = Just model }
-withReasoning :: Reasoning -> ModelTurn tools effects a -> ModelTurn tools effects a
-withReasoning reasoning turn = turn { turnReasoning = Just reasoning }
+withModel :: ModelChoice choice => choice -> ModelTurn tools effects a -> ModelTurn tools effects a
+withModel model turn = turn { turnModel = Just (modelSelection model) }
 withLimits :: ModelLimits -> ModelTurn tools effects a -> ModelTurn tools effects a
 withLimits limits turn = turn { turnLimits = limits }
 
@@ -153,9 +145,9 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
     drive compiled Nothing initial
   where
     request compiled = toJSON (ModelRequestEnvelope
-      (turnInstructions turn) input (turnModel turn) (turnReasoning turn)
+      (turnInstructions turn) input Nothing Nothing
       (requestLimits (turnLimits turn)) (declarationsToJson (declarations compiled))
-      (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))))
+      (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))) (turnModel turn))
     stop Nothing failure = pure (failed failure)
     stop (Just token) failure = do
       closed <- send (ModelCloseWith token)

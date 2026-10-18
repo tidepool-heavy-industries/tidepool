@@ -885,6 +885,11 @@ pub(crate) fn resolve_model(
     config: &ActorHostConfig,
     model: &exomonad_actor::Model,
 ) -> std::result::Result<String, String> {
+    if let Some(catalog) = config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.as_ref()) {
+        if model != &catalog.models[&catalog.primary].model {
+            return Err("the conversational model is fixed by the run profile; select helpers through Tidepool.Model".into());
+        }
+    }
     if model.backend() != config.model.backend() {
         return Err("model backend differs from the admitted run backend".into());
     }
@@ -939,6 +944,9 @@ fn reasoning_from_effort(
         (Backend::OpenAIPlan, Effort::Low) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAILow)),
         (Backend::OpenAIPlan, Effort::Medium) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAIMedium)),
         (Backend::OpenAIPlan, Effort::High) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAIHigh)),
+        (Backend::GeminiInteractions, Effort::Low) => Ok(Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortLow)),
+        (Backend::GeminiInteractions, Effort::Medium) => Ok(Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortMedium)),
+        (Backend::GeminiInteractions, Effort::High) => Ok(Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortHigh)),
         _ => Err("retained reasoning is unsupported by the run backend".into()),
     }
 }
@@ -1887,6 +1895,7 @@ async fn run_owned(
         settings,
         Arc::clone(&host_incarnation),
         config.inference_auth.clone(),
+        config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.as_ref()),
     )
     .instrument(
         tracing::info_span!(target: "tidepool::actor_host::startup", "embedded_service_prepare"),

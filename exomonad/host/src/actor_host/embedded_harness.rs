@@ -83,6 +83,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
     context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
     inference_auth: OnceLock<super::run_auth::RunAuth>,
+    inference_providers: OnceLock<std::collections::BTreeMap<String, super::run_auth::RunAuth>>,
     #[cfg(test)]
     admission_test_hooks: OnceLock<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -97,6 +98,7 @@ impl EmbeddedHarnessRuntime {
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
             inference_auth: OnceLock::new(),
+            inference_providers: OnceLock::new(),
             #[cfg(test)]
             admission_test_hooks: OnceLock::new(),
             store,
@@ -111,6 +113,12 @@ impl EmbeddedHarnessRuntime {
         self.inference_auth
             .set(auth)
             .map_err(|_| "run inference already configured".to_owned())
+    }
+    pub(super) fn configure_providers(&self, providers: std::collections::BTreeMap<String, super::run_auth::RunAuth>) -> Result<(), String> {
+        self.inference_providers.set(providers).map_err(|_| "run providers already configured".into())
+    }
+    pub(super) fn inference_providers(&self) -> Option<&std::collections::BTreeMap<String, super::run_auth::RunAuth>> {
+        self.inference_providers.get()
     }
     pub(super) fn inference_auth(&self) -> &super::run_auth::RunAuth {
         self.inference_auth

@@ -17,6 +17,38 @@ pub(crate) enum RunAuth {
 }
 
 impl RunAuth {
+    pub(super) fn from_provider(
+        provider: &crate::exomonad::model_catalog::ProviderConfig,
+        store: Arc<harness::store::Store>, run: String,
+    ) -> Result<Self, String> {
+        use harness::transport::{NativeTransportContract, ResponsesRoute, ResponsesProtocol};
+        use exomonad_actor::Backend;
+        provider.validate()?;
+        let credential = match (&provider.credential_file, &provider.credential_env) {
+            (Some(path), None) => CredentialReference::File { path: path.clone() },
+            (None, Some(name)) => CredentialReference::Env { name: name.clone() },
+            _ => return Err("provider must select one credential source".into()),
+        };
+        let (route, protocol, endpoint) = match provider.backend {
+            Backend::OpenAIPlan => (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard, harness::transport::client::CHATGPT_PLAN_ENDPOINT),
+            Backend::DeepSeek => (ResponsesRoute::DeepSeek, ResponsesProtocol::Standard, harness::transport::client::DEEPSEEK_ENDPOINT),
+            Backend::GeminiInteractions => (ResponsesRoute::GeminiInteractions, ResponsesProtocol::Interactions, harness::transport::client::GEMINI_INTERACTIONS_ENDPOINT),
+        };
+        let limits = provider.inference_limits.resolve(provider.backend);
+        let admission = NativeTransportAdmission::rehydrate(NativeTransportContract {
+            route, protocol, endpoint: provider.endpoint.clone().unwrap_or_else(|| endpoint.into()), credential, limits,
+        }).map_err(|e| e.to_string())?;
+        match provider.backend {
+            Backend::DeepSeek => DeepSeekAuth::from_admission(admission).map(Self::DeepSeek).map_err(|e| e.to_string()),
+            Backend::GeminiInteractions => GeminiAuth::from_admission(admission).map(Self::Gemini).map_err(|e| e.to_string()),
+            Backend::OpenAIPlan => {
+                let path = provider.credential_file.clone().ok_or("OpenAI plan requires a credential file")?;
+                let accounts = SavedAccounts::beside(path).map_err(|e| e.to_string())?;
+                RunAccountAuth::new_with_limits(store, run, accounts, limits).map(Self::OpenAIPlan).map_err(|e| e.to_string())
+            }
+        }
+    }
+
     pub(super) fn from_settings(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         store: Arc<harness::store::Store>,

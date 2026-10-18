@@ -280,6 +280,7 @@ impl EmbeddedService {
         settings: &EmbeddedLaunchConfig,
         owner: Arc<super::HostIncarnationLease>,
         inference_auth: Option<super::run_auth::RunAuth>,
+        catalog: Option<&crate::exomonad::model_catalog::ResolvedCatalog>,
     ) -> Result<Self, String> {
         if !owner
             .owns_run(run_root)
@@ -305,14 +306,28 @@ impl EmbeddedService {
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
-        let auth = match inference_auth {
-            Some(auth) => auth,
-            None => super::run_auth::RunAuth::from_settings(
-                settings,
-                runtime.store(),
-                runtime.run_identity().to_owned(),
-            )?,
+        let mut providers = std::collections::BTreeMap::new();
+        if let Some(catalog) = catalog {
+            for (key, provider) in &catalog.providers {
+                providers.insert(key.clone(), super::run_auth::RunAuth::from_provider(provider, runtime.store(), runtime.run_identity().to_owned())?);
+            }
+        }
+        let selected = catalog.map(|catalog| providers[&catalog.models[&catalog.primary].provider].clone());
+        let auth = match (inference_auth, selected) {
+            (Some(injected), Some(selected)) => {
+                if harness::transport::Auth::admission(&injected).map_err(|e| e.to_string())?.contract()
+                    != harness::transport::Auth::admission(&selected).map_err(|e| e.to_string())?.contract() {
+                    return Err("injected root transport differs from frozen catalog".into());
+                }
+                injected
+            }
+            (Some(auth), None) | (None, Some(auth)) => auth,
+            (None, None) => super::run_auth::RunAuth::from_settings(settings, runtime.store(), runtime.run_identity().to_owned())?,
         };
+        if let Some(catalog) = catalog {
+            providers.insert(catalog.models[&catalog.primary].provider.clone(), auth.clone());
+            runtime.configure_providers(providers)?;
+        }
         runtime.configure_inference(auth)?;
         // Only this exclusive host startup can prove native continuations
         // from the previous process no longer exist. Ordinary Store reads
@@ -423,7 +438,7 @@ impl EmbeddedService {
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
-        Self::prepare_owned(run_root, settings, Arc::new(owner), None).await
+        Self::prepare_owned(run_root, settings, Arc::new(owner), None, None).await
     }
 
     #[cfg(test)]

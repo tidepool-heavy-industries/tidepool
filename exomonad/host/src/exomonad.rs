@@ -24,6 +24,7 @@ pub(crate) const STATUS_VERSION: u32 = 5;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 mod inference_selection;
+pub(crate) mod model_catalog;
 mod launch_preflight;
 pub use inference_selection::AgentInferenceDefaults as ExomonadAgentDefaults;
 pub mod resources;
@@ -236,7 +237,10 @@ pub(crate) struct ExomonadConfig {
     compiler: CompilerConfig,
     #[serde(default)]
     pub(crate) resources: exomonad_node::command_resources::CommandResourcePolicy,
+    #[serde(default = "ExomonadAgentDefaults::deepseek_default")]
     pub(crate) defaults: ExomonadAgentDefaults,
+    #[serde(default)]
+    pub(crate) inference: Option<model_catalog::InferenceConfig>,
     #[serde(default, with = "inference_selection::models_config")]
     pub(crate) models: std::collections::BTreeMap<String, Model>,
     #[serde(default)]
@@ -262,6 +266,7 @@ pub(crate) fn write_fixture_project_config(
                 exomonad_actor::OpenAIReasoning::OpenAILow,
             ),
         },
+        inference: None,
         models: std::collections::BTreeMap::new(),
         haskell: workspace::HaskellConfig::default(),
         prompts: workspace::PromptConfig::default(),
@@ -729,6 +734,17 @@ fn parse_project_config(
             path.display()
         ))
     })?;
+    if let Some(inference) = &config.inference {
+        let catalog = inference.resolve().map_err(runtime_error)?;
+        let primary = &catalog.models[&catalog.primary];
+        config.defaults = ExomonadAgentDefaults { model: primary.model.clone(), reasoning: primary.reasoning };
+        let provider = &catalog.providers[&primary.provider];
+        if let Some(embedded) = &mut config.launch.embedded {
+            embedded.provider = provider.backend;
+            embedded.credential_file = provider.credential_file.clone().unwrap_or_default();
+            embedded.inference_limits = provider.inference_limits;
+        }
+    }
     config.launch.validate()?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {

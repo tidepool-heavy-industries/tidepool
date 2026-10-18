@@ -26,6 +26,8 @@ use tidepool_handlers::handlers::model::{ModelBoundaryError, ModelService};
 use tidepool_repr::PrincipalId;
 use tokio::runtime::Handle;
 
+pub type SelectedTransport<C> = dyn Fn(&tidepool_bridge_effects::ModelSelectionEnvelope) -> Result<(C, String, Effort), String> + Send + Sync;
+
 pub type ModelResolver =
     dyn Fn(&tidepool_bridge_effects::Model) -> Result<String, String> + Send + Sync;
 
@@ -102,6 +104,7 @@ pub struct CellModelService<A, C> {
     scheduler: Arc<JobScheduler>,
     policy: ModelPolicy,
     transport: Arc<dyn Fn() -> C + Send + Sync>,
+    selection: Option<Arc<SelectedTransport<C>>>,
     budget: OnceLock<CellBudget>,
     accepting: AtomicBool,
     registry: Mutex<HashMap<String, Registered>>,
@@ -168,11 +171,16 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             scheduler,
             policy,
             transport,
+            selection: None,
             budget: OnceLock::new(),
             accepting: AtomicBool::new(true),
             registry: Mutex::new(HashMap::new()),
             auth: PhantomData,
         }
+    }
+    pub fn with_selection(mut self, resolver: Option<Arc<SelectedTransport<C>>>) -> Self {
+        self.selection = resolver;
+        self
     }
     /// Called by the admitted execution owner on cancellation or disposal.
     /// Stops admission and signals every invocation without waiting for callbacks.
@@ -358,13 +366,22 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
         let (inherited_model, inherited_effort) =
             (self.policy.inherit_selection)().map_err(rejected)?;
-        let model = match request.model {
+        let model = match &request.model {
             Some(selection) => (self.policy.resolve_model)(&selection).map_err(rejected)?,
             None => inherited_model,
         };
-        let effort = match request.reasoning {
+        let effort = match &request.reasoning {
             Some(selection) => (self.policy.resolve_reasoning)(&selection).map_err(rejected)?,
             None => inherited_effort,
+        };
+        let (transport, model, effort) = match &request.selection {
+            Some(selection) => {
+                if request.model.is_some() || request.reasoning.is_some() {
+                    return Err(rejected("select coupled model options once"));
+                }
+                self.selection.as_ref().ok_or_else(|| rejected("no frozen model catalog is admitted"))?(selection).map_err(rejected)?
+            }
+            None => ((self.transport)(), model, effort),
         };
         let limits = Limits {
             requests: request
@@ -404,7 +421,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         let invocation = {
             let _entered = self.runtime.enter();
             Invocation::start::<A, C>(
-                (self.transport)(),
+                transport,
                 self.store.clone(),
                 self.scheduler.clone(),
                 config,

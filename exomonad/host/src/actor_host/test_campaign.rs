@@ -683,6 +683,7 @@ impl TestCampaign {
             settings,
             Arc::clone(&self.host_incarnation),
             None,
+            None,
         )
         .await
     }
