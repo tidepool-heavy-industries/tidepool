@@ -158,6 +158,10 @@ fn assert_committed(reply: &serde_json::Value) {
     assert_eq!(reply["status"], "committed", "{reply:?}");
 }
 
+// Workspace and installation gates block launch completion. `child` acknowledges
+// admission in the same poll that returns the installation, so launch completion
+// cannot legitimately precede these progress observations. Borrowed launch handles
+// remain available to the scenario when progress wins.
 async fn await_launch_progress<P, L>(phase: &str, progress: P, launch: L) -> P::Output
 where
     P: std::future::Future,
