@@ -1517,9 +1517,20 @@ async fn launch_host_window(
     filesystem: &exomonad_node::systemd_slice::HostFilesystemPolicy,
     tmux: &TmuxSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let frozen = workspace::FrozenWorkspace::load_prepared_run(&coordinates.workspace, run_root)
+        .map_err(boot_refusal)?;
+    let catalog = frozen
+        .config()
+        .map_err(boot_refusal)?
+        .resolved_catalog()
+        .map_err(runtime_error)?;
+    let (credentials, absent_credentials) =
+        provider_credential_environment_from(catalog.as_ref(), |name| std::env::var(name).ok());
     let mut environment = host_environment(compiler_socket);
     environment.extend(selected);
-    let unset_environment = deployment_environment_unsets(&environment);
+    environment.extend(credentials);
+    let mut unset_environment = deployment_environment_unsets(&environment);
+    unset_environment.extend(absent_credentials);
     let command = slice.supervised_service(
         &format!("exomonad-host-{}", coordinates.run_id),
         slice.verified_command(
@@ -1713,6 +1724,30 @@ fn compiler_daemon_launch(
         environment,
         unset_environment,
     })
+}
+
+fn provider_credential_environment_from(
+    catalog: Option<&model_catalog::ResolvedCatalog>,
+    read: impl Fn(&str) -> Option<String>,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeSet<String>,
+) {
+    let names: std::collections::BTreeSet<_> = catalog
+        .into_iter()
+        .flat_map(|catalog| catalog.providers.values())
+        .filter_map(|provider| provider.credential_env.as_deref())
+        .collect();
+    let mut environment = std::collections::BTreeMap::new();
+    let mut absent = std::collections::BTreeSet::new();
+    for name in names {
+        if let Some(value) = read(name) {
+            environment.insert(name.to_owned(), value);
+        } else {
+            absent.insert(name.to_owned());
+        }
+    }
+    (environment, absent)
 }
 
 fn host_environment(compiler_socket: &Path) -> std::collections::BTreeMap<String, String> {
@@ -4467,6 +4502,58 @@ mod tests {
             Some("/tmp/owned-compiler-evidence")
         );
         assert!(pane_environment_from(|_| None).is_empty());
+    }
+
+    #[test]
+    fn host_credentials_follow_selected_catalog_and_clear_absent_tmux_values() {
+        let config: model_catalog::InferenceConfig = serde_json::from_value(serde_json::json!({
+            "profile": "work",
+            "providers": {
+                "present": {"backend": "deepseek", "credential_env": "CUSTOM_PROVIDER_KEY"},
+                "absent": {"backend": "deepseek", "credential_env": "DEEPSEEK_API_KEY"},
+                "excluded": {"backend": "deepseek", "credential_env": "EXCLUDED_KEY"}
+            },
+            "models": {
+                "primary": {"provider": "present", "model": "deepseek-flash", "constructor": "Primary", "effort": "high"},
+                "other": {"provider": "absent", "model": "deepseek-pro", "constructor": "Other", "effort": "high"},
+                "excluded": {"provider": "excluded", "model": "deepseek-flash", "constructor": "Excluded", "effort": "high"}
+            },
+            "profiles": {"work": {"default": "primary", "allowed": ["primary", "other"]}}
+        })).unwrap();
+        let catalog = config.resolve().unwrap();
+        let (environment, unset) =
+            provider_credential_environment_from(Some(&catalog), |name| match name {
+                "CUSTOM_PROVIDER_KEY" => Some("test-current-secret".into()),
+                "DEEPSEEK_API_KEY" => None,
+                other => panic!("read unselected credential {other}"),
+            });
+        assert_eq!(
+            environment,
+            std::collections::BTreeMap::from([(
+                "CUSTOM_PROVIDER_KEY".into(),
+                "test-current-secret".into()
+            )])
+        );
+        assert_eq!(
+            unset,
+            std::collections::BTreeSet::from(["DEEPSEEK_API_KEY".into()])
+        );
+        let mut tmux = std::collections::BTreeMap::from([
+            ("CUSTOM_PROVIDER_KEY".into(), "stale-present".into()),
+            ("DEEPSEEK_API_KEY".into(), "stale-absent".into()),
+        ]);
+        tmux.retain(|name, _| !unset.contains(name));
+        tmux.extend(environment);
+        assert_eq!(
+            tmux.get("CUSTOM_PROVIDER_KEY").map(String::as_str),
+            Some("test-current-secret")
+        );
+        assert!(!tmux.contains_key("DEEPSEEK_API_KEY"));
+        assert!(!serde_json::to_string(&config)
+            .unwrap()
+            .contains("test-current-secret"));
+        let (empty, absent) = provider_credential_environment_from(None, |_| panic!("no catalog"));
+        assert!(empty.is_empty() && absent.is_empty());
     }
 
     #[test]
