@@ -290,14 +290,19 @@ fn daemon_work(rows: &[Value], requests: &[Value], unrelated: &[Value]) -> Vec<V
     // The independent daemon census must not disappear merely because the
     // corresponding host identification was lost from its retained slice.
     for row in fields.iter().filter(|row| {
-        matches!(
-            row["message"].as_str(),
-            Some(
-                "compiler request started"
-                    | "compiler request finished"
-                    | "compiler diagnostics processed"
+        // Request-scoped timing/work is independently observable even if all
+        // lifecycle records were lost. Partial physical identities also refuse.
+        ["daemon_epoch", "admission_id", "request_ordinal"]
+            .iter()
+            .any(|key| row.get(key).is_some())
+            || matches!(
+                row["message"].as_str(),
+                Some(
+                    "compiler request started"
+                        | "compiler request finished"
+                        | "compiler diagnostics processed"
+                )
             )
-        )
     }) {
         let request = physical
             .get(&physical_key(row))
@@ -649,6 +654,9 @@ fn completed_request_census_preserves_absent_groups_and_refuses_missing_identifi
     assert_eq!(work[0]["group_observation_status"], "not_emitted");
     assert_eq!(work[0]["work"], json!([]));
     assert!(daemon_work(&[], &[], &[]).is_empty());
+    let timing_only = [json!({"span":request, "fields":{
+        "message":"compiler timing", "line":"tidepool-group-work {}"}})];
+    assert!(std::panic::catch_unwind(|| daemon_work(&timing_only, &[], &[])).is_err());
     assert!(std::panic::catch_unwind(|| daemon_work(&rows, &[], &[])).is_err());
     assert!(std::panic::catch_unwind(|| daemon_work(
         &rows[..2],
