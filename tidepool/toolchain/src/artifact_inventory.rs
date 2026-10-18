@@ -9420,7 +9420,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn owner_bound_segment_histories_preserve_demand_and_refuse_foreign_cursors(
-            operations in proptest::collection::vec(0u8..3, 1..20),
+            operations in proptest::collection::vec(0u8..3, 0..20),
         ) {
             let inventory = ArtifactInventory::default();
             let dependency = Arc::new(issued_native_groups(
@@ -9448,7 +9448,9 @@ mod tests {
             let consumer_first = key(&consumer, 0);
             let consumer_late = key(&consumer, 17);
             let dependency_group = key(&dependency, 7);
-            for operation in [0, 1, 2].into_iter().chain(operations) {
+            // Generate before completing coverage so first demands can appear
+            // on either side of refusals and repeated demands.
+            for operation in [0].into_iter().chain(operations).chain([1, 2]) {
                 let ordinal = if operation == 1 { 0 } else { 17 };
                 let imports = [issued_source(&consumer, ordinal)];
                 let before = segment.observed_binding_state();
