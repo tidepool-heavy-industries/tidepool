@@ -3131,7 +3131,9 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             .unwrap();
         let inputs = request.compiler_inputs();
         assert_eq!(
-            inputs.native_transport.metadata.entries[&owner].descriptor.id,
+            inputs.native_transport.metadata.entries[&owner]
+                .descriptor
+                .id,
             entries[winner].descriptor.id
         );
         assert!(
@@ -3234,6 +3236,105 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             "actual_error={error:?}"
         );
     }
+}
+
+#[test]
+fn direct_native_advertisement_uses_descendant_contribution_without_sibling_custody() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let hidden = product("AdvertisedDescendant", 81);
+    let root = dependent_product(
+        "AdvertisedRoot",
+        82,
+        vec![(3, vec![source_import(&hidden, 7)])],
+    );
+    let sibling = product("AdvertisedSibling", 83);
+    let products = recovered_witness_fixtures(&[hidden, root, sibling])
+        .into_iter()
+        .map(|witness| witness.product)
+        .collect::<Vec<_>>();
+    let inputs = OriginalCompilerInputs::from_checked_support_products(
+        &crate::artifact_inventory::CompilerSourceSupport::empty(),
+        producer,
+        &products,
+    )
+    .unwrap();
+    let complete =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+    let ids = products
+        .iter()
+        .map(|product| {
+            ArtifactEntry::original(producer, product.clone())
+                .unwrap()
+                .descriptor
+                .id
+        })
+        .collect::<Vec<_>>();
+    let owners = products
+        .iter()
+        .map(|product| identity(&product.owner().unit, &product.owner().module))
+        .collect::<Vec<_>>();
+    let projection = complete
+        .projection()
+        .for_source_owners(&BTreeSet::from([owners[1].clone()]));
+    let selected = complete.artifacts().select_roots(vec![ids[1]]).unwrap();
+    let issued = fixture_compiler_support(projection, selected);
+    assert!(
+        issued
+            .native_offers()
+            .iter()
+            .all(|offer| offer.original() == ids[1]),
+        "only the real R issuer contributes native proof"
+    );
+    let hidden_row = issued
+        .native_availability()
+        .rows()
+        .find(|row| row.original.descriptor.id == ids[0])
+        .unwrap();
+    assert!(hidden_row.permits(7) && !hidden_row.permits(9001));
+    assert!(hidden_row.offers().all(|offer| offer.original() == ids[1]));
+    let types = issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(owners.clone())
+        .unwrap()
+        .retain_template_availability(&issued)
+        .unwrap();
+    let context = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_issued_compiler_support(&types)
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(context))
+        .prepare_compilation(root.path(), PRODUCER)
+        .unwrap();
+    let inputs = request.compiler_inputs();
+    assert_eq!(
+        inputs.native_transport.metadata.entries[&owners[0]]
+            .descriptor
+            .id,
+        ids[0]
+    );
+    assert!(
+        matches!(
+            inputs.native_transport.metadata.entries[&owners[2]].payload,
+            ArtifactPayload::Canonical(_)
+        ),
+        "R's broad checked custody cannot advertise its unrelated sibling"
+    );
+    assert!(inputs.native_availability(ids[2]).is_none());
+    assert_eq!(wire_mode(&request, &owners[0].module), issued_mode(&[7]));
+    let private = inputs.private_native_availability();
+    let direct = inputs.advertised_native_originals();
+    let receipt = direct
+        .receipt_original(
+            &private,
+            &owners[0].unit,
+            &owners[0].module,
+            &products[0].owner().module_version,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(receipt.permits(7) && !receipt.permits(9001));
 }
 
 #[test]
