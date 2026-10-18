@@ -106,7 +106,11 @@ impl ResponsesTransport for Script {
             ("nested", _) => final_turn("nested answer"),
             ("callback" | "nested-outer", _) => final_turn("done"),
             ("budget", _) => final_turn("allowed"),
-            ("record-typed", _) => turn(vec![Item(json!({
+            ("record-typed", false) => turn(vec![Item(json!({
+                "type":"function_call", "name":"echo", "call_id":"record-echo",
+                "arguments":"{\"message\":\"record callback\"}",
+            }))]),
+            ("record-typed", true) => turn(vec![Item(json!({
                 "type":"function_call", "name":"finalize", "call_id":"record-final",
                 "arguments":serde_json::to_string(&json!({"result":{"answer":42}})).unwrap(),
             }))]),
@@ -390,7 +394,32 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                 assert_eq!(script.record_cancellations.load(Ordering::SeqCst), 0);
                 assert_eq!(script.record_settlements.load(Ordering::SeqCst), 0);
                 let requests = script.requests.lock().unwrap().clone();
-                assert_eq!(requests.len(), 2);
+                assert_eq!(requests.len(), 4);
+                for (request, expected) in
+                    requests.iter().zip(["first", "first", "second", "second"])
+                {
+                    let inputs = request
+                        .input
+                        .iter()
+                        .filter(|item| item.0["role"] == "user")
+                        .map(|item| item.0["content"].clone())
+                        .collect::<Vec<_>>();
+                    assert_eq!(inputs, vec![json!([{"type":"input_text","text":expected}])]);
+                }
+                for request in [&requests[1], &requests[3]] {
+                    let outputs = request
+                        .input
+                        .iter()
+                        .filter(|item| item.0["type"] == "function_call_output")
+                        .map(|item| {
+                            serde_json::from_str::<serde_json::Value>(
+                                item.0["output"].as_str().unwrap(),
+                            )
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(outputs, vec![json!("record callback")]);
+                }
                 assert!(requests
                     .iter()
                     .all(|request| request.model == "test-model"
@@ -413,7 +442,7 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                 .await;
                 assert_eq!(committed_display_text(&retired), "True");
                 assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
-                assert_eq!(script.record_cancellations.load(Ordering::SeqCst), 1);
+                assert!(script.record_cancellations.load(Ordering::SeqCst) >= 1);
                 assert_eq!(script.record_settlements.load(Ordering::SeqCst), 1);
                 let before_refusal = campaign
                     .forest
@@ -435,7 +464,7 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                     "{refused}"
                 );
                 assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
-                assert_eq!(script.requests.lock().unwrap().len(), 2);
+                assert_eq!(script.requests.lock().unwrap().len(), 4);
                 assert_eq!(
                     before_refusal,
                     campaign

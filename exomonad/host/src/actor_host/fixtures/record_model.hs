@@ -11,14 +11,15 @@ module RecordModelFixture where
 import Prelude
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Tidepool.Aeson (FromJSON, JsonSchema)
-import Tidepool.Agent.Contract (defaultSpec)
+import Tidepool.Aeson (FromJSON)
+import Tidepool.Agent.Contract (JsonSchema, defaultSpec, specTools, presentWith, tool)
+import ModelFixture (EchoArgs (..), EchoTools (..))
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
-import Tidepool.Effects.Row (knownEffects)
+import Tidepool.Effects.Row (KnownEffect, knownEffects)
 import Tidepool.Model
 
-newtype Answer = Answer { answer :: Int }
+data Answer = Answer { answer :: Int }
   deriving (Generic, FromJSON, JsonSchema)
 
 data Probe mode = Probe
@@ -27,15 +28,18 @@ data Probe mode = Probe
   , readCalls :: mode R.:- R.Call () (R.Reply Int)
   } deriving Generic
 
-probe :: forall modelFamily. KnownFamily modelFamily
-      => Model modelFamily -> Bool -> R.ActorSpec Probe '[ModelCall modelFamily]
+probe :: forall modelFamily. (KnownFamily modelFamily, KnownEffect (ModelCall modelFamily))
+      => Model modelFamily -> Bool -> R.ActorSpec Probe (R.LocalEffects Probe '[ModelCall modelFamily])
 probe model granted = permissions $
   R.definition "record-model-probe" (Actor.Selected (knownEffects @'[ModelCall modelFamily])) Probe
     { calls = 0
     , runModel = \input -> do
         result <- invokeModel
-          (withLimits (defaultLimits { requestLimit = Just 1, toolLimit = Just 1 })
-            (typedTurn @Answer model defaultSpec "record-typed")) input
+          (withLimits (defaultLimits { requestLimit = Just 2, toolLimit = Just 2 })
+            (typedTurn @Answer model
+              (defaultSpec { specTools = EchoTools (presentWith id $ tool "Echo through the record actor state" (\args -> do
+                R.modify' (+10)
+                pure (message args))) }) "record-typed")) input
         R.modify' (+1)
         pure result
     , readCalls = \() -> R.get
