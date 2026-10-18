@@ -7,7 +7,7 @@ For launch and prompt changes, use focused owning tests such as
 `actor_host::documentation_tests::published_notebook_sources_match_authored_fixtures`,
 `actor_host::documentation_tests::published_request_example_retains_success_and_target_cancellation`, and
 `exomonad::tests::config_effort_defaults_low_and_preserves_explicit_values` and
-`actor_host::cell_model::tests::cell_model_policy_matches_admitted_embedded_alias_and_effort` in the `exomonad-host`
+`actor_host::cell_model::tests::typed_cell_model_selection_checks_actor_grants_before_provider_work` in the `exomonad-host`
 library. When changing launch configuration or tool contracts, update the
 scripted-provider fixtures, check exact test selections actually ran, and
 compile changed consumers.

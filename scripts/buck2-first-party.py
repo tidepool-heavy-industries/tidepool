@@ -1308,7 +1308,7 @@ def facade_test_cases(binary):
             "exomonad::tests::launch_version_and_selection_shape_must_agree",
             "actor_host::display_output::transport_admission_tests::preadmitted_transport_requires_unopened_store_and_preserves_existing_state",
             "actor_host::display_output::transport_admission_tests::preadmitted_transport_does_not_treat_uninspectable_store_as_fresh",
-            "actor_host::cell_model::tests::cell_model_policy_resolves_only_the_fixed_backend_before_provider_work",
+            "actor_host::cell_model::tests::typed_cell_model_selection_checks_actor_grants_before_provider_work",
             "actor_host::run_auth::tests::injected_contract_refuses_backend_and_limits_before_startup_work",
         ], {}, {}, ["toolchains//:exomonad_runtime_tools"], False, False, 30),
         ("facade_source_inspection_tests", [

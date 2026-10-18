@@ -58,7 +58,7 @@ SPECIALIST_ACCEPTANCE_TESTS = [
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 MODEL_CALL_POLICY_TESTS = [
-    "actor_host::cell_model::tests::typed_cell_model_selection_resolves_frozen_policy_before_provider_work",
+    "actor_host::cell_model::tests::typed_cell_model_selection_checks_actor_grants_before_provider_work",
 ]
 PERSONA_RELEASE_CONTRACT_TESTS = [
     "actor_host::operation_observation::tests::native_status_and_authenticated_gui_observe_the_same_operation_while_notebook_is_busy",
