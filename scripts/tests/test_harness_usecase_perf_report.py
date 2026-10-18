@@ -43,6 +43,44 @@ def check_shrinking_samples(samples, check):
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
+    def test_case_wall_ledger_keeps_verification_shutdown_and_unpartitioned_work_separate(self):
+        for scale in (1, 17, 1000000):
+            phases = [
+                {"phase": "activation", "start_ns": 2 * scale, "end_ns": 12 * scale, "wall_ns": 10 * scale,
+                 "installation_verification_start_ns": 13 * scale,
+                 "installation_verification_end_ns": 16 * scale, "installation_verification_ns": 3 * scale},
+                {"phase": "cell", "start_ns": 20 * scale, "end_ns": 30 * scale, "wall_ns": 10 * scale},
+                {"phase": "measurement-summary", "start_ns": 32 * scale, "end_ns": 40 * scale,
+                 "wall_ns": 8 * scale, "case_wall_ns": 40 * scale},
+            ]
+            report = reporter.case_wall_ledger(phases, ["cell"])
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["measured_disjoint_ns"], 31 * scale)
+            self.assertEqual(report["unpartitioned_ns"], 9 * scale)
+            overlap = [*phases[:1], {**phases[1], "start_ns": 15 * scale,
+                                   "wall_ns": 15 * scale}, phases[2]]
+            self.assertEqual(reporter.case_wall_ledger(overlap, ["cell"])["status"], "partial_or_unknown")
+            self.assertEqual(reporter.case_wall_ledger([*phases, phases[-1]], ["cell"])["status"], "partial_or_unknown")
+        self.assertEqual(reporter.case_wall_ledger([], ["cell"])["status"], "not_collected")
+
+    def test_catalog_acceptance_is_receipt_observation_not_unique_or_missing_zero(self):
+        values = {"message": "deployment module products accepted", "deployment_accepted_modules": 2,
+                  "deployment_original_product_bytes": 1024, "receipt_fresh_native_modules": 1,
+                  "receipt_cached_native_modules": 3, "receipt_retained_core_native_modules": 0}
+        row = {"target": "tidepool_toolchain::module_candidates::acceptance", "fields": values,
+               "span": {"name": "cell", "execution": "issued-execution"}}
+        report = reporter.catalog_acceptance_observations([row, row])
+        self.assertEqual(report["status"], "observed")
+        self.assertEqual(report["module_observations"]["deployment_accepted_modules"], 4)
+        self.assertEqual(report["events"][0]["execution"], "issued-execution")
+        self.assertIsNone(report["events"][0]["request_identity"])
+        absent = reporter.catalog_acceptance_observations([])
+        self.assertEqual(absent["status"], "not_observed_unknown")
+        self.assertIsNone(absent["module_observations"]["receipt_fresh_native_modules"])
+        old = {**row, "fields": {key: value for key, value in values.items()
+                                 if key != "receipt_fresh_native_modules"}}
+        self.assertEqual(reporter.catalog_acceptance_observations([old])["status"], "partial_or_unknown")
+
     def workbench_rows(self, scale=1):
         phases = [
             (0, "private_begin_started"), (1, "private_begin_completed"),

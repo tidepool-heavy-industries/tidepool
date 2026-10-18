@@ -951,6 +951,7 @@ class NativeQualificationTests(unittest.TestCase):
         expected = {
             "repeat-launch": ("prepare-once-repeated-launch", "production_harness_prepare_once_repeated_launch"),
             "notebook-reuse": ("notebook-a-a-b-a", "production_harness_notebook_a_a_b_a"),
+            "persona": ("persona-workbench", "production_harness_persona_workbench_history"),
             "concurrent-children": ("two-children-concurrent", "production_harness_two_children_execute_concurrently"),
         }
         selected = qualification.cohorts()
@@ -968,6 +969,8 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(cohort["required_startup_mode"], "prepared")
                 self.assertIn("TIDEPOOL_PREPARED_BUILTIN_ENTRIES", cohort["required_environment"])
                 self.assertEqual(cohort["measurement_reporter"], qualification.HARNESS_PERFORMANCE_REPORTER)
+                if suffix in ("persona", "notebook-reuse"):
+                    self.assertEqual(cohort["required_workspace_route"], "prepared-workspace")
 
     def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
         cohorts = qualification.cohorts()

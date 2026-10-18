@@ -449,22 +449,35 @@ pub(crate) fn record_deployment_acceptance(
     {
         return;
     }
-    let accepted: Vec<_> = receipt
-        .modules
-        .iter()
-        .filter_map(|module| {
-            if module.origin != crate::certified_products::ProductOrigin::Cached {
-                return None;
+    let mut fresh = 0u64;
+    let mut cached = 0u64;
+    let mut retained_core = 0u64;
+    let mut deployment_accepted = 0u64;
+    let mut deployment_bytes = 0u64;
+    for module in &receipt.modules {
+        match module.origin {
+            crate::certified_products::ProductOrigin::Fresh => fresh += 1,
+            crate::certified_products::ProductOrigin::RetainedCore => retained_core += 1,
+            crate::certified_products::ProductOrigin::Cached => {
+                cached += 1;
+                if let Some(bundle) = candidates
+                    .by_owner
+                    .get(&(module.unit.clone(), module.module.clone()))
+                {
+                    if matches!(bundle.origin, CandidateOrigin::Deployment) {
+                        deployment_accepted += 1;
+                        deployment_bytes += bundle.product.bytes().len() as u64;
+                    }
+                }
             }
-            let bundle = candidates
-                .by_owner
-                .get(&(module.unit.clone(), module.module.clone()))?;
-            matches!(bundle.origin, CandidateOrigin::Deployment).then_some(bundle)
-        })
-        .collect();
-    tracing::info!(target: "tidepool_toolchain::module_candidates",
-        deployment_accepted_modules = accepted.len() as u64,
-        deployment_original_product_bytes = accepted.iter().map(|b| b.product.bytes().len() as u64).sum::<u64>(),
+        }
+    }
+    tracing::info!(target: "tidepool_toolchain::module_candidates::acceptance",
+        deployment_accepted_modules = deployment_accepted,
+        deployment_original_product_bytes = deployment_bytes,
+        receipt_fresh_native_modules = fresh,
+        receipt_cached_native_modules = cached,
+        receipt_retained_core_native_modules = retained_core,
         "deployment module products accepted");
 }
 

@@ -613,8 +613,11 @@ global compiler submissions. The ordered cold capture control retains its
 original history. These cohorts use the same counted runner and frozen inputs;
 only provider replies are scripted.
 
-`harness-performance-persona` measures retained source inspection, context reads,
-five conditional assistant-text edits and read-back through that same host route.
+`harness-performance-persona` is the primary packaged Persona workbench workload.
+It uses the same `prepare_workspace` and selected prepared toolset handoff as
+`harness-performance-notebook-reuse`, and verifies the live and durable installed
+entry against the workspace owner's exact selection. It measures retained source
+inspection, context reads, five conditional assistant-text edits and read-back.
 It repeats the inspection/read probes after four cells retain 32 typed values.
 The five source messages are synthetic assistant messages recorded by the real
 provider/store boundary; the context owner issues their edit targets. Read-back
@@ -626,6 +629,30 @@ no shared cache is deleted. The reporter partitions sequential workbench phase
 boundaries and keeps nested preparation/snapshot/install spans separate from
 those totals. UTC trace intervals and process-monotonic call counters are
 distinct observations. A passing workload establishes behavior, not a speedup.
+The eight-phase `harness-performance` history keeps its unprepared-workspace
+constructor; its packaged root entry does not imply a prepared workspace toolset.
+Use `persona-release-contracts` for the existing reload and retained file-read
+continuation controls, and `m3-recursive` for captured cross-actor code and cleanup.
+Do not substitute the uncatalogued ordinary-demand diagnostic for these packaged
+workloads or combine their different histories into a weighted latency score.
+
+```sh
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort harness-performance-persona --output "$PERSONA_EVIDENCE" --jobs 1 \
+  --compiler-mode owned-resident --compiler-workers 2 \
+  --foreground-jobs 1 --preparation-jobs 1 --trace-profile minimal \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
+The frozen owner rejects a missing required catalog or an input/profile mismatch.
+The reporter separately records certified native receipt origins (Fresh, Cached,
+and RetainedCore) and accepted deployment candidate bytes. These are receipt
+observations, not unique module counts or physical read counts; a prepared entry
+may load without compilation, and absent observations remain unknown. Persona
+and notebook reuse record shutdown and a whole-test monotonic wall ledger. Entry
+installation verification is separate from startup, and the unpartitioned remainder
+includes fixture setup, assertions and recording without attributing a cause.
+Nested compiler, installation and snapshot intervals are not added to phase walls.
 
 The CLI's `prepare` followed by `init` already selects the completed deployment.
 Fresh fixture preparation measures the initial preparation cost; it does not

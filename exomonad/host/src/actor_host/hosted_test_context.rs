@@ -949,9 +949,9 @@ impl HostedTestRuntime {
         self.startup_readiness_elapsed.as_nanos()
     }
 
-    pub(super) async fn assert_prepared_workspace_original_handoff(
+    pub(super) async fn assert_prepared_workspace_installation(
         &self,
-    ) -> tidepool_toolchain::artifacts::ProductionEntryOutput {
+    ) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
         let installation = self
             .context
             .observer
@@ -1048,6 +1048,14 @@ impl HostedTestRuntime {
             serde_json::to_value(&completed).unwrap()
         );
         assert_eq!(std::fs::canonicalize(&directory).unwrap(), directory);
+        (directory, roots)
+    }
+
+    pub(super) async fn assert_prepared_workspace_original_handoff(
+        &self,
+    ) -> tidepool_toolchain::artifacts::ProductionEntryOutput {
+        let (directory, roots) = self.assert_prepared_workspace_installation().await;
+        let frozen = self.context.config.workspace_inputs.as_ref().unwrap();
         let wrapper = directory.join("Expr.hs");
         let observed =
             tidepool_toolchain::artifacts::FrozenEntrySources::capture(&roots, &wrapper).unwrap();

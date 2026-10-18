@@ -306,6 +306,7 @@ def cohorts() -> dict:
                 "max_jobs": 1, "retain_artifacts": True,
                 "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "notebook-a-a-b-a",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_workspace_route": "prepared-workspace",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "harness-performance-persona": {
                 "tests": ["actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_persona_workbench_history"], "expected_count": 1,
@@ -313,6 +314,7 @@ def cohorts() -> dict:
                 "max_jobs": 1, "retain_artifacts": True,
                 "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "persona-workbench",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_workspace_route": "prepared-workspace",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "harness-performance-concurrent-children": {
                 "tests": ["actor_host::scripted_three_actor_performance::production_harness_two_children_execute_concurrently"], "expected_count": 1,
@@ -2437,6 +2439,11 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") ==
                                                   cohort.get("compiler_mode") == "owned-resident",
         "phase_measurements_complete": (report.get("phase_measurements") or {}).get("status") == "complete",
+        "selected_workspace_route_consumed": (cohort.get("required_workspace_route") is None or (
+            (report.get("workspace_route") or {}).get("selected") == cohort["required_workspace_route"]
+            and (report.get("workspace_route") or {}).get("verified") is True)),
+        "whole_case_wall_complete": (cohort.get("required_workspace_route") is None
+                                    or (report.get("whole_case_wall") or {}).get("status") == "complete"),
         "counted_behavior_passed": behavioral_completed and record.get("passed") is True
                                       and execution.get("executed_test_count") == 1
                                       and execution.get("exit_code") == 0,
