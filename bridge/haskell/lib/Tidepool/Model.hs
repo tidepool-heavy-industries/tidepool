@@ -115,11 +115,14 @@ data ModelRequestObservation = ModelRequestObservation
   } deriving (Eq, Show)
 
 -- | References identify evidence retained by the host. Full transcripts are
--- not copied into every notebook result. Usage is per invocation; nested
--- invocations have their own receipts and share the cell's aggregate limit.
+-- not copied into every result. Usage is per invocation; nested invocations
+-- have their own receipts and share the owning execution's aggregate limit.
 data ModelReceipt = ModelReceipt
   { invocationIdentity :: Text
   , parentCellIdentity :: Text
+    -- ^ Owning execution identity: the notebook cell for notebook calls, or
+    -- the retained actor-scope execution for native Record RPCs. This is not
+    -- necessarily a notebook cell reference in the Store.
   , requestIdentities :: [Text]
   , requestObservations :: [ModelRequestObservation]
   , invocationDurationMs :: Int
