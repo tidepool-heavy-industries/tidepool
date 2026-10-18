@@ -142,6 +142,21 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
       liftIO $ BS.writeFile manifest (encodeDeclarationJoin input)
       decoded <- liftIO (readDeclarationJoin manifest)
       liftIO $ unless (decoded == input) (fail "exact join manifest changed across transport")
+      -- Both direct and wire front doors refuse native file overdelivery before IO.
+      let nativeRow = DeclarationArtifact
+            (ExactIfaceArtifact "main" "Missing" "/missing/interface.hi" (replicate 64 '0') [])
+            (Just (ModuleSnapshot "Missing" "/missing/native.tpmod" (replicate 64 '0')))
+          nativeInput = decoded { implementationArtifacts = [nativeRow] }
+      nativeOutcome <- liftIO (validateOwned nativeInput)
+      liftIO $ case outcomeDecision nativeOutcome of
+        JoinRejected ArtifactChanged _ -> pure ()
+        _ -> fail "direct declaration join accepted native product transport"
+      liftIO $ BS.writeFile manifest (encodeDeclarationJoin nativeInput)
+      nativeRead <- liftIO (try (readDeclarationJoin manifest) :: IO (Either IOException DeclarationJoinInput))
+      liftIO $ case nativeRead of
+        Left _ -> pure ()
+        Right _ -> fail "declaration join decoder accepted native product transport"
+      liftIO $ BS.writeFile manifest (encodeDeclarationJoin decoded)
       outcome <- liftIO (validateOwned decoded)
       liftIO $ case outcomeDecision outcome of
         JoinAccepted | outcomeInput outcome == input, Just _ <- outcomeArtifact outcome -> pure ()
@@ -602,7 +617,12 @@ declarationManifestCaptureChecks = bracket temporary removeDirectoryRecursive $ 
   dispatched <- readDeclarationOperation path
   unless (direct == typedWireInput && dispatched == ValidateJoin direct)
     (fail "direct and dispatched declaration readers changed the same captured body")
-  forM_ [ BS.empty, BS.init bytes, bytes <> BS.singleton 0
+  -- Strict version cut: preserve canonical framing while changing only v4 to v3.
+  let version4Prefix = BS.pack [0x8c, 0x67, 84, 80, 68, 74, 79, 73, 78, 0x61, 52]
+  unless (BS.take (BS.length version4Prefix) bytes == version4Prefix)
+    (fail "version refusal fixture no longer has the declared canonical framing")
+  let oldVersion = BS.take 10 bytes <> BS.singleton 51 <> BS.drop 11 bytes
+  forM_ [ BS.empty, BS.init bytes, bytes <> BS.singleton 0, oldVersion
         , BS.pack [0x98, 12] <> BS.tail bytes
         , toStrictByteString (encodeTerm (TList [TString "unknown-operation"])) ] $ \malformed -> do
     BS.writeFile path malformed

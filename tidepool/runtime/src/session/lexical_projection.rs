@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tidepool_repr::Generation;
 use tidepool_toolchain::declaration_join::{
     certify_declaration_join, AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin,
-    DeclarationExport, DeclarationJoinInput, ExactDeclarationContext, ExactLexicalNode,
+    DeclarationExport, DeclarationJoinSpec, ExactDeclarationContext, ExactLexicalNode,
     ExactModuleIdentity, ExportIdentity, InstanceInventory, ModuleSnapshot, ReservedJoin,
 };
 
@@ -201,23 +201,18 @@ pub(super) fn issue_projection(
     let digest = hash.finalize().to_hex().to_string();
     let module = format!("Tidepool.Actor.Surface.H{digest}");
     let scratch = Arc::new(tempfile::tempdir()?);
-    let materialized = context.materialize_scratch(&scratch)?;
-    let original = materialized
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.interface.unit == original_tip.unit
-                && artifact.interface.module == original_tip.module
-        })
+    let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
+    let original = join_inputs
+        .interface(original_tip)
         .ok_or(SessionError::StaleStagedDeclaration)?;
-    let input = DeclarationJoinInput {
+    let input = DeclarationJoinSpec {
         expected_public_version: digest,
         public_module: None,
         private_base: None,
         private_tip: Some(ModuleSnapshot {
-            module: original.interface.module.clone(),
-            path: original.interface.path.clone(),
-            sha256: original.interface.sha256.clone(),
+            module: original.module.clone(),
+            path: original.path.clone(),
+            sha256: original.sha256.clone(),
         }),
         writes: Vec::new(),
         reserved: ReservedJoin {
@@ -225,19 +220,11 @@ pub(super) fn issue_projection(
             module,
             path: scratch.path().join("projection.hi"),
         },
-        artifacts: materialized.artifacts,
         family_closure: families.to_vec(),
         expected_exports: exports,
         expected_instances: instances.clone(),
     };
-    let receipt = match certify_declaration_join(
-        input,
-        context,
-        includes,
-        root,
-        Arc::clone(&scratch),
-        settlement,
-    )? {
+    let receipt = match certify_declaration_join(input, join_inputs, includes, root, settlement)? {
         CertifiedDeclarationJoin::Accepted(receipt) => Arc::new(receipt),
         CertifiedDeclarationJoin::Rejected(rejected) => {
             return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
