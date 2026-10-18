@@ -15,9 +15,20 @@ keep a real-owner control proving that a duplicate transition refuses without
 replacing the original result or preventing subsequent valid use. Do not make
 production transitions permissive to compensate for duplicate test setup.
 
-For notebook policy, source reload, or settlement changes, compile the owning
-consumers with `just check exomonad-actor tidepool-runtime tidepool`, then run
-`just test-native //exomonad/actor:actor_notebook_contract_tests`. This counted
+For private notebook policy, source reload, or settlement changes confined to
+this crate, compile the actor's test configuration and the hosted consumer:
+
+```sh
+just build //exomonad/actor:exomonad_actor_unit_tests \
+  //exomonad/host:exomonad_host //exomonad/host:exomonad_host_unit_tests
+```
+
+The normal actor and runtime libraries build transitively. Changes to public
+interfaces, upstream runtime or facade code, host CLI code, or integration tests
+also require their affected consumer checks.
+
+Then run `just test-native //exomonad/actor:actor_notebook_contract_tests`, which
+builds the actor integration executable and executes four cases. This counted
 integration cohort installs the source-selected notebook policy and checks
 acknowledgement, cancellation, reload refusal, uncertainty, and cleanup through
 the real actor. Unit-only checks cannot exercise dynamic Haskell preparation or
