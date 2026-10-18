@@ -10459,6 +10459,7 @@ mod tests {
         cross_inventory: bool,
         reverse: bool,
         extend: bool,
+        same_view: bool,
     ) {
         let first = ArtifactInventory::default();
         let second = if cross_inventory {
@@ -10504,6 +10505,11 @@ mod tests {
         } else {
             (left, left_roles, right, right_roles)
         };
+        let (right, right_roles) = if same_view {
+            (left.clone(), left_roles.clone())
+        } else {
+            (right, right_roles)
+        };
         let inventory = left.inventory().clone();
         let before = inventory.metrics();
         let (actual, roles, _) = left
@@ -10528,7 +10534,7 @@ mod tests {
             actual_work, 0,
             "warm operands need no inventory closure rewalk"
         );
-        assert!(reference_work >= (count * 2 + 1) as u64);
+        assert!(reference_work >= expected.lease.payloads.len() as u64);
         assert_eq!(roles, left_roles.merge(&right_roles).unwrap());
         assert_eq!(
             actual.capture_graph_selection(),
@@ -10574,7 +10580,11 @@ mod tests {
         }
         let selected = actual.namespace()[&shared.descriptor.id];
         assert_eq!(selected, left.namespace()[&shared.descriptor.id]);
-        assert_ne!(selected, right.namespace()[&shared.descriptor.id]);
+        if same_view {
+            assert_eq!(selected, right.namespace()[&shared.descriptor.id]);
+        } else {
+            assert_ne!(selected, right.namespace()[&shared.descriptor.id]);
+        }
         let packet = actual.capture_graph_selection();
         let edges = actual.binding_dependencies();
         let entries = actual.entries();
@@ -10600,9 +10610,20 @@ mod tests {
             for cross_inventory in [false, true] {
                 for reverse in [false, true] {
                     for extend in [false, true] {
-                        check_direct_compiler_selection(count, cross_inventory, reverse, extend);
+                        check_direct_compiler_selection(
+                            count,
+                            cross_inventory,
+                            reverse,
+                            extend,
+                            false,
+                        );
                     }
                 }
+            }
+        }
+        for count in [1, 8, 64] {
+            for extend in [false, true] {
+                check_direct_compiler_selection(count, false, false, extend, true);
             }
         }
     }
@@ -10614,8 +10635,9 @@ mod tests {
             cross_inventory in proptest::bool::ANY,
             reverse in proptest::bool::ANY,
             extend in proptest::bool::ANY,
+            same_view in proptest::bool::ANY,
         ) {
-            check_direct_compiler_selection(count, cross_inventory, reverse, extend);
+            check_direct_compiler_selection(count, cross_inventory, reverse, extend, same_view);
         }
     }
 
