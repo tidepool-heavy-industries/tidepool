@@ -1,7 +1,7 @@
 //! Publication facts remain fixed while the same original gains native demand.
 //! The reference model uses authored ordinals, independently of graph queries.
 use super::*;
-use crate::artifact_inventory::{NativeArtifactDemand, NativeGroupBinding, NativeGroupKey};
+use crate::artifact_inventory::{NativeGroupBinding, NativeGroupKey};
 use crate::certified_products::PendingImportOwner;
 use proptest::prelude::*;
 use tidepool_repr::execution_schema::SymbolIdentity;
@@ -179,28 +179,6 @@ fn fixture_with_helper_version(
     (root, helper, publication)
 }
 
-fn continued_context(
-    context: &ExactDeclarationContext,
-    view: &ArtifactView,
-) -> Result<ExactDeclarationContext, CompileError> {
-    // Authenticate the changed demand through recorded recovery, then carry
-    // the parent's complete permission evidence without rebuilding its roots.
-    let support = recover_fixture_compiler_support(
-        context.compiler_input_projection().clone(),
-        view.clone(),
-        context
-            .compiler_source_support()
-            .native_offers()
-            .iter()
-            .cloned(),
-    )?
-    .restore_snapshot_evidence(&context.snapshot())?;
-    context
-        .clone()
-        .rebuild(|facts| facts.compiler_support = support)
-        .finish()
-}
-
 fn restored(
     context: &ExactDeclarationContext,
     roles: &[CompilerInputRole],
@@ -215,7 +193,7 @@ fn restored(
             .unwrap();
     let edges: Vec<_> =
         serde_json::from_slice(&serde_json::to_vec(&view.binding_dependencies()).unwrap()).unwrap();
-    RecoveredArtifactInventory::capture_bound(
+    let inventory = RecoveredArtifactInventory::capture_bound(
         scratch.path(),
         &products,
         &interfaces,
@@ -225,8 +203,28 @@ fn restored(
         &selection.bindings,
         &edges,
     )
-    .unwrap()
-    .context_with_graph_selection(&selection, roles, context.owner.facts.lexical.to_vec())
+    .unwrap();
+    // Authenticate the supplied wire roles first, including malformed-selection
+    // controls, before restoring the complete recorded owner from its expected root.
+    let authenticated = inventory.context_with_graph_selection(
+        &selection,
+        roles,
+        context.owner.facts.lexical.to_vec(),
+    )?;
+    authenticated
+        .compiler_source_support()
+        .restore_snapshot_evidence(&context.snapshot())?;
+    use fvm_ipld_blockstore::Blockstore;
+    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+    let mut writer = crate::exact_context::Materializer::new(&store);
+    let persisted = writer
+        .materialize_context(None, &context.snapshot())
+        .unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        store.put_keyed(&cid, &bytes).unwrap();
+    }
+    let acquired = crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
+    inventory.context_for_expected_snapshot(persisted.root(), &acquired)
 }
 
 fn property_config() -> proptest::test_runner::Config {
@@ -304,8 +302,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let (root, helper, publication) = fixture(initial);
         let original = publication.context();
         let expected_publication = original.semantic_sha256();
-        let expected_roles = original.compiler_input_roles();
-        let expected_artifacts = original.artifact_view().artifact_ids();
+        let mut expected_roles = original.compiler_input_roles();
+        let mut expected_artifacts = original.artifact_view().artifact_ids();
         let initial_groups = std::iter::once(NativeGroupKey {
             artifact: root.descriptor.id,
             original_ordinal: ORDINALS[initial],
@@ -317,6 +315,39 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         .collect::<BTreeSet<_>>();
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
         let mut context = original.as_ref().clone();
+        // Earn broad body availability independently of the initial source choice.
+        // Calibration below refuses a separately issued, incompatible binding pair.
+        let inventory = context.artifact_view().inventory();
+        let entries = context.artifact_view().entries().into_iter().filter(|entry| {
+            matches!(&entry.payload, ArtifactPayload::Original(_))
+                || (entry.descriptor.owner != root.descriptor.owner
+                    && entry.descriptor.owner != helper.descriptor.owner)
+        }).collect::<Vec<_>>();
+        let all_groups = ORDINALS.iter().map(|ordinal| NativeGroupKey {
+            artifact: root.descriptor.id, original_ordinal: *ordinal,
+        }).chain(std::iter::once(NativeGroupKey {
+            artifact: helper.descriptor.id, original_ordinal: 7,
+        })).collect();
+        let available = inventory.admit_recovery_selection(
+            context.artifact_view(), vec![], &all_groups,
+        ).unwrap();
+        let full = issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&entries).unwrap(), available,
+        ).unwrap();
+        let before = context.artifact_view().capture_graph_selection();
+        let full_graph = full.artifacts().capture_graph_selection();
+        for binding in &before.namespace {
+            prop_assert!(full_graph.namespace.contains(binding), "Full support keeps the exact current namespace binding");
+        }
+        let support = context.compiler_source_support()
+            .retain_offers(full.native_offers().iter().cloned()).unwrap()
+            .retain_normalized_availability(full.native_availability()).unwrap();
+        let row = support.native_availability().rows()
+            .find(|row| row.original.descriptor.id == root.descriptor.id).unwrap();
+        prop_assert!(ORDINALS.iter().all(|ordinal| row.permits(*ordinal)));
+        prop_assert_eq!(support.artifacts().selected_native_groups(), initial_groups.clone());
+        context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
+        let mut outputs = BTreeMap::new();
         // Every history reaches the causal interaction, even after shrinking:
         // later same-owner body -> compose publication -> durable reconstruction.
         let history = history
@@ -348,14 +379,41 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             record_parent: None,
                         },
                     };
+                    let module = format!("HistoryOutput{ordinal}");
+                    let product = crate::certified_products::tests::recovered_witness_fixtures(&[
+                        crate::certified_products::fixture_finalized_product_with_requirements(
+                            crate::certified_products::tests::original_groups_fixture_with_interface(
+                                &module, vec![(0, vec![import.clone()])], 1, &BTreeMap::new(),
+                                format!("{module} interface").into_bytes(),
+                            ), [2; 32], Some(BTreeMap::from([(
+                                ("fixture".into(), "HistoryRoot".into()), root.descriptor.interface_sha256,
+                            )])),
+                        ),
+                    ]).remove(0).product;
+                    let output = Arc::new(ArtifactEntry::original([2; 32], product.clone()).unwrap());
+                    let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+                    let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
+                    let support = context.compiler_source_support().admit_checked_products([2; 32], &[product]).unwrap();
+                    context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
+                    prop_assert!(context.artifact_view().dependencies().iter().any(|(dependent, required, edge)| {
+                        *dependent == output.descriptor.id && *required == root.descriptor.id
+                            && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                                dependent_ordinal: 0, required_ordinal,
+                            } if *required_ordinal == ordinal)
+                    }), "the issued output body retains its exact Root ordinal dependency");
+                    if outputs.insert(ordinal, output.descriptor.id).is_none() {
+                        expected_roles.extend(output_role);
+                        expected_artifacts.insert(output.descriptor.id);
+                        expected_artifacts.insert(canonical.descriptor.id);
+                    }
                     let imports = [import];
-                    let target = context.owner.facts.compiler_support.artifacts().inventory()
+                    let target = context.artifact_view().inventory()
                         .admit_product_artifacts(context.artifact_view(), vec![root.clone()],
-                            NativeArtifactDemand::CertifiedTargetImports(&imports), None)
+                            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports), None)
                         .unwrap().into_target().unwrap().bind_target(None, imports.to_vec());
-                    context = continued_context(&context, target.artifacts()).unwrap();
                     let groups = target.resolve().unwrap().groups().clone();
-                    let issuer_originals = expected_roles.iter().filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
+                    let issuer_originals = original.compiler_input_roles().iter()
+                        .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
                     let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
                         .all(|group| original.artifact_view().contains_issued_native_group(*group));
                     let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
@@ -470,7 +528,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     duplicate_refusals.set(duplicate_refusals.get() + 1);
                 }
             }
-            prop_assert_eq!(context.compiler_input_roles(), expected_roles.clone());
+            let actual_roles = context.compiler_input_roles();
+            prop_assert_eq!(actual_roles.len(), expected_roles.len());
+            prop_assert!(expected_roles.iter().all(|role| actual_roles.contains(role)));
             prop_assert_eq!(context.lexical_graph(), original.lexical_graph());
             prop_assert_eq!(
                 context.artifact_view().artifact_ids(),
@@ -493,6 +553,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                                 original_ordinal: 7
                             })
                     )
+                    .chain(outputs.values().map(|artifact| NativeGroupKey {
+                        artifact: *artifact, original_ordinal: 0,
+                    }))
                     .collect::<BTreeSet<_>>()
             );
             let Value::Array(rows) = context.published_scope_value().unwrap() else {
