@@ -112,8 +112,11 @@ import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
-import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc, withInspectionWork)
-import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
+import Tidepool.Introspection
+  ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
+  , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
+import Tidepool.InspectionRunner
+  ( runInspectionRequests, runHostedLookupRequests, HostedMetadataEnvironment(..), isInspectionTypeQuery )
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -376,15 +379,25 @@ runInspectionMode bound _path = do
   res <- trySynchronous $ withInspectionWork $ \work -> do
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-        compile purpose path = compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
+        compile purpose path = do
+          inspectionCompilationWork work
+          compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
 
         inspect successful requests = runBoundGhc bound $ runInspectionGhc work
           (crHscEnv successful)
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
           (crInspectionProbes successful) requests
-    results <- runInspectionRequests args compile inspect
-    BS.writeFile out (encodeInspectionResults results)
+    bytes <- case requestHostedLookup args of
+      Nothing -> encodeInspectionResults <$> runInspectionRequests args compile inspect
+      Just batch -> encodeHostedLookupOutput <$> runHostedLookupRequests args compile inspect (\metadata answers ->
+        case metadata of
+          HostedMetadataReady successful | needsHostedFallback batch answers -> runBoundGhc bound $
+            runHostedLookupDiscoveryGhc work (crHscEnv successful) (crTargetTcGblEnv successful)
+              (crTargetRdrEnv successful) batch answers
+          HostedMetadataRejected diagnostic -> pure (finishHostedKnown batch answers (Just diagnostic))
+          _ -> pure (finishHostedKnown batch answers Nothing))
+    BS.writeFile out bytes
   either throwIO (const (pure [])) res
 
 

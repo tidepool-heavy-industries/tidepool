@@ -1,10 +1,14 @@
 //! Structured lookup mechanics shared by the self-hosted lookup tool.
 use crate::lookup_tool;
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
-use tidepool_runtime::session::{
-    ExactNameQuery, IdentifierNamespace, InspectionQuery, InspectionResult, LookupAnswer,
-    LookupNameMode, NameScope,
+use tidepool_extract_cmd::{
+    ExactNameInspection, InspectionNamespace, InspectionScope, LookupNameInspection,
 };
+use tidepool_runtime::session::inspection::{
+    HostedFallback, HostedLookupAnswer, HostedLookupBatch, HostedLookupDiscovery,
+    HostedLookupOperation, HostedLookupOutput, HostedLookupQuery, HostedOperationIdentity,
+};
+use tidepool_runtime::session::{InspectionQuery, LookupNameMode, NameScope};
 
 #[derive(Debug)]
 pub(crate) enum LookupInspectionError {
@@ -234,26 +238,24 @@ pub(crate) enum LookupModuleSearch {
     #[haskell(module = "Tidepool.Effects.Core", name = "LookupModulesAttempted")]
     Attempted,
 }
-fn attempted_scopes(results: &[InspectionResult]) -> Vec<LookupSearchScope> {
+fn search_scopes(scopes: &[NameScope]) -> Vec<LookupSearchScope> {
+    scopes
+        .iter()
+        .map(|scope| match scope {
+            NameScope::Current => LookupSearchScope::Current,
+            NameScope::PublicModule(module) => LookupSearchScope::Module(module.clone()),
+        })
+        .collect()
+}
+
+fn attempted_scopes(results: &[HostedLookupAnswer]) -> Vec<LookupSearchScope> {
     let mut scopes = Vec::new();
     for result in results {
         let observed = match result {
-            InspectionResult::Lookup { scopes, .. }
-            | InspectionResult::ModuleNotFound { scopes, .. } => scopes
-                .iter()
-                .map(|scope| match scope {
-                    NameScope::Current => LookupSearchScope::Current,
-                    NameScope::PublicModule(module) => LookupSearchScope::Module(module.clone()),
-                })
-                .collect::<Vec<_>>(),
-            InspectionResult::Browse { module, .. } => vec![if module.is_empty() {
-                LookupSearchScope::Current
-            } else {
-                LookupSearchScope::Module(module.clone())
-            }],
-            InspectionResult::TypeMatches { .. } => vec![LookupSearchScope::Current],
-            InspectionResult::Rejected { .. } => vec![],
-            _ => vec![],
+            HostedLookupAnswer::Name { scopes, .. }
+            | HostedLookupAnswer::Reference { scopes, .. } => search_scopes(scopes),
+            HostedLookupAnswer::Type { .. } => vec![LookupSearchScope::Current],
+            HostedLookupAnswer::Rejected { .. } => vec![],
         };
         for scope in observed {
             if !scopes.contains(&scope) {
@@ -307,16 +309,6 @@ pub(crate) enum LookupNamespace {
     Constructor,
     #[haskell(module = "Tidepool.Effects.Core", name = "LookupFieldNamespace")]
     Field,
-}
-impl LookupNamespace {
-    fn from_kind(kind: &str) -> Self {
-        match kind {
-            "type" => Self::Type,
-            "constructor" => Self::Constructor,
-            "record-selector" => Self::Field,
-            _ => Self::Value,
-        }
-    }
 }
 impl From<&tidepool_runtime::session::IdentifierRef> for LookupReference {
     fn from(r: &tidepool_runtime::session::IdentifierRef) -> Self {
@@ -505,9 +497,7 @@ pub(crate) fn queries(
 }
 
 struct LookupInspectionPlan {
-    queries: Vec<InspectionQuery>,
-    primary_len: usize,
-    reference_indices: Vec<usize>,
+    batch: HostedLookupBatch,
 }
 
 impl LookupInspectionPlan {
@@ -515,40 +505,98 @@ impl LookupInspectionPlan {
         prepared: &[lookup_tool::PreparedLookup],
         imports: &str,
         references: &[LookupReference],
-    ) -> Self {
-        let primary = queries(prepared, imports);
-        let mut plan = Self {
-            primary_len: primary.len(),
-            queries: primary,
-            reference_indices: vec![],
+        discovery: Option<(usize, &[String])>,
+    ) -> Result<Self, String> {
+        let ordinal = |index| {
+            u32::try_from(index).map_err(|_| "lookup ordinal exceeds worker protocol".to_owned())
         };
-        for reference in references {
-            let result_index = plan.include(InspectionQuery::ExactName(ExactNameQuery {
+        let mut operations = Vec::new();
+        for (index, prepared) in prepared.iter().enumerate() {
+            let Some(query) = queries(std::slice::from_ref(prepared), imports).pop() else {
+                continue;
+            };
+            let query = match query {
+                InspectionQuery::LookupName {
+                    query,
+                    qualifier_module,
+                    mode,
+                } => HostedLookupQuery::Name(LookupNameInspection {
+                    query,
+                    qualifier_module,
+                    mode,
+                }),
+                InspectionQuery::TypeSearch(query) => HostedLookupQuery::TypeSearch(query),
+                _ => unreachable!("prepared lookup has only name and type operations"),
+            };
+            operations.push(HostedLookupOperation::Primary {
+                ordinal: ordinal(index)?,
+                origin: prepared.query.clone(),
+                query,
+            });
+        }
+        for (index, reference) in references.iter().enumerate() {
+            let query = ExactNameInspection {
                 scope: if reference.module.is_empty() {
-                    NameScope::Current
+                    InspectionScope::Current
                 } else {
-                    NameScope::PublicModule(reference.module.clone())
+                    InspectionScope::PublicModule(reference.module.clone())
                 },
                 namespace: match reference.namespace {
-                    LookupNamespace::Value => IdentifierNamespace::Value,
-                    LookupNamespace::Type => IdentifierNamespace::Type,
-                    LookupNamespace::Constructor => IdentifierNamespace::Constructor,
-                    LookupNamespace::Field => IdentifierNamespace::Field,
+                    LookupNamespace::Value => InspectionNamespace::Value,
+                    LookupNamespace::Type => InspectionNamespace::Type,
+                    LookupNamespace::Constructor => InspectionNamespace::Constructor,
+                    LookupNamespace::Field => InspectionNamespace::Field,
                 },
                 name: reference.name.clone(),
-            }));
-            plan.reference_indices.push(result_index);
+            };
+            if let Some(HostedLookupOperation::ExactReference { destinations, .. }) = operations.iter_mut().find(|operation| matches!(operation, HostedLookupOperation::ExactReference { query: existing, .. } if *existing == query)) {
+                destinations.push(ordinal(index)?);
+            } else {
+                operations.push(HostedLookupOperation::ExactReference { destinations: vec![ordinal(index)?], query });
+            }
         }
-        plan
-    }
-
-    fn include(&mut self, query: InspectionQuery) -> usize {
-        if let Some(index) = self.queries.iter().position(|existing| *existing == query) {
-            return index;
-        }
-        let index = self.queries.len();
-        self.queries.push(query);
-        index
+        let discovery = discovery
+            .map(|(cap, workspace_modules)| {
+                let mut modules = Vec::new();
+                for prepared in prepared {
+                    if let lookup_tool::PreparedLookupKind::Name(name)
+                    | lookup_tool::PreparedLookupKind::Qualified(name) = &prepared.kind
+                    {
+                        if let Some((qualifier, _)) = name.rsplit_once('.') {
+                            let module = lookup_tool::resolve_qualifier_module(imports, qualifier)
+                                .unwrap_or_else(|| qualifier.into());
+                            if !modules.contains(&module) {
+                                modules.push(module);
+                            }
+                        }
+                    }
+                }
+                let named_count = modules.len();
+                for module in workspace_modules {
+                    if !modules.contains(module) {
+                        modules.push(module.clone());
+                    }
+                }
+                let eligible_modules = ordinal(modules.len())?;
+                modules.truncate(128);
+                let mut scopes = modules
+                    .into_iter()
+                    .map(InspectionScope::PublicModule)
+                    .collect::<Vec<_>>();
+                scopes.insert(named_count.min(scopes.len()), InspectionScope::Current);
+                Ok::<_, String>(HostedLookupDiscovery {
+                    candidate_limit: cap as u32,
+                    scopes,
+                    eligible_modules,
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            batch: HostedLookupBatch {
+                operations,
+                discovery,
+            },
+        })
     }
 }
 
@@ -645,7 +693,7 @@ pub(crate) fn execute(
     live_modules: &[String],
     workspace_modules: &[String],
     usage: crate::UsagePointerTable,
-    mut inspect: impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+    mut inspect: impl FnMut(&HostedLookupBatch) -> Result<HostedLookupOutput, LookupInspectionError>,
 ) -> LookupBatch {
     let mut batch = LookupBatch {
         search_receipt: LookupSearchReceipt::new(view.clone(), request.discover),
@@ -681,412 +729,101 @@ pub(crate) fn execute(
             }
         }
     };
-    // Exact name decisions and explicit references share one checked environment.
-    // Type searches retain their own wildcard transform.
-    let plan = LookupInspectionPlan::new(&prepared, imports, &request.references);
-    batch.search_receipt.disposition = LookupSearchDisposition::Captured;
-    let InspectionAnswers {
-        results: mut inspected,
-        unavailable,
-    } = if plan.queries.is_empty() {
-        InspectionAnswers {
-            results: vec![],
-            unavailable: None,
+    let cap = request.candidate_limit.clamp(0, 128) as usize;
+    let eligible_query = !queries(&prepared, imports).is_empty();
+    let discovery = (request.discover && eligible_query).then_some((cap, workspace_modules));
+    let plan = match LookupInspectionPlan::new(&prepared, imports, &request.references, discovery) {
+        Ok(plan) => plan,
+        Err(diagnostic) => {
+            batch.issue = Some(diagnostic);
+            if request.discover {
+                batch.search_receipt.discovery =
+                    LookupDiscovery::NotRun(LookupSearchNotRun::InvalidRequest);
+            }
+            return batch;
         }
+    };
+    batch.search_receipt.disposition = LookupSearchDisposition::Captured;
+    let (output, unavailable, isolated) = if plan.batch.operations.is_empty() {
+        (
+            HostedLookupOutput {
+                answers: vec![],
+                discovery: None,
+            },
+            None,
+            false,
+        )
     } else {
-        match inspect_checked(&plan.queries, &mut inspect) {
-            Ok(results) => InspectionAnswers {
-                results,
-                unavailable: None,
-            },
-            Err(InspectionFailure::SourceRejected(diagnostic)) => isolate(
-                &prepared,
-                imports,
-                &plan.queries[plan.primary_len..],
-                &mut inspect,
-                &diagnostic,
+        match inspect_checked(&plan.batch, &mut inspect) {
+            Ok(output) => (output, None, false),
+            Err(InspectionFailure::SourceRejected(diagnostic)) => {
+                let (answers, unavailable) = isolate(&plan.batch, &mut inspect, &diagnostic);
+                (
+                    HostedLookupOutput {
+                        answers,
+                        discovery: None,
+                    },
+                    unavailable,
+                    true,
+                )
+            }
+            Err(InspectionFailure::Unavailable(diagnostic)) => (
+                HostedLookupOutput {
+                    answers: rejected(&plan.batch.operations, &diagnostic),
+                    discovery: None,
+                },
+                Some(diagnostic),
+                false,
             ),
-            Err(InspectionFailure::Unavailable(diagnostic)) => InspectionAnswers {
-                results: rejected(plan.queries.len(), &diagnostic),
-                unavailable: Some(diagnostic),
-            },
         }
     };
     batch.issue = unavailable;
-    batch.search_receipt.attempted_scopes = attempted_scopes(&inspected);
-    let reference_results = plan
-        .reference_indices
-        .iter()
-        .map(|index| inspected[*index].clone())
-        .collect::<Vec<_>>();
-    inspected.truncate(plan.primary_len);
-    let mut response = lookup_tool::resolve(
-        prepared.clone(),
-        inspected.clone(),
-        live_modules,
-        workspace_modules,
-        usage.clone(),
-    );
-    for (index, reference) in request.references.iter().enumerate() {
-        let query = if reference.module.is_empty() {
-            reference.name.clone()
+    batch.search_receipt.attempted_scopes = attempted_scopes(&output.answers);
+    if request.discover && !eligible_query {
+        batch.search_receipt.discovery = LookupDiscovery::NotRun(if cap == 0 {
+            LookupSearchNotRun::ZeroBudget
         } else {
-            format!("{}.{}", reference.module, reference.name)
-        };
-        let outcome = match reference_results.get(index).cloned() {
-            Some(result @ InspectionResult::Lookup { .. }) => {
-                let prepared = vec![lookup_tool::PreparedLookup {
-                    query: query.clone(),
-                    kind: lookup_tool::PreparedLookupKind::Name(reference.name.clone()),
-                }];
-                lookup_tool::resolve(
-                    prepared,
-                    vec![result],
-                    live_modules,
-                    workspace_modules,
-                    usage.clone(),
-                )
-                .results
-                .remove(0)
-                .outcome
+            LookupSearchNotRun::NoEligibleQuery
+        });
+    } else if let Some(selected) = output.discovery {
+        let (module_search, scopes) = match selected.fallback {
+            HostedFallback::Attempted(scopes) => {
+                (LookupModuleSearch::Attempted, search_scopes(&scopes))
             }
-            Some(InspectionResult::Rejected { diagnostic }) => {
-                lookup_tool::LookupOutcome::Rejected { diagnostic }
+            HostedFallback::Unavailable(diagnostic) => {
+                if batch.issue.is_none() {
+                    batch.issue = Some(bound_diagnostic(&diagnostic, DIAGNOSTIC_BOUND));
+                }
+                (LookupModuleSearch::Unavailable, vec![])
             }
-            Some(other) => lookup_tool::LookupOutcome::Rejected {
-                diagnostic: other.render(),
-            },
-            None => lookup_tool::LookupOutcome::Rejected {
-                diagnostic: "lookup compiler omitted reference result".into(),
-            },
+            HostedFallback::NotNeeded | HostedFallback::ZeroBudget => {
+                (LookupModuleSearch::NotNeeded, vec![])
+            }
         };
-        response
-            .results
-            .push(lookup_tool::LookupResult { query, outcome });
-    }
-    let cap = request.candidate_limit.clamp(0, 128) as usize;
-    let eligible_query = prepared.iter().any(|query| {
-        !matches!(
-            query.kind,
-            lookup_tool::PreparedLookupKind::Doc(_) | lookup_tool::PreparedLookupKind::Rejected(_)
-        )
-    });
-    if request.discover && cap == 0 {
-        batch.search_receipt.discovery = LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget);
-    } else if request.discover && !eligible_query {
-        batch.search_receipt.discovery =
-            LookupDiscovery::NotRun(LookupSearchNotRun::NoEligibleQuery);
-    }
-    if request.discover && cap > 0 {
-        let mut groups: Vec<Vec<LookupCandidate>> = vec![];
-        let mut cursor = 0;
-        let originals: Vec<_> = response
-            .results
-            .iter()
-            .flat_map(|r| match &r.outcome {
-                lookup_tool::LookupOutcome::Found { matches, .. } => matches
-                    .iter()
-                    .filter_map(|e| {
-                        e.defining_module.as_ref().map(|module| LookupReference {
-                            module: module.clone(),
-                            name: e.name.clone(),
-                            namespace: match e.kind {
-                                lookup_tool::LookupEntryKind::Type => LookupNamespace::Type,
-                                lookup_tool::LookupEntryKind::Constructor => {
-                                    LookupNamespace::Constructor
-                                }
-                                lookup_tool::LookupEntryKind::RecordSelector => {
-                                    LookupNamespace::Field
-                                }
-                                _ => LookupNamespace::Value,
-                            },
-                        })
-                    })
-                    .collect(),
-                _ => Vec::new(),
+        batch.candidates = selected
+            .candidates
+            .into_iter()
+            .map(|candidate| LookupCandidate {
+                query: candidate.query,
+                origins: candidate.origins,
+                summary: candidate.summary,
+                local: candidate.local,
+                reference: candidate.reference.as_ref().map(Into::into),
             })
             .collect();
-        let mut discovery_modules: Vec<String> = vec![];
-        for query in &prepared {
-            if let lookup_tool::PreparedLookupKind::Name(name)
-            | lookup_tool::PreparedLookupKind::Qualified(name) = &query.kind
-            {
-                if let Some((qualifier, _)) = name.rsplit_once('.') {
-                    let module = lookup_tool::resolve_qualifier_module(imports, qualifier)
-                        .unwrap_or_else(|| qualifier.into());
-                    if !discovery_modules.contains(&module) {
-                        discovery_modules.push(module);
-                    }
-                }
-            }
-        }
-        let named_count = discovery_modules.len();
-        let local_count = named_count + 1;
-        for module in workspace_modules {
-            if !discovery_modules.contains(module) {
-                discovery_modules.push(module.clone());
-            }
-        }
-        // Module metadata is compiler-owned. Discovery is bounded independently of display.
-        let eligible_modules = discovery_modules.len();
-        discovery_modules.truncate(128);
-        let misses = response.results.iter().zip(&prepared).any(|(r, q)| {
-            matches!(r.outcome, lookup_tool::LookupOutcome::NotFound { .. })
-                && matches!(
-                    q.kind,
-                    lookup_tool::PreparedLookupKind::Name(_)
-                        | lookup_tool::PreparedLookupKind::Qualified(_)
-                )
-        });
-        let mut discovery_scopes = vec![];
-        let mut submitted_modules = 0;
-        let module_search = if !misses {
-            LookupModuleSearch::NotNeeded
-        } else if batch.issue.is_some() {
-            LookupModuleSearch::Unavailable
+        batch.search_receipt.discovery = if cap == 0 {
+            LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
         } else {
-            LookupModuleSearch::Attempted
-        };
-        let exports = if misses && batch.issue.is_none() {
-            let mut discovery_queries = discovery_modules
-                .iter()
-                .map(|module| InspectionQuery::Browse {
-                    module: module.clone(),
-                    expanded: true,
-                })
-                .collect::<Vec<_>>();
-            discovery_queries.insert(
-                named_count.min(discovery_queries.len()),
-                InspectionQuery::ScopeBrowse,
-            );
-            submitted_modules = discovery_queries
-                .iter()
-                .filter(|query| matches!(query, InspectionQuery::Browse { .. }))
-                .count();
-            match inspect_checked(&discovery_queries, &mut inspect) {
-                Ok(results) => {
-                    discovery_scopes = attempted_scopes(&results);
-                    results
-                }
-                Err(error) => {
-                    batch.issue = Some(bound_diagnostic(
-                        &format!(
-                            "lookup candidate discovery unavailable: {}",
-                            error.diagnostic()
-                        ),
-                        DIAGNOSTIC_BOUND,
-                    ));
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        for (query, result) in prepared.iter().zip(&response.results) {
-            let count = queries(std::slice::from_ref(query), imports).len();
-            let own = &inspected[cursor..cursor + count];
-            cursor += count;
-            let mut candidates = vec![];
-            if matches!(
-                query.kind,
-                lookup_tool::PreparedLookupKind::Doc(_)
-                    | lookup_tool::PreparedLookupKind::Rejected(_)
-            ) {
-                groups.push(candidates);
-                continue;
-            }
-            match &result.outcome {
-                lookup_tool::LookupOutcome::Found {
-                    matches: returned, ..
-                } => {
-                    if let Some(first) = own.first() {
-                        let refs: Vec<_> = match first {
-                            InspectionResult::Lookup {
-                                answer: LookupAnswer::Info(entries),
-                                ..
-                            } => entries
-                                .iter()
-                                .filter(|e| {
-                                    returned
-                                        .iter()
-                                        .any(|r| r.name == e.name && r.defining_module == e.module)
-                                })
-                                .flat_map(|e| e.references.iter())
-                                .collect(),
-                            InspectionResult::TypeMatches { matches, .. } => matches
-                                .iter()
-                                .filter(|e| {
-                                    returned
-                                        .iter()
-                                        .any(|r| r.name == e.name && r.defining_module == e.module)
-                                })
-                                .flat_map(|e| e.references.iter())
-                                .collect(),
-                            _ => vec![],
-                        };
-                        for reference in refs {
-                            let qualified = if reference.module.is_empty() {
-                                reference.name.clone()
-                            } else {
-                                format!("{}.{}", reference.module, reference.name)
-                            };
-                            if !originals.contains(&LookupReference::from(reference)) {
-                                candidates.push(LookupCandidate {
-                                    query: qualified,
-                                    origins: vec![query.query.clone()],
-                                    summary: format!(
-                                        "{:?} referenced by {}",
-                                        reference.namespace, query.query
-                                    ),
-                                    local: true,
-                                    reference: Some(reference.into()),
-                                });
-                            }
-                        }
-                    }
-                }
-                lookup_tool::LookupOutcome::Ambiguous { matches, .. } => {
-                    for entry in matches {
-                        candidates.push(LookupCandidate {
-                            query: entry.defining_module.as_ref().map_or_else(
-                                || entry.name.clone(),
-                                |m| format!("{m}.{}", entry.name),
-                            ),
-                            origins: vec![query.query.clone()],
-                            summary: entry.signature_or_declaration.clone(),
-                            local: true,
-                            reference: entry.defining_module.as_ref().map(|module| {
-                                LookupReference {
-                                    module: module.clone(),
-                                    name: entry.name.clone(),
-                                    namespace: match entry.kind {
-                                        lookup_tool::LookupEntryKind::Type => LookupNamespace::Type,
-                                        lookup_tool::LookupEntryKind::Constructor => {
-                                            LookupNamespace::Constructor
-                                        }
-                                        lookup_tool::LookupEntryKind::RecordSelector => {
-                                            LookupNamespace::Field
-                                        }
-                                        _ => LookupNamespace::Value,
-                                    },
-                                }
-                            }),
-                        });
-                    }
-                }
-                lookup_tool::LookupOutcome::NotFound { .. }
-                    if matches!(
-                        query.kind,
-                        lookup_tool::PreparedLookupKind::Name(_)
-                            | lookup_tool::PreparedLookupKind::Qualified(_)
-                    ) =>
-                {
-                    for (index, export) in exports.iter().enumerate() {
-                        if let InspectionResult::Browse {
-                            module, entries, ..
-                        } = export
-                        {
-                            for entry in entries {
-                                let module = if module.is_empty() {
-                                    entry.module.as_deref().unwrap_or("")
-                                } else {
-                                    module.as_str()
-                                };
-                                candidates.push(LookupCandidate {
-                                    query: if module.is_empty() {
-                                        entry.name.clone()
-                                    } else {
-                                        format!("{module}.{}", entry.name)
-                                    },
-                                    origins: vec![query.query.clone()],
-                                    summary: entry.display.clone(),
-                                    local: index < local_count,
-                                    reference: Some(LookupReference {
-                                        module: module.to_owned(),
-                                        name: entry.name.clone(),
-                                        namespace: LookupNamespace::from_kind(&entry.kind),
-                                    }),
-                                });
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if matches!(result.outcome, lookup_tool::LookupOutcome::NotFound { .. }) {
-                let leaf = query.query.rsplit('.').next().unwrap_or(&query.query);
-                candidates.sort_by_key(|candidate| {
-                    (
-                        !candidate.local,
-                        lookup_tool::edit_distance(
-                            leaf,
-                            candidate
-                                .query
-                                .rsplit('.')
-                                .next()
-                                .unwrap_or(&candidate.query),
-                        ),
-                    )
-                });
-            }
-            groups.push(candidates);
-        }
-        // Round-robin admission prevents the first query monopolizing the shared budget.
-        let enumerated_occurrences = groups.iter().map(Vec::len).sum();
-        let mut groups: Vec<_> = groups.into_iter().map(Vec::into_iter).collect();
-        while batch.candidates.len() < cap {
-            let mut progressed = false;
-            for group in &mut groups {
-                if let Some(candidate) = group.next() {
-                    progressed = true;
-                    if let Some(existing) = batch
-                        .candidates
-                        .iter_mut()
-                        .find(|c| c.query == candidate.query && c.reference == candidate.reference)
-                    {
-                        for origin in candidate.origins {
-                            if !existing.origins.contains(&origin) {
-                                existing.origins.push(origin);
-                            }
-                        }
-                    } else {
-                        batch.candidates.push(candidate);
-                    }
-                    if batch.candidates.len() == cap {
-                        break;
-                    }
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
-        // A full budget limits declarations, not the original queries linked to them.
-        let mut discarded_occurrences = 0;
-        for candidate in groups.into_iter().flatten() {
-            if let Some(existing) = batch.candidates.iter_mut().find(|existing| {
-                existing.query == candidate.query && existing.reference == candidate.reference
-            }) {
-                for origin in candidate.origins {
-                    if !existing.origins.contains(&origin) {
-                        existing.origins.push(origin);
-                    }
-                }
-            } else {
-                discarded_occurrences += 1;
-            }
-        }
-        if eligible_query {
-            batch.search_receipt.discovery = LookupDiscovery::Observed(LookupDiscoveryReceipt {
+            LookupDiscovery::Observed(LookupDiscoveryReceipt {
                 module_search,
-                submitted_modules: LookupCount::known(submitted_modules),
-                attempted_scopes: discovery_scopes,
-                eligible_modules: LookupCount::known(eligible_modules),
+                attempted_scopes: scopes,
+                eligible_modules: LookupCount::known(selected.eligible_modules),
+                submitted_modules: LookupCount::known(selected.submitted_modules),
                 module_limit: 128,
-                enumerated_occurrences: LookupCount::known(enumerated_occurrences),
+                enumerated_occurrences: LookupCount::known(selected.enumerated_occurrences),
                 retained_candidates: LookupCount::known(batch.candidates.len()),
-                discarded_occurrences: LookupCount::known(discarded_occurrences),
-                distinct_discarded: if discarded_occurrences == 0 {
+                discarded_occurrences: LookupCount::known(selected.discarded_occurrences),
+                distinct_discarded: if selected.discarded_occurrences == 0 {
                     LookupCount::Known(0)
                 } else {
                     LookupCount::Unknown
@@ -1094,10 +831,66 @@ pub(crate) fn execute(
                 unenumerated_candidates: LookupCount::Unknown,
                 candidate_limit: cap as i64,
                 broader_module_count: LookupCount::Unknown,
-                issue: batch.issue.clone(),
-            });
+                issue: selected.issue.or_else(|| batch.issue.clone()),
+            })
+        };
+    } else if request.discover && (isolated || batch.issue.is_some()) {
+        // Isolation may recover primary facts; it never replays fallback search.
+        batch.search_receipt.discovery = LookupDiscovery::NotRun(LookupSearchNotRun::Unavailable);
+    }
+    let primary_len = prepared.len();
+    let mut normalizer_inputs = std::collections::BTreeMap::new();
+    for answer in output.answers {
+        match &answer {
+            HostedLookupAnswer::Name { ordinal, .. }
+            | HostedLookupAnswer::Type { ordinal, .. }
+            | HostedLookupAnswer::Rejected {
+                operation: HostedOperationIdentity::Primary(ordinal),
+                ..
+            } => {
+                normalizer_inputs.insert(*ordinal as usize, answer);
+            }
+            HostedLookupAnswer::Reference { destinations, .. }
+            | HostedLookupAnswer::Rejected {
+                operation: HostedOperationIdentity::Reference(destinations),
+                ..
+            } => {
+                // Repeated authored references share one physical query. Only
+                // their already-bounded selected result needs repeated delivery.
+                let destinations = destinations.clone();
+                let mut answer = Some(answer);
+                for (index, destination) in destinations.iter().enumerate() {
+                    let delivered = if index + 1 == destinations.len() {
+                        answer.take().expect("last reference delivery")
+                    } else {
+                        answer.as_ref().expect("reference delivery").clone()
+                    };
+                    normalizer_inputs.insert(primary_len + *destination as usize, delivered);
+                }
+            }
         }
     }
+    let mut prepared = prepared;
+    prepared.extend(
+        request
+            .references
+            .into_iter()
+            .map(|reference| lookup_tool::PreparedLookup {
+                query: if reference.module.is_empty() {
+                    reference.name.clone()
+                } else {
+                    format!("{}.{}", reference.module, reference.name)
+                },
+                kind: lookup_tool::PreparedLookupKind::Name(reference.name),
+            }),
+    );
+    let response = lookup_tool::resolve(
+        prepared,
+        normalizer_inputs,
+        live_modules,
+        workspace_modules,
+        usage.clone(),
+    );
     batch.search_receipt.matches = response
         .results
         .iter()
@@ -1186,45 +979,39 @@ enum InspectionFailure {
     Unavailable(String),
 }
 
-impl InspectionFailure {
-    fn diagnostic(&self) -> &str {
-        match self {
-            Self::SourceRejected(diagnostic) | Self::Unavailable(diagnostic) => diagnostic,
-        }
-    }
-}
-
-struct InspectionAnswers {
-    results: Vec<InspectionResult>,
-    unavailable: Option<String>,
-}
-
-fn rejected(count: usize, diagnostic: &str) -> Vec<InspectionResult> {
+fn rejected(operations: &[HostedLookupOperation], diagnostic: &str) -> Vec<HostedLookupAnswer> {
     let diagnostic = bound_diagnostic(diagnostic, DIAGNOSTIC_BOUND);
-    (0..count)
-        .map(|_| InspectionResult::Rejected {
+    operations
+        .iter()
+        .map(|operation| HostedLookupAnswer::Rejected {
+            operation: match operation {
+                HostedLookupOperation::Primary { ordinal, .. } => {
+                    HostedOperationIdentity::Primary(*ordinal)
+                }
+                HostedLookupOperation::ExactReference { destinations, .. } => {
+                    HostedOperationIdentity::Reference(destinations.clone())
+                }
+            },
             diagnostic: diagnostic.clone(),
         })
         .collect()
 }
 
 fn inspect_checked(
-    queries: &[InspectionQuery],
-    inspect: &mut impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
-) -> Result<Vec<InspectionResult>, InspectionFailure> {
-    match inspect(queries) {
-        Ok(values) if values.len() == queries.len() => Ok(values),
-        Ok(values) => Err(InspectionFailure::Unavailable(format!(
-            "lookup compiler returned {} results for {} queries",
-            values.len(),
-            queries.len()
-        ))),
+    batch: &HostedLookupBatch,
+    inspect: &mut impl FnMut(&HostedLookupBatch) -> Result<HostedLookupOutput, LookupInspectionError>,
+) -> Result<HostedLookupOutput, InspectionFailure> {
+    let result = inspect(batch).and_then(|output| {
+        output
+            .validate_for(batch)
+            .map_err(LookupInspectionError::Compiler)?;
+        Ok(output)
+    });
+    match result {
+        Ok(output) => Ok(output),
         Err(error) => {
             let diagnostic =
                 bound_diagnostic(&render_lookup_inspection_error(&error), DIAGNOSTIC_BOUND);
-            // Only GHC source rejection can be narrowed by partitioning queries.
-            // Worker, admission, cancellation and receipt failures apply to the
-            // inspection service; submitting more queries cannot isolate them.
             match error {
                 LookupInspectionError::Compiler(tidepool_runtime::CompileError::Diagnostics(_)) => {
                     Err(InspectionFailure::SourceRejected(diagnostic))
@@ -1236,47 +1023,37 @@ fn inspect_checked(
 }
 
 fn isolate(
-    prepared: &[lookup_tool::PreparedLookup],
-    imports: &str,
-    supplemental: &[InspectionQuery],
-    inspect: &mut impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+    batch: &HostedLookupBatch,
+    inspect: &mut impl FnMut(&HostedLookupBatch) -> Result<HostedLookupOutput, LookupInspectionError>,
     original_diagnostic: &str,
-) -> InspectionAnswers {
-    let parts = prepared
-        .iter()
-        .map(|query| queries(std::slice::from_ref(query), imports))
-        .filter(|queries| !queries.is_empty())
-        .chain(supplemental.iter().map(|query| vec![query.clone()]))
-        .collect::<Vec<_>>();
-    if parts.len() == 1 {
-        // Repeating the identical request would provide no narrower evidence.
-        return InspectionAnswers {
-            results: rejected(parts[0].len(), original_diagnostic),
-            unavailable: None,
-        };
+) -> (Vec<HostedLookupAnswer>, Option<String>) {
+    if batch.operations.len() == 1 {
+        return (rejected(&batch.operations, original_diagnostic), None);
     }
     let mut results = Vec::new();
     let mut unavailable: Option<String> = None;
-    for queries in parts {
+    for operation in &batch.operations {
+        let operations = std::slice::from_ref(operation);
         if let Some(diagnostic) = &unavailable {
-            results.extend(rejected(queries.len(), diagnostic));
+            results.extend(rejected(operations, diagnostic));
             continue;
         }
-        match inspect_checked(&queries, inspect) {
-            Ok(values) => results.extend(values),
+        let shard = HostedLookupBatch {
+            operations: operations.to_vec(),
+            discovery: None,
+        };
+        match inspect_checked(&shard, inspect) {
+            Ok(output) => results.extend(output.answers),
             Err(InspectionFailure::SourceRejected(diagnostic)) => {
-                results.extend(rejected(queries.len(), &diagnostic))
+                results.extend(rejected(operations, &diagnostic))
             }
             Err(InspectionFailure::Unavailable(diagnostic)) => {
-                results.extend(rejected(queries.len(), &diagnostic));
+                results.extend(rejected(operations, &diagnostic));
                 unavailable = Some(diagnostic);
             }
         }
     }
-    InspectionAnswers {
-        results,
-        unavailable,
-    }
+    (results, unavailable)
 }
 
 #[cfg(test)]
@@ -1468,6 +1245,85 @@ mod tests {
         );
     }
 
+    use tidepool_runtime::session::inspection::{
+        HostedDiscoveryCandidate, HostedDiscoverySelection, SelectedLookupAnswer, SelectedMatches,
+    };
+
+    fn selected(entries: Vec<InfoEntry>) -> SelectedLookupAnswer {
+        SelectedLookupAnswer::Info(SelectedMatches {
+            observed: entries.len(),
+            entries,
+            limit: 20,
+        })
+    }
+    fn name(ordinal: u32, answer: SelectedLookupAnswer) -> HostedLookupAnswer {
+        HostedLookupAnswer::Name {
+            ordinal,
+            scopes: vec![NameScope::Current],
+            answer,
+        }
+    }
+    fn output(answers: Vec<HostedLookupAnswer>) -> HostedLookupOutput {
+        HostedLookupOutput {
+            answers,
+            discovery: None,
+        }
+    }
+    fn selection(
+        batch: &HostedLookupBatch,
+        fallback: HostedFallback,
+        candidates: Vec<HostedDiscoveryCandidate>,
+        enumerated: usize,
+        discarded: usize,
+    ) -> HostedDiscoverySelection {
+        let policy = batch.discovery.as_ref().expect("discovery policy");
+        HostedDiscoverySelection {
+            submitted_modules: if matches!(fallback, HostedFallback::Attempted(_)) {
+                policy
+                    .scopes
+                    .iter()
+                    .filter(|scope| matches!(scope, InspectionScope::PublicModule(_)))
+                    .count()
+            } else {
+                0
+            },
+            candidates,
+            fallback,
+            eligible_modules: policy.eligible_modules as usize,
+            candidate_limit: policy.candidate_limit as usize,
+            enumerated_occurrences: enumerated,
+            discarded_occurrences: discarded,
+            issue: None,
+        }
+    }
+
+    #[test]
+    fn hosted_plan_preserves_original_ordinals_and_shared_reference_destinations() {
+        let prepared = lookup_tool::prepare(
+            serde_json::json!({"queries":["doc topics", "value", "", "value", ":: Int -> Int"]}),
+        )
+        .unwrap();
+        let reference = LookupReference {
+            module: String::new(),
+            name: "Defining.Owner.value".into(),
+            namespace: LookupNamespace::Value,
+        };
+        let plan = LookupInspectionPlan::new(
+            &prepared,
+            "",
+            &[reference.clone(), reference],
+            Some((20, &[])),
+        )
+        .unwrap();
+        assert!(matches!(&plan.batch.operations[..], [
+            HostedLookupOperation::Primary { ordinal: 1, origin: first, .. },
+            HostedLookupOperation::Primary { ordinal: 3, origin: second, .. },
+            HostedLookupOperation::Primary { ordinal: 4, query: HostedLookupQuery::TypeSearch(_), .. },
+            HostedLookupOperation::ExactReference { destinations, query: ExactNameInspection { scope: InspectionScope::Current, name, .. } },
+        ] if first == "value" && second == "value" && destinations == &[0,1] && name == "Defining.Owner.value"));
+        plan.batch.validate().unwrap();
+    }
+
     #[test]
     fn search_receipt_uses_worker_attempts_instead_of_optional_query_paths() {
         for scopes in [
@@ -1476,202 +1332,713 @@ mod tests {
                 NameScope::Current,
                 NameScope::PublicModule("Project".into()),
             ],
-            vec![],
         ] {
-            let issued = scopes.clone();
-            let batch = execute(
+            let result = execute(
                 request(&["Alias.value"], false),
                 "view".into(),
                 "qualified Project as Alias",
                 &[],
                 &[],
-                crate::UsagePointerTable::default(),
-                |queries| {
+                Default::default(),
+                |batch| {
                     assert!(
-                        matches!(&queries[..], [InspectionQuery::LookupName { qualifier_module: Some(module), .. }] if module == "Project")
+                        matches!(&batch.operations[..], [HostedLookupOperation::Primary { query: HostedLookupQuery::Name(LookupNameInspection { qualifier_module: Some(owner), .. }), .. }] if owner == "Project")
                     );
-                    Ok(vec![InspectionResult::Lookup {
-                        query: "Alias.value".into(),
-                        scopes: issued.clone(),
-                        answer: LookupAnswer::Missing {
+                    Ok(output(vec![HostedLookupAnswer::Name {
+                        ordinal: 0,
+                        scopes: scopes.clone(),
+                        answer: SelectedLookupAnswer::Missing {
                             export_names: vec![],
                         },
-                    }])
+                    }]))
                 },
             );
-            assert_eq!(batch.search_receipt.attempted_scopes.len(), scopes.len());
-            for (observed, scope) in batch.search_receipt.attempted_scopes.iter().zip(&scopes) {
-                assert!(matches!(
-                    (observed, scope),
-                    (LookupSearchScope::Current, NameScope::Current)
-                        | (LookupSearchScope::Module(_), NameScope::PublicModule(_))
-                ));
-            }
+            assert_eq!(
+                result.search_receipt.attempted_scopes,
+                search_scopes(&scopes)
+            );
         }
-        let batch = execute(
-            request(&["Alias.value"], false),
-            "view".into(),
-            "qualified Project as Alias",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |_| Err(source_error("query rejected before name search")),
-        );
-        assert!(batch.search_receipt.attempted_scopes.is_empty());
-        assert!(matches!(
-            batch.results[0].outcome,
-            LookupOutcome::Rejected(_)
-        ));
     }
 
     #[test]
-    fn qualified_module_parent_names_and_references_share_inspection() {
-        let calls = Cell::new(0);
-        let mut req = request(&["Project.Work", "Project.Choice", "doc workbench"], false);
-        req.references.push(LookupReference {
+    fn hosted_results_preserve_counts_order_and_reference_namespace_without_ranking() {
+        let mut req = request(&["doc topics", "Project.Value", "value"], false);
+        let reference = LookupReference {
             module: "Project".into(),
             name: "Choice".into(),
             namespace: LookupNamespace::Constructor,
-        });
+        };
+        req.references = vec![reference.clone(), reference];
+        let calls = Cell::new(0);
         let result = execute(
             req,
             "view".into(),
             "",
             &[],
             &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
+            Default::default(),
+            |batch| {
                 calls.set(calls.get() + 1);
-                Ok(queries
-                    .iter()
-                    .map(|query| match query {
-                        InspectionQuery::LookupName {
-                            query,
-                            mode: LookupNameMode::NameOrModule,
-                            ..
-                        } => {
-                            let answer = match query.as_str() {
-                                "Project.Work" => LookupAnswer::Module {
-                                    module: query.clone(),
-                                    entries: vec![entry("runWork")],
-                                },
-                                "Project.Choice" => {
-                                    let mut ty = entry("Choice");
-                                    ty.kind = "type".into();
-                                    let mut constructor = entry("Choice");
-                                    constructor.kind = "constructor".into();
-                                    LookupAnswer::Ambiguous(vec![ty, constructor])
-                                }
-                                _ => panic!("unexpected semantic query {query}"),
-                            };
-                            InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: query.clone(),
-                                answer,
-                            }
-                        }
-                        InspectionQuery::ExactName(ExactNameQuery {
-                            namespace: IdentifierNamespace::Constructor,
-                            name,
-                            ..
-                        }) => {
-                            let mut constructor = entry(name);
-                            constructor.kind = "constructor".into();
-                            InspectionResult::Lookup {
-                                scopes: vec![NameScope::PublicModule("Project".into())],
-                                query: name.clone(),
-                                answer: LookupAnswer::Info(vec![constructor]),
-                            }
-                        }
-                        _ => panic!("unexpected query {query:?}"),
-                    })
-                    .collect())
+                assert!(batch.discovery.is_none());
+                assert!(
+                    matches!(&batch.operations[2], HostedLookupOperation::ExactReference { destinations, query: ExactNameInspection { namespace: InspectionNamespace::Constructor, .. } } if destinations == &[0,1])
+                );
+                let mut constructor = entry("Choice");
+                constructor.kind = "constructor".into();
+                // Deliberately reverse lexical order. The host must not normalize
+                // a selected prefix again or infer its observed count from length.
+                let entries = (0..20)
+                    .rev()
+                    .map(|i| entry(&format!("value{i:02}")))
+                    .collect();
+                Ok(output(vec![
+                    HostedLookupAnswer::Name {
+                        ordinal: 1,
+                        scopes: vec![
+                            NameScope::Current,
+                            NameScope::PublicModule("Project.Value".into()),
+                        ],
+                        answer: SelectedLookupAnswer::Module {
+                            module: "Project.Value".into(),
+                            matches: SelectedMatches {
+                                entries,
+                                observed: 99,
+                                limit: 20,
+                            },
+                        },
+                    },
+                    name(2, selected(vec![entry("second")])),
+                    HostedLookupAnswer::Reference {
+                        destinations: vec![0, 1],
+                        scopes: vec![NameScope::PublicModule("Project".into())],
+                        answer: selected(vec![constructor]),
+                    },
+                ]))
             },
         );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.results.len(), 5);
+        let LookupOutcome::Found(entries, true) = &result.results[1].outcome else {
+            panic!("selected module prefix")
+        };
+        assert_eq!(entries[0].name, "value19");
         assert_eq!(
-            calls.get(),
-            1,
-            "known export facts must not recompile the view"
+            result.search_receipt.matches[1].observed,
+            LookupCount::Known(99)
         );
-        let LookupOutcome::Found(entries, false) = &result.results[0].outcome else {
-            panic!("module browse must succeed")
-        };
-        assert_eq!(entries[0].name, "runWork");
-        let LookupOutcome::Ambiguous(entries, false) = &result.results[1].outcome else {
-            panic!("parent names take precedence over a successful module browse")
-        };
-        assert_eq!(entries.len(), 2);
-        assert!(entries.iter().all(|entry| entry.name == "Choice"));
-        let LookupOutcome::Found(entries, false) = &result.results[2].outcome else {
-            panic!("local documentation must resolve")
-        };
-        assert!(matches!(entries[0].kind, LookupKind::Documentation));
-        let LookupOutcome::Found(entries, false) = &result.results[3].outcome else {
-            panic!("explicit reference must resolve")
-        };
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0].kind, LookupKind::Constructor));
+        assert_eq!(
+            result.search_receipt.matches[1].retained,
+            LookupCount::Known(20)
+        );
+        for index in [3, 4] {
+            assert!(
+                matches!(&result.results[index].outcome, LookupOutcome::Found(entries, false) if matches!(entries[0].kind, LookupKind::Constructor))
+            );
+        }
     }
 
     #[test]
-    fn supplemental_inspection_failures_do_not_discard_primary_answers() {
-        let mut req = request(&["Project.Work", "x"], false);
-        req.references.push(LookupReference {
-            module: "Broken.Reference".into(),
-            name: "missing".into(),
-            namespace: LookupNamespace::Value,
-        });
+    fn discovery_is_issued_with_the_primary_request_and_keeps_complete_selected_summary() {
+        let calls = Cell::new(0);
+        let summary = "λ complete selected declaration\n".repeat(300);
+        let modules = (0..130)
+            .map(|i| format!("Workspace.M{i}"))
+            .collect::<Vec<_>>();
         let result = execute(
-            req,
+            request(&["Alias.missing"], true),
+            "view".into(),
+            "qualified Project.Owner as Alias",
+            &[],
+            &modules,
+            Default::default(),
+            |batch| {
+                calls.set(calls.get() + 1);
+                let policy = batch.discovery.as_ref().unwrap();
+                assert_eq!(policy.eligible_modules, 131);
+                assert_eq!(policy.scopes.len(), 129);
+                assert_eq!(
+                    policy.scopes[0],
+                    InspectionScope::PublicModule("Project.Owner".into())
+                );
+                assert_eq!(policy.scopes[1], InspectionScope::Current);
+                let candidates = vec![HostedDiscoveryCandidate {
+                    query: "Owner.visible".into(),
+                    origins: vec!["Alias.missing".into()],
+                    summary: summary.clone(),
+                    local: true,
+                    reference: Some(IdentifierRef {
+                        module: String::new(),
+                        name: "Owner.visible".into(),
+                        namespace: IdentifierNamespace::Value,
+                    }),
+                }];
+                // A protected/unavailable scope can have no actual search. Receipt
+                // submission and actual attempted scopes remain independent.
+                let selected = selection(
+                    batch,
+                    HostedFallback::Attempted(vec![NameScope::Current]),
+                    candidates,
+                    200,
+                    199,
+                );
+                Ok(HostedLookupOutput {
+                    answers: vec![name(
+                        0,
+                        SelectedLookupAnswer::Missing {
+                            export_names: vec![],
+                        },
+                    )],
+                    discovery: Some(selected),
+                })
+            },
+        );
+        assert_eq!(calls.get(), 1, "no second compiler request");
+        assert_eq!(result.candidates[0].summary, summary);
+        assert_eq!(result.candidates[0].reference.as_ref().unwrap().module, "");
+        let LookupDiscovery::Observed(receipt) = result.search_receipt.discovery else {
+            panic!("issued discovery")
+        };
+        assert_eq!(receipt.submitted_modules, LookupCount::Known(128));
+        assert_eq!(receipt.attempted_scopes, vec![LookupSearchScope::Current]);
+        assert_eq!(receipt.eligible_modules, LookupCount::Known(131));
+        assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(200));
+        assert_eq!(receipt.discarded_occurrences, LookupCount::Known(199));
+        assert_eq!(receipt.distinct_discarded, LookupCount::Unknown);
+        assert_eq!(receipt.unenumerated_candidates, LookupCount::Unknown);
+    }
+
+    #[test]
+    fn seed_only_and_type_only_discovery_consume_worker_candidates_without_fallback() {
+        for query in ["value", ":: Int -> Int"] {
+            let result = execute(
+                request(&[query], true),
+                "view".into(),
+                "",
+                &[],
+                &[],
+                Default::default(),
+                |batch| {
+                    let answer = if query.starts_with("::") {
+                        HostedLookupAnswer::Type {
+                            ordinal: 0,
+                            matches: SelectedMatches {
+                                observed: 0,
+                                entries: vec![],
+                                limit: 20,
+                            },
+                        }
+                    } else {
+                        name(0, selected(vec![entry("value")]))
+                    };
+                    let candidate = HostedDiscoveryCandidate {
+                        query: "Types.Ref".into(),
+                        origins: vec![query.into()],
+                        summary: "issued seed summary".into(),
+                        local: true,
+                        reference: None,
+                    };
+                    Ok(HostedLookupOutput {
+                        answers: vec![answer],
+                        discovery: Some(selection(
+                            batch,
+                            HostedFallback::NotNeeded,
+                            vec![candidate],
+                            1,
+                            0,
+                        )),
+                    })
+                },
+            );
+            assert_eq!(result.candidates.len(), 1);
+            assert_eq!(result.candidates[0].summary, "issued seed summary");
+            let LookupDiscovery::Observed(receipt) = result.search_receipt.discovery else {
+                panic!()
+            };
+            assert!(matches!(
+                receipt.module_search,
+                LookupModuleSearch::NotNeeded
+            ));
+            assert_eq!(receipt.submitted_modules, LookupCount::Known(0));
+            assert!(receipt.attempted_scopes.is_empty());
+        }
+    }
+
+    #[test]
+    fn per_query_rejection_keeps_native_candidates_without_isolation() {
+        let calls = Cell::new(0);
+        let result = execute(
+            request(&["bad", ":: Int -> Int"], true),
             "view".into(),
             "",
             &[],
             &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                if queries.len() > 2 {
-                    return Err(source_error("combined source rejected"));
-                }
-                queries
-                    .iter()
-                    .map(|query| match query {
-                        InspectionQuery::LookupName { query, .. } if query == "x" => {
-                            Ok(InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: query.clone(),
-                                answer: LookupAnswer::Info(vec![entry("x")]),
-                            })
-                        }
-                        InspectionQuery::LookupName { query, .. } if query == "Project.Work" => {
-                            Ok(InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: query.clone(),
-                                answer: LookupAnswer::Module {
-                                    module: query.clone(),
-                                    entries: vec![entry("runWork")],
-                                },
-                            })
-                        }
-                        InspectionQuery::ExactName(_) => {
-                            Err(source_error("reference source rejected"))
-                        }
-                        _ => panic!("unexpected query {query:?}"),
-                    })
-                    .collect()
+            Default::default(),
+            |batch| {
+                calls.set(calls.get() + 1);
+                Ok(HostedLookupOutput {
+                    answers: vec![
+                        HostedLookupAnswer::Rejected {
+                            operation: HostedOperationIdentity::Primary(0),
+                            diagnostic: "metadata source rejected".into(),
+                        },
+                        HostedLookupAnswer::Type {
+                            ordinal: 1,
+                            matches: SelectedMatches {
+                                observed: 0,
+                                entries: vec![],
+                                limit: 20,
+                            },
+                        },
+                    ],
+                    discovery: Some(selection(
+                        batch,
+                        HostedFallback::Unavailable("metadata source rejected".into()),
+                        vec![HostedDiscoveryCandidate {
+                            query: "Type.Ref".into(),
+                            origins: vec![":: Int -> Int".into()],
+                            summary: "type seed survives".into(),
+                            local: true,
+                            reference: None,
+                        }],
+                        1,
+                        0,
+                    )),
+                })
             },
         );
+        assert_eq!(calls.get(), 1);
         assert!(matches!(
-            result.results[0].outcome,
-            LookupOutcome::Found(_, false)
+            &result.results[0].outcome,
+            LookupOutcome::Rejected(_)
         ));
+        assert_eq!(result.candidates.len(), 1);
+        let LookupDiscovery::Observed(receipt) = result.search_receipt.discovery else {
+            panic!()
+        };
+        assert!(matches!(
+            receipt.module_search,
+            LookupModuleSearch::Unavailable
+        ));
+        assert_eq!(receipt.submitted_modules, LookupCount::Known(0));
+        assert!(receipt.attempted_scopes.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_isolation_disables_discovery_and_keeps_original_positions() {
+        let calls = Cell::new(0);
+        let result = execute(
+            request(&["doc topics", "good", "bad"], true),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            Default::default(),
+            |batch| {
+                calls.set(calls.get() + 1);
+                if batch.operations.len() > 1 {
+                    assert!(batch.discovery.is_some());
+                    return Err(source_error("batch source rejected"));
+                }
+                assert!(
+                    batch.discovery.is_none(),
+                    "isolation cannot replay discovery"
+                );
+                match batch.operations[0] {
+                    HostedLookupOperation::Primary { ordinal: 1, .. } => {
+                        Ok(output(vec![name(1, selected(vec![entry("good")]))]))
+                    }
+                    HostedLookupOperation::Primary { ordinal: 2, .. } => {
+                        Err(source_error("bad source"))
+                    }
+                    _ => panic!("original position changed"),
+                }
+            },
+        );
+        assert_eq!(calls.get(), 3);
         assert!(matches!(
             result.results[1].outcome,
             LookupOutcome::Found(_, false)
         ));
         assert!(
-            matches!(&result.results[2].outcome, LookupOutcome::Rejected(diagnostic)
-            if diagnostic.contains("reference source rejected"))
+            matches!(&result.results[2].outcome, LookupOutcome::Rejected(diagnostic) if diagnostic.contains("bad source"))
         );
+        assert!(matches!(
+            result.search_receipt.discovery,
+            LookupDiscovery::NotRun(LookupSearchNotRun::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn infrastructure_or_receipt_failure_never_isolates_or_fabricates_missing() {
+        for malformed in [false, true] {
+            let calls = Cell::new(0);
+            let result = execute(
+                request(&["a", "b"], true),
+                "view".into(),
+                "",
+                &[],
+                &[],
+                Default::default(),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    if malformed {
+                        Ok(output(vec![]))
+                    } else {
+                        Err(LookupInspectionError::Message("worker stopped".into()))
+                    }
+                },
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(result.issue.is_some());
+            assert!(result
+                .results
+                .iter()
+                .all(|result| matches!(result.outcome, LookupOutcome::Rejected(_))));
+            assert!(result
+                .search_receipt
+                .matches
+                .iter()
+                .all(|receipt| receipt.observed == LookupCount::Unknown));
+            assert!(matches!(
+                result.search_receipt.discovery,
+                LookupDiscovery::NotRun(LookupSearchNotRun::Unavailable)
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_typed_worker_receipts_refuse_at_the_actor_frontdoor() {
+        for query in ["value", ":: Int"] {
+            for mutation in 0..9 {
+                let calls = Cell::new(0);
+                let result = execute(
+                    request(&[query], true),
+                    "view".into(),
+                    "",
+                    &[],
+                    &[],
+                    Default::default(),
+                    |batch| {
+                        calls.set(calls.get() + 1);
+                        let mut answer = if query.starts_with("::") {
+                            HostedLookupAnswer::Type {
+                                ordinal: 0,
+                                matches: SelectedMatches {
+                                    observed: 0,
+                                    entries: vec![],
+                                    limit: 20,
+                                },
+                            }
+                        } else {
+                            name(0, selected(vec![entry("value")]))
+                        };
+                        let mut discovery =
+                            selection(batch, HostedFallback::NotNeeded, vec![], 0, 0);
+                        match mutation {
+                            0 => match &mut answer {
+                                HostedLookupAnswer::Type { matches, .. } => matches.observed = 1,
+                                HostedLookupAnswer::Name {
+                                    answer: SelectedLookupAnswer::Info(matches),
+                                    ..
+                                } => matches.observed = 0,
+                                _ => unreachable!(),
+                            },
+                            1 => match &mut answer {
+                                HostedLookupAnswer::Type { matches, .. } => matches.limit = 1,
+                                HostedLookupAnswer::Name {
+                                    answer: SelectedLookupAnswer::Info(matches),
+                                    ..
+                                } => matches.limit = 1,
+                                _ => unreachable!(),
+                            },
+                            2 => discovery.discarded_occurrences = 1,
+                            3 => discovery.candidates.push(HostedDiscoveryCandidate {
+                                query: "not enumerated".into(),
+                                origins: vec![query.into()],
+                                summary: "invalid count".into(),
+                                local: true,
+                                reference: None,
+                            }),
+                            4 => discovery.candidate_limit = 0,
+                            5 => discovery.submitted_modules = 1,
+                            6 => {
+                                discovery.fallback =
+                                    HostedFallback::Unavailable("no rejected metadata".into())
+                            }
+                            7 => {
+                                discovery.fallback =
+                                    HostedFallback::Attempted(vec![NameScope::Current])
+                            }
+                            8 => match &mut answer {
+                                HostedLookupAnswer::Type { ordinal, .. }
+                                | HostedLookupAnswer::Name { ordinal, .. } => *ordinal = 1,
+                                _ => unreachable!(),
+                            },
+                            _ => unreachable!(),
+                        }
+                        Ok(HostedLookupOutput {
+                            answers: vec![answer],
+                            discovery: Some(discovery),
+                        })
+                    },
+                );
+                assert_eq!(calls.get(), 1, "bad receipt is not source rejection");
+                assert!(result.issue.is_some(), "query {query} mutation {mutation}");
+                assert!(
+                    matches!(result.results[0].outcome, LookupOutcome::Rejected(_)),
+                    "query {query} mutation {mutation}"
+                );
+                assert!(result.candidates.is_empty());
+            }
+        }
+        for mutation in 0..8 {
+            let mut req = request(&[], false);
+            req.references.push(LookupReference {
+                module: String::new(),
+                name: "Owner.value".into(),
+                namespace: LookupNamespace::Value,
+            });
+            let nominal = |name: &str| {
+                let mut hit = entry(name);
+                hit.module = Some("Owner".into());
+                hit
+            };
+            let result = execute(req, "view".into(), "", &[], &[], Default::default(), |_| {
+                let answer = match mutation {
+                    0 => SelectedLookupAnswer::Module {
+                        module: "Other".into(),
+                        matches: SelectedMatches {
+                            observed: 0,
+                            entries: vec![],
+                            limit: 20,
+                        },
+                    },
+                    1 => SelectedLookupAnswer::ModuleNotFound("Other".into()),
+                    2 => SelectedLookupAnswer::Ambiguous(SelectedMatches {
+                        observed: 1,
+                        entries: vec![nominal("value")],
+                        limit: 20,
+                    }),
+                    3 => {
+                        let mut wrong = nominal("value");
+                        wrong.kind = "type".into();
+                        selected(vec![wrong])
+                    }
+                    5 => selected(vec![nominal("other")]),
+                    6 => {
+                        let mut wrong = entry("other");
+                        wrong.module = None;
+                        selected(vec![wrong])
+                    }
+                    7 => selected(vec![entry("value")]),
+                    _ => {
+                        let mut local = entry("value");
+                        local.module = None;
+                        selected(vec![local])
+                    }
+                };
+                Ok(output(vec![HostedLookupAnswer::Reference {
+                    destinations: vec![0],
+                    scopes: if mutation == 4 {
+                        vec![NameScope::PublicModule("Other".into())]
+                    } else {
+                        vec![NameScope::Current]
+                    },
+                    answer,
+                }]))
+            });
+            assert!(
+                matches!(result.results[0].outcome, LookupOutcome::Rejected(_)),
+                "reference mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn requested_candidate_cap_is_clamped_once_and_worker_receipt_is_preserved() {
+        for requested in [-1, 0, 1, 127, 128, 129] {
+            let mut req = request(&["value"], true);
+            req.candidate_limit = requested;
+            let result = execute(
+                req,
+                "view".into(),
+                "",
+                &[],
+                &[],
+                Default::default(),
+                |batch| {
+                    let cap = batch.discovery.as_ref().unwrap().candidate_limit;
+                    assert_eq!(cap, requested.clamp(0, 128) as u32);
+                    Ok(HostedLookupOutput {
+                        answers: vec![name(0, selected(vec![entry("value")]))],
+                        discovery: Some(selection(
+                            batch,
+                            if cap == 0 {
+                                HostedFallback::ZeroBudget
+                            } else {
+                                HostedFallback::NotNeeded
+                            },
+                            vec![],
+                            0,
+                            0,
+                        )),
+                    })
+                },
+            );
+            if requested <= 0 {
+                assert!(matches!(
+                    result.search_receipt.discovery,
+                    LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
+                ));
+            } else {
+                let LookupDiscovery::Observed(receipt) = result.search_receipt.discovery else {
+                    panic!()
+                };
+                assert_eq!(receipt.candidate_limit, requested.min(128));
+            }
+        }
+    }
+
+    #[test]
+    fn invalidation_retains_observed_counts_and_search_history_once() {
+        let mut result = execute(
+            request(&["value"], false),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            Default::default(),
+            |_| Ok(output(vec![name(0, selected(vec![entry("value")]))])),
+        );
+        result.invalidate_changed_view();
+        result.invalidate_changed_view();
+        assert!(result.results.is_empty());
+        assert!(result.search_receipt.matches.is_empty());
+        assert_eq!(
+            result.search_receipt.attempted_scopes,
+            vec![LookupSearchScope::Current]
+        );
+        let LookupSearchDisposition::Invalidated(receipts, discovery) =
+            result.search_receipt.disposition
+        else {
+            panic!()
+        };
+        assert_eq!(receipts[0].observed, LookupCount::Known(1));
+        assert!(matches!(discovery, LookupDiscovery::NotRequested));
+    }
+
+    #[test]
+    fn examples_follow_issued_nominal_identity_and_refuse_shadows_ambiguity_and_unavailable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let checks = workspace.path().join(".exomonad/workspace/checks");
+        std::fs::create_dir_all(&checks).unwrap();
+        std::fs::write(checks.join("example.hs"), "Cmd.start command\n").unwrap();
+        std::fs::write(checks.join("usage-examples.json"), r#"{"examples":[{"module":"Tidepool.Command","name":"start","namespace":"value","source":"checks/example.hs","prerequisites":[],"requirements":"Import Cmd"}]}"#).unwrap();
+        let usage = crate::UsagePointerTable::discover(workspace.path()).unwrap();
+        for exact in [false, true] {
+            for (owner, availability, live, ambiguous, expected) in [
+                (
+                    "Tidepool.Command",
+                    InspectionAvailability::Available,
+                    false,
+                    false,
+                    true,
+                ),
+                (
+                    "Other.Command",
+                    InspectionAvailability::Available,
+                    false,
+                    false,
+                    false,
+                ),
+                (
+                    "Tidepool.Command",
+                    InspectionAvailability::Available,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "Tidepool.Command",
+                    InspectionAvailability::Unavailable,
+                    false,
+                    false,
+                    false,
+                ),
+                (
+                    "Tidepool.Command",
+                    InspectionAvailability::Available,
+                    false,
+                    true,
+                    false,
+                ),
+            ] {
+                let mut req = request(if exact { &[] } else { &["Cmd.start"] }, false);
+                if exact {
+                    req.references.push(LookupReference {
+                        module: "Reexport.Command".into(),
+                        name: "start".into(),
+                        namespace: LookupNamespace::Value,
+                    });
+                }
+                let live_modules = if live {
+                    vec!["Tidepool.Command".into()]
+                } else {
+                    Vec::new()
+                };
+                let result = execute(
+                    req,
+                    "view".into(),
+                    "qualified Tidepool.Command as Cmd",
+                    &live_modules,
+                    &[],
+                    usage.clone(),
+                    |batch| {
+                        let mut hit = entry("start");
+                        hit.module = Some(owner.into());
+                        hit.availability = availability;
+                        let answer = if ambiguous {
+                            let mut other = hit.clone();
+                            other.module = Some("Other.Command".into());
+                            SelectedLookupAnswer::Ambiguous(SelectedMatches {
+                                entries: vec![hit, other],
+                                observed: 2,
+                                limit: 20,
+                            })
+                        } else {
+                            selected(vec![hit])
+                        };
+                        Ok(output(vec![match &batch.operations[0] {
+                            HostedLookupOperation::Primary { ordinal, .. } => {
+                                name(*ordinal, answer)
+                            }
+                            HostedLookupOperation::ExactReference { destinations, .. } => {
+                                HostedLookupAnswer::Reference {
+                                    destinations: destinations.clone(),
+                                    scopes: vec![NameScope::PublicModule(
+                                        "Reexport.Command".into(),
+                                    )],
+                                    answer,
+                                }
+                            }
+                        }]))
+                    },
+                );
+                match &result.results[0].outcome {
+                    LookupOutcome::Found(entries, false)
+                    | LookupOutcome::Ambiguous(entries, false) => {
+                        assert_eq!(entries[0].example.is_some(), expected);
+                        if expected {
+                            assert_eq!(
+                                entries[0].example.as_ref().unwrap().source,
+                                "Cmd.start command\n"
+                            );
+                        }
+                    }
+                    _ => panic!("issued example fixture must resolve"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -1741,795 +2108,6 @@ mod tests {
         assert!(!requires_inspection(&changed, "", view));
     }
 
-    #[test]
-    fn raw_lookup_never_discovers_and_preserves_outcome() {
-        let calls = Cell::new(0);
-        let result = execute(
-            request(&["x"], false),
-            "view".into(),
-            "",
-            &[],
-            &["Project.Test".into()],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                calls.set(calls.get() + 1);
-                assert_eq!(queries.len(), 1);
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "x".into(),
-                    answer: LookupAnswer::Info(vec![entry("x")]),
-                }])
-            },
-        );
-        assert_eq!(calls.get(), 1);
-        assert!(result.candidates.is_empty());
-        assert!(matches!(
-            result.results[0].outcome,
-            LookupOutcome::Found(_, false)
-        ));
-    }
-    #[test]
-    fn examples_follow_resolved_identity_and_exclude_live_ambiguous_unavailable() {
-        let workspace = tempfile::tempdir().unwrap();
-        let checks = workspace.path().join(".exomonad/workspace/checks");
-        std::fs::create_dir_all(&checks).unwrap();
-        std::fs::write(checks.join("example.hs"), "Cmd.start command\n").unwrap();
-        std::fs::write(
-            checks.join("usage-examples.json"),
-            r#"{"examples":[{
-            "module":"Tidepool.Command","name":"start","namespace":"value",
-            "source":"checks/example.hs","prerequisites":[],"requirements":"Import Cmd"
-        }]}"#,
-        )
-        .unwrap();
-        let usage = crate::UsagePointerTable::discover(workspace.path()).unwrap();
-        let make_entry = |module: &str, availability| InfoEntry {
-            name: "start".into(),
-            module: Some(module.into()),
-            kind: "value".into(),
-            display: "start :: Command -> Eff effects Job".into(),
-            availability,
-            references: vec![],
-        };
-        let available = InspectionAvailability::Available;
-        let mut direct_and_exact = request(&["Cmd.start", "Alias.start"], false);
-        direct_and_exact.expected_view = Some("view".into());
-        direct_and_exact.references = vec![LookupReference {
-            module: "Reexport.Command".into(),
-            name: "start".into(),
-            namespace: LookupNamespace::Value,
-        }];
-        let found = execute(
-            direct_and_exact,
-            "view".into(),
-            "qualified Tidepool.Command as Cmd\nqualified Tidepool.Command as Alias",
-            &[],
-            &[],
-            usage.clone(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|query| match query {
-                        InspectionQuery::LookupName { query: name, .. } => {
-                            InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: name.clone(),
-                                answer: LookupAnswer::Info(vec![make_entry(
-                                    "Tidepool.Command",
-                                    available,
-                                )]),
-                            }
-                        }
-                        InspectionQuery::ExactName(query) => InspectionResult::Lookup {
-                            scopes: vec![query.scope.clone()],
-                            query: query.name.clone(),
-                            answer: LookupAnswer::Info(vec![make_entry(
-                                "Tidepool.Command",
-                                available,
-                            )]),
-                        },
-                        _ => panic!("unexpected query"),
-                    })
-                    .collect())
-            },
-        );
-        assert_eq!(found.results.len(), 3);
-        for result in &found.results {
-            let LookupOutcome::Found(entries, false) = &result.outcome else {
-                panic!("expected one hit")
-            };
-            let [entry] = entries.as_slice() else {
-                panic!("expected one entry")
-            };
-            assert_eq!(
-                entry.example.as_ref().unwrap().source,
-                "Cmd.start command\n"
-            );
-        }
-        let excluded = execute(
-            request(&["start"], false),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            usage.clone(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "start".into(),
-                    answer: LookupAnswer::Info(vec![make_entry("Other.Command", available)]),
-                }])
-            },
-        );
-        let LookupOutcome::Found(entries, false) = &excluded.results[0].outcome else {
-            panic!()
-        };
-        let [entry] = entries.as_slice() else {
-            panic!()
-        };
-        assert!(entry.example.is_none());
-        let live = execute(
-            request(&["start"], false),
-            "view".into(),
-            "",
-            &["Tidepool.Command".into()],
-            &[],
-            usage.clone(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "start".into(),
-                    answer: LookupAnswer::Info(vec![make_entry("Tidepool.Command", available)]),
-                }])
-            },
-        );
-        let LookupOutcome::Found(entries, false) = &live.results[0].outcome else {
-            panic!()
-        };
-        let [entry] = entries.as_slice() else {
-            panic!()
-        };
-        assert!(entry.example.is_none());
-        let unavailable = execute(
-            request(&["start"], false),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            usage.clone(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "start".into(),
-                    answer: LookupAnswer::Info(vec![make_entry(
-                        "Tidepool.Command",
-                        InspectionAvailability::Unavailable,
-                    )]),
-                }])
-            },
-        );
-        let LookupOutcome::Found(entries, false) = &unavailable.results[0].outcome else {
-            panic!()
-        };
-        let [entry] = entries.as_slice() else {
-            panic!()
-        };
-        assert!(entry.example.is_none());
-        let ambiguous = execute(
-            request(&["start"], false),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            usage.clone(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "start".into(),
-                    answer: LookupAnswer::Ambiguous(vec![
-                        make_entry("Tidepool.Command", available),
-                        make_entry("Other.Command", available),
-                    ]),
-                }])
-            },
-        );
-        assert!(matches!(
-            ambiguous.results[0].outcome,
-            LookupOutcome::Ambiguous(_, _)
-        ));
-        for (live_modules, namespace, entries) in [
-            (
-                vec!["Tidepool.Command".into()],
-                LookupNamespace::Value,
-                vec![make_entry("Tidepool.Command", available)],
-            ),
-            (
-                vec![],
-                LookupNamespace::Type,
-                vec![make_entry("Tidepool.Command", available)],
-            ),
-            (
-                vec![],
-                LookupNamespace::Value,
-                vec![make_entry(
-                    "Tidepool.Command",
-                    InspectionAvailability::Unavailable,
-                )],
-            ),
-            (
-                vec![],
-                LookupNamespace::Value,
-                vec![
-                    make_entry("Tidepool.Command", available),
-                    make_entry("Other.Command", available),
-                ],
-            ),
-        ] {
-            let expected_missing = namespace == LookupNamespace::Type;
-            let expected_ambiguous = entries.len() > 1;
-            let mut exact = request(&[], false);
-            exact.expected_view = Some("view".into());
-            exact.references = vec![LookupReference {
-                module: "Reexport.Command".into(),
-                name: "start".into(),
-                namespace,
-            }];
-            let captured = execute(
-                exact,
-                "view".into(),
-                "",
-                &live_modules,
-                &[],
-                usage.clone(),
-                |queries| {
-                    Ok(queries
-                        .iter()
-                        .map(|query| {
-                            let InspectionQuery::ExactName(query) = query else {
-                                panic!()
-                            };
-                            assert_eq!(query.name, "start");
-                            InspectionResult::Lookup {
-                                query: query.name.clone(),
-                                scopes: vec![query.scope.clone()],
-                                answer: if expected_missing {
-                                    LookupAnswer::Missing {
-                                        export_names: vec![],
-                                    }
-                                } else if expected_ambiguous {
-                                    LookupAnswer::Ambiguous(entries.clone())
-                                } else {
-                                    LookupAnswer::Info(entries.clone())
-                                },
-                            }
-                        })
-                        .collect())
-                },
-            );
-            match &captured.results[0].outcome {
-                LookupOutcome::Found(entries, false)
-                    if !expected_missing && !expected_ambiguous =>
-                {
-                    assert_eq!(entries.len(), 1);
-                    assert!(entries[0].example.is_none());
-                }
-                LookupOutcome::Ambiguous(entries, false) if expected_ambiguous => {
-                    assert_eq!(entries.len(), 2);
-                    assert!(entries.iter().all(|entry| entry.example.is_none()));
-                }
-                LookupOutcome::Missing(_, _) if expected_missing => {}
-                _ => panic!("unexpected exact-reference outcome"),
-            }
-        }
-    }
-    #[test]
-    fn references_are_one_degree_deduplicated_and_fair() {
-        let mut req = request(&["a", "b"], true);
-        req.candidate_limit = 2;
-        let result = execute(
-            req,
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|q| {
-                        let InspectionQuery::LookupName { query: name, .. } = q else {
-                            panic!()
-                        };
-                        let mut e = entry(name);
-                        e.references = vec![
-                            IdentifierRef {
-                                module: "Project.Test".into(),
-                                name: format!("{name}First"),
-                                namespace: IdentifierNamespace::Type,
-                            },
-                            IdentifierRef {
-                                module: "Project.Test".into(),
-                                name: format!("{name}Second"),
-                                namespace: IdentifierNamespace::Type,
-                            },
-                        ];
-                        InspectionResult::Lookup {
-                            scopes: vec![NameScope::Current],
-                            query: name.clone(),
-                            answer: LookupAnswer::Info(vec![e]),
-                        }
-                    })
-                    .collect())
-            },
-        );
-        assert_eq!(
-            result
-                .candidates
-                .iter()
-                .map(|c| c.query.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Project.Test.aFirst", "Project.Test.bFirst"]
-        );
-    }
-    #[test]
-    fn full_candidate_budget_retains_origins_from_later_queries() {
-        let mut req = request(&["a", "b"], true);
-        req.candidate_limit = 1;
-        let result = execute(
-            req,
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|query| {
-                        let InspectionQuery::LookupName { query: name, .. } = query else {
-                            panic!()
-                        };
-                        let mut entry = entry(name);
-                        entry.references = vec![IdentifierRef {
-                            module: "Project.Test".into(),
-                            name: "Shared".into(),
-                            namespace: IdentifierNamespace::Type,
-                        }];
-                        InspectionResult::Lookup {
-                            scopes: vec![NameScope::Current],
-                            query: name.clone(),
-                            answer: LookupAnswer::Info(vec![entry]),
-                        }
-                    })
-                    .collect())
-            },
-        );
-        assert_eq!(result.candidates.len(), 1);
-        assert_eq!(result.candidates[0].origins, vec!["a", "b"]);
-    }
-    #[test]
-    fn search_receipt_records_match_cap_before_discard() {
-        for count in [0, 19, 20, 21, 40] {
-            let captured = execute(
-                request(&["value"], false),
-                "view".into(),
-                "",
-                &[],
-                &[],
-                crate::UsagePointerTable::default(),
-                |_| {
-                    Ok(vec![InspectionResult::Lookup {
-                        scopes: vec![NameScope::Current],
-                        query: "value".into(),
-                        answer: LookupAnswer::Info((0..count).map(|_| entry("value")).collect()),
-                    }])
-                },
-            );
-            let receipt = &captured.search_receipt.matches[0];
-            assert_eq!(receipt.observed, LookupCount::known(count));
-            assert_eq!(receipt.retained, LookupCount::known(count.min(20)));
-            assert_eq!(receipt.limit, Some(20));
-            assert!(matches!(
-                captured.search_receipt.discovery,
-                LookupDiscovery::NotRequested
-            ));
-        }
-    }
-    #[test]
-    fn search_receipt_records_effective_candidate_cap_boundaries() {
-        for requested in [-1, 0, 1, 127, 128, 129] {
-            let mut req = request(&["root"], true);
-            req.candidate_limit = requested;
-            let captured = execute(
-                req,
-                "view".into(),
-                "",
-                &[],
-                &[],
-                crate::UsagePointerTable::default(),
-                |_| {
-                    let mut hit = entry("root");
-                    hit.references = (0..129)
-                        .map(|n| IdentifierRef {
-                            module: "Project.Other".into(),
-                            name: format!("Ref{n}"),
-                            namespace: IdentifierNamespace::Type,
-                        })
-                        .collect();
-                    Ok(vec![InspectionResult::Lookup {
-                        scopes: vec![NameScope::Current],
-                        query: "root".into(),
-                        answer: LookupAnswer::Info(vec![hit]),
-                    }])
-                },
-            );
-            let cap = requested.clamp(0, 128);
-            if cap == 0 {
-                assert!(matches!(
-                    captured.search_receipt.discovery,
-                    LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
-                ));
-            } else {
-                let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
-                    panic!()
-                };
-                assert_eq!(receipt.candidate_limit, cap);
-                assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(129));
-                assert_eq!(receipt.retained_candidates, LookupCount::Known(cap));
-                assert_eq!(receipt.discarded_occurrences, LookupCount::Known(129 - cap));
-                assert_eq!(receipt.distinct_discarded, LookupCount::Unknown);
-                assert_eq!(receipt.unenumerated_candidates, LookupCount::Unknown);
-            }
-        }
-    }
-    #[test]
-    fn search_receipt_distinguishes_module_cap_from_unsearched_universe() {
-        let modules: Vec<_> = (0..130).map(|n| format!("Project.Module{n}")).collect();
-        let captured = execute(
-            request(&["absent"], true),
-            "view".into(),
-            "",
-            &[],
-            &modules,
-            crate::UsagePointerTable::default(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|query| match query {
-                        InspectionQuery::LookupName { query: name, .. } => {
-                            InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: name.clone(),
-                                answer: LookupAnswer::Missing {
-                                    export_names: vec![],
-                                },
-                            }
-                        }
-                        InspectionQuery::ScopeBrowse => InspectionResult::Browse {
-                            module: "".into(),
-                            expanded: true,
-                            entries: vec![],
-                        },
-                        InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
-                            module: module.clone(),
-                            expanded: *expanded,
-                            entries: vec![],
-                        },
-                        _ => panic!(),
-                    })
-                    .collect())
-            },
-        );
-        let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
-            panic!()
-        };
-        assert_eq!(receipt.eligible_modules, LookupCount::Known(130));
-        assert_eq!(receipt.submitted_modules, LookupCount::Known(128));
-        assert_eq!(receipt.attempted_scopes.len(), 129);
-        assert!(matches!(
-            receipt.module_search,
-            LookupModuleSearch::Attempted
-        ));
-        assert_eq!(receipt.broader_module_count, LookupCount::Unknown);
-        assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(0));
-    }
-    #[test]
-    fn discovery_submission_is_distinct_from_scopes_rejected_before_search() {
-        let captured = execute(
-            request(&["Missing.value"], true),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                if matches!(&queries[..], [InspectionQuery::LookupName { .. }]) {
-                    Ok(vec![InspectionResult::Lookup {
-                        query: "Missing.value".into(),
-                        scopes: vec![
-                            NameScope::Current,
-                            NameScope::PublicModule("Missing".into()),
-                        ],
-                        answer: LookupAnswer::Missing {
-                            export_names: vec![],
-                        },
-                    }])
-                } else {
-                    assert_eq!(
-                        queries
-                            .iter()
-                            .filter(|query| matches!(query, InspectionQuery::Browse { .. }))
-                            .count(),
-                        1
-                    );
-                    Err(source_error("discovery source rejected before name search"))
-                }
-            },
-        );
-        let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
-            panic!()
-        };
-        assert_eq!(receipt.submitted_modules, LookupCount::Known(1));
-        assert!(receipt.attempted_scopes.is_empty());
-        assert!(receipt.issue.is_some());
-    }
-
-    #[test]
-    fn search_receipt_does_not_turn_not_run_into_zero_coverage() {
-        let mut stale = request(&["value"], true);
-        stale.expected_view = Some("old-view".into());
-        let captured = execute(
-            stale,
-            "new-view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |_| panic!("stale view must not inspect"),
-        );
-        assert_eq!(captured.search_receipt.view, "new-view");
-        assert!(captured.search_receipt.matches.is_empty());
-        assert!(captured.search_receipt.attempted_scopes.is_empty());
-        assert!(matches!(
-            captured.search_receipt.disposition,
-            LookupSearchDisposition::NotExecuted
-        ));
-        assert!(matches!(
-            captured.search_receipt.discovery,
-            LookupDiscovery::NotRun(LookupSearchNotRun::StaleView)
-        ));
-        let docs = execute(
-            request(&["doc workbench"], true),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |_| panic!("docs do not inspect"),
-        );
-        assert!(matches!(
-            docs.search_receipt.discovery,
-            LookupDiscovery::NotRun(LookupSearchNotRun::NoEligibleQuery)
-        ));
-        assert!(docs.search_receipt.attempted_scopes.is_empty());
-        let mut zero = request(&["value"], true);
-        zero.candidate_limit = 0;
-        let captured = execute(
-            zero,
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "value".into(),
-                    answer: LookupAnswer::Info(vec![entry("value")]),
-                }])
-            },
-        );
-        assert!(matches!(
-            captured.search_receipt.discovery,
-            LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
-        ));
-        assert!(captured.candidates.is_empty());
-    }
-    #[test]
-    fn search_receipt_invalidates_executed_facts_without_fabricating_zero_counts() {
-        let mut captured = execute(
-            request(&["value"], true),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |_| {
-                Ok(vec![InspectionResult::Lookup {
-                    scopes: vec![NameScope::Current],
-                    query: "value".into(),
-                    answer: LookupAnswer::Info(vec![entry("value")]),
-                }])
-            },
-        );
-        assert_eq!(
-            captured.search_receipt.matches[0].observed,
-            LookupCount::Known(1)
-        );
-        assert!(matches!(
-            captured.search_receipt.discovery,
-            LookupDiscovery::Observed(_)
-        ));
-        captured.invalidate_changed_view();
-        captured.invalidate_changed_view();
-        assert!(captured.results.is_empty());
-        assert!(captured.candidates.is_empty());
-        assert!(captured.search_receipt.matches.is_empty());
-        assert_eq!(
-            captured.search_receipt.attempted_scopes,
-            [LookupSearchScope::Current]
-        );
-        let LookupSearchDisposition::Invalidated(work, discovery) =
-            captured.search_receipt.disposition
-        else {
-            panic!()
-        };
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].observed, LookupCount::Known(1));
-        assert!(matches!(discovery, LookupDiscovery::Observed(_)));
-        assert!(matches!(
-            captured.search_receipt.discovery,
-            LookupDiscovery::Invalidated
-        ));
-    }
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
-        #[test]
-        fn search_receipt_duplicate_histories_count_only_discarded_occurrences(width in 1usize..9, cap in 1usize..12) {
-            let mut req = request(&["a", "b"], true);
-            req.candidate_limit = cap as i64;
-            let captured = execute(req, "view".into(), "", &[], &[], crate::UsagePointerTable::default(), |queries| {
-                Ok(queries.iter().map(|query| {
-                    let InspectionQuery::LookupName { query: name, .. } = query else { panic!() };
-                    let mut hit = entry(name);
-                    hit.references = (0..width).chain(std::iter::once(0)).map(|n| IdentifierRef {
-                        module: "Project.Other".into(), name: format!("Ref{n}"), namespace: IdentifierNamespace::Type,
-                    }).collect();
-                    InspectionResult::Lookup { scopes: vec![NameScope::Current], query: name.clone(), answer: LookupAnswer::Info(vec![hit]) }
-                }).collect())
-            });
-            let LookupDiscovery::Observed(receipt) = &captured.search_receipt.discovery else { panic!() };
-            let retained = width.min(cap);
-            proptest::prop_assert_eq!(&receipt.enumerated_occurrences, &LookupCount::known(2 * (width + 1)));
-            proptest::prop_assert_eq!(&receipt.retained_candidates, &LookupCount::known(retained));
-            proptest::prop_assert_eq!(&receipt.discarded_occurrences, &LookupCount::known(2 * (width - retained)));
-            proptest::prop_assert_eq!(&receipt.distinct_discarded, &if width == retained { LookupCount::Known(0) } else { LookupCount::Unknown });
-            proptest::prop_assert!(matches!(receipt.module_search, LookupModuleSearch::NotNeeded));
-            proptest::prop_assert!(receipt.attempted_scopes.is_empty());
-            proptest::prop_assert!(captured.candidates.iter().all(|candidate| candidate.origins == ["a", "b"]));
-        }
-    }
-    #[test]
-    fn missed_name_searches_imports_and_keeps_failure() {
-        let result = execute(
-            request(&["targte"], true),
-            "view".into(),
-            "qualified Project.Test as T",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|q| match q {
-                        InspectionQuery::LookupName { query: name, .. } => {
-                            InspectionResult::Lookup {
-                                scopes: vec![NameScope::Current],
-                                query: name.clone(),
-                                answer: LookupAnswer::Missing {
-                                    export_names: vec![],
-                                },
-                            }
-                        }
-                        InspectionQuery::ScopeBrowse => InspectionResult::Browse {
-                            module: String::new(),
-                            expanded: true,
-                            entries: vec![entry("aaa"), entry("target")],
-                        },
-                        _ => panic!(),
-                    })
-                    .collect())
-            },
-        );
-        assert!(matches!(
-            result.results[0].outcome,
-            LookupOutcome::Missing(_, _)
-        ));
-        assert_eq!(result.candidates[0].query, "Project.Test.target");
-        assert!(result.candidates[0].local);
-    }
-    #[test]
-    fn type_miss_does_not_browse_modules() {
-        let calls = Cell::new(0);
-        let result = execute(
-            request(&[":: Int -> Bool"], true),
-            "view".into(),
-            "Project.Test",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                calls.set(calls.get() + 1);
-                assert!(queries
-                    .iter()
-                    .all(|q| matches!(q, InspectionQuery::TypeSearch(_))));
-                Ok(vec![InspectionResult::TypeMatches {
-                    query: "Int -> Bool".into(),
-                    matches: vec![],
-                }])
-            },
-        );
-        assert!(result.candidates.is_empty());
-        assert_eq!(calls.get(), 1);
-    }
-    /// A query-local GHC source failure preserves independently valid neighbors.
-    #[test]
-    fn mixed_batch_isolates_one_failing_query_from_its_neighbors() {
-        let calls = Cell::new(0);
-        let result = execute(
-            request(&["validName", "unknownName", ":: Int -> Bool"], false),
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                calls.set(calls.get() + 1);
-                if queries.len() != 1 {
-                    return Err(source_error("combined source rejected"));
-                }
-                match &queries[0] {
-                    InspectionQuery::LookupName { query: name, .. } if name == "validName" => {
-                        Ok(vec![InspectionResult::Lookup {
-                            scopes: vec![NameScope::Current],
-                            query: name.clone(),
-                            answer: LookupAnswer::Info(vec![entry("validName")]),
-                        }])
-                    }
-                    InspectionQuery::LookupName { query: name, .. } if name == "unknownName" => {
-                        Ok(vec![InspectionResult::Lookup {
-                            scopes: vec![NameScope::Current],
-                            query: name.clone(),
-                            answer: LookupAnswer::Missing {
-                                export_names: vec![],
-                            },
-                        }])
-                    }
-                    InspectionQuery::TypeSearch(_) => Err(source_error(
-                        "Not in scope: type constructor or class `Bool'",
-                    )),
-                    other => panic!("unexpected retried query: {other:?}"),
-                }
-            },
-        );
-        // One combined attempt, then one retry per query.
-        assert_eq!(calls.get(), 4);
-        assert_eq!(result.results.len(), 3);
-        assert!(matches!(
-            result.results[0].outcome,
-            LookupOutcome::Found(_, false)
-        ));
-        assert!(matches!(
-            result.results[1].outcome,
-            LookupOutcome::Missing(_, _)
-        ));
-        match &result.results[2].outcome {
-            LookupOutcome::Rejected(diagnostic) => {
-                assert!(diagnostic.contains("Not in scope"), "{diagnostic}");
-            }
-            _ => panic!("expected the signature query to be rejected"),
-        }
-    }
     fn missing(query: &str) -> LookupResult {
         LookupResult {
             query: query.into(),
@@ -2582,65 +2160,3 @@ mod tests {
         ));
     }
 }
-
-#[cfg(test)]
-mod reference_tests {
-    use super::*;
-    use tidepool_runtime::session::{InfoEntry, InspectionAvailability};
-    #[test]
-    fn exact_reference_preserves_constructor_namespace() {
-        let result = execute(
-            LookupRequest {
-                queries: vec![],
-                discover: false,
-                expected_view: Some("view".into()),
-                candidate_limit: 128,
-                references: vec![LookupReference {
-                    module: "Project.Test".into(),
-                    name: "Same".into(),
-                    namespace: LookupNamespace::Constructor,
-                }],
-            },
-            "view".into(),
-            "",
-            &[],
-            &[],
-            crate::UsagePointerTable::default(),
-            |queries| {
-                Ok(queries
-                    .iter()
-                    .map(|q| {
-                        assert!(matches!(
-                            q,
-                            InspectionQuery::ExactName(ExactNameQuery {
-                                namespace: IdentifierNamespace::Constructor,
-                                ..
-                            })
-                        ));
-                        InspectionResult::Lookup {
-                            scopes: vec![NameScope::PublicModule("Project.Test".into())],
-                            query: "Same".into(),
-                            answer: LookupAnswer::Info(vec![InfoEntry {
-                                name: "Same".into(),
-                                module: Some("Project.Test".into()),
-                                kind: "constructor".into(),
-                                display: "constructor".into(),
-                                availability: InspectionAvailability::Available,
-                                references: vec![],
-                            }]),
-                        }
-                    })
-                    .collect())
-            },
-        );
-        let LookupOutcome::Found(entries, false) = &result.results[0].outcome else {
-            panic!("exact reference did not resolve")
-        };
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0].kind, LookupKind::Constructor));
-    }
-}
-
-#[cfg(test)]
-#[path = "lookup/inspection_failure_tests.rs"]
-mod inspection_failure_tests;
