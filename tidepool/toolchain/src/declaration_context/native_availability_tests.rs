@@ -2144,7 +2144,12 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
     };
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let a_seed = product("ScopedBackedgeA", 171);
+    let b_seed = product("ScopedBackedgeB", 172);
+    let a_seed = dependent_product(
+        "ScopedBackedgeA",
+        171,
+        vec![(7, vec![source_import(&b_seed, 7)]), (9001, vec![])],
+    );
     let b = dependent_product(
         "ScopedBackedgeB",
         172,
@@ -2154,6 +2159,11 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         "ScopedBackedgeA",
         171,
         vec![(7, vec![source_import(&b, 7)]), (9001, vec![])],
+    );
+    assert_eq!(
+        a_seed.owner(),
+        a.owner(),
+        "the historical backedge names the same immutable source owner"
     );
     let recovered = recovered_witness_fixtures(&[a, b]);
     let entries = recovered
