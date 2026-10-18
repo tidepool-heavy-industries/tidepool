@@ -298,6 +298,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         callbacks.set(callbacks.get() + 1);
         let (root, helper, publication) = fixture(initial);
         let original = publication.context();
+        let expected_publication = original.semantic_sha256();
         let expected_roles = original.compiler_input_roles();
         let expected_artifacts = original.artifact_view().artifact_ids();
         let initial_groups = std::iter::once(NativeGroupKey {
