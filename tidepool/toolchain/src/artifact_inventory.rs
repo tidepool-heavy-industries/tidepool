@@ -8357,6 +8357,7 @@ mod tests {
             if test_display_projection {
                 let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
                     &Arc::new(context.clone()),
+                    &source_selection,
                     "Tidepool.Session.ProjectionAudit.G100",
                 );
                 let prototype =
