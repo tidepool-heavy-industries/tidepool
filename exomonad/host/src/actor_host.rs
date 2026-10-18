@@ -661,8 +661,20 @@ pub struct ActorHostConfig {
     pub jev: Option<exomonad_actor::JevBackendHandle>,
 }
 
-fn operator_capabilities() -> exomonad_actor::ActorCapabilities {
-    exomonad_actor::ActorCapabilities::default()
+fn admitted_capabilities(
+    workspace: Option<&crate::exomonad::workspace::FrozenWorkspace>,
+) -> Result<exomonad_actor::ActorCapabilities, String> {
+    workspace
+        .and_then(|workspace| workspace.model_catalog.as_ref())
+        .map(|catalog| {
+            catalog.root_capabilities(
+                exomonad_actor::ActorCapabilities::default()
+                    .effect_keys()
+                    .to_vec(),
+            )
+        })
+        .transpose()
+        .map(|capabilities| capabilities.unwrap_or_default())
 }
 
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
@@ -2332,7 +2344,9 @@ async fn run_owned(
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
-    let operator_role = operator_capabilities();
+    let operator_role = admitted_capabilities(config.workspace_inputs.as_ref())
+        .map_err(runtime_error)?
+        .with_conversation_permission(None);
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -3045,7 +3059,7 @@ pub(crate) fn spec_effect_preflight(
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
     {
-        let capabilities = exomonad_actor::ActorCapabilities::default();
+        let capabilities = admitted_capabilities(Some(workspace)).map_err(runtime_error)?;
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, capabilities.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
@@ -3647,20 +3661,8 @@ fn compile_root(
         tracing::info_span!(target: "tidepool::actor_host::startup", "prepare_startup_entry")
             .in_scope(|| machine.prepare_startup_entry(compiled.code()))?;
     machine.seal_recovery_initialization_scope(lexical_scope)?;
-    let capabilities = config
-        .workspace_inputs
-        .as_ref()
-        .and_then(|workspace| workspace.model_catalog.as_ref())
-        .map(|catalog| {
-            catalog.root_capabilities(
-                exomonad_actor::ActorCapabilities::default()
-                    .effect_keys()
-                    .to_vec(),
-            )
-        })
-        .transpose()
-        .map_err(runtime_error)?
-        .unwrap_or_default();
+    let capabilities =
+        admitted_capabilities(config.workspace_inputs.as_ref()).map_err(runtime_error)?;
     let root_model = capabilities
         .conversation_permission()
         .map(|permission| permission.model().model().clone())
@@ -3693,6 +3695,9 @@ fn compile_root(
         );
     }
     descriptor = prompt_composition::install(descriptor, config, source.cloned());
+    descriptor
+        .validate_conversation_selection()
+        .map_err(runtime_error)?;
     let source = host_workbench_source(config, preamble, include, toolset_support)?;
     Ok(CompiledRoot {
         source,
@@ -3780,7 +3785,8 @@ pub(crate) async fn prepare_workspace_toolsets(
     Box<dyn std::error::Error>,
 > {
     let authored = inputs.config()?;
-    let requested_effects = exomonad_actor::ActorCapabilities::default()
+    let requested_effects = admitted_capabilities(Some(&inputs))
+        .map_err(runtime_error)?
         .effect_keys()
         .to_vec();
     let settings = authored

@@ -455,6 +455,25 @@ impl ActorDescriptor {
         &self.source_layer
     }
 
+    /// Reject an inconsistent trusted descriptor before it can issue a compile context.
+    pub fn validate_conversation_selection(&self) -> Result<(), String> {
+        let Some(permission) = self.capabilities.conversation_permission() else {
+            return Ok(());
+        };
+        if self.model.as_ref() != Some(permission.model().model()) {
+            return Err("actor model differs from its fixed conversation permission".into());
+        }
+        if !self
+            .reasoning
+            .is_some_and(|reasoning| permission.permits(permission.model(), reasoning))
+        {
+            return Err(
+                "actor requires an explicit effort admitted by its conversation permission".into(),
+            );
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn session_context(&self, actor: ActorRef) -> ActorSessionContext {
         ActorSessionContext {
@@ -510,6 +529,7 @@ mod tests {
                 ActorCapabilities::default().with_conversation_permission(Some(permission)),
             );
         let actor = crate::ActorRef::first(crate::ActorId(1));
+        assert!(descriptor.validate_conversation_selection().is_err());
         assert!(descriptor.session_context(actor).current_model.is_none());
         assert!(descriptor
             .clone()
@@ -519,6 +539,7 @@ mod tests {
             .is_none());
         assert_eq!(
             descriptor
+                .with_model(Some(crate::Model::DeepSeekFlash))
                 .with_reasoning(Some(low))
                 .session_context(actor)
                 .current_model,

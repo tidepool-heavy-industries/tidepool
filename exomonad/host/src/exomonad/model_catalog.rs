@@ -386,13 +386,19 @@ catalogIdentity = {identity}
             Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
             Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
         };
-        let effort = match reasoning.value() {
-            "none" => "None",
-            "low" => "Low",
-            "medium" => "Medium",
-            "high" => "High",
-            "max" => "Max",
-            effort => return Err(format!("unsupported reasoning setting {effort}")),
+        let effort = match reasoning {
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow)
+            | Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortLow)
+            | Reasoning::DeepSeekReasoning(exomonad_actor::DeepSeekReasoning::DeepSeekLow) => "Low",
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAIMedium)
+            | Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortMedium) => "Medium",
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAIHigh)
+            | Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortHigh)
+            | Reasoning::DeepSeekReasoning(exomonad_actor::DeepSeekReasoning::DeepSeekHigh) => {
+                "High"
+            }
+            Reasoning::DeepSeekReasoning(exomonad_actor::DeepSeekReasoning::DeepSeekNone) => "None",
+            Reasoning::DeepSeekReasoning(exomonad_actor::DeepSeekReasoning::DeepSeekMax) => "Max",
         };
         Ok(format!(
             r#"type {alias} = {family}

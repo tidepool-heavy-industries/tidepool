@@ -310,13 +310,17 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
             crate::Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
             crate::Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
         };
-        let effort = match reasoning.value() {
-            "none" => "None",
-            "low" => "Low",
-            "medium" => "Medium",
-            "high" => "High",
-            "max" => "Max",
-            _ => unreachable!("Reasoning is a closed provider-qualified value"),
+        let effort = match reasoning {
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortLow)
+            | crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekLow) => "Low",
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAIMedium)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium) => "Medium",
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAIHigh)
+            | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortHigh)
+            | crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh) => "High",
+            crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekNone) => "None",
+            crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekMax) => "Max",
         };
         let literal = |text: &str| {
             format!(
