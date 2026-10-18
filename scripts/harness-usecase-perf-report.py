@@ -9,11 +9,133 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 import hashlib
 import json
 import re
 from pathlib import Path
 import sys
+import uuid
+
+
+class ClaimKind(str, Enum):
+    WORKLOAD_TIMING = "workload_timing"
+    FROZEN_WORKLOAD_TIMING = "frozen_workload_timing"
+
+
+class AssessmentStatus(str, Enum):
+    VALID = "valid_workload_timing"
+    QUALIFIED = "qualified_frozen_timing"
+    DIAGNOSTICS = "failed_workload_diagnostics"
+    INSUFFICIENT = "insufficient_observations"
+    NOT_APPLICABLE = "not_applicable"
+    UNASSESSED = "unassessed"
+
+
+def prepared_workspace_selection_valid(selection):
+    """Recognize the issuer's closed selection receipt, never an entry-path proxy."""
+    if not isinstance(selection, dict):
+        return False
+    if selection.get("kind") == "builtin_deployment_program":
+        program = selection.get("program")
+        return (set(selection) == {"kind", "program"}
+                and isinstance(program, dict)
+                and set(program) == {"policy", "manifest_blake3"}
+                and program.get("policy") in ("workbench", "async_workbench")
+                and isinstance(program.get("manifest_blake3"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", program["manifest_blake3"]) is not None)
+    if selection.get("kind") == "workspace_original":
+        if (set(selection) != {"kind", "recipe", "original"}
+                or not isinstance(selection.get("recipe"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", selection["recipe"]) is None
+                or not isinstance(selection.get("original"), str)):
+            return False
+        try:
+            original = uuid.UUID(selection["original"])
+        except ValueError:
+            return False
+        return original.int != 0 and str(original) == selection["original"]
+    return False
+
+
+def claim_assessment(report, requested):
+    """Select only the requested claim; historical reports confer no claim."""
+    requested = ClaimKind(requested)
+    if type(report.get("schema")) is not int or report["schema"] != 2:
+        return {"kind": requested.value, "status": AssessmentStatus.UNASSESSED.value}
+    for assessment in (report.get("assessment"), report.get("workload_assessment")):
+        if isinstance(assessment, dict) and assessment.get("kind") == requested.value:
+            AssessmentStatus(assessment.get("status"))
+            return assessment
+    return {"kind": requested.value, "status": AssessmentStatus.NOT_APPLICABLE.value}
+
+
+def require_claim(report, requested, *, scope):
+    requested = ClaimKind(requested)
+    assessment = claim_assessment(report, requested)
+    accepted = (AssessmentStatus.VALID if requested == ClaimKind.WORKLOAD_TIMING
+                else AssessmentStatus.QUALIFIED)
+    if assessment["status"] != accepted.value:
+        raise ValueError(f"{requested.value}: {assessment['status']}")
+    prerequisites = assessment.get("prerequisites")
+    coverage = report.get("phase_coverage") or {}
+    if (not isinstance(prerequisites, dict) or not prerequisites
+            or not all(value is True for value in prerequisites.values())
+            or scope not in KNOWN_ROSTERS or assessment.get("scope") != scope
+            or coverage.get("cohort") != scope
+            or coverage.get("expected_order") != list(KNOWN_ROSTERS[scope])
+            or coverage.get("complete") is not True):
+        raise ValueError(f"{requested.value}: inconsistent assessment")
+    return assessment
+
+
+def workload_assessment(report, record):
+    execution = record.get("execution") or {}
+    coverage = report["phase_coverage"]
+    physical = report["whole_physical_stream_reconciliation"]
+    expected = KNOWN_ROSTERS.get(coverage.get("cohort"))
+    prepared_workspace = coverage.get("cohort") in ("persona-workbench", "notebook-a-a-b-a")
+    prerequisites = {
+        "workload_contract_matches_selected_cohort": expected is not None
+            and coverage.get("expected_order") == list(expected),
+        "counted_behavior_passed": record.get("passed") is True
+            and type(execution.get("executed_test_count")) is int
+            and execution["executed_test_count"] == 1
+            and type(execution.get("exit_code")) is int and execution["exit_code"] == 0,
+        "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") == "owned-resident",
+        "artifacts_retained": execution.get("artifacts_retained_after_success") is True,
+        "applied_trace_profile_confirmed": report["trace_capture"]["status"] == "complete",
+        "applicable_execution_observations_complete": report["execution_observations"]["status"] == "complete",
+        "phase_measurements_complete": report["phase_measurements"]["status"] == "complete",
+        "phase_coverage_complete": coverage.get("complete") is True,
+        "selected_workspace_route_consumed": not prepared_workspace or (
+            report["workspace_route"]["selected"] == "prepared-workspace"
+            and report["workspace_route"]["verified"] is True),
+        "whole_case_wall_complete": not prepared_workspace
+            or report["whole_case_wall"]["status"] == "complete",
+        "workload_request_service_joins_complete": report["workload_request_service_joins"]["status"] == "complete",
+        "whole_physical_stream_reconciled": physical["status"] == "complete",
+        "all_physical_services_succeeded": physical["physical_service_outcome_status"] == "all_successful",
+        "raw_trace_capture_complete": physical["raw_event_capture_status"] == "complete",
+        "queue_evidence_complete": report["queue_evidence"]["status"] == "complete",
+        "compiler_job_grants_complete": report["compiler_job_grants"]["status"] in
+            ("observed", "not_applicable_no_compiler_requests"),
+        "startup_owner_complete": report["startup_scope"]["owner_status"] == "complete",
+        "cleanup_confirmed": report["runner"]["cleanup"]["complete"] is True,
+        "bounded_owner_observations_complete": report["owned_artifact_observations"]["status"] in
+            ("observed", "native_only_no_compiler_requests"),
+    }
+    disposal = execution.get("disposal") or {}
+    known_failure = (
+        type(execution.get("exit_code")) is int and execution["exit_code"] != 0
+        or execution.get("status") in ("timeout", "interrupted", "spawn_failed", "launch_identity_failed", "runner_failed")
+        or disposal.get("status") == "failed"
+        or record.get("passed") is False and disposal.get("status") != "pending"
+           and type(execution.get("executed_test_count")) is int)
+    status = (AssessmentStatus.DIAGNOSTICS if known_failure else AssessmentStatus.VALID
+              if all(prerequisites.values()) else AssessmentStatus.INSUFFICIENT)
+    return {"kind": ClaimKind.WORKLOAD_TIMING.value, "status": status.value,
+            "scope": coverage.get("cohort"), "prerequisites": prerequisites}
 
 
 EXPECTED_PHASES = (
@@ -1394,14 +1516,28 @@ def analyze(record_path):
         "compiler_trace": {"bytes": daemon_path.stat().st_size, "sha256": sha256_file(daemon_path)},
     }
 
+    # Startup is reported separately. Only a unique observation for each
+    # owner-declared non-activation phase can contribute to this workload total.
+    expected_counter_phases = [name for name in KNOWN_ROSTERS.get(cohort_name, ())
+                               if name != "activation"]
+    observed_counts = []
+    unknown_count = 0
+    for name in expected_counter_phases:
+        rows = [phase for phase in workload_phases if phase["phase"] == name]
+        value = rows[0]["phase_record"].get("logical_compiler_requests") if len(rows) == 1 else None
+        if type(value) is int and value >= 0:
+            observed_counts.append(value)
+        else:
+            unknown_count += 1
     report = {
-        "schema": 1,
+        "schema": 2,
         "whole_case_wall": case_wall_ledger(phases, roster),
         "catalog_acceptance": catalog_acceptance_observations(host_rows),
         "workspace_route": {"selected": environment.get("workspace_route"),
-                            "installed_entry": (activation or {}).get("prepared_workspace_entry"),
+                            "installed_selection": (activation or {}).get("prepared_workspace_selection"),
                             "verified": environment.get("workspace_route") == "prepared-workspace"
-                                        and isinstance((activation or {}).get("prepared_workspace_entry"), str)},
+                                        and prepared_workspace_selection_valid(
+                                            (activation or {}).get("prepared_workspace_selection"))},
         "owned_artifact_observations": owner_observations,
         "trace_capture": capture_observation,
         "execution_observations": execution_observation,
@@ -1437,7 +1573,7 @@ def analyze(record_path):
         },
         "phase_coverage": phase_coverage,
         "phase_measurements": {
-            "status": "complete" if not invalid_phase_measurements else "partial_or_unknown",
+            "status": "complete" if phase_coverage["complete"] and not invalid_phase_measurements else "partial_or_unknown",
             "invalid_records": invalid_phase_measurements,
             "required_values": "wall_ns and logical_compiler_requests are nonnegative JSON integers",
         },
@@ -1471,7 +1607,10 @@ def analyze(record_path):
         },
         "workload_request_service_joins": {
             "status": "complete" if phase_coverage["complete"] and workload_exact else "partial_or_unknown",
-            "logical_request_count": sum(phase.get("logical_compiler_requests") or 0 for phase in workload_phases),
+            "logical_request_count": sum(observed_counts) if expected_counter_phases and phase_coverage["complete"] and not unknown_count else None,
+            "observed_logical_request_subtotal": sum(observed_counts),
+            "unknown_logical_request_phase_count": unknown_count,
+            "logical_request_count_scope": "declared_non_activation_workload_phases",
             "exact_phase_request_join_count": sum(phase["daemon_service_matched_count"] for phase in workload_phases),
         },
         "whole_physical_stream_reconciliation": {
@@ -1558,6 +1697,8 @@ def analyze(record_path):
             phase["harness_runtime_cost_events"] = None
             phase["harness_runtime_cost_coverage"] = None
             phase["store_projection_status"] = "unknown_by_trace_profile"
+    report["runner_record"] = {"path": str(record_path), "sha256": sha256_file(record_path)}
+    report["assessment"] = workload_assessment(report, record)
     return report
 
 
@@ -1565,14 +1706,29 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runner_record", type=Path,
                         help="retained <sha256(test-name)>.json from isolated-libtest --output-dir")
+    parser.add_argument("--require-claim", choices=[kind.value for kind in ClaimKind],
+                        help="require this explicit claim after emitting the observations")
+    parser.add_argument("--workload-scope", choices=sorted(KNOWN_ROSTERS),
+                        help="the owning workload scope required by the claim consumer")
     options = parser.parse_args(argv)
     try:
         report = analyze(options.runner_record)
     except (OSError, ValueError, TypeError) as error:
+        json.dump({"schema": 2, "assessment": {
+            "kind": ClaimKind.WORKLOAD_TIMING.value,
+            "status": AssessmentStatus.INSUFFICIENT.value,
+            "reason": str(error)}, "runner_record": str(options.runner_record)}, sys.stdout)
+        sys.stdout.write("\n")
         print(f"harness use-case report failed: {error}", file=sys.stderr)
         return 2
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
+    if options.require_claim:
+        try:
+            require_claim(report, options.require_claim, scope=options.workload_scope)
+        except ValueError as error:
+            print(f"measurement claim refused: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

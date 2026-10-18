@@ -649,8 +649,13 @@ The reporter separately records certified native receipt origins (Fresh, Cached,
 and RetainedCore) and accepted deployment candidate bytes. These are receipt
 observations, not unique module counts or physical read counts; a prepared entry
 may load without compilation, and absent observations remain unknown. Persona
-and notebook reuse record shutdown and a whole-test monotonic wall ledger. Entry
-installation verification is separate from startup, and the unpartitioned remainder
+and notebook reuse record shutdown and a whole-test monotonic wall ledger. Their
+activation receipt records the actual typed `prepared_workspace_selection`: either
+the builtin policy and exact manifest hash or the workspace recipe and original
+UUID. Builtins have no workspace-original entry path. The live, ready and durable
+installation must agree with the selected deployment and source identity. This
+receipt replaces the old entry-path marker; older frozen reports retain their
+bundle-owned reader. Installation verification is separate from startup, and the unpartitioned remainder
 includes fixture setup, assertions and recording without attributing a cause.
 Nested compiler, installation and snapshot intervals are not added to phase walls.
 
@@ -695,9 +700,13 @@ buffered logger arrival order is not an execution boundary. RTS deltas measure
 process allocation, not retained heap; overlapping allocation deltas are not
 summed. Absent summaries remain unknown rather than zero work.
 
-Behavioral and measurement outcomes remain separate. `behavioral_completed`
-requires the one executed passing case and controls the cohort exit status.
-The measurement report separately records phase coverage, exact workload
+Behavioral and measurement outcomes remain separate. Schema2 cohort reports
+use `behavioral_completed` for the counted outcome and
+`behavior_selection_completed` for behavior plus the selected compiler/trace
+contract. The latter controls the cohort exit status. Exit0 does not accept a
+measurement claim. No generic `completed` field is emitted.
+
+The measurement sidecar separately records phase coverage, exact workload
 request/service joins with one reconciled owner per physical submission, whole
 observed physical-stream reconciliation, nonnegative integer phase measurements, raw trace
 capture versus truncated detailed samples, queue admission evidence, explicit
@@ -712,10 +721,37 @@ use the production assembly/copy owner; manually adding a reporter dependency
 to a test bundle does not establish that assembly delivers it. Root startup
 attribution requires the production preparation owner or canonical `actor_path = "root"`;
 missing actor paths remain unknown. Queue or startup evidence is not inferred
-from counts or timestamps. `measurement.completed` becomes true only when every
-required evidence dimension is complete. It imposes no latency threshold and
-does not establish provider network performance. These supplementary cohorts do
-not block M2 acceptance.
+from counts or timestamps. Absent or invalid counts remain null, with a known
+subtotal and unknown operand count; they are not zero work.
+The logical workload count covers the declared non-activation phases; startup
+is reported separately. Missing or duplicate required phase observations keep
+that total unknown even if every retained prefix counter is zero.
+
+Schema2 observations carry an explicit `assessment.kind` and `assessment.status`.
+The raw reporter can issue `workload_timing` with `valid_workload_timing`,
+`failed_workload_diagnostics` or `insufficient_observations`. The scope comes from
+the owning named workload roster, including every required phase. Valid source
+timing does not require a prepared frozen root. Persona and A/A/B/A scopes still
+require their actual consumed prepared-workspace selection and complete whole-case
+ledger; those are workload premises, independent of frozen-bundle matching.
+The central qualification owner
+alone adds `frozen_workload_timing` with `qualified_frozen_timing` after matching
+the verified descriptor/catalog/root/profile. Missing observations are
+insufficient evidence; a cohort with no selected measurement has `not_applicable`.
+
+`report.json` carries compact assessments and an `observation_report` path,
+byte count and SHA256, rather than a second full measurement copy. Consumers use
+the bundle-owned `qualification.read_measurement(report_path)` to check that
+reference, then the bundled reporter's `require_claim(observation, kind, scope=selected_workload)` for
+the exact requested claim. Historical schema1 reports are unassessed and cannot
+be promoted from their exit code, `completed` or nested booleans. Preserve old
+frozen helpers and reports; this schema applies only to newly delivered helpers.
+
+The raw reporter's default exit reflects report serialization. Its optional
+`--require-claim workload_timing --workload-scope harness-eight-phase` explicitly requires valid timing while still
+emitting available diagnostics on refusal. It cannot issue a frozen claim.
+These assessments impose no latency threshold and do not establish provider
+network performance. The supplementary cohorts do not block M2 acceptance.
 
 ```sh
 python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \

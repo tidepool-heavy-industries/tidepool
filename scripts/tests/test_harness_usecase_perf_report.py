@@ -1,4 +1,6 @@
 import importlib.util
+import contextlib
+import io
 from datetime import datetime, timedelta, timezone
 import itertools
 import json
@@ -43,6 +45,24 @@ def check_shrinking_samples(samples, check):
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
+    def test_prepared_workspace_selection_requires_exact_typed_receipt(self):
+        builtin = {"kind": "builtin_deployment_program",
+                   "program": {"policy": "workbench", "manifest_blake3": "a" * 64}}
+        original = {"kind": "workspace_original", "recipe": "b" * 64,
+                    "original": "12345678-1234-4234-8234-123456789abc"}
+        for selection in (builtin, original):
+            self.assertTrue(reporter.prepared_workspace_selection_valid(selection))
+        for selection in (None, "", "/old/entry", {},
+                          {**builtin, "entry": "/dummy"},
+                          {**builtin, "program": {"policy": "other", "manifest_blake3": "a" * 64}},
+                          {**builtin, "program": {"policy": "workbench", "manifest_blake3": "bad"}},
+                          {**original, "original": "00000000-0000-0000-0000-000000000000"},
+                          {**original, "original": "not-an-original"},
+                          {**original, "recipe": "not-a-recipe"},
+                          {**original, "entry": "/dummy"}):
+            with self.subTest(selection=selection):
+                self.assertFalse(reporter.prepared_workspace_selection_valid(selection))
+
     def test_case_wall_ledger_keeps_verification_shutdown_and_unpartitioned_work_separate(self):
         for scale in (1, 17, 1000000):
             phases = [
@@ -385,6 +405,125 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         report = reporter.analyze(path)
         self.assertEqual(report['compiler_job_grants']['status'], 'partial_or_unknown')
         self.assertIsNone(report['compiler_job_grants']['admissions'][0]['jobs'])
+
+    def test_logical_request_aggregate_preserves_missing_and_invalid_counts(self):
+        for invalid in (None, -1, True, "1"):
+            with self.subTest(invalid=invalid):
+                record = self.make_complete_case()
+                path = self.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(path)
+                next(row for row in phases if row["phase"] == "first-arithmetic")["logical_compiler_requests"] = invalid
+                self.write_jsonl(path, phases)
+                aggregate = reporter.analyze(record)["workload_request_service_joins"]
+                self.assertIsNone(aggregate["logical_request_count"])
+                self.assertEqual(aggregate["unknown_logical_request_phase_count"], 1)
+                self.assertEqual(aggregate["observed_logical_request_subtotal"], 1)
+        record = self.make_complete_case()
+        path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(path)
+        for row in phases:
+            if row["phase"] != "environment":
+                row["logical_compiler_requests"] = 0
+        self.write_jsonl(path, phases)
+        aggregate = reporter.analyze(record)["workload_request_service_joins"]
+        self.assertEqual(aggregate["logical_request_count"], 0)
+        self.assertEqual(aggregate["unknown_logical_request_phase_count"], 0)
+
+    def test_logical_request_aggregate_requires_the_exact_owned_roster(self):
+        for mutation, unknown in (("zero-prefix", 7), ("missing", 1), ("duplicate", 1),
+                                  ("empty", 8), ("missing-control", 0)):
+            with self.subTest(mutation=mutation):
+                record = self.make_complete_case(trace_profile="minimal")
+                self.add_owner_summaries()
+                path = self.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(path)
+                if mutation == "zero-prefix":
+                    phases = [row for row in phases if row["phase"] in ("environment", "first-arithmetic")]
+                elif mutation == "missing":
+                    phases = [row for row in phases if row["phase"] != "reuse-retained"]
+                elif mutation == "duplicate":
+                    phases.append(next(row for row in phases if row["phase"] == "first-arithmetic"))
+                elif mutation == "empty":
+                    phases = phases[:2]
+                else:
+                    phases = [row for row in phases if row["phase"] != "activation"]
+                self.write_jsonl(path, phases)
+                report = reporter.analyze(record)
+                aggregate = report["workload_request_service_joins"]
+                self.assertIsNone(aggregate["logical_request_count"])
+                self.assertEqual(aggregate["unknown_logical_request_phase_count"], unknown)
+                self.assertEqual(aggregate["observed_logical_request_subtotal"],
+                                 1 if mutation in ("duplicate", "missing-control") else 0)
+                self.assertEqual(report["assessment"]["status"], "insufficient_observations")
+
+    def test_source_timing_claim_does_not_require_frozen_preparation(self):
+        record = self.make_complete_case(trace_profile="minimal")
+        self.add_owner_summaries()
+        path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(path)
+        phases[0]["prepared_root_entry_supplied"] = False
+        self.write_jsonl(path, phases)
+        report = reporter.analyze(record)
+        assessment = reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
+        self.assertEqual(assessment["status"], "valid_workload_timing")
+        with self.assertRaises(ValueError):
+            reporter.require_claim(report, "workload_timing", scope="persona-workbench")
+        self.assertEqual(report["environment"]["frozen_catalog_qualification"], "not-established-by-this-counted-test")
+        with self.assertRaises(ValueError):
+            reporter.require_claim(report, "frozen_workload_timing", scope="harness-eight-phase")
+
+    def test_claims_distinguish_failed_body_missing_observations_and_empty_phases(self):
+        for mutation in ("failed_body", "failed_disposal", "failed_timeout", "unknown_cleanup", "no_phases"):
+            with self.subTest(mutation=mutation):
+                record = self.make_complete_case(trace_profile="minimal")
+                self.add_owner_summaries()
+                payload = json.loads(record.read_text())
+                if mutation == "failed_body":
+                    payload.update(passed=False)
+                    payload["execution"]["exit_code"] = 101
+                elif mutation == "failed_disposal":
+                    payload.update(passed=False)
+                    payload["execution"]["disposal"] = {"status": "failed"}
+                elif mutation == "failed_timeout":
+                    payload.update(passed=False)
+                    payload["execution"].update(status="timeout", executed_test_count=None)
+                elif mutation == "unknown_cleanup":
+                    payload["execution"]["hosted_cleanup_status"] = "unknown"
+                else:
+                    path = self.root / "artifacts/phases.jsonl"
+                    self.write_jsonl(path, reporter.read_jsonl(path)[:1])
+                self.write_json(record, payload)
+                report = reporter.analyze(record)
+                expected = "failed_workload_diagnostics" if mutation.startswith("failed_") else "insufficient_observations"
+                self.assertEqual(report["assessment"]["status"], expected)
+                if mutation == "no_phases":
+                    self.assertEqual(report["phase_measurements"]["status"], "partial_or_unknown")
+                    self.assertIsNone(report["workload_request_service_joins"]["logical_request_count"])
+                with self.assertRaises(ValueError):
+                    reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
+
+    def test_claim_consumption_never_promotes_historical_or_missing_assessment(self):
+        for report in ({"schema": 1, "completed": True}, {"schema": True, "completed": True},
+                       {"schema": 2, "completed": True},
+                       {"schema": 2, "assessment": {"kind": "workload_timing", "status": "valid_workload_timing"}}):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                reporter.require_claim(report, "workload_timing", scope="harness-eight-phase")
+        self.assertEqual(reporter.claim_assessment({"schema": 1}, "workload_timing")["status"], "unassessed")
+        with self.assertRaises(ValueError):
+            reporter.require_claim({"schema": 2}, "unknown-kind", scope="harness-eight-phase")
+
+    def test_report_cli_serialization_and_requested_claim_have_distinct_outcomes(self):
+        record = self.make_case()
+        for options, expected in (([], 0), (["--require-claim", "workload_timing", "--workload-scope", "harness-eight-phase"], 1)):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(reporter.main([str(record), *options]), expected)
+            self.assertEqual(json.loads(stdout.getvalue())["assessment"]["status"], "insufficient_observations")
+        (self.root / "artifacts/phases.jsonl").unlink()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(reporter.main([str(record)]), 2)
+        self.assertEqual(json.loads(stdout.getvalue())["assessment"]["status"], "insufficient_observations")
 
     def make_complete_case(self, cohort="harness-eight-phase", trace_profile=None):
         record = self.make_case(trace_profile=trace_profile)
