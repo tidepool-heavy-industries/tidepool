@@ -8311,14 +8311,9 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .merge(value.compiler_source_support())?;
             self = self.rebuild(|facts| facts.compiler_support = support);
-            item_timing.advance("retain_template_custody");
             if let Some(retained) = value.template_imports() {
-                let updated = self
-                    .owner
-                    .facts
-                    .compiler_support
-                    .retain_custody(retained.compiler_support.artifacts())?;
-                self = self.rebuild(|facts| facts.compiler_support = updated);
+                // The checked value already carries its template compiler
+                // support, including exact native availability and custody.
                 item_timing.advance("merge_template_imports");
                 {
                     let updated = Some(match &self.owner.facts.template_imports {
