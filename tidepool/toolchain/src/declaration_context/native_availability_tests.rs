@@ -3131,7 +3131,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             .unwrap();
         let inputs = request.compiler_inputs();
         assert_eq!(
-            inputs.metadata.entries[&owner].descriptor.id,
+            inputs.native_transport.metadata.entries[&owner].descriptor.id,
             entries[winner].descriptor.id
         );
         assert!(
