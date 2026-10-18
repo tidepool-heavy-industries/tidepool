@@ -3272,7 +3272,11 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
     let projection = complete
         .projection()
         .for_source_owners(&BTreeSet::from([owners[1].clone()]));
-    let selected = complete.artifacts().select_roots(vec![ids[1]]).unwrap();
+    let sibling_canonical = complete.projection().snapshot_roles()[&owners[2]].interface();
+    let selected = complete
+        .artifacts()
+        .select_roots(vec![ids[1], sibling_canonical])
+        .unwrap();
     let issued = fixture_compiler_support(projection, selected);
     assert!(
         issued
