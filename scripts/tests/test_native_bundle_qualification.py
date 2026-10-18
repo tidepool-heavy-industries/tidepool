@@ -2005,6 +2005,26 @@ class NativeQualificationTests(unittest.TestCase):
                 elif mutation == "missing_summary":
                     self.assertFalse(measured["assessment"]["prerequisites"]["whole_case_wall_complete"])
 
+    def test_browser_node_requires_an_immutable_executable_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            node = root / 'node'
+            node.write_text('fixture executable; never launched\n')
+            node.chmod(0o755)
+            with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)):
+                self.assertEqual(qualification.browser_node_executable(node), node)
+                for invalid in (root, node):
+                    if invalid == node:
+                        node.chmod(0o644)
+                    with self.subTest(path=invalid), self.assertRaisesRegex(ValueError, 'not an executable file'):
+                        qualification.browser_node_executable(invalid)
+                    with self.assertRaisesRegex(ValueError, 'not an executable file'), \
+                         patch.object(qualification, 'native_runtime_tools') as tools:
+                        qualification.freeze(SimpleNamespace(browser_node=invalid))
+                    tools.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'immutable Nix paths'):
+                qualification.browser_node_executable(node)
+
     def test_offline_compiler_selection_is_exact_immutable_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3291,6 +3311,7 @@ class CatalogSourceTests(unittest.TestCase):
         ghc.mkdir()
         browser_node = tools / 'bin/browser-node'
         browser_node.write_text('fixture node executable')
+        browser_node.chmod(0o755)
         playwright = self.root / 'playwright-browsers'
         playwright.mkdir()
         external_inputs = {
@@ -3374,6 +3395,21 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(qualification.verify(descriptor_path), descriptor)
             self.assertEqual(verify_catalog.call_count, 1)
             self.assertEqual(verify_root.call_count, 3)
+
+            for invalid in (tools, browser_node):
+                changed = json.loads(json.dumps(descriptor))
+                if invalid == browser_node:
+                    browser_node.chmod(0o644)
+                changed['external_inputs']['TIDEPOOL_BROWSER_NODE'] = {
+                    'path': str(invalid), 'store_path': str(invalid),
+                }
+                qualification.write_json(descriptor_path, changed)
+                try:
+                    with self.subTest(browser_node=invalid), self.assertRaisesRegex(ValueError, 'not an executable file'):
+                        qualification.verify(descriptor_path)
+                finally:
+                    browser_node.chmod(0o755)
+                    qualification.write_json(descriptor_path, descriptor)
 
             for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment'):
                 changed = json.loads(json.dumps(descriptor))
