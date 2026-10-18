@@ -2180,13 +2180,24 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     assert_eq!(explicit_display_texts(&foreign)[0], "0", "{foreign}");
     let reply = campaign.drive_native_admission(dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput")).await;
     assert_eq!(reply["status"], "replied", "{reply}");
+    native_setup(campaign, root.as_ref(), "Right unavailable <- request @Text (responseActor producer) (\"lost target\" :: Text) defaultRequestOptions\nhandled <- route (settlement unavailable) (\\settled -> case settled of { Left (ResponseTargetCancelled _) -> pure (); Left failure -> error (T.pack (show failure)); Right _ -> error \"unexpected success\" })").await;
+    campaign.next_deployment(
+        "producer pending request activation",
+        Duration::from_secs(120),
+        |event| match event {
+            LocalResidentDeployment::SessionReady { activation }
+                if activation.id.actor() == producer.actor.identity() => Ok(()),
+            other => Err(other),
+        },
+    ).await;
     displayed(
         campaign,
         root.as_ref(),
         "stopAgent (responseActor producer)",
     )
     .await;
-    displayed(campaign, root.as_ref(), "Right unavailable <- request @Text (responseActor producer) (\"lost target\" :: Text) defaultRequestOptions\nhandled <- route (settlement unavailable) (\\settled -> case settled of { Left _ -> pure (); Right _ -> error \"unexpected success\" })").await;
+    let refused = displayed(campaign, root.as_ref(), "refused <- request @Text (responseActor producer) (\"already stopped\" :: Text) defaultRequestOptions\n_ <- display (case refused of { Left _ -> True; Right _ -> False })").await;
+    assert_eq!(explicit_display_texts(&refused)[0], "True", "{refused}");
     let handled = displayed(
         campaign, root.as_ref(),
         "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
