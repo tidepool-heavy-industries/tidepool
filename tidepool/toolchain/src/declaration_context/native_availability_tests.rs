@@ -8398,6 +8398,45 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             CompleteAvailabilitySource::Request(&continuation),
         )
     };
+    let carriers = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    assert!(
+        full.proof()
+            .unwrap()
+            .qualify_availability(&carriers)
+            .is_err(),
+        "the selected carrier view cannot reissue the historical Full proof"
+    );
+    let carrier_support = recover_fixture_compiler_support(
+        context.compiler_input_projection().clone(),
+        carriers,
+        [full.clone()],
+    )
+    .unwrap();
+    let carrier_context = context
+        .clone()
+        .rebuild(|facts| facts.compiler_support = carrier_support);
+    let before_carriers = carrier_context.artifact_view().capture_graph_selection();
+    let continued = issue_from_request(&carrier_context)
+        .expect("the same request-owned Full remains valid beside carrier-only selection");
+    assert!(continued
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    assert_eq!(
+        carrier_context.artifact_view().capture_graph_selection(),
+        before_carriers
+    );
+    assert!(continued
+        .native_offers()
+        .iter()
+        .any(|offer| offer.original() == fresh_id && offer.is_full()));
+
     let continued =
         issue_from_request(&context).expect("request-owned Full supports fresh dependent body");
     assert!(continued
