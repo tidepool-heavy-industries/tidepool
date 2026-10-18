@@ -265,7 +265,9 @@ async fn production_harness_notebook_a_a_b_a() {
 }
 
 async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
+    let case_started = Instant::now();
     let cohort = history.cohort();
+    let prepared_workspace = matches!(history, NotebookHistory::AABA | NotebookHistory::Persona);
     let (host_trace, compiler_trace, phase_trace, compiler_lifecycle, trace_capture) =
         prepare_performance_traces();
     assert!(
@@ -308,6 +310,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             "schema": 1,
             "phase": "environment",
             "workload_cohort": cohort,
+            "workspace_route": if prepared_workspace { "prepared-workspace" } else { "unprepared-workspace" },
             "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
             "campaign_trace_capture": trace_capture,
             "workload_roster": phases.iter().map(|phase| phase.name).collect::<Vec<_>>(),
@@ -319,9 +322,9 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             "deployment": deployment,
         }),
     );
-    let activation_started = Instant::now();
+    let activation_start_ns = case_started.elapsed().as_nanos();
     let activation_requests = tidepool_extract_cmd::extract_spawn_count();
-    let (_files, fixture, mut rounds) = if matches!(history, NotebookHistory::AABA) {
+    let (_files, fixture, mut rounds) = if prepared_workspace {
         let (files, settings) = settings();
         let (requests, rounds) = mpsc::unbounded_channel();
         let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider {
@@ -342,7 +345,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             .await
             .unwrap();
         fixture
-            .http_input("Exercise the prepared A,A,B,A notebook history.")
+            .http_input("Exercise the prepared notebook history.")
             .await
             .unwrap();
         (files, fixture, rounds)
@@ -352,11 +355,24 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
     let mut round = next_round(&mut rounds, &fixture.context).await;
     let actor = fixture.context.actor.identity();
     let session = round.request.session_id.clone();
+    let activation_end_ns = case_started.elapsed().as_nanos();
+    let verification_start_ns = case_started.elapsed().as_nanos();
+    let prepared_entry = if prepared_workspace {
+        Some(fixture.assert_prepared_workspace_installation().await.0)
+    } else {
+        None
+    };
+    let verification_end_ns = case_started.elapsed().as_nanos();
     record_phase(
         &phase_trace,
         json!({
             "schema": 1, "phase": "activation", "completed": true,
-            "wall_ns": activation_started.elapsed().as_nanos(),
+            "wall_ns": activation_end_ns - activation_start_ns,
+            "start_ns": activation_start_ns, "end_ns": activation_end_ns,
+            "prepared_workspace_entry": prepared_entry,
+            "installation_verification_start_ns": verification_start_ns,
+            "installation_verification_end_ns": verification_end_ns,
+            "installation_verification_ns": verification_end_ns - verification_start_ns,
             "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - activation_requests,
             "provider_calls": round.provider_calls.load(Ordering::SeqCst),
             "context_items": round.request.input.len(),
@@ -372,10 +388,10 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
         let images_before =
             tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
         let provider_before = round.provider_calls.load(Ordering::SeqCst);
-        let started = Instant::now();
+        let start_ns = case_started.elapsed().as_nanos();
         issue(round, phase, &call_id);
         let successor = next_round(&mut rounds, &fixture.context).await;
-        let first_successor_ns = started.elapsed().as_nanos();
+        let first_successor_ns = case_started.elapsed().as_nanos() - start_ns;
         let yielded_before_terminal = !has_output(&successor, &call_id);
         round = if phase.asynchronous && yielded_before_terminal {
             successor.wait_for_pending();
@@ -383,7 +399,8 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
         } else {
             successor
         };
-        let completed_ns = started.elapsed().as_nanos();
+        let end_ns = case_started.elapsed().as_nanos();
+        let completed_ns = end_ns - start_ns;
         let output = successful_output(&round.request, &call_id);
         let displayed = test_campaign::retained_committed_display_text(
             &fixture.runtime.store(),
@@ -407,6 +424,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
                 "schema": 1, "phase": phase.name, "sequence": index, "call_id": call_id,
                 "actor_id": actor.to_string(),
                 "completed": true, "wall_ns": completed_ns, "first_successor_ns": first_successor_ns,
+                "start_ns": start_ns, "end_ns": end_ns,
                 "logical_compiler_requests": logical_compiler_requests,
                 "successful_native_image_constructions": tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations() - images_before,
                 "provider_calls": round.provider_calls.load(Ordering::SeqCst) - provider_before,
@@ -419,11 +437,22 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             }),
         );
     }
+    let shutdown_start_ns = case_started.elapsed().as_nanos();
+    let shutdown_requests = tidepool_extract_cmd::extract_spawn_count();
     round.finish();
     fixture
         .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .unwrap();
+    let shutdown_end_ns = case_started.elapsed().as_nanos();
+    record_phase(
+        &phase_trace,
+        json!({"schema": 1, "phase": "measurement-summary", "completed": true,
+            "wall_ns": shutdown_end_ns - shutdown_start_ns,
+            "start_ns": shutdown_start_ns, "end_ns": shutdown_end_ns,
+            "case_wall_ns": shutdown_end_ns,
+            "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - shutdown_requests}),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

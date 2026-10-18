@@ -398,7 +398,7 @@ def trace_capture_observation(environment, execution, host_rows, daemon_rows, ho
 
 def native_call_requirement(cohort, name):
     """The named workload owns applicability; observed rows cannot remove obligations."""
-    if name in ("environment", "activation"):
+    if name in ("environment", "activation", "measurement-summary"):
         return 0, "lifecycle"
     if cohort in ("harness-eight-phase", "notebook-a-a-b-a", "persona-workbench") and name in KNOWN_ROSTERS[cohort]:
         return 1, None
@@ -917,6 +917,70 @@ def owned_artifact_observations(host_rows, daemon_rows):
                           "Allocation is a process RTS delta, not retained heap; overlapping deltas are not summed.",
     }
 
+
+def case_wall_ledger(phases, roster):
+    summaries = [phase for phase in phases if phase["phase"] == "measurement-summary"]
+    activation = [phase for phase in phases if phase["phase"] == "activation"]
+    if not summaries:
+        return {"status": "not_collected", "scope": "no whole-case monotonic summary"}
+    if len(summaries) != 1 or len(activation) != 1:
+        return {"status": "partial_or_unknown", "problems": ["non-single summary or activation"]}
+    summary, active = summaries[0], activation[0]
+    total = summary.get("case_wall_ns")
+    intervals = [("activation", active.get("start_ns"), active.get("end_ns"), active.get("wall_ns")),
+                 ("installation_verification", active.get("installation_verification_start_ns"),
+                  active.get("installation_verification_end_ns"), active.get("installation_verification_ns"))]
+    intervals += [(phase["phase"], phase.get("start_ns"), phase.get("end_ns"), phase.get("wall_ns"))
+                  for phase in phases if phase["phase"] in roster]
+    intervals.append(("shutdown", summary.get("start_ns"), summary.get("end_ns"), summary.get("wall_ns")))
+    problems = []
+    previous_end = 0
+    for name, start, end, duration in intervals:
+        if (any(type(value) is not int or value < 0 for value in (start, end, duration))
+                or end < start or end - start != duration):
+            problems.append(f"invalid monotonic interval: {name}")
+        elif start < previous_end:
+            problems.append(f"overlapping monotonic interval: {name}")
+        else:
+            previous_end = end
+    if type(total) is not int or total < previous_end:
+        problems.append("invalid whole-case wall")
+    if problems:
+        return {"status": "partial_or_unknown", "problems": problems}
+    covered = sum(interval[3] for interval in intervals)
+    return {"status": "complete", "case_wall_ns": total,
+            "measured_disjoint_ns": covered, "unpartitioned_ns": total - covered,
+            "intervals": [{"name": name, "start_ns": start, "end_ns": end, "wall_ns": duration}
+                          for name, start, end, duration in intervals],
+            "scope": "test body through acknowledged host shutdown; verification is separate from startup; "
+                     "unpartitioned includes setup, assertions and recording, not an inferred cause; "
+                     "runner setup/teardown and nested compiler spans are not added"}
+
+
+def catalog_acceptance_observations(host_rows):
+    names = ("deployment_accepted_modules", "deployment_original_product_bytes",
+             "receipt_fresh_native_modules", "receipt_cached_native_modules",
+             "receipt_retained_core_native_modules")
+    events = []
+    for index, row in enumerate(host_rows):
+        if (row.get("target") != "tidepool_toolchain::module_candidates::acceptance"
+                or fields(row).get("message") != "deployment module products accepted"):
+            continue
+        values = {name: nonnegative_integer(fields(row).get(name)) for name in names}
+        events.append({"event_index": index, "request_identity": request_identity(row),
+                       "execution": attr(row, "execution"), "workload_phase": attr(row, "workload_phase"),
+                       "startup_owners": sorted({owner for span in span_fields(row)
+                                                 if (owner := startup_owner(span)) is not None}), **values})
+    complete = bool(events) and all(event[name] is not None for event in events for name in names)
+    return {"status": "observed" if complete else "partial_or_unknown" if events else "not_observed_unknown",
+            "events": events,
+            "module_observations": {name: sum(event[name] for event in events)
+                                    if complete else None for name in names},
+            "scope": "successful certified native receipt dispositions with deployment candidates; "
+                     "observations are not unique modules, physical reads, canonical-only rows or compiler time; "
+                     "absent events do not imply zero work or a catalog miss; prepared entry loading may need no compile"}
+
+
 def analyze(record_path):
     record_path = Path(record_path).resolve()
     record = read_json(record_path)
@@ -995,7 +1059,7 @@ def analyze(record_path):
     prior_digests = set()
     output_phases = []
     for phase in phases:
-        if phase["phase"] in ("environment", "activation"):
+        if phase["phase"] in ("environment", "activation", "measurement-summary"):
             continue
         phase_evidence = phase.get("evidence", {})
         if not isinstance(phase_evidence, dict):
@@ -1168,7 +1232,7 @@ def analyze(record_path):
     if host_start_readiness_ns is None:
         host_start_readiness_ns = activation_evidence.get("host_start_readiness_ns")
     for phase in phases:
-        if phase["phase"] == "environment":
+        if phase["phase"] in ("environment", "measurement-summary"):
             continue
         invalid_fields = [name for name in ("wall_ns", "logical_compiler_requests")
                           if type(phase.get(name)) is not int or phase[name] < 0]
@@ -1332,6 +1396,12 @@ def analyze(record_path):
 
     report = {
         "schema": 1,
+        "whole_case_wall": case_wall_ledger(phases, roster),
+        "catalog_acceptance": catalog_acceptance_observations(host_rows),
+        "workspace_route": {"selected": environment.get("workspace_route"),
+                            "installed_entry": (activation or {}).get("prepared_workspace_entry"),
+                            "verified": environment.get("workspace_route") == "prepared-workspace"
+                                        and isinstance((activation or {}).get("prepared_workspace_entry"), str)},
         "owned_artifact_observations": owner_observations,
         "trace_capture": capture_observation,
         "execution_observations": execution_observation,
