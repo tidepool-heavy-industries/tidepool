@@ -12480,22 +12480,23 @@ pub(crate) mod tests {
             let inventory = ArtifactInventory::default();
             let projection =
                 CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+            let mut full_support = None;
             let view = if mode == "full" {
                 let complete = inventory
                     .admit_shared(&inventory.empty_view(), vec![entry.clone()])
                     .unwrap();
-                let support = crate::declaration_context::recover_fixture_compiler_support(
+                let no_offer = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     complete.clone(),
                     [],
                 )
                 .unwrap();
-                let narrowed = support
+                let no_offer_narrowed = no_offer
                     .select_support_roots(vec![projection.roles()[0].interface()])
                     .unwrap()
                     .finalize_namespace()
                     .unwrap();
-                complete
+                let no_offer_view = complete
                     .select_issued(
                         projection
                             .roles()
@@ -12505,10 +12506,76 @@ pub(crate) mod tests {
                             })
                             .collect(),
                         &crate::artifact_inventory::ExactArtifactSelection::capture(
-                            narrowed.artifacts(),
+                            no_offer_narrowed.artifacts(),
                         ),
                     )
-                    .unwrap()
+                    .unwrap();
+                let no_offer_context = ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &no_offer_view,
+                    projection.clone(),
+                    vec![crate::declaration_join::ExactLexicalNode {
+                        owner: entry.descriptor.owner.clone(),
+                        imports: vec![],
+                    }],
+                    entry.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap();
+                let no_offer_root = tempfile::tempdir().unwrap();
+                let no_offer_request = ExactCompileContext::new(Arc::new(no_offer_context))
+                    .prepare_compilation(no_offer_root.path(), producer_bytes)
+                    .unwrap();
+                assert!(
+                    !no_offer_request
+                        .compiler_inputs()
+                        .native_availability(entry.descriptor.id)
+                        .unwrap()
+                        .permits(9001),
+                    "broad custody without carried Full cannot acquire the body"
+                );
+                let no_offer_wire: Value = ciborium::de::from_reader(
+                    std::fs::read(&no_offer_request.manifest)
+                        .unwrap()
+                        .as_slice(),
+                )
+                .unwrap();
+                assert_eq!(
+                    no_offer_wire.as_array().unwrap()[6].as_array().unwrap()[0]
+                        .as_array()
+                        .unwrap()[8],
+                    value_array([value_text("issued-groups"), value_array([])])
+                );
+                let available = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let mut physical = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &available.metadata_snapshot(),
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+                OriginalCompilerInputs::issue_segment_native_availability(
+                    &mut physical,
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                )
+                .unwrap();
+                let private =
+                    OriginalCompilerInputs::from_selection(&physical, &available).unwrap();
+                let support =
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        &private,
+                    )
+                    .unwrap();
+                let view = support.artifacts().clone();
+                assert!(view.selected_native_groups().is_empty());
+                full_support = Some(support);
+                view
             } else {
                 let selected = if mode == "partial" {
                     BTreeSet::from([NativeGroupKey {
@@ -12526,7 +12593,12 @@ pub(crate) mod tests {
                     )
                     .unwrap()
             };
-            let context = Arc::new(
+            let context = Arc::new(if let Some(support) = full_support {
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap()
+            } else {
                 ExactDeclarationContext::from_authenticated_execution(
                     producer.sha256(),
                     &view,
@@ -12538,12 +12610,13 @@ pub(crate) mod tests {
                     entry.descriptor.owner.clone(),
                     &[],
                 )
-                .unwrap(),
-            );
+                .unwrap()
+            });
             let root = tempfile::tempdir().unwrap();
             let request = ExactCompileContext::new(context.clone())
                 .prepare_compilation(&root.path().join("initial"), producer_bytes)
                 .unwrap();
+            let inventory = request.compiler_inputs().artifacts.inventory();
             let expected = match mode {
                 "full" | "current" => value_array([value_text("full-carrier")]),
                 "empty" => value_array([value_text("issued-groups"), value_array([])]),
@@ -12688,7 +12761,10 @@ pub(crate) mod tests {
                             unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={imported:?}"));
                             continue;
                         };
-                        let admitted = inventory
+                        let admitted = next
+                            .compiler_inputs()
+                            .artifacts
+                            .inventory()
                             .admit_certified_with_demand(
                                 &next.compiler_inputs().artifacts,
                                 vec![entry.clone()],
@@ -13392,6 +13468,7 @@ pub(crate) mod tests {
                 .issued_group_carriers(&inputs.artifacts)
                 .unwrap()
         );
+        let inventory = inputs.artifacts.inventory();
         let mut fixed = inventory
             .bind_segment(&inputs.artifacts, entries, &physical)
             .unwrap();
