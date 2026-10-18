@@ -62,10 +62,9 @@ module Tidepool.Actors.Exomonad
   , WorkerLifetime (..)
   , Backend (..)
   , OpenAIModel (..)
-  , Model (..)
+  , module Tidepool.Model.Selection
+  , ModelCall, ForkAgent, SpawnAgent
   , Reasoning (..)
-  , DeepSeekReasoning (..)
-  , OpenAIReasoning (..)
   , ContextCheckpoint
   , checkpoint
   , releaseCheckpoint
@@ -203,6 +202,7 @@ module Tidepool.Actors.Exomonad
   , defaultRequestOptions
   , RequestError (..)
   , SpawnContext (..)
+  , Captured, Fresh, SpawnEffect
   , Workspace (..)
   , WorkspaceHandle
   , currentWorkspace
@@ -213,7 +213,7 @@ module Tidepool.Actors.Exomonad
   , descendantDepth
   , activeDescendants
   , SpawnOptions
-  , spawnModel, spawnReasoning, spawnInstructions, spawnLabel, spawnLifetime, spawnLimits
+  , spawnModel, spawnPermissions, spawnInstructions, spawnLabel, spawnLifetime, spawnLimits
   , ValidatedAgentSpec, AgentSpecValidationReport (..)
   , SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..), SpecProviderValidation (..)
   , validateAgentSpec, validatedAgentSpecReport, defaultValidatedSpawnOptions
@@ -263,16 +263,14 @@ import Tidepool.Actors.Internal.Agent
 import Tidepool.Actors.Role
 import Tidepool.Actors.Observe
 import Tidepool.Actors.Spawn
+import Tidepool.Model.Selection
 import Tidepool.Actors.Worktree
 import Tidepool.Effects.Core
   ( ResourceScopes
   , WorkerLifetime (..)
   , Backend (..)
   , OpenAIModel (..)
-  , Model (..)
   , Reasoning (..)
-  , DeepSeekReasoning (..)
-  , OpenAIReasoning (..)
   , CheckpointRefusal (..)
   , ActorContextInfo (..)
   , ActivationKind (..)

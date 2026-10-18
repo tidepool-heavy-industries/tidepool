@@ -1024,6 +1024,8 @@ test-suite automation-helper-contract
     Project.SlowCommandWatch
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Actors.Exomonad
@@ -1107,6 +1109,8 @@ test-suite browser-scenario-contract
     Project.TestEvidence
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1173,6 +1177,8 @@ test-suite command-tools-contract
   other-modules:
     Tidepool.Actor
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Record
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1250,6 +1256,8 @@ test-suite tool-profiles-contract
     LookupNavigationTest
     Project.RetainedLookupExample
     Tidepool.Actor.Internal
+    Tidepool.Model.Selection
+    Tidepool.Internal.ModelControl
     Tidepool.Actor.Source
     Tidepool.Aeson
     Tidepool.Aeson.FromJSON

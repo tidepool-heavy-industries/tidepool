@@ -18,6 +18,8 @@ module Tidepool.Actors.Role
   , WorktreeIntegration
   , Jev
   , ModelCall
+  , ForkAgent
+  , SpawnAgent
   , Lookup
   , Reflect
   , Source
@@ -44,6 +46,8 @@ import Tidepool.Effects.Core
   , Jev
   , Journal
   , ModelCall
+  , ForkAgent
+  , SpawnAgent
   , Lookup
   , Reflect
   , RepoEvent

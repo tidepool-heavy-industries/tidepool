@@ -110,8 +110,10 @@ type family SpawnEffect mode family where
   SpawnEffect Captured family = ForkAgent family
   SpawnEffect Fresh family = SpawnAgent family
 
-checkpoint :: forall family effects. (KnownFamily family, Member (ForkAgent family) effects) => Text -> Eff effects (Either CheckpointRefusal (ContextCheckpoint family))
-checkpoint name = fmap ContextCheckpoint <$> send @(ForkAgent family) (ForkAgentCheckpointWith (familyWitness @family) name)
+-- | Capture the caller's actual conversation. The model value pins only the
+-- family; it does not switch the conversation to another model or effort.
+checkpoint :: forall family effects. (KnownFamily family, Member (ForkAgent family) effects) => Model family -> Text -> Eff effects (Either CheckpointRefusal (ContextCheckpoint family))
+checkpoint _ name = fmap ContextCheckpoint <$> send @(ForkAgent family) (ForkAgentCheckpointWith (familyWitness @family) name)
 
 releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint family -> Eff effects (Either CheckpointRefusal ())
 releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpointWith token)

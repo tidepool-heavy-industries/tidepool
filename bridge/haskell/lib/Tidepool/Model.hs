@@ -12,6 +12,8 @@
 -- its after-tool hook. Ambient actor tools and hooks are not inherited.
 module Tidepool.Model
   ( ModelCall
+  , ForkAgent
+  , SpawnAgent
   , ModelTurn
   , textTurn
   , typedTurn
@@ -39,7 +41,7 @@ import Tidepool.Aeson
 import Tidepool.Model.Selection
 import Tidepool.Internal.ModelControl hiding (ModelOperation (..))
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..), KnownFamily (familyWitness))
+import Tidepool.Effects.Core (ModelCall (..), ForkAgent, SpawnAgent, ModelBoundaryError (..), KnownFamily (familyWitness))
 
 -- | Optional narrower limits. Missing fields retain the cell's limits;
 -- negative values are refused before any provider request. Reported token
