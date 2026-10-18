@@ -11673,16 +11673,36 @@ mod tests {
             reordered.semantic_sha256(),
             legacy_semantic_sha256(&reordered)
         );
+        let producer = context.owner.facts.producer;
+        let later = scaffold_native_fixture(producer, "fixture", "Later", 1);
+        assert!(later.original_native().is_some());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&later)
+                .unwrap()
+                .count(),
+            0,
+        );
+        let draft = crate::certified_products::fixture_finalized_product(later.clone(), producer);
+        assert!(draft.original_native().is_none());
+        assert_eq!(draft.owner(), later.owner());
+        assert_eq!(draft.product_bytes(), later.product_bytes());
+        assert_eq!(draft.interface_bytes(), later.interface_bytes());
+        assert_eq!(draft.package_imports_bytes(), later.package_imports_bytes());
+        assert_eq!(draft.certification_bytes(), later.certification_bytes());
+        assert!(matches!(
+            context
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(producer, &[draft]),
+            Err(CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
+                    "native availability lacks authenticated census"
+                ))
+        ));
         let extended = context
             .as_ref()
             .clone()
-            .extend_checked_original_products(
-                context.owner.facts.producer,
-                &[crate::certified_products::fixture_finalized_product(
-                    support_product("Later"),
-                    context.owner.facts.producer,
-                )],
-            )
+            .extend_checked_original_products(producer, &[later])
             .unwrap();
         assert_ne!(extended.semantic_sha256(), context.semantic_sha256());
         assert_ne!(
@@ -14464,10 +14484,7 @@ mod tests {
     fn late_private_key_capture_keeps_selected_files_after_ancestor_retirement() {
         let (ancestor, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
-        let gamma = crate::certified_products::fixture_finalized_product(
-            support_product("Gamma"),
-            ancestor.owner.facts.producer,
-        );
+        let gamma = scaffold_native_fixture(ancestor.owner.facts.producer, "fixture", "Gamma", 1);
         let descendant = Arc::new(
             ancestor
                 .as_ref()
@@ -14503,10 +14520,8 @@ mod tests {
             .unwrap()
             .interface
             .clone();
-        let epsilon = crate::certified_products::fixture_finalized_product(
-            support_product("Epsilon"),
-            descendant.owner.facts.producer,
-        );
+        let epsilon =
+            scaffold_native_fixture(descendant.owner.facts.producer, "fixture", "Epsilon", 1);
         let next = Arc::new(
             descendant
                 .as_ref()
@@ -15740,9 +15755,11 @@ mod tests {
             .clone()
             .extend_checked_original_products(
                 context.owner.facts.producer,
-                &[crate::certified_products::fixture_finalized_product(
-                    support_product("Later"),
+                &[scaffold_native_fixture(
                     context.owner.facts.producer,
+                    "fixture",
+                    "Later",
+                    1,
                 )],
             )
             .unwrap();
@@ -17805,6 +17822,9 @@ mod tests {
                 hidden.module_interface().unwrap().interface_sha256(),
             )])),
         );
+        let relay = crate::certified_products::tests::recovered_witness_fixtures(&[relay])
+            .remove(0)
+            .product;
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -18633,52 +18653,7 @@ mod tests {
 
     #[test]
     fn first_program_context_growth_materializes_and_checks_new_original() {
-        let interface = b"interface".to_vec();
-        let value = Value::Array(vec![
-            text("TPMOD"),
-            Value::Integer(1.into()),
-            Value::Array(vec![Value::Array(vec![
-                text("fixture"),
-                text("Support"),
-                Value::Bytes(interface.clone()),
-                Value::Array(vec![]),
-            ])]),
-        ]);
-        let mut product_bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
-        let owner = CachedHomeOwner {
-            unit: "fixture".into(),
-            module: "Support".into(),
-            module_version: ModuleVersion([1; 32]),
-            skinny_iface_sha256: Sha256::digest(&interface).into(),
-            product_sha256: Sha256::digest(&product_bytes).into(),
-        };
-        let certification =
-            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-                .unwrap();
-        let package_value = Value::Array(vec![
-            text("TPPKGROOTS"),
-            text("2"),
-            Value::Array(vec![
-                text(&owner.unit),
-                text(&owner.module),
-                text(sha256(&interface)),
-            ]),
-            Value::Array(vec![]),
-            Value::Array(vec![]),
-        ]);
-        let mut package_bytes = Vec::new();
-        ciborium::ser::into_writer(&package_value, &mut package_bytes).unwrap();
-        let product = crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
-                owner,
-                interface,
-                product_bytes,
-                package_bytes,
-                certification,
-            ),
-            [2; 32],
-        );
+        let product = support_product_with_interface("fixture", "Support", b"interface".to_vec());
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let context = Arc::new(
             baseline
@@ -21205,6 +21180,9 @@ mod tests {
         .unwrap()
         .with_execution_source_with_validation(graph.clone(), &mut validation)
         .unwrap();
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
