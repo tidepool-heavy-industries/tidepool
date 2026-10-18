@@ -379,9 +379,9 @@ fn certify_promotion(
         parsed,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -596,9 +596,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &promoted,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -618,9 +618,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &promoted,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -974,9 +974,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &independent,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1120,9 +1120,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &promoted,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1150,9 +1150,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &promoted,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1175,9 +1175,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &promoted,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     target_source,
                     &evidence_bytes,

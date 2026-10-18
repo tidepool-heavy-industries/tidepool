@@ -340,9 +340,9 @@ pub(super) fn issue_planned_original_with_retained_child(
         &parsed,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     &source,
                     &evidence_bytes,
@@ -476,9 +476,9 @@ pub(super) fn issue_planned_original_with_source_value(
         &parsed,
         &crate::artifacts::SourceEvidenceAdmission::from_exact(
             (&exact)
-                .source
+                .source()
                 .match_product(
-                    (&exact).request,
+                    (&exact).physical_request(),
                     &input,
                     &source,
                     &evidence_bytes,
