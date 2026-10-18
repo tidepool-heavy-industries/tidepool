@@ -3383,6 +3383,255 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
     assert!(receipt.permits(7) && !receipt.permits(9001));
 }
 
+fn independently_cloned_availability(
+    rows: &RequestNativeAvailability,
+) -> RequestNativeAvailability {
+    RequestNativeAvailability::from_issued_rows(rows.rows().map(|row| {
+        let mut copied = (**row).clone();
+        copied.contributions = row
+            .contributions
+            .iter()
+            .map(|contribution| Arc::new((**contribution).clone()))
+            .collect::<Vec<_>>()
+            .into();
+        Arc::new(copied)
+    }))
+    .unwrap()
+}
+
+#[test]
+fn unchanged_native_availability_merge_keeps_qualified_rows() {
+    let native = product("UnchangedNativeRows", 54);
+    let context = native_context(&native);
+    let support = context.compiler_source_support();
+    let rows = support.native_availability();
+    assert_eq!(rows.rows().count(), 1);
+    assert_eq!(rows.rows().next().unwrap().mode, NativeTransportMode::Full);
+    let independent = independently_cloned_availability(rows);
+    let expected = rows
+        .for_canonical_roles(support.projection(), support.artifacts())
+        .unwrap();
+    assert_eq!(
+        &expected, rows,
+        "the receiver already carries completed qualification"
+    );
+    for (prior, copied) in rows.rows().zip(independent.rows()) {
+        for (prior, copied) in prior.contributions.iter().zip(copied.contributions.iter()) {
+            assert!(!Arc::ptr_eq(prior, copied));
+        }
+    }
+    assert!(!Arc::ptr_eq(
+        rows.rows().next().unwrap(),
+        independent.rows().next().unwrap(),
+    ));
+    for incoming in [
+        RequestNativeAvailability::default(),
+        rows.clone(),
+        independent,
+    ] {
+        let merged = rows.merge(&incoming).unwrap();
+        let NativeAvailabilityMerge::Unchanged(unchanged) = merged else {
+            panic!("an equal row merge must preserve the existing row owner");
+        };
+        assert!(Arc::ptr_eq(&rows.0, &unchanged.0));
+        let before = support.artifacts().inventory().metrics();
+        let retained = support.retain_normalized_availability(&incoming).unwrap();
+        let after = support.artifacts().inventory().metrics();
+        assert!(Arc::ptr_eq(&rows.0, &retained.native_availability().0));
+        assert_eq!(retained.native_availability(), &expected);
+        assert!(Arc::ptr_eq(
+            support.artifacts().selection_snapshot(),
+            retained.artifacts().selection_snapshot(),
+        ));
+        assert_eq!(after.graph_visits, before.graph_visits);
+    }
+
+    let extra = native_context(&product("ChangedNativeRows", 55));
+    assert!(matches!(
+        rows.merge(extra.compiler_source_support().native_availability())
+            .unwrap(),
+        NativeAvailabilityMerge::Changed(_)
+    ));
+    let before = support.artifacts().inventory().metrics();
+    let requalified = support
+        .retain_normalized_availability(extra.compiler_source_support().native_availability())
+        .unwrap();
+    let after = support.artifacts().inventory().metrics();
+    assert!(!Arc::ptr_eq(&rows.0, &requalified.native_availability().0));
+    assert!(after.graph_visits > before.graph_visits);
+    assert_eq!(requalified.native_availability(), rows);
+
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    let canonical_id = canonical.descriptor.id;
+    let projection = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
+    let inventory = ArtifactInventory::default();
+    let canonical_only = inventory
+        .admit_shared(&inventory.empty_view(), vec![canonical])
+        .unwrap();
+    let rebound = canonical_only.retain_custody(support.artifacts()).unwrap();
+    assert_ne!(
+        support
+            .artifacts()
+            .selection_snapshot()
+            .namespace
+            .get(&canonical_id),
+        rebound.selection_snapshot().namespace.get(&canonical_id),
+        "equal canonical payloads must still have distinct issued bindings in this control",
+    );
+    let downgraded = rows.for_canonical_roles(&projection, &rebound).unwrap();
+    let downgraded_row = downgraded.rows().next().unwrap();
+    assert_eq!(downgraded_row.mode, NativeTransportMode::IssuedGroups);
+    assert!(downgraded_row.permits(7));
+    assert!(downgraded_row.permits(9001));
+    assert!(!downgraded_row.permits(9999));
+    assert!(matches!(
+        downgraded.merge(rows).unwrap(),
+        NativeAvailabilityMerge::Changed(_)
+    ));
+    let rebound_support = recover_fixture_compiler_support(
+        projection,
+        rebound,
+        support.native_offers().iter().cloned(),
+    )
+    .unwrap()
+    .retain_normalized_availability(&downgraded)
+    .unwrap();
+    let expected = rebound_support
+        .native_availability()
+        .for_canonical_roles(rebound_support.projection(), rebound_support.artifacts())
+        .unwrap();
+    assert_eq!(&expected, rebound_support.native_availability());
+    let unchanged = rebound_support
+        .retain_normalized_availability(&independently_cloned_availability(
+            rebound_support.native_availability(),
+        ))
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &rebound_support.native_availability().0,
+        &unchanged.native_availability().0
+    ));
+    assert_eq!(unchanged.native_availability(), &expected);
+    let prior = rebound_support.native_availability().0.clone();
+    let retained = rebound_support
+        .retain_normalized_availability(rows)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&prior, &retained.native_availability().0));
+    let retained_row = retained.native_availability().rows().next().unwrap();
+    assert_eq!(retained_row.mode, NativeTransportMode::IssuedGroups);
+    assert!(
+        !retained_row.permits(9999),
+        "a changed merge must recheck Full's exact namespace"
+    );
+}
+
+#[test]
+fn unchanged_native_availability_merge_preserves_indirect_permissions() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let hidden = product("UnchangedIndirectHidden", 58);
+    let root = dependent_product(
+        "UnchangedIndirectRoot",
+        59,
+        vec![(3, vec![source_import(&hidden, 7)])],
+    );
+    let products = recovered_witness_fixtures(&[hidden, root])
+        .into_iter()
+        .map(|witness| witness.product)
+        .collect::<Vec<_>>();
+    let inputs = OriginalCompilerInputs::from_checked_support_products(
+        &crate::artifact_inventory::CompilerSourceSupport::empty(),
+        producer.sha256(),
+        &products,
+    )
+    .unwrap();
+    let complete =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+    let root_owner = identity(&products[1].owner().unit, &products[1].owner().module);
+    let selected = complete
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![root_owner])
+        .unwrap();
+    let support = selected.retain_template_availability(&complete).unwrap();
+    let hidden_owner = identity(&products[0].owner().unit, &products[0].owner().module);
+    assert!(!support
+        .projection()
+        .snapshot_roles()
+        .contains_key(&hidden_owner));
+    let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
+        .unwrap()
+        .descriptor
+        .id;
+    let rows = support.native_availability();
+    let hidden_row = &rows.0[&hidden_id];
+    assert_eq!(hidden_row.mode, NativeTransportMode::IssuedGroups);
+    assert!(hidden_row.permits(7));
+    assert!(!hidden_row.permits(9001));
+    let expected = rows
+        .for_canonical_roles(support.projection(), support.artifacts())
+        .unwrap();
+    assert_eq!(
+        &expected, rows,
+        "indirect permission restriction is already complete"
+    );
+    let independent = independently_cloned_availability(rows);
+    let before = support.artifacts().inventory().metrics();
+    let retained = support
+        .retain_normalized_availability(&independent)
+        .unwrap();
+    let after = support.artifacts().inventory().metrics();
+    assert!(Arc::ptr_eq(&rows.0, &retained.native_availability().0));
+    assert_eq!(retained.native_availability(), &expected);
+    assert_eq!(after.graph_visits, before.graph_visits);
+    assert!(retained.native_availability().0[&hidden_id].permits(7));
+    assert!(!retained.native_availability().0[&hidden_id].permits(9001));
+}
+
+#[test]
+fn native_availability_failed_merge_preserves_qualified_owner() {
+    let contexts = [
+        native_context(&product("AtomicNativeRowsA", 56)),
+        native_context(&product("AtomicNativeRowsB", 57)),
+    ];
+    let mut rows = contexts
+        .iter()
+        .enumerate()
+        .map(|(index, context)| {
+            let row = Arc::clone(
+                context
+                    .compiler_source_support()
+                    .native_availability()
+                    .rows()
+                    .next()
+                    .unwrap(),
+            );
+            (row.original.descriptor.id, (index, row))
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_values();
+    let (_, lower) = rows.next().unwrap();
+    let (upper_index, upper) = rows.next().unwrap();
+    assert!(lower.original.descriptor.id < upper.original.descriptor.id);
+    assert_ne!(lower.canonical, upper.canonical);
+    let mut invalid = (*upper).clone();
+    invalid.canonical = lower.canonical;
+    let incoming = RequestNativeAvailability::from_issued_rows([lower, Arc::new(invalid)]).unwrap();
+    let support = contexts[upper_index].compiler_source_support();
+    let before = support.native_availability().clone();
+    let incoming_before = incoming.clone();
+    let failure = support
+        .retain_normalized_availability(&incoming)
+        .unwrap_err();
+    assert!(
+        matches!(failure, CompileError::ExtractFailed(_)),
+        "actual_error={failure:?}"
+    );
+    assert!(Arc::ptr_eq(&before.0, &support.native_availability().0));
+    assert_eq!(support.native_availability(), &before);
+    assert_eq!(incoming, incoming_before);
+}
+
 #[test]
 fn private_full_availability_requires_exact_namespace_and_refuses_historical_ambiguity() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
@@ -3449,7 +3698,10 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    let normalized = separate_rows[0].merge(&separate_rows[1]).unwrap();
+    let normalized = separate_rows[0]
+        .merge(&separate_rows[1])
+        .unwrap()
+        .into_rows();
     let error =
         NativeCompilerTransport::receive(&projection, &metadata, &custody, &normalized, &offers)
             .err()

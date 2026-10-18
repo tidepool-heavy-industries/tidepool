@@ -813,12 +813,17 @@ impl CompilerSourceSupport {
         &self,
         incoming: &crate::declaration_context::RequestNativeAvailability,
     ) -> Result<Self, CompileError> {
-        let mut result = self.clone();
-        result.native_availability = self
-            .native_availability
-            .merge(incoming)?
-            .for_canonical_roles(&self.projection, &self.artifacts)?;
-        Ok(result)
+        match self.native_availability.merge(incoming)? {
+            // The receiver keeps its exact roles, namespace and prior row owners.
+            // An equal incoming row does not transfer additional custody here.
+            crate::declaration_context::NativeAvailabilityMerge::Unchanged(_) => Ok(self.clone()),
+            crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => {
+                let mut result = self.clone();
+                result.native_availability =
+                    rows.for_canonical_roles(&self.projection, &self.artifacts)?;
+                Ok(result)
+            }
+        }
     }
 
     pub(crate) fn native_offers(&self) -> &[IssuedNativeOffer] {

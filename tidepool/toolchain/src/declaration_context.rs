@@ -775,7 +775,9 @@ impl OriginalCompilerInputs {
                 producer,
                 CompleteAvailabilitySource::Request(complete),
             )?;
-            native_availability = native_availability.merge(&issued.native_availability)?;
+            native_availability = native_availability
+                .merge(&issued.native_availability)?
+                .into_rows();
             native_offers.extend(issued.native_offers);
             issued.artifacts
         } else {
@@ -1036,6 +1038,7 @@ impl OriginalCompilerInputs {
             native_availability: self
                 .native_availability
                 .merge(&other.native_availability)?
+                .into_rows()
                 .for_canonical_roles(&projection, &artifacts)?,
             demand,
             projection,
@@ -1323,6 +1326,25 @@ pub(crate) struct RequestNativeAvailability(
     Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
 );
 
+/// Mutation of immutable rows does not establish qualification for a new context.
+pub(crate) enum NativeAvailabilityMerge {
+    Unchanged(RequestNativeAvailability),
+    Changed(RequestNativeAvailability),
+}
+
+impl NativeAvailabilityMerge {
+    pub(crate) fn into_rows(self) -> RequestNativeAvailability {
+        match self {
+            Self::Unchanged(rows) | Self::Changed(rows) => rows,
+        }
+    }
+}
+
+enum NativeAvailabilityRowMerge {
+    Unchanged,
+    Changed,
+}
+
 impl RequestNativeAvailability {
     fn semantic_observations(
         &self,
@@ -1409,14 +1431,14 @@ impl RequestNativeAvailability {
     fn merge_row(
         rows: &mut BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
         row: Arc<NativeTransportAvailability>,
-    ) -> Result<(), CompileError> {
+    ) -> Result<NativeAvailabilityRowMerge, CompileError> {
         let id = row.original.descriptor.id;
         let Some(previous) = rows.get(&id) else {
             rows.insert(id, row);
-            return Ok(());
+            return Ok(NativeAvailabilityRowMerge::Changed);
         };
         if previous == &row {
-            return Ok(());
+            return Ok(NativeAvailabilityRowMerge::Unchanged);
         }
         if previous.original != row.original || previous.canonical != row.canonical {
             return Err(failure("normalized native owner differs"));
@@ -1447,15 +1469,27 @@ impl RequestNativeAvailability {
                 contributions: contributions.into_values().collect::<Vec<_>>().into(),
             }),
         );
-        Ok(())
+        Ok(NativeAvailabilityRowMerge::Changed)
     }
 
-    pub(crate) fn merge(&self, incoming: &Self) -> Result<Self, CompileError> {
+    pub(crate) fn merge(&self, incoming: &Self) -> Result<NativeAvailabilityMerge, CompileError> {
         let mut rows = (*self.0).clone();
+        let mut disposition = NativeAvailabilityRowMerge::Unchanged;
         for row in incoming.rows() {
-            Self::merge_row(&mut rows, Arc::clone(row))?;
+            if let NativeAvailabilityRowMerge::Changed =
+                Self::merge_row(&mut rows, Arc::clone(row))?
+            {
+                disposition = NativeAvailabilityRowMerge::Changed;
+            }
         }
-        Ok(Self(Arc::new(rows)))
+        Ok(match disposition {
+            NativeAvailabilityRowMerge::Unchanged => {
+                NativeAvailabilityMerge::Unchanged(self.clone())
+            }
+            NativeAvailabilityRowMerge::Changed => {
+                NativeAvailabilityMerge::Changed(Self(Arc::new(rows)))
+            }
+        })
     }
 
     pub(crate) fn for_canonical_roles(

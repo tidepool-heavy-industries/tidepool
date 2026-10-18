@@ -2029,6 +2029,8 @@ mod normalized_dependency_tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(roots.len(), 2);
         let closed = issued.for_groups(&roots).unwrap();
+        assert_eq!(closed.reachable, issued.reachable);
+        assert!(Arc::ptr_eq(&issued, &closed));
         let identity = closed.identity().unwrap();
         let repeated = closed.for_groups(&roots).unwrap();
         assert!(Arc::ptr_eq(&closed, &repeated));
@@ -2063,6 +2065,67 @@ mod normalized_dependency_tests {
             &empty,
             &empty.for_groups(&BTreeSet::new()).unwrap()
         ));
+
+        // All Group roots do not cover an independently retained canonical root.
+        let sibling = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "ContributionArtifactOnly",
+                vec![(13, vec![])],
+                30,
+                &BTreeMap::new(),
+                b"artifact-only interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let sibling = ArtifactEntry::canonical(sibling.module_interface().unwrap().clone());
+        let sibling_id = sibling.descriptor.id;
+        let custody = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
+        let issuer = custody
+            .select_issued(vec![original], &offer.proof().unwrap().selection)
+            .unwrap();
+        let broad = issuer
+            .inventory()
+            .admit_shared(&issuer, vec![Arc::new(sibling)])
+            .unwrap();
+        let proof = NativeOriginalRequirement {
+            original,
+            selection: ExactArtifactSelection::capture(&broad),
+        };
+        let broad_offer = IssuedNativeOffer::issue(original, &broad, Some(proof)).unwrap();
+        assert!(broad_offer.is_full());
+        let mixed = Arc::new(
+            broad_offer
+                .contribution_for(&BTreeSet::from([original]))
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(mixed.reachable.iter().any(|node| matches!(node,
+            ArtifactBindingNode::Artifact(binding) if binding.artifact == sibling_id)));
+        let all_groups = mixed
+            .reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(all_groups, roots);
+        let mixed_identity = mixed.identity().unwrap();
+        let reduced = mixed.for_groups(&all_groups).unwrap();
+        assert!(!Arc::ptr_eq(&mixed, &reduced));
+        assert!(reduced.identity.get().is_none());
+        assert_eq!(reduced.reachable, closed.reachable);
+        assert!(!reduced
+            .reachable
+            .iter()
+            .any(|node| node.artifact() == sibling_id));
+        assert!(reduced.offer().same_issuance(&broad_offer));
+        assert_ne!(reduced.identity().unwrap(), mixed_identity);
+        assert_ne!(
+            reduced.identity().unwrap(),
+            closed.identity().unwrap(),
+            "equal memberships from distinct offer proofs retain their own identity"
+        );
     }
 
     fn exhaustive_group_supports<'a>(
