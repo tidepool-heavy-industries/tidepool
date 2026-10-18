@@ -7761,7 +7761,33 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
             .unwrap();
         let policy_fragment =
             OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
-        assert!(policy_fragment.issued_input_decisions().is_none());
+        let owner = &entry.descriptor.owner;
+        let fragment_role = policy_fragment
+            .projection
+            .snapshot_roles()
+            .get(owner)
+            .expect("the policy producer has an actual original role");
+        assert_eq!(fragment_role.original(), Some(entry.descriptor.id));
+        assert_eq!(fragment_role.interface(), role.interface());
+        assert!(
+            selection.continuation_input(owner).unwrap().is_none(),
+            "this producer is NewProduct, not a missing carried input"
+        );
+        assert!(matches!(
+            policy_fragment
+                .issued_input_decisions()
+                .unwrap()
+                .for_role(owner, fragment_role),
+            crate::artifact_inventory::InputNativeDecision::UnissuedPolicy
+        ));
+        let reused_role = reused.projection.snapshot_roles().get(owner).unwrap();
+        assert_eq!(reused_role, &role);
+        assert!(
+            matches!(reused.issued_input_decisions().unwrap()
+            .for_role(owner, reused_role), crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
+                if choices.is_empty()),
+            "this exact owner's empty choice remains issued"
+        );
         for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
             let merged = left.merge(right).unwrap();
             assert!(merged.issued_artifacts().selected_native_groups().is_empty(),
