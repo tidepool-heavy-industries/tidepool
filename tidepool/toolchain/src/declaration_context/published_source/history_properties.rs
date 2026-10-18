@@ -182,18 +182,23 @@ fn fixture_with_helper_version(
 fn continued_context(
     context: &ExactDeclarationContext,
     view: &ArtifactView,
-    root: &ArtifactEntry,
 ) -> Result<ExactDeclarationContext, CompileError> {
-    // This is the original_execution_context production construction boundary:
-    // original instance evidence and its issued compiler projection travel together.
-    ExactDeclarationContext::from_authenticated_execution(
-        context.owner.facts.producer,
-        view,
-        context.owner.facts.compiler_support.projection().clone(),
-        context.owner.facts.lexical.to_vec(),
-        root.descriptor.owner.clone(),
-        &[root.descriptor.owner.clone()],
-    )
+    // Authenticate the changed demand through recorded recovery, then carry
+    // the parent's complete permission evidence without rebuilding its roots.
+    let support = recover_fixture_compiler_support(
+        context.compiler_input_projection().clone(),
+        view.clone(),
+        context
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .cloned(),
+    )?
+    .restore_snapshot_evidence(&context.snapshot())?;
+    context
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
 }
 
 fn restored(
@@ -348,7 +353,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .admit_product_artifacts(context.artifact_view(), vec![root.clone()],
                             NativeArtifactDemand::CertifiedTargetImports(&imports), None)
                         .unwrap().into_target().unwrap().bind_target(None, imports.to_vec());
-                    context = continued_context(&context, target.artifacts(), &root).unwrap();
+                    context = continued_context(&context, target.artifacts()).unwrap();
                     let groups = target.resolve().unwrap().groups().clone();
                     let issuer_originals = expected_roles.iter().filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
                     let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
