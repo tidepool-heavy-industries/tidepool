@@ -4,7 +4,6 @@ use super::*;
 use crate::artifact_inventory::{NativeGroupBinding, NativeGroupKey};
 use crate::certified_products::PendingImportOwner;
 use proptest::prelude::*;
-use tidepool_repr::execution_schema::SymbolIdentity;
 
 const ORDINALS: [u32; 3] = [3, 11, 29];
 
@@ -74,16 +73,16 @@ fn fixture_with_helper_version(
     let ArtifactPayload::Original(helper_product) = &helper.payload else {
         unreachable!()
     };
+    let helper_definitions =
+        crate::certified_products::original_native_group_definitions(helper_product, 7).unwrap();
+    let helper_binding = match &helper_definitions.bindings()[0] {
+        tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+        tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+    };
     let helper_import = PendingImportOwner::Source {
         owner: helper_product.owner().clone(),
         original_ordinal: 7,
-        binder: SymbolIdentity {
-            unit: "fixture".into(),
-            module: "HistoryHelper".into(),
-            namespace: "value".into(),
-            occurrence: "entry_7".into(),
-            record_parent: None,
-        },
+        binder: helper_binding.identity.clone(),
     };
     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
         crate::certified_products::fixture_finalized_product_with_requirements(
@@ -437,16 +436,15 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let ArtifactPayload::Original(product) = &root.payload else {
                         unreachable!()
                     };
+                    let definitions = crate::certified_products::original_native_group_definitions(product, ordinal).unwrap();
+                    let binding = match &definitions.bindings()[0] {
+                        tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                        tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+                    };
                     let import = PendingImportOwner::Source {
                         owner: product.owner().clone(),
                         original_ordinal: ordinal,
-                        binder: SymbolIdentity {
-                            unit: "fixture".into(),
-                            module: "HistoryRoot".into(),
-                            namespace: "value".into(),
-                            occurrence: format!("entry_{ordinal}"),
-                            record_parent: None,
-                        },
+                        binder: binding.identity.clone(),
                     };
                     let root_binding = *context.artifact_view().capture_graph_selection().namespace.iter()
                         .find(|binding| binding.artifact == root.descriptor.id).unwrap();

@@ -1727,7 +1727,8 @@ mod tests {
                 published.semantic_sha256(),
                 "publication keeps its original selection independently of later demand"
             );
-            let ambient = inventory
+            let ambient = admitted
+                .inventory()
                 .admit_shared_with_demand(
                     &admitted,
                     vec![future.clone()],
