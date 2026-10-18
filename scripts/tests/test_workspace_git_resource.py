@@ -176,7 +176,10 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         copied = shared / "workspace.bundle"
         shutil.copyfile(self.bundle, copied)
         (shared / "ghc-libdir.txt").write_text(str(self.root) + "\n")
-        qualification.write_json(shared / "native-build-contract.json", {"stdlib_mode": "source-backed"})
+        qualification.write_json(shared / "native-build-contract.json", {
+            "stdlib_mode": "source-backed",
+            "offline_compilers": {name: os.environ[name] for name in qualification.OFFLINE_COMPILERS},
+        })
         tools = Path(os.environ["TIDEPOOL_RUNTIME_TOOLS"]).resolve(strict=True)
         (shared / "runtime-tools").symlink_to(tools)
         environment = qualification.native_environment(frozen)
