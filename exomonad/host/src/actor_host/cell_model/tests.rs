@@ -1079,3 +1079,278 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
         "selection checks must not issue provider work"
     );
 }
+
+#[tokio::test]
+async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungranted_work() {
+    use crate::exomonad::model_catalog::{
+        InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
+    };
+    use exomonad_actor::{
+        ActorCapabilities, ActorPlacement, Backend, ModelGrant, ModelPermissions,
+    };
+    use exomonad_tool::{ModelFamily, ModelOperation, ModelPermission};
+    use std::{collections::BTreeMap, io::Write, os::unix::fs::OpenOptionsExt};
+    use tidepool_bridge_effects::ModelSelectionEnvelope;
+
+    let files = tempfile::tempdir().unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut providers = BTreeMap::new();
+    let mut models = BTreeMap::new();
+    let mut servers = Vec::new();
+    for (key, model, marker) in [
+        ("executor", "deepseek-flash", "offline-executor-key"),
+        ("planner", "deepseek-v4-pro", "offline-planner-key"),
+    ] {
+        let key_file = files.path().join(key);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_file)
+            .unwrap();
+        writeln!(file, "{marker}").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let captured = observed.clone();
+        let app = axum::Router::new().route("/responses", axum::routing::post(
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| {
+                let captured = captured.clone();
+                async move {
+                    assert_eq!(headers["authorization"].to_str().unwrap(), format!("Bearer {marker}"));
+                    assert_eq!(body["model"], model);
+                    assert_eq!(body["reasoning"], json!({"effort":"high"}));
+                    assert!(body.get("prompt_cache_key").is_none());
+                    captured.lock().unwrap().push((key, body));
+                    let response = json!({"id":format!("response-{key}"),"status":"completed",
+                        "model":model,"output":[{"type":"message","id":format!("message-{key}"),
+                        "role":"assistant","status":"completed","content":[{"type":"output_text",
+                        "text":format!("{key} λ 🪼")}]}],"usage":{"input_tokens":9,"output_tokens":3,
+                        "input_tokens_details":{"cached_tokens":0}}});
+                    let wire = format!("event: response.completed\ndata: {}\n\n",
+                        json!({"type":"response.completed","response":response}));
+                    let chunks = wire.as_bytes().chunks(3).map(|part|
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::copy_from_slice(part)))
+                        .collect::<Vec<_>>();
+                    axum::response::Response::builder().header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from_stream(futures_util::stream::iter(chunks))).unwrap()
+                }
+            }
+        ));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        servers.push((stop, task));
+        providers.insert(
+            key.into(),
+            ProviderConfig {
+                backend: Backend::DeepSeek,
+                credential_file: Some(key_file),
+                credential_env: None,
+                endpoint: Some(format!("http://{address}/responses")),
+                inference_limits: Default::default(),
+            },
+        );
+        models.insert(
+            key.into(),
+            ModelConfig {
+                provider: key.into(),
+                model: model.into(),
+                effort: "high".into(),
+                allowed_efforts: vec!["high".into()],
+            },
+        );
+    }
+    let catalog = InferenceConfig {
+        profile: "offline".into(),
+        providers,
+        models,
+        profiles: BTreeMap::from([(
+            "offline".into(),
+            ProfileConfig {
+                default: "executor".into(),
+                allowed: vec!["executor".into(), "planner".into()],
+            },
+        )]),
+    }
+    .resolve()
+    .unwrap();
+    let runtime =
+        super::super::embedded_harness::EmbeddedHarnessRuntime::open(files.path(), 1).unwrap();
+    let auth = catalog
+        .providers
+        .iter()
+        .map(|(key, provider)| {
+            (
+                key.clone(),
+                RunAuth::from_provider(provider, runtime.store(), runtime.run_identity().into())
+                    .unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    runtime
+        .configure_inference(auth["executor"].clone())
+        .unwrap();
+    runtime.configure_providers(auth).unwrap();
+    let (_storage, mut config) = policy_config();
+    config.model = Model::DeepSeekFlash;
+    config.reasoning = catalog.models["executor"].reasoning;
+    config.workspace_inputs.as_mut().unwrap().model_catalog = Some(catalog.clone());
+    let settings =
+        toml::from_str("provider='deepseek'\nlisten='127.0.0.1:0'\ncontext_capacity_tokens=4096\n")
+            .unwrap();
+    let factory = admitted_runtime_factory(&runtime, &settings, &config);
+    let permissions = ModelPermissions::new(
+        catalog
+            .models
+            .iter()
+            .map(|(key, model)| {
+                ModelGrant::new(
+                    ModelPermission {
+                        operation: ModelOperation::ModelCall,
+                        family: ModelFamily::DeepSeek,
+                    },
+                    AdmittedModelIdentity::new(
+                        catalog.identity.clone(),
+                        key.clone(),
+                        model.provider.clone(),
+                        model.model.clone(),
+                    )
+                    .unwrap(),
+                    vec![model.reasoning],
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let descriptor = ActorDescriptor::new(
+        "http-selected",
+        ActorPlacement {
+            session: tidepool_repr::SessionId(1),
+            resource_scope: tidepool_codegen::suspension::RealmId(1),
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    )
+    .with_capabilities(ActorCapabilities::default().with_model_permissions(permissions));
+    let selected = factory.selected_transport(&descriptor).unwrap();
+    let denied = factory
+        .selected_transport(
+            &descriptor
+                .clone()
+                .with_capabilities(ActorCapabilities::default()),
+        )
+        .unwrap();
+    let store = runtime.store();
+    let work_store = store.clone();
+    let observed_before_work = observed.clone();
+    tokio::task::spawn_blocking(move || {
+        let caller = PrincipalId::new(1, 1);
+        let service = CellModelService::<RunAuth, _>::new(
+            tokio::runtime::Handle::current(),
+            caller,
+            "catalog-http".into(),
+            work_store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            ModelPolicy {
+                limits: Limits::default(),
+            },
+            selected,
+        );
+        let choice = |key: &str| ModelSelectionEnvelope {
+            catalog_identity: catalog.identity.clone(),
+            key: key.into(),
+            reasoning: catalog.models[key].reasoning,
+        };
+        let request = |selection| {
+            json!({"instructions":"offline routing","input":"Unicode λ 🪼",
+            "selection":selection,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
+        };
+        let mut wrong_catalog = choice("planner");
+        wrong_catalog.catalog_identity = "foreign-catalog".into();
+        let mut wrong_effort = choice("planner");
+        wrong_effort.reasoning = Reasoning::for_backend(Backend::DeepSeek, "low").unwrap();
+        let mut wrong_key = choice("planner");
+        wrong_key.key = "unadmitted".into();
+        for invalid in [wrong_catalog, wrong_effort, wrong_key] {
+            assert!(service
+                .start(caller, ModelFamily::DeepSeek, request(json!(invalid)))
+                .is_err());
+        }
+        assert!(service
+            .start(
+                caller,
+                ModelFamily::OpenAI,
+                request(json!(choice("planner")))
+            )
+            .is_err());
+        let denied_service = CellModelService::<RunAuth, _>::new(
+            tokio::runtime::Handle::current(),
+            caller,
+            "catalog-http-denied".into(),
+            work_store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            ModelPolicy {
+                limits: Limits::default(),
+            },
+            denied,
+        );
+        assert!(denied_service
+            .start(
+                caller,
+                ModelFamily::DeepSeek,
+                request(json!(choice("planner")))
+            )
+            .is_err());
+        assert!(observed_before_work.lock().unwrap().is_empty());
+        assert!(
+            work_store.events(None).unwrap().is_empty(),
+            "refusal must precede provider claims"
+        );
+        for key in ["planner", "executor"] {
+            let receipt = service
+                .start(caller, ModelFamily::DeepSeek, request(json!(choice(key))))
+                .unwrap();
+            assert_eq!(
+                receipt["receipt"]["outcome"]["value"],
+                format!("{key} λ 🪼")
+            );
+            assert_eq!(receipt["receipt"]["counts"]["requests"], 1);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>(),
+        ["planner", "executor"]
+    );
+    let events = store.events(None).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "model_invocation_receipt")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "responses_transport")
+            .count(),
+        2
+    );
+    for (stop, task) in servers {
+        stop.send(()).unwrap();
+        task.await.unwrap();
+    }
+}

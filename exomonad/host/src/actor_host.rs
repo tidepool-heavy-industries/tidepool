@@ -3823,7 +3823,8 @@ pub(crate) async fn prepare_workspace_toolsets(
         .map_err(runtime_error)?;
     let source_layers: exomonad_actor::ActorSourceLayerResolver = source.clone();
     let jev = jev_backend(&config);
-    let models = cell_model::admitted_runtime_factory(&runtime, &settings, &config);
+    let models: Arc<dyn exomonad_actor::CellModelFactory> =
+        cell_model::admitted_runtime_factory(&runtime, &settings, &config);
     let conversation = embedded_reflect::run_conversation_reader(runtime.store(), recovery);
     for key in exomonad_actor::installed_intrinsic_effect_support(
         Some(&source_layers),
