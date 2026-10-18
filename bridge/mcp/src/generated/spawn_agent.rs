@@ -6,7 +6,7 @@ pub fn spawn_agent_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         model_permission: None,
         type_name: "SpawnAgent",
-        description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+        description: "Admit an idle agent with a fresh conversation, explicit model selection, tools, workspace and child model grants.",
         prompt_card: None,
         constructors: &[
             "SpawnAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> SpawnAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",

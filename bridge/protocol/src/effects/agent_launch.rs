@@ -9,7 +9,7 @@ use crate::schema::{
 pub(crate) const MODEL_FAMILY_PARAMS: &[crate::schema::TypeParam] =
     &[crate::schema::TypeParam::value("modelFamily")];
 
-/// Admit an idle persistent actor with explicit context, directory and tools.
+/// Validate or replace installations and inspect or release checkpoints.
 #[must_use]
 pub fn agent_launch() -> Effect {
     Effect {
@@ -20,7 +20,7 @@ pub fn agent_launch() -> Effect {
         req_enum: "AgentLaunchReq",
         decl_fn: "agent_launch_decl",
         description: &[
-            "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+            "Validate or replace compiled agent tools and inspect or release retained checkpoints.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -55,10 +55,21 @@ pub fn agent_launch() -> Effect {
                 ctor: "AgentLaunchValidateSpecWith",
                 method: "agent_launch_validate_spec_with",
                 args: vec![
-                    Arg { name: "spec_metadata", ty: HsType::Value, rust: RustBinding::HaskellValue },
-                    Arg { name: "effects", ty: HsType::list(HsType::Named("ActorEffectKey")), rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>") },
+                    Arg {
+                        name: "spec_metadata",
+                        ty: HsType::Value,
+                        rust: RustBinding::HaskellValue,
+                    },
+                    Arg {
+                        name: "effects",
+                        ty: HsType::list(HsType::Named("ActorEffectKey")),
+                        rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
+                    },
                 ],
-                ret: HsType::either(HsType::Named("SpecValidationError"), HsType::Named("SpecValidationReceipt")),
+                ret: HsType::either(
+                    HsType::Named("SpecValidationError"),
+                    HsType::Named("SpecValidationReceipt"),
+                ),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -440,6 +451,7 @@ fn context_types() -> Vec<TypeDef> {
 pub fn spawn_agent() -> Effect {
     let mut effect = agent_launch();
     effect.name = "SpawnAgent";
+    effect.description = &["Admit an idle agent with a fresh conversation, explicit model selection, tools, workspace and child model grants."];
     effect.req_enum = "SpawnAgentReq";
     effect.decl_fn = "spawn_agent_decl";
     effect.type_params = MODEL_FAMILY_PARAMS;
@@ -514,6 +526,7 @@ pub fn spawn_agent() -> Effect {
 pub fn fork_agent() -> Effect {
     let mut effect = spawn_agent();
     effect.name = "ForkAgent";
+    effect.description = &["Capture a conversation checkpoint or admit an idle agent from captured context with explicit model selection and child model grants."];
     effect.req_enum = "ForkAgentReq";
     effect.decl_fn = "fork_agent_decl";
     effect.verbs[0].ctor = "ForkAgentSpawnWith";

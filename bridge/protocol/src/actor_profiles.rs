@@ -1283,3 +1283,32 @@ pub fn family_witness_rust() -> String {
     rust.push_str("        }\n    }\n}\n");
     rust
 }
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    #[test]
+    fn family_applications_have_distinct_nominal_arguments_and_typed_permissions() {
+        let qualified = EFFECTS
+            .iter()
+            .filter(|effect| effect.model_permission.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(qualified.len(), 9);
+        assert!(validate(EFFECTS).is_ok());
+        for target in qualified {
+            let mut changed = EFFECTS.to_vec();
+            let index = changed
+                .iter()
+                .position(|effect| effect.wire_name == target.wire_name)
+                .unwrap();
+            changed[index].model_permission.as_mut().unwrap().family =
+                match target.model_permission.unwrap().family {
+                    ModelFamily::OpenAI => ModelFamily::Argon,
+                    _ => ModelFamily::OpenAI,
+                };
+            assert!(validate(&changed)
+                .unwrap_err()
+                .contains("model permission disagrees"));
+        }
+    }
+}

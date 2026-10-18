@@ -6,7 +6,7 @@ pub fn fork_agent_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         model_permission: None,
         type_name: "ForkAgent",
-        description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+        description: "Capture a conversation checkpoint or admit an idle agent from captured context with explicit model selection and child model grants.",
         prompt_card: None,
         constructors: &[
             "ForkAgentSpawnWith :: FamilyWitness modelFamily -> SpawnContextWire -> (Int -> Eff childEffs ()) -> SpawnWorkspaceWire -> [ActorEffectKey] -> Value -> Maybe Text -> Value -> Maybe Text -> WorkerLifetime -> Maybe (Int, Int) -> Value -> ForkAgent modelFamily (Either SpawnErrorWire (Int, Int, Maybe WorktreeHandle))",

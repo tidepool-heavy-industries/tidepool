@@ -6,7 +6,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         model_permission: None,
         type_name: "AgentLaunch",
-        description: "Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership.",
+        description: "Validate or replace compiled agent tools and inspect or release retained checkpoints.",
         prompt_card: None,
         constructors: &[
             "AgentLaunchValidateSpecWith :: Value -> [ActorEffectKey] -> AgentLaunch (Either SpecValidationError SpecValidationReceipt)",
