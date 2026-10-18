@@ -11,18 +11,25 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 `Tidepool.Model.invokeModel`, `textTurn`, `withModel` and `withLimits`. Its
 `noToolsTurn` uses `defaultSpec { specTools = NoTools }` and narrows
 `defaultLimits` to `requestLimit = Just 1` and `toolLimit = Just 0`.
-`flash input` selects `DeepSeekFlash` and returns `ModelResult Text`; `pro input`
-uses the same recipe with `DeepSeekPro`. Explicit model and reasoning choices
-must match the backend fixed when the run starts. Missing choices inherit the
-parent conversation's effective selection.
+The recipe takes a choice from the frozen `Exomonad.Models` module and returns
+`ModelResult Text`. Each generated model constructor takes its provider's typed
+options, keeping model and reasoning effort together. `Models.allowedModels`
+lists the admitted choices with their configured defaults; `Models.primaryModel`
+is the launch profile's conversational default. Selecting a choice for a bounded
+call does not change the conversational model. A turn without `withModel`
+inherits the parent conversation's effective selection instead.
 
-In an ordinary asynchronous program, call `ModelExample.flash input` or
-`ModelExample.pro input`. In a synchronous notebook, use the corresponding
-`synchronousFlash` or `synchronousPro` helper. They lift the ordinary program
+The registered notebook cell imports `Examples.ModelCallWorkflow` as
+`ModelExample` and `Exomonad.Models` as `Models`, then uses
+`ModelExample.synchronousWithModel` with `Models.primaryModel` and explicit
+input. Ordinary asynchronous programs use `ModelExample.invokeWithModel` with
+the same choice and input. The synchronous helper lifts that ordinary program
 through `raiseSync` while retaining the caller's ambient effect row.
 The shared source module lists its imports and extensions. Load it from the
 selected source root before running the registered cells. Each invocation is
-fresh model work; changing the model and invoking again makes another request.
+fresh model work; selecting another admitted choice and invoking again makes
+another request. Frozen catalog checks and provider credentials remain separate
+from the authored choice.
 
 Retain the original `ModelResult` before presenting a projection. Inspect
 `modelOutcome` as `Either ModelFailure a` and `modelReceipt` separately on both
