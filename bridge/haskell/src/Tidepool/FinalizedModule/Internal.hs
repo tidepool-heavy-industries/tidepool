@@ -74,13 +74,10 @@ finalizedTidyGuts = ownedTidyGuts
 
 -- Creating the semantic owner does not encode either representation.
 newFinalizedModule :: HscEnv -> HomeModInfo -> CgGuts -> IO FinalizedModule
-newFinalizedModule env home guts = newFinalizedModuleWithCore env home guts Nothing
-
-newFinalizedModuleWithCore :: HscEnv -> HomeModInfo -> CgGuts -> Maybe CoreCapture -> IO FinalizedModule
-newFinalizedModuleWithCore env home guts core = do
+newFinalizedModule env home guts = do
   profile <- evaluate (targetProfile (hsc_dflags env))
   foreignEmpty <- evaluate (emptyForeignStubs env (cg_foreign guts))
-  FinalizedModule home guts profile foreignEmpty <$> newMVar core <*> newMVar Nothing
+  FinalizedModule home guts profile foreignEmpty <$> newMVar Nothing <*> newMVar Nothing
 
 emptyForeignStubs :: HscEnv -> ForeignStubs -> Bool
 emptyForeignStubs _ NoStubs = True
@@ -254,7 +251,7 @@ decodeFinalizedCore env home location bytes = do
               location emptyIfaceForeign
         bindings <- initIfaceCheck (text "tidepool finalized Core") knotted
           (typecheckWholeCoreBindings types whole)
-        newFinalizedModuleWithCore env home CgGuts
+        newFinalizedModule env home CgGuts
           { cg_module = coreOwner core
           , cg_tycons = tycons
           , cg_binds = bindings
@@ -264,13 +261,19 @@ decodeFinalizedCore env home location bytes = do
           , cg_dep_pkgs = Set.fromList (corePackages core)
           , cg_modBreaks = Nothing
           , cg_spt_entries = []
-          } (Just (EncodedCore bytes))
+          }
       case reconstructed of
         Left failure -> pure (Left (FinalizedCoreDecodeFailure (displayException failure)))
-        Right finalized -> do
-          timing <- readTimingEnabled
-          emitCount timing "finalized_core_admitted_seeds" 1
-          pure (Right finalized)
+        Right finalized -> case validateFinalized finalized of
+          Left failure -> pure (Left failure)
+          Right () -> do
+            -- Retaining admitted bytes bypasses encoding, not the semantic
+            -- checks that ordinary first capture applies to the exact pair.
+            modifyMVar (ownedCoreCapture finalized) $ \_ ->
+              pure (Just (EncodedCore bytes), ())
+            timing <- readTimingEnabled
+            emitCount timing "finalized_core_admitted_seeds" 1
+            pure (Right finalized)
 
 -- The demanding owner must verify the companion's certified SHA before this
 -- operation. Interface fingerprints deliberately exclude defining Core.

@@ -39,7 +39,7 @@ import GHC.Fingerprint.Type (Fingerprint(..))
 import GHC.Types.Name (getOccString)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.SptEntry (SptEntry(..))
-import GHC.Types.TypeEnv (lookupTypeEnv)
+import GHC.Types.TypeEnv (lookupTypeEnv, mkTypeEnv, typeEnvElts)
 import GHC.Types.Var (varName)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), justBytecode, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -422,6 +422,26 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
               && eqType (idType original) (idType binder))
                 "cold Core rebound an original native Name or type"
             _ -> fail "cold Core binder has no admitted original declaration"
+      missingBinder <- case [binder | binder <- bindersOfBinds (cg_binds guts)
+          , getOccString binder == "identity", isExternalName (varName binder)] of
+        [binder] -> pure binder
+        _ -> fail "missing-binding control lost its genuine external identity binder"
+      let missingName = varName missingBinder
+          details = hm_details home
+          incompleteTypes = mkTypeEnv
+            [thing | thing <- typeEnvElts (md_types details), case thing of
+              AnId identifier -> varName identifier /= missingName
+              _ -> True]
+          incompleteHome = home {hm_details = details {md_types = incompleteTypes}}
+      (incomplete, incompleteCounts) <- withTiming $ captureDiagnostics $
+        decodeFinalizedCore env incompleteHome (ms_location summary) originalCoreBody
+      assert (case incomplete of
+          Left (FinalizedCoreInterfaceBindingMissing occurrence) -> occurrence == getOccString missingBinder
+          _ -> False)
+        "canonical companion admitted Core whose external binder was absent from its original interface"
+      assert (captureCount "finalized_core_admitted_seeds" incompleteCounts == 0
+          && captureCount "finalized_core_encoding_attempts" incompleteCounts == 0)
+        "refused native pair seeded or re-encoded its original Core"
       prepared <- prepareModule env (ms_location summary) mempty finalized
       assert (not (null (pmBindings prepared))) "cold canonical Core produced no STG"
       let owner = cg_module guts
