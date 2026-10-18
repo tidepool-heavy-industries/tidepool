@@ -4199,6 +4199,7 @@ dependencies = [
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
  "tidepool-effect",
+ "tidepool-extract-cmd",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",

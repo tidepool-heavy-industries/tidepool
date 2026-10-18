@@ -366,24 +366,41 @@ def write_private_json(path: Path, value: dict) -> None:
     """Atomically publish one owner receipt readable only by its Unix owner."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    output = None
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(value, output, indent=2, sort_keys=True)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
+        output = os.fdopen(fd, "w")
+        fd = None
+        json.dump(value, output, indent=2, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+        closing, output = output, None
+        closing.close()
         os.replace(temporary, path)
         os.chmod(path, 0o600)
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    except BaseException as primary:
+        secondary = []
+        if output is not None or fd is not None:
+            try:
+                if output is not None:
+                    output.close()
+                else:
+                    os.close(fd)
+            except BaseException as error:
+                error.add_note("private receipt cleanup stage: close temporary output")
+                secondary.append(error)
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+        except BaseException as error:
+            error.add_note("private receipt cleanup stage: unlink temporary output")
+            secondary.append(error)
+        if secondary:
+            if primary.__cause__ is not None:
+                secondary.insert(0, primary.__cause__)
+            raise primary from BaseExceptionGroup("private receipt cleanup failures", secondary)
         raise
 
 def process_start_identity(pid: int) -> dict:
@@ -597,10 +614,25 @@ def _run_owned_qualification_runner(command: list[str], environment: dict, stdou
     published_request_count = 0
     signal_owner.bind(receipt_path, receipt)
 
+    publication_failure = None
+
+    def publish_receipt():
+        nonlocal publication_failure
+        try:
+            write_private_json(receipt_path, receipt)
+        except BaseException as error:
+            publication_failure = error
+            receipt["receipt_publication_error"] = {
+                "type": type(error).__name__, "message": str(error),
+                "errno": getattr(error, "errno", None),
+                "observed_owner_state": receipt["owner_state"],
+            }
+            raise
+
     def publish_request_state():
         nonlocal published_request_count
         generation = len(cancellation_requests)
-        write_private_json(receipt_path, receipt)
+        publish_receipt()
         published_request_count = generation
 
     try:
@@ -623,10 +655,10 @@ def _run_owned_qualification_runner(command: list[str], environment: dict, stdou
                 receipt["runner_reaped"] = True
             except subprocess.TimeoutExpired:
                 receipt["runner_reap_status"] = "unconfirmed"
-            write_private_json(receipt_path, receipt)
+            publish_receipt()
             raise RuntimeError(receipt["error"])
         receipt["status"] = "running"
-        write_private_json(receipt_path, receipt)
+        publish_receipt()
         for event in cancellation_requests:
             if event["forwarding_status"] in ("pending", "runner_identity_unavailable"):
                 event["forwarding_status"] = _forward_runner_signal(process, runner_identity,
@@ -660,14 +692,20 @@ def _run_owned_qualification_runner(command: list[str], environment: dict, stdou
         receipt["status"] = "interrupted" if confirmed_interruptions else "finished"
         receipt["interruption_signal"] = (confirmed_interruptions[0]["signal"]
                                            if confirmed_interruptions else None)
-        write_private_json(receipt_path, receipt)
+        publish_receipt()
         return subprocess.CompletedProcess(command, returncode), receipt
     except BaseException as error:
-        signal_owner.phase = "failed"
-        receipt["owner_state"] = "failed"
-        receipt["status"] = "runner_spawn_or_wait_failed"
+        publication_failed = publication_failure is error
+        receipt["failure_stage"] = ("receipt_publication" if publication_failed else
+                                    "completion_assessment" if receipt["runner_reaped"] else
+                                    "runner_spawn_or_wait")
+        if not receipt["runner_reaped"]:
+            signal_owner.phase = "failed"
+            receipt["owner_state"] = "failed"
+            receipt["status"] = ("receipt_publication_failed" if publication_failed else
+                                 "runner_spawn_or_wait_failed")
         receipt["error"] = f"{type(error).__name__}: {error}"
-        if process is not None:
+        if process is not None and not receipt["runner_reaped"]:
             receipt["runner"] = {"pid": process.pid, "start_identity": runner_identity}
             if process.poll() is None:
                 status = _forward_runner_signal(process, runner_identity, signal.SIGTERM)
@@ -681,10 +719,19 @@ def _run_owned_qualification_runner(command: list[str], environment: dict, stdou
                 receipt["runner_exit_code"] = process.returncode
             elif receipt.get("runner_reap_status") is None:
                 receipt["runner_reap_status"] = "unconfirmed"
-        else:
+        elif process is None:
             receipt["runner_reap_status"] = "not_started"
+        if receipt["runner_reaped"]:
+            signal_owner.phase = "reaped"
+            receipt["owner_state"] = "reaped"
+            receipt.setdefault("runner_exit_code", process.returncode)
         receipt["cancellation_requests"] = cancellation_requests
-        write_private_json(receipt_path, receipt)
+        try:
+            write_private_json(receipt_path, receipt)
+        except BaseException as publication_error:
+            publication_error.add_note("qualification failure receipt publication failed")
+            secondary = ([error.__cause__] if error.__cause__ is not None else []) + [publication_error]
+            raise error from BaseExceptionGroup("qualification receipt secondary failures", secondary)
         raise
 
 def inventory(root: Path, excluded=()) -> dict:
@@ -1096,7 +1143,8 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
                "--target", target, "--source-root", str(original), "--output-root", str(output)]
     invocation_root = output.with_name(output.name + ".invocation") if operation is CatalogProducerOperation.INSPECT else None
     primary = None
-    secondary = None
+    secondary = []
+    retention_error = None
     return_code = None
     started = time.monotonic_ns()
     invocation = {
@@ -1133,24 +1181,37 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
         try:
             verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
                                            record_origin=args.retention_record_origin)
-        except Exception as error:
-            secondary = error
+        except BaseException as error:
+            retention_error = error
+            error.add_note("catalog source retention recheck failed")
+            secondary.append(error)
         if invocation_root is not None:
-            write_json(invocation_root / "outcome.json", {
-                **invocation, "producer_exit_code": return_code,
-                "timed_out": isinstance(primary, subprocess.TimeoutExpired),
-                "producer_error": str(primary) if primary is not None else None,
-                "retention_recheck": {"passed": secondary is None,
-                                      "error": str(secondary) if secondary is not None else None},
-                "completed": primary is None and secondary is None,
-                "elapsed_ns": time.monotonic_ns() - started,
-            })
+            try:
+                write_json(invocation_root / "outcome.json", {
+                    **invocation, "producer_exit_code": return_code,
+                    "timed_out": isinstance(primary, subprocess.TimeoutExpired),
+                    "producer_error": str(primary) if primary is not None else None,
+                    "retention_recheck": {"passed": retention_error is None,
+                                          "error": str(retention_error) if retention_error is not None else None},
+                    "completed": primary is None and retention_error is None,
+                    "elapsed_ns": time.monotonic_ns() - started,
+                })
+            except BaseException as error:
+                error.add_note("catalog invocation outcome publication failed")
+                secondary.append(error)
     if primary is not None:
-        if secondary is not None:
-            raise ValueError(f"producer failed: {primary}; retention recheck failed: {secondary}") from primary
+        if secondary:
+            if primary.__cause__ is not None:
+                secondary.insert(0, primary.__cause__)
+            raise primary from BaseExceptionGroup("catalog invocation secondary failures", secondary)
         raise primary
-    if secondary is not None:
-        raise secondary
+    if secondary:
+        first, *later = secondary
+        if later:
+            if first.__cause__ is not None:
+                later.insert(0, first.__cause__)
+            raise first from BaseExceptionGroup("catalog invocation secondary failures", later)
+        raise first
     return original
 
 
@@ -2605,6 +2666,11 @@ def main(argv=None) -> int:
         return 0
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"native qualification failed: {error}", file=sys.stderr)
+        if isinstance(error.__cause__, BaseExceptionGroup):
+            for secondary in error.__cause__.exceptions:
+                notes = "; ".join(getattr(secondary, "__notes__", ()))
+                print(f"secondary failure ({notes or type(secondary).__name__}): {secondary}",
+                      file=sys.stderr)
         return 1
 
 
