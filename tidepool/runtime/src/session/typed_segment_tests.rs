@@ -1331,17 +1331,19 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     assert_ne!(baseline, increment);
     assert_ne!(baseline, double);
     assert_ne!(baseline, negate);
-    let mut selected_carrier = before
+    let initially_selected_carrier = before
         .artifact_view()
         .selected_native_groups()
         .into_iter()
         .filter(|key| key.artifact == descriptor.id)
         .collect::<BTreeSet<_>>();
-    assert!(selected_carrier.contains(&baseline));
-    assert!(!selected_carrier.contains(&increment));
-    assert!(!selected_carrier.contains(&double));
-    assert!(!selected_carrier.contains(&negate));
-    let initially_selected_carrier = selected_carrier.clone();
+    assert!(initially_selected_carrier.contains(&baseline));
+    assert!(!initially_selected_carrier.contains(&increment));
+    assert!(!initially_selected_carrier.contains(&double));
+    assert!(!initially_selected_carrier.contains(&negate));
+    // Per-target imports are distinct from retained heap values and installed code custody.
+    let expected_warm_carrier = BTreeSet::from([increment, double]);
+    let mut selected_carrier = BTreeSet::new();
     let old_owners = originals
         .iter()
         .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
@@ -1404,8 +1406,16 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     .into_iter()
                     .filter(|key| key.artifact == descriptor.id)
                     .collect::<BTreeSet<_>>();
-                assert!(selected_carrier.is_subset(&carrier_groups));
-                selected_carrier = carrier_groups;
+                let context_carrier = context.artifact_view().selected_native_groups().into_iter()
+                    .filter(|key| key.artifact == descriptor.id).collect::<BTreeSet<_>>();
+                assert!(carrier_groups.is_subset(&context_carrier));
+                assert!(carrier_groups.is_subset(&expected_warm_carrier));
+                assert!(!context_carrier.contains(&negate));
+                if native.item().binders() == ["warmCarrierResult"] {
+                    assert_eq!(carrier_groups, expected_warm_carrier);
+                    assert_eq!(context_carrier, expected_warm_carrier);
+                }
+                selected_carrier.extend(carrier_groups);
             }
         },
     )
@@ -1442,7 +1452,8 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         .into_iter()
         .filter(|key| key.artifact == descriptor.id)
         .collect::<BTreeSet<_>>();
-    assert!(initially_selected_carrier.is_subset(&result_selected_carrier));
+    assert!(initially_selected_carrier.is_disjoint(&result_selected_carrier));
+    assert_eq!(result_selected_carrier, expected_warm_carrier);
     assert!(result_selected_carrier.contains(&increment));
     assert!(result_selected_carrier.contains(&double));
     assert!(!result_selected_carrier.contains(&negate));
