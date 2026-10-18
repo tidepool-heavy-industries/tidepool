@@ -1083,12 +1083,16 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .unwrap();
     let other_interface = other_support.artifacts().clone();
     for selected in [&other, &other_interface] {
-        let mismatch = left
-            .merge_fixture_selections(selected)
-            .unwrap()
-            .retain_original_custody(selected)
-            .unwrap();
-        assert!(left_proof.issued_groups(&mismatch).is_ok());
+        let selected_graph = selected.capture_graph_selection();
+        let mismatch = selected.retain_custody(&left).unwrap();
+        let mismatch_graph = mismatch.capture_graph_selection();
+        assert_eq!(mismatch_graph.namespace, selected_graph.namespace);
+        assert_eq!(mismatch_graph.roots, selected_graph.roots);
+        assert_eq!(
+            left_proof.issued_groups(&mismatch).unwrap(),
+            left_proof.issued_groups(&left).unwrap(),
+            "cross-inventory custody preserves the actual historical group identities"
+        );
         assert!(left_proof
             .qualify_availability(&mismatch)
             .unwrap()
