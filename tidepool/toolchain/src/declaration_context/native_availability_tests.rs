@@ -13,6 +13,24 @@ fn fixture_compiler_support(
     crate::declaration_context::issue_fixture_compiler_support(projection, artifacts).unwrap()
 }
 
+// Fixture view changes reopen one complete issued packet through production
+// recovery; rows and native decisions cannot be supplied independently.
+fn restore_fixture_support_in_view(
+    issued: &ExactDeclarationContext,
+    view: ArtifactView,
+) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+    issued
+        .compiler_source_support()
+        .native_availability()
+        .validate_role_coverage(issued.compiler_input_projection())?;
+    let recovered = recover_fixture_compiler_support(
+        issued.compiler_input_projection().clone(),
+        view.retain_custody(issued.artifact_view())?,
+        [],
+    )?;
+    recovered.restore_snapshot_evidence(&issued.snapshot())
+}
+
 const PRODUCER: &[u8] = b"protected-native-availability-fixture";
 
 fn product(module: &str, version: u8) -> CertifiedRecoveryProduct {
@@ -2405,16 +2423,32 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             .is_err(),
         "transport must not discard B's real backedge to old A"
     );
+    let typed = selected_projection
+        .admit_interfaces_with_native_offers(
+            &private.artifacts,
+            vec![replacement],
+            &private.native_offers,
+            &catalog,
+        )
+        .expect("type-only custody does not consume the incompatible native backedge");
+    assert!(typed.selected_native_groups().is_empty());
+    selected_projection.validate(&typed).unwrap();
+    let group = |artifact, ordinal| {
+        *support
+            .keys()
+            .find(|group| group.binding.artifact() == artifact && group.original_ordinal == ordinal)
+            .unwrap()
+    };
     assert!(
-        selected_projection
-            .admit_interfaces_with_native_offers(
-                &private.artifacts,
-                vec![replacement],
-                &private.native_offers,
-                &catalog,
-            )
-            .is_err(),
-        "typed admission must also preserve the incompatible exact backedge"
+        typed.binding_dependencies().contains(&(
+            ArtifactBindingNode::Group(group(b_id, 7)),
+            ArtifactBindingNode::Group(group(a_id, 9001)),
+            crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                dependent_ordinal: 7,
+                required_ordinal: 9001,
+            },
+        )),
+        "type-only custody preserves the exact backedge that native consumption refuses"
     );
 }
 
@@ -8517,14 +8551,22 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     let dependency = products[0].product.clone();
     let fresh = products[1].product.clone();
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
-    let inventory = ArtifactInventory::default();
-    let issued = inventory
-        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
-        .unwrap();
-    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &issued)
+    let output = OriginalCompilerInputs::from_checked_support_products(
+        &crate::artifact_inventory::CompilerSourceSupport::empty(),
+        producer.sha256(),
+        std::slice::from_ref(&dependency),
+    )
+    .unwrap();
+    let support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output).unwrap();
+    let issued = support.artifacts().clone();
+    let inventory = issued.inventory().clone();
+    let full = support
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == entry.descriptor.id)
         .unwrap()
-        .unwrap();
-    let full = IssuedNativeOffer::issue(entry.descriptor.id, &issued, Some(proof)).unwrap();
+        .clone();
     assert!(full.is_full());
     assert_eq!(
         full.issued_group_carriers()
@@ -8545,33 +8587,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .any(
             |group| group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 3
         ));
-    let mut graph = issued.capture_graph_selection();
-    let group_roots = graph
-        .roots
-        .iter()
-        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
-        .copied()
-        .collect::<Vec<_>>();
-    graph
-        .roots
-        .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
-    graph.custody_roots.extend(group_roots);
-    graph.custody_roots.sort();
-    graph.custody_roots.dedup();
-    let namespace = graph
-        .namespace
-        .iter()
-        .map(|binding| binding.artifact)
-        .collect();
-    let withdrawn = issued
-        .select_issued(
-            namespace,
-            &ExactArtifactSelection::from_recovered_graph_selection(graph),
-        )
-        .unwrap();
-    assert!(withdrawn.selected_native_groups().is_empty());
-    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-    let support = recover_fixture_compiler_support(projection, withdrawn, [full.clone()]).unwrap();
+    assert!(support.artifacts().selected_native_groups().is_empty());
     let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
         producer: producer.sha256(),
         compiler_support: support,
@@ -8589,6 +8605,24 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         full.snapshot_facts()
     );
     let before = context.artifact_view().capture_graph_selection();
+    let incomplete_recorded_support = recover_fixture_compiler_support(
+        context.compiler_input_projection().clone(),
+        context.artifact_view().clone(),
+        [full.clone()],
+    )
+    .unwrap();
+    let incomplete_recorded_context = context.clone().rebuild(|facts| {
+        facts.compiler_support = incomplete_recorded_support;
+    });
+    let missing_rows = restore_fixture_support_in_view(
+        &incomplete_recorded_context,
+        context.artifact_view().clone(),
+    );
+    assert!(
+        matches!(&missing_rows, Err(CompileError::ExtractFailed(detail))
+        if detail == "exact declaration context: selected original lacks its normalized native permission row"),
+        "an incomplete recorded owner cannot enter the valid fixture workflow: {missing_rows:?}"
+    );
     let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
         .unwrap()
         .descriptor
@@ -8675,12 +8709,18 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             .is_err(),
         "the selected carrier view cannot reissue the historical Full proof"
     );
-    let carrier_support = recover_fixture_compiler_support(
-        context.compiler_input_projection().clone(),
-        carriers,
-        [full.clone()],
-    )
-    .unwrap();
+    let carrier_support = restore_fixture_support_in_view(&context, carriers).unwrap();
+    assert_eq!(
+        carrier_support.recorded_input_decisions(),
+        context.compiler_source_support().recorded_input_decisions()
+    );
+    let carried_full = carrier_support
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == entry.descriptor.id)
+        .unwrap()
+        .clone();
+    assert_eq!(carried_full.snapshot_facts(), full.snapshot_facts());
     let carrier_context = context
         .clone()
         .rebuild(|facts| facts.compiler_support = carrier_support);
@@ -8699,7 +8739,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     assert!(continued
         .native_offers()
         .iter()
-        .any(|offer| offer.same_issuance(&full)));
+        .any(|offer| offer.same_issuance(&carried_full)));
 
     let (continued, choices) =
         continue_request(&context).expect("request-owned Full keeps its exact available groups");
@@ -8724,9 +8764,14 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         let bounded = inventory
             .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
             .unwrap();
-        let proof =
-            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &bounded).unwrap();
-        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &bounded, proof).unwrap();
+        let bounded_support =
+            fixture_compiler_support(context.compiler_input_projection().clone(), bounded.clone());
+        let offer = bounded_support
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == entry.descriptor.id)
+            .unwrap()
+            .clone();
         assert!(!offer.is_full());
         assert_eq!(
             offer
@@ -8762,15 +8807,25 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
                 &ExactArtifactSelection::from_recovered_graph_selection(graph),
             )
             .unwrap();
-        let support = recover_fixture_compiler_support(
-            context.compiler_input_projection().clone(),
-            withdrawn,
-            [offer.clone()],
-        )
-        .unwrap();
-        let bounded_context = context
-            .clone()
-            .rebuild(|facts| facts.compiler_support = support);
+        let bounded_issuer = context.clone().rebuild(|facts| {
+            facts.compiler_support = bounded_support;
+        });
+        let support = restore_fixture_support_in_view(&bounded_issuer, withdrawn).unwrap();
+        assert_eq!(
+            support.recorded_input_decisions(),
+            bounded_issuer
+                .compiler_source_support()
+                .recorded_input_decisions(),
+            "Partial and explicit Empty keep their exact issued decision domain"
+        );
+        let restored_offer = support
+            .native_offers()
+            .iter()
+            .find(|candidate| candidate.original() == entry.descriptor.id)
+            .unwrap()
+            .clone();
+        assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
+        let bounded_context = bounded_issuer.rebuild(|facts| facts.compiler_support = support);
         assert!(bounded_context
             .artifact_view()
             .selected_native_groups()
@@ -8801,7 +8856,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         assert!(continued
             .native_offers()
             .iter()
-            .any(|retained| retained.same_issuance(&offer)));
+            .any(|retained| retained.same_issuance(&restored_offer)));
         let result =
             OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
         assert_eq!(
@@ -8877,12 +8932,10 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         vec![historical.clone(), full.clone()],
         vec![full.clone(), full.clone()],
     ] {
-        let support = recover_fixture_compiler_support(
-            context.compiler_input_projection().clone(),
-            context.artifact_view().clone(),
-            offers,
-        )
-        .unwrap();
+        let support = context
+            .compiler_source_support()
+            .retain_offers(offers)
+            .unwrap();
         let scoped = context
             .clone()
             .rebuild(|facts| facts.compiler_support = support);
@@ -8926,26 +8979,20 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             .selected_native_groups()
             .is_empty());
     }
-    let support = recover_fixture_compiler_support(
-        context.compiler_input_projection().clone(),
-        context.artifact_view().clone(),
-        [historical],
-    )
-    .unwrap();
-    let wrong_scope = context
-        .clone()
-        .rebuild(|facts| facts.compiler_support = support);
+    let historical_support =
+        fixture_compiler_support(context.compiler_input_projection().clone(), historical_view);
+    let historical_context = context.clone().rebuild(|facts| {
+        facts.compiler_support = historical_support;
+    });
+    let mismatched_issuer = context
+        .compiler_source_support()
+        .restore_snapshot_evidence(&historical_context.snapshot());
+    assert!(matches!(&mismatched_issuer, Err(CompileError::ExtractFailed(detail))
+        if detail == "artifact inventory: recovered native offer scope is outside acquisition custody"),
+        "a different historical issuer cannot restore its authority into current custody: {mismatched_issuer:?}");
     assert_eq!(
-        wrong_scope
-            .artifact_view()
-            .capture_graph_selection()
-            .namespace,
+        context.artifact_view().capture_graph_selection().namespace,
         before.namespace
-    );
-    assert!(
-        matches!(OriginalCompilerInputs::from_candidates(&wrong_scope, producer, &candidates), Err(CompileError::ArtifactInventory(error))
-        if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 3 } if artifact == entry.descriptor.id)),
-        "only a historical different carrier's offer cannot authorize the current dependency"
     );
 }
 
