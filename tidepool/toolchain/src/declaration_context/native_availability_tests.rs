@@ -2679,6 +2679,60 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
 }
 
 #[test]
+fn value_interface_append_keeps_materialized_inputs_until_last_context_release() {
+    let native = product("ValueAppendMaterialization", 196);
+    let required = identity(&native.owner().unit, &native.owner().module);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let context = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(producer.sha256(), &[native])
+            .unwrap(),
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let completed = context
+        .prepare_compilation(scratch.path(), PRODUCER)
+        .unwrap();
+    let directory = completed
+        .materialization
+        .as_ref()
+        .unwrap()
+        ._directory
+        .as_ref()
+        .unwrap();
+    let directory_owner = Arc::downgrade(directory);
+    let directory_path = directory.path().to_path_buf();
+    let interface = crate::certified_products::fixture_module_interface(
+        producer.sha256(),
+        "fixture",
+        "FreshValueMaterialization",
+        BTreeMap::new(),
+    );
+    let value = Arc::new(
+        CertifiedValueInterface::from_checked_compilation(
+            producer.sha256(),
+            identity(interface.unit(), interface.module()),
+            interface.interface_bytes().to_vec(),
+            interface.package_imports_bytes().to_vec(),
+            vec![required],
+        )
+        .unwrap(),
+    );
+    let appended = context
+        .as_ref()
+        .clone()
+        .extend_program_value_interface(value)
+        .unwrap();
+    drop(completed);
+    drop(context);
+    assert!(directory_owner.upgrade().is_some());
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    drop(appended);
+    assert!(directory_owner.upgrade().is_none());
+    assert!(!directory_path.try_exists().unwrap());
+}
+
+#[test]
 fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let native = product("CustodyMaterialization", 96);

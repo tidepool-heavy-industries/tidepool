@@ -2030,6 +2030,25 @@ impl ArtifactEntry {
             native: None,
         }
     }
+
+    fn validate_interface_seal(
+        &self,
+        required: &ExactModuleIdentity,
+        target: &ArtifactEntry,
+    ) -> Result<(), CompileError> {
+        if self.interface_seals.get(required).is_some_and(|seal| {
+            target.descriptor.interface_sha256 != *seal
+                || target.descriptor.producer_sha256 != self.descriptor.producer_sha256
+        }) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::InterfaceSealMismatch {
+                    dependent: self.descriptor.owner.clone(),
+                    required: required.clone(),
+                },
+            ));
+        }
+        Ok(())
+    }
 }
 pub(crate) fn restore_recovery_interface_dependencies(
     entries: &mut [ArtifactEntry],
@@ -2403,7 +2422,114 @@ struct CheckedValueInterfaceAppend {
     parent: ArtifactView,
     projection: CompilerInputProjection,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    repeated: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     dependencies: BTreeMap<ArtifactId, BTreeSet<ValueInterfaceTarget>>,
+}
+
+struct AppendedValueInterfaces {
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+    selected: BTreeMap<ExactModuleIdentity, (ArtifactBinding, Arc<ArtifactEntry>)>,
+}
+
+impl CheckedValueInterfaceAppend {
+    fn issue(self) -> Result<AppendedValueInterfaces, CompileError> {
+        let inventory = self.parent.inventory().clone();
+        let mut state = inventory.0.lock().expect("inventory lock");
+        let mut payloads = self.repeated;
+        for (id, entry) in self.entries {
+            payloads.insert(id, state.canonicalize(entry)?);
+        }
+        let provisional = ArtifactSelectionId([0; 32]);
+        let node = |id, selection| {
+            InventoryNodeKey::Artifact(ArtifactBinding {
+                artifact: id,
+                selection,
+            })
+        };
+        let rows: BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>> =
+            self.dependencies
+                .iter()
+                .map(|(id, edges)| {
+                    (
+                        node(*id, provisional),
+                        edges
+                            .iter()
+                            .map(|target| {
+                                let target = match target {
+                                    ValueInterfaceTarget::Selected(binding) => {
+                                        InventoryNodeKey::Artifact(*binding)
+                                    }
+                                    ValueInterfaceTarget::Appended(id) => node(*id, provisional),
+                                };
+                                (target, ArtifactDependency::Interface)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+        let witness = ScopeProofV3::issue(&rows, provisional).map(Arc::new);
+        let mut namespace = self.parent.namespace();
+        let mut roots = Vec::new();
+        if let Some(proof) = &witness {
+            for id in self.dependencies.keys() {
+                let binding = ArtifactBinding {
+                    artifact: *id,
+                    selection: proof.selection,
+                };
+                namespace.insert(*id, binding);
+                roots.push(InventoryNodeKey::Artifact(binding));
+            }
+        }
+        let selected = payloads
+            .values()
+            .map(|entry| {
+                (
+                    entry.descriptor.owner.clone(),
+                    (namespace[&entry.descriptor.id], Arc::clone(entry)),
+                )
+            })
+            .collect();
+        let unchanged = roots.is_empty()
+            && payloads.iter().all(|(id, entry)| {
+                self.parent
+                    .lease
+                    .payloads
+                    .get(id)
+                    .is_some_and(|previous| Arc::ptr_eq(previous, entry))
+            });
+        if unchanged {
+            return Ok(AppendedValueInterfaces {
+                projection: self.projection,
+                artifacts: self.parent,
+                selected,
+            });
+        }
+        let prepared = scope_proof::prepare_install(&state, witness)?;
+        scope_proof::install(&mut state, prepared);
+        let parents = vec![Arc::clone(&self.parent.lease)];
+        let selection = selection_snapshot_for_lease(&state, &namespace, &roots, &[], &parents);
+        drop(state);
+        let introduced = self.dependencies.keys().copied().collect();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection,
+                inventory,
+                parents,
+                issuing_payloads: payloads,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            introduced,
+        );
+        let artifacts = ArtifactView::from_custody(lease);
+        Ok(AppendedValueInterfaces {
+            projection: self.projection,
+            artifacts,
+            selected,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2643,19 +2769,9 @@ impl SelectedOwners {
                 })
             })
         };
-        for (owner, seal) in &entry.interface_seals {
+        for owner in entry.interface_seals.keys() {
             let id = resolve(owner, &ArtifactDependency::Interface)?;
-            let required = &entries[&id].descriptor;
-            if required.interface_sha256 != *seal
-                || required.producer_sha256 != entry.descriptor.producer_sha256
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::InterfaceSealMismatch {
-                        dependent: entry.descriptor.owner.clone(),
-                        required: owner.clone(),
-                    },
-                ));
-            }
+            entry.validate_interface_seal(owner, &entries[&id])?;
         }
         let mut edges = BTreeSet::new();
         for owner in &entry.requirements {
@@ -3644,12 +3760,13 @@ impl ArtifactInventory {
             .collect::<BTreeSet<_>>();
         let mut reason = None;
         let mut appended = BTreeMap::new();
+        let mut repeated = BTreeMap::new();
         let mut targets = BTreeMap::new();
         for (id, entry) in &incoming {
             if let Some(previous) = parent.lease.payloads.get(id) {
                 // Requirements are not part of the value payload ID. Repeated
                 // bytes cannot replace a previously issued dependency row.
-                ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
+                let merged = ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
                 if source
                     .projection()
                     .snapshot_roles()
@@ -3661,6 +3778,7 @@ impl ArtifactInventory {
                             entry.descriptor.owner.clone(),
                             ValueInterfaceTarget::Selected(*binding),
                         );
+                        repeated.insert(*id, merged);
                         continue;
                     }
                 }
@@ -3689,7 +3807,12 @@ impl ArtifactInventory {
         let mut dependencies = BTreeMap::new();
         for (id, entry) in &incoming {
             let mut row = BTreeSet::new();
-            for required in &entry.requirements {
+            let requirements = entry
+                .requirements
+                .iter()
+                .chain(entry.interface_seals.keys())
+                .collect::<BTreeSet<_>>();
+            for required in requirements {
                 let target = match targets.get(required) {
                     Some(target) => *target,
                     None => {
@@ -3726,7 +3849,16 @@ impl ArtifactInventory {
                         ValueInterfaceTarget::Selected(binding)
                     }
                 };
-                row.insert(target);
+                let target_entry = match target {
+                    ValueInterfaceTarget::Selected(binding) => {
+                        &parent.lease.payloads[&binding.artifact]
+                    }
+                    ValueInterfaceTarget::Appended(id) => &incoming[&id],
+                };
+                entry.validate_interface_seal(required, target_entry)?;
+                if entry.requirements.contains(required) {
+                    row.insert(target);
+                }
             }
             if appended.contains_key(id) {
                 dependencies.insert(*id, row);
@@ -3765,6 +3897,7 @@ impl ArtifactInventory {
                 parent: parent.clone(),
                 projection,
                 entries: appended,
+                repeated,
                 dependencies,
             },
         ))
