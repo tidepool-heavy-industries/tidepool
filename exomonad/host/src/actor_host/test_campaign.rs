@@ -190,7 +190,7 @@ fn workspace_commit_preserves_head_until_authored_files_change() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path();
     let git = exomonad_worktree::GitCli::new();
-    git.try_run(workspace, &["init", "--quiet"]).unwrap();
+    git.init_repository(workspace, &["--quiet"]).unwrap();
     git.try_run(workspace, &["config", "user.name", "Campaign Test"])
         .unwrap();
     git.try_run(workspace, &["config", "user.email", "campaign@example.invalid"])
