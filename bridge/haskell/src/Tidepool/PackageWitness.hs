@@ -6,6 +6,8 @@ module Tidepool.PackageWitness
   , AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection, extendAdmittedPackageImportsWith
   , extendAdmittedPackageImportsWithFacts
+  , PackageRootObservations, withPackageRootObservations
+  , packageImportRootWithin, validatePackageImportRootWithin
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -39,7 +41,7 @@ import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
-import Tidepool.BoundedRead (FileObservations, FileObservation(..), observeFile, withFileObservations, readFileAtMost)
+import Tidepool.BoundedRead (FileObservations, FileObservation(..), observeFile, withFileObservations, fileObservationTotals, readFileAtMost)
 
 -- Directness is certified by the authored import evidence owner. This witness
 -- authenticates the actual selected package interface, including unused imports.
@@ -177,6 +179,43 @@ packageImportRoot env owner
             pure (Right (PackageImportRoot (unitString (moduleUnit owner))
               (moduleNameString (moduleName owner)) path sha))
       Left reason -> pure (Left reason)
+
+-- One read-only operation shares physical observations, never resolver answers.
+-- Discard this owner before loading interfaces, compiler effects or publication.
+-- Exact expected witnesses remain separate, including conflicting alternatives.
+data PackageRootObservations = PackageRootObservations HscEnv FileObservations
+
+withPackageRootObservations :: HscEnv -> (PackageRootObservations -> IO a) -> IO a
+withPackageRootObservations env action = withFileObservations $ \observations -> do
+  result <- action (PackageRootObservations env observations)
+  timing <- readTimingEnabled
+  (reads,bytes) <- fileObservationTotals observations
+  emitCount timing "package_preflight.physical_reads" (fromIntegral reads)
+  emitCount timing "package_preflight.physical_bytes" bytes
+  pure result
+
+packageImportRootWithin :: PackageRootObservations -> Module -> IO (Either String PackageImportRoot)
+packageImportRootWithin (PackageRootObservations env observations) owner = do
+  timing <- readTimingEnabled
+  emitCount timing "package_preflight.root_requests" 1
+  timeDetailPhase timing "package_imports" "root" $ do
+    selected <- selectedPackageInterface env owner
+    case selected of
+      Left reason -> pure (Left reason)
+      Right path -> do
+        captured <- try (observeFile observations path Nothing) :: IO (Either IOException FileObservation)
+        pure $ case captured of
+          Left _ -> Left "selected package interface is unavailable"
+          Right actual -> Right (PackageImportRoot (unitString (moduleUnit owner))
+            (moduleNameString (moduleName owner)) path (observedSha256 actual))
+
+validatePackageImportRootWithin :: PackageRootObservations -> PackageImportRoot -> IO (Either String ())
+validatePackageImportRootWithin observations expected = do
+  actual <- packageImportRootWithin observations
+    (mkModule (stringToUnit (packageUnit expected)) (mkModuleName (packageModule expected)))
+  pure $ case actual of
+    Right witness | witness == expected -> Right ()
+    _ -> Left "package selection or interface bytes differ from the certified import root"
 
 selectedPackageInterface :: HscEnv -> Module -> IO (Either String FilePath)
 selectedPackageInterface env owner
