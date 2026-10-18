@@ -386,6 +386,29 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report['compiler_job_grants']['status'], 'partial_or_unknown')
         self.assertIsNone(report['compiler_job_grants']['admissions'][0]['jobs'])
 
+    def test_logical_request_aggregate_preserves_missing_and_invalid_counts(self):
+        for invalid in (None, -1, True, "1"):
+            with self.subTest(invalid=invalid):
+                record = self.make_complete_case()
+                path = self.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(path)
+                next(row for row in phases if row["phase"] == "first-arithmetic")["logical_compiler_requests"] = invalid
+                self.write_jsonl(path, phases)
+                aggregate = reporter.analyze(record)["workload_request_service_joins"]
+                self.assertIsNone(aggregate["logical_request_count"])
+                self.assertEqual(aggregate["unknown_logical_request_phase_count"], 1)
+                self.assertEqual(aggregate["observed_logical_request_subtotal"], 1)
+        record = self.make_complete_case()
+        path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(path)
+        for row in phases:
+            if row["phase"] != "environment":
+                row["logical_compiler_requests"] = 0
+        self.write_jsonl(path, phases)
+        aggregate = reporter.analyze(record)["workload_request_service_joins"]
+        self.assertEqual(aggregate["logical_request_count"], 0)
+        self.assertEqual(aggregate["unknown_logical_request_phase_count"], 0)
+
     def make_complete_case(self, cohort="harness-eight-phase", trace_profile=None):
         record = self.make_case(trace_profile=trace_profile)
         phase_path = self.root / "artifacts/phases.jsonl"

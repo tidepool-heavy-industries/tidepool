@@ -1394,6 +1394,9 @@ def analyze(record_path):
         "compiler_trace": {"bytes": daemon_path.stat().st_size, "sha256": sha256_file(daemon_path)},
     }
 
+    logical_counts = [phase["phase_record"].get("logical_compiler_requests") for phase in workload_phases]
+    observed_counts = [value for value in logical_counts if type(value) is int and value >= 0]
+    unknown_count = len(logical_counts) - len(observed_counts)
     report = {
         "schema": 1,
         "whole_case_wall": case_wall_ledger(phases, roster),
@@ -1472,7 +1475,9 @@ def analyze(record_path):
         },
         "workload_request_service_joins": {
             "status": "complete" if phase_coverage["complete"] and workload_exact else "partial_or_unknown",
-            "logical_request_count": sum(phase.get("logical_compiler_requests") or 0 for phase in workload_phases),
+            "logical_request_count": sum(observed_counts) if logical_counts and not unknown_count else None,
+            "observed_logical_request_subtotal": sum(observed_counts),
+            "unknown_logical_request_phase_count": unknown_count,
             "exact_phase_request_join_count": sum(phase["daemon_service_matched_count"] for phase in workload_phases),
         },
         "whole_physical_stream_reconciliation": {
