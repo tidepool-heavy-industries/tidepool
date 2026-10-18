@@ -1473,12 +1473,12 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let unrelated_offer = complete(2);
     let dependency_offer = IssuedNativeOffer::issue(entries[1].descriptor.id, &base, None).unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-    let metadata = projection
+    let transport_metadata = projection
         .project_metadata(base.metadata_snapshot())
         .unwrap();
     let transport = NativeCompilerTransport::issue(
         &projection,
-        &metadata,
+        &transport_metadata,
         &full,
         &[
             ancestor_offer.clone(),
@@ -1629,6 +1629,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     drop(b_context);
     drop(dependency_offer);
     drop(transport);
+    drop(transport_metadata);
     drop(metadata);
     drop(unrelated_offer);
     drop(ancestor_offer);
