@@ -7170,39 +7170,13 @@ impl ExactDeclarationContext {
         values: &[RecoveryValueInterfaceRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        Self::capture_recovery_inputs(
-            root,
-            products,
-            module_interfaces,
-            joins,
-            values,
-            None,
-            lexical,
-        )
-    }
-    fn capture_recovery_inputs(
-        root: &Path,
-        products: &[RecoveryArtifactRef],
-        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
-        joins: &[RecoveryJoinRef],
-        values: &[RecoveryValueInterfaceRef],
-        inventory: Option<(
-            &[crate::artifact_inventory::ArtifactDescriptor],
-            &[(
-                crate::artifact_inventory::ArtifactId,
-                crate::artifact_inventory::ArtifactId,
-                crate::artifact_inventory::ArtifactDependency,
-            )],
-        )>,
-        lexical: Vec<ExactLexicalNode>,
-    ) -> Result<Self, CompileError> {
         let inventory = RecoveredArtifactInventory::capture_inputs(
             root,
             products,
             module_interfaces,
             joins,
             values,
-            inventory,
+            None,
         )
         .map_err(failure)?;
         inventory.context_all_groups(
