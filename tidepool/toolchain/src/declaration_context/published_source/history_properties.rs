@@ -364,7 +364,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         callbacks.set(callbacks.get() + 1);
         let (root, helper, publication) = fixture_with_helper_version(initial, 1, true);
         let original = publication.context();
-        let expected_publication = original.semantic_sha256();
+        let expected_publication = original.compiler_input_roles().into_iter()
+            .find(CompilerInputRole::is_published_source_original).unwrap();
         let mut expected_roles = original.compiler_input_roles();
         let mut expected_artifacts = original.artifact_view().artifact_ids();
         let initial_groups = std::iter::once(NativeGroupKey {
@@ -412,6 +413,14 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     };
                     let root_binding = *context.artifact_view().capture_graph_selection().namespace.iter()
                         .find(|binding| binding.artifact == root.descriptor.id).unwrap();
+                    let row = context.compiler_source_support().native_availability().rows()
+                        .find(|row| row.original.descriptor.id == root.descriptor.id).unwrap();
+                    prop_assert!(row.permits(ordinal));
+                    let permitted_groups = row.offers().filter_map(|offer| offer.proof())
+                        .flat_map(|proof| proof.selection.graph_selection().native_groups.iter().copied())
+                        .filter(|group| group.binding.artifact() == root.descriptor.id
+                            && group.original_ordinal == ordinal).collect::<BTreeSet<_>>();
+                    prop_assert!(!permitted_groups.is_empty());
                     let module = format!("HistoryOutput{ordinal}");
                     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
                         crate::certified_products::fixture_finalized_product_with_requirements(
@@ -428,18 +437,23 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
                     let support = context.compiler_source_support().admit_checked_products([2; 32], &[product]).unwrap();
                     context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
-                    prop_assert!(context.artifact_view().binding_dependencies().iter().any(|(dependent, required, edge)| {
+                    let edges = context.artifact_view().binding_dependencies();
+                    prop_assert!(edges.iter().any(|(dependent, required, edge)| {
                         matches!((dependent, required), (
                             crate::artifact_inventory::ArtifactBindingNode::Group(dependent),
                             crate::artifact_inventory::ArtifactBindingNode::Group(required),
                         ) if dependent.binding.artifact() == output.descriptor.id
                             && dependent.original_ordinal == 0
-                            && required.binding == root_binding
-                            && required.original_ordinal == ordinal)
+                            && permitted_groups.contains(required)
+                            && edges.iter().any(|(source, target, edge)| {
+                                source == &crate::artifact_inventory::ArtifactBindingNode::Group(*required)
+                                    && target == &crate::artifact_inventory::ArtifactBindingNode::Artifact(root_binding)
+                                    && matches!(edge, crate::artifact_inventory::ArtifactDependency::Interface)
+                            }))
                             && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
                                 dependent_ordinal: 0, required_ordinal,
                             } if *required_ordinal == ordinal)
-                    }), "the issued output body retains its exact Root binding and ordinal dependency");
+                    }), "the issued output requires a previously permitted Root group with its exact carrier edge");
                     if outputs.insert(ordinal, output.descriptor.id).is_none() {
                         expected_roles.extend(output_role);
                         expected_artifacts.insert(output.descriptor.id);
@@ -485,8 +499,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let reopened = context.published_source_original_selections().unwrap();
                     prop_assert_eq!(reopened.len(), 1);
                     prop_assert_eq!(
-                        reopened[0].context().semantic_sha256(),
-                        expected_publication
+                        reopened[0].context().compiler_input_roles().into_iter()
+                            .find(CompilerInputRole::is_published_source_original).unwrap(),
+                        expected_publication.clone()
                     );
                     prop_assert_eq!(
                         reopened[0]
