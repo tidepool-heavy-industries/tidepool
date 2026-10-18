@@ -14948,22 +14948,27 @@ mod tests {
         if reverse {
             issuers.reverse();
         }
-        let roles = CompilerInputProjection::from_issued_entries(&[root.clone()])
-            .unwrap()
-            .interface_only();
+        let roles = CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap();
         let mut broad = if publication {
             issuers[0]
+                .with_compiler_projection(&roles)
+                .unwrap()
                 .select_publication_roots(
                     root.descriptor.id,
                     vec![root.descriptor.id, canonical.descriptor.id],
                 )
                 .unwrap()
         } else {
-            issuers[0].with_compiler_projection(&roles).unwrap()
+            issuers[0]
+                .select_roots(vec![canonical.descriptor.id])
+                .unwrap()
+                .with_compiler_projection(&roles.interface_only())
+                .unwrap()
         };
         for issued in &issuers {
             broad = broad.retain_custody(issued).unwrap();
         }
+        assert!(!broad.contains_namespace_artifact(hidden.descriptor.id));
         let before = broad.capture_graph_selection();
         let expected_hidden = before
             .bindings
