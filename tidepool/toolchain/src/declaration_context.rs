@@ -3191,17 +3191,13 @@ struct OwnedExecutionGraphFile {
 }
 
 impl RetainedArtifactMaterialization {
-    /// Detach exactly the selected immutable facts from historical delta owners.
-    /// Each file keeps its issuing directory; neither paths nor names discover
-    /// an owner, and selection cannot add native authority.
+    /// Reuse a complete issued closure, or detach a narrower selection from
+    /// historical delta owners. Each file retains its actual issuing directory.
     pub(crate) fn select_custody(
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Option<Arc<Self>> {
-        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata);
         let selected_graphs = metadata
             .artifacts
             .values()
@@ -3215,34 +3211,66 @@ impl RetainedArtifactMaterialization {
         let mut rows = BTreeMap::new();
         let mut graph_paths = BTreeMap::new();
         let mut visited = BTreeSet::new();
+        let mut ancestors = BTreeSet::new();
+        let (mut row_count, mut group_count, mut graph_count) = (0, 0, 0);
         for owner in owners {
             owner.visit_owners(&mut visited, &mut |owner| {
+                ancestors.extend(
+                    owner
+                        ._parents
+                        .iter()
+                        .map(|parent| Arc::as_ptr(parent) as usize),
+                );
+                row_count += owner.rows.len();
+                group_count += owner.groups.len();
+                graph_count += owner.graph_paths.len();
                 rows.extend(
                     owner
                         .rows
                         .iter()
                         .filter(|(id, _)| metadata.artifacts.contains_key(*id))
-                        .map(|(id, row)| (*id, row.clone())),
+                        .map(|(id, row)| (*id, row)),
                 );
                 graph_paths.extend(
                     owner
                         .graph_paths
                         .iter()
                         .filter(|(digest, _)| selected_graphs.contains(*digest))
-                        .map(|(digest, file)| (*digest, file.clone())),
+                        .map(|(digest, file)| (*digest, file)),
                 );
             });
         }
         if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
             return None;
         }
+        // A single actual source frontier owns these very borrowed facts.
+        // Reuse only its entire closure, with no excluded or shadowed issuers.
+        // Arc ancestry is operation-local ownership, never a digest/name match.
+        if row_count == rows.len()
+            && group_count == groups.len()
+            && graph_count == graph_paths.len()
+        {
+            let frontier = owners
+                .iter()
+                .filter(|owner| !ancestors.contains(&(Arc::as_ptr(owner) as usize)))
+                .collect::<Vec<_>>();
+            if let [owner] = frontier.as_slice() {
+                return Some(Arc::clone(owner));
+            }
+        }
         Some(Arc::new(Self {
             _directory: None,
             _parents: Vec::new(),
-            rows,
-            groups: groups.into(),
+            rows: rows
+                .into_iter()
+                .map(|(id, row)| (id, row.clone()))
+                .collect(),
+            groups: groups.into_iter().cloned().collect::<Vec<_>>().into(),
             execution_scope: None,
-            graph_paths,
+            graph_paths: graph_paths
+                .into_iter()
+                .map(|(digest, file)| (digest, file.clone()))
+                .collect(),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
         }))
@@ -14330,6 +14358,10 @@ mod tests {
         let first = a
             .prepare_compilation(&scratch.path().join("a1"), &producer)
             .unwrap();
+        let a_owner = first.materialization.as_ref().unwrap();
+        let a_directory = a_owner._directory.as_ref().unwrap();
+        let a_directory_weak = Arc::downgrade(a_directory);
+        let a_files = private_directory_file_bytes(a_directory.path());
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
             a.owner.facts.producer,
@@ -14351,11 +14383,31 @@ mod tests {
         }
         assert_eq!(second.artifacts.len(), first.artifacts.len() + 1);
         let b_owner = second.materialization.as_ref().unwrap();
-        assert_eq!(b_owner._parents.len(), 1);
-        assert!(Arc::ptr_eq(
-            &b_owner._parents[0],
-            first.materialization.as_ref().unwrap()
+        assert_eq!(b_owner.rows.len(), 1, "B owns only its new physical row");
+        let b_metadata = b.compiler_metadata_snapshot().unwrap();
+        assert!(b_owner.rows.contains_key(
+            &b_metadata.entries[&identity("fixture", "Gamma")]
+                .descriptor
+                .id
         ));
+        let b_rows = b_owner.selected_rows(&b_metadata);
+        for artifact in &first.artifacts {
+            let entry = &b_metadata.entries
+                [&identity(&artifact.interface.unit, &artifact.interface.module)];
+            let inherited = b_rows[&entry.descriptor.id];
+            assert_eq!(inherited.artifact(), *artifact);
+            assert!(Arc::ptr_eq(&inherited._directory, a_directory));
+        }
+        assert_eq!(private_directory_file_bytes(a_directory.path()), a_files);
+        let new_file_bytes = private_directory_file_bytes(b_owner.directory().path())
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+        assert_eq!(
+            b_owner.payload_work.written_bytes, new_file_bytes,
+            "B writes its new files without rewriting inherited payloads"
+        );
+        assert!(new_file_bytes > 0);
         let gamma = second
             .artifacts
             .iter()
@@ -14383,9 +14435,12 @@ mod tests {
         drop(third);
         drop(a);
         assert!(root_a.exists(), "B retains borrowed A paths");
+        assert!(a_directory_weak.upgrade().is_some());
+        assert_eq!(private_directory_file_bytes(&root_a), a_files);
         drop(second);
         drop(b);
         assert!(!root_a.exists());
+        assert!(a_directory_weak.upgrade().is_none());
     }
 
     #[test]
@@ -14862,7 +14917,6 @@ mod tests {
                     assert!(request.artifacts.contains(artifact));
                 }
                 let retained = request.materialization.as_ref().unwrap();
-                assert_eq!(retained._parents.len(), 1);
                 assert_eq!(
                     retained.rows.len(),
                     1,
@@ -19205,17 +19259,28 @@ mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        assert!(dependent_context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .metadata_snapshot()
-            .selected_native_groups
+        let issued_support = changed
+            .compiler_source_support()
+            .native_offers()
             .iter()
-            .any(|group| group.artifact == support_entry.descriptor.id));
-        // The exact support groups remain selected even though their compiler
-        // role is type-only. A redundant private support offer is optional.
+            .filter(|offer| offer.original() == support_entry.descriptor.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !issued_support.is_empty(),
+            "changed compiler proof must issue its exact support availability"
+        );
+        let propagated_support = dependent_context
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .filter(|offer| offer.original() == support_entry.descriptor.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            propagated_support, issued_support,
+            "type-only support must retain its issuer's exact carrier, interface, availability class and selection"
+        );
+        // Opaque availability survives type-only roles independently of
+        // executable group demand. A redundant private support offer is optional.
         OriginalCompilerInputs::from_native_availability(
             &dependent_context,
             producer,
