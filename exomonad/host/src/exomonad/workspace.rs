@@ -2561,24 +2561,179 @@ mod tests {
 
     #[test]
     fn generated_workspace_module_path_is_reserved_for_each_source_suffix() {
-        for suffix in ["hs", "lhs", "hs-boot", "lhs-boot"] {
-            let project = tempfile::tempdir().unwrap();
-            let run = tempfile::tempdir().unwrap();
-            let authored = project.path().join(".exomonad");
-            let collision = authored.join(format!("Exomonad/Workspace.{suffix}"));
-            std::fs::create_dir_all(collision.parent().unwrap()).unwrap();
-            std::fs::write(&collision, "").unwrap();
-            std::fs::write(
-                authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\n",
-            )
-            .unwrap();
+        for module in ["Workspace", "Models"] {
+            for suffix in ["hs", "lhs", "hs-boot", "lhs-boot"] {
+                let project = tempfile::tempdir().unwrap();
+                let run = tempfile::tempdir().unwrap();
+                let authored = project.path().join(".exomonad");
+                let collision = authored.join(format!("Exomonad/{module}.{suffix}"));
+                std::fs::create_dir_all(collision.parent().unwrap()).unwrap();
+                std::fs::write(&collision, "").unwrap();
+                std::fs::write(
+                    authored.join("config.toml"),
+                    "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\n",
+                )
+                .unwrap();
+                let error = FrozenWorkspace::load(project.path(), run.path())
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("reserved for generated interfaces"),
+                    "{module}.{suffix}: {error}"
+                );
+                assert!(!run.path().join("workspace/selection.json").exists());
+            }
+        }
+    }
 
+    fn catalog_project() -> tempfile::TempDir {
+        let mut config: super::super::ExomonadConfig = toml::from_str(include_str!(
+            "../../../examples/persona/.exomonad/config.argon.toml"
+        ))
+        .unwrap();
+        config.haskell = HaskellConfig {
+            source_roots: vec![PathBuf::from(".")],
+            ..Default::default()
+        };
+        config.prompts = PromptConfig::default();
+        deployment_project(&toml::to_string(&config).unwrap())
+    }
+
+    #[test]
+    fn frozen_model_catalog_and_generated_bytes_survive_reopen_and_launch_edits() {
+        let project = catalog_project();
+        let run = tempfile::tempdir().unwrap();
+        let selected = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let catalog = selected.model_catalog.as_ref().unwrap();
+        let generated = selected.workspace_resources().join("Exomonad/Models.hs");
+        let bytes = std::fs::read(&generated).unwrap();
+        assert_eq!(bytes, catalog.render_haskell_models().unwrap().as_bytes());
+        assert_eq!(
+            selected.files[Path::new("resources/Exomonad/Models.hs")],
+            blake3::hash(&bytes).to_hex().to_string()
+        );
+        assert_eq!(catalog.primary, "argon");
+        let reopened = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reopened.model_catalog).unwrap(),
+            serde_json::to_value(&selected.model_catalog).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(reopened.workspace_resources().join("Exomonad/Models.hs")).unwrap(),
+            bytes
+        );
+
+        let mut edited = selected.config().unwrap();
+        edited
+            .inference
+            .as_mut()
+            .unwrap()
+            .profiles
+            .get_mut("argon")
+            .unwrap()
+            .default = "flash".into();
+        std::fs::write(
+            project.path().join(".exomonad/config.toml"),
+            toml::to_string(&edited).unwrap(),
+        )
+        .unwrap();
+        let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(
+            retained.config().unwrap().defaults.model,
+            exomonad_actor::Model::GeminiArgon
+        );
+        assert_eq!(
+            serde_json::to_value(&retained.model_catalog).unwrap(),
+            serde_json::to_value(&selected.model_catalog).unwrap()
+        );
+        assert_eq!(std::fs::read(&generated).unwrap(), bytes);
+        assert!(
+            retained
+                .verify_current_inputs(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("workspace configuration changed since preparation")
+        );
+
+        let next_run = tempfile::tempdir().unwrap();
+        let next = FrozenWorkspace::load(project.path(), next_run.path()).unwrap();
+        let next_catalog = next.model_catalog.as_ref().unwrap();
+        assert_eq!(next_catalog.primary, "flash");
+        assert_ne!(next_catalog.identity, catalog.identity);
+        assert_ne!(
+            std::fs::read(next.workspace_resources().join("Exomonad/Models.hs")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn frozen_model_catalog_tampering_refuses_before_reopen() {
+        let project = catalog_project();
+        let run = tempfile::tempdir().unwrap();
+        FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        for pointer in [
+            "/model_catalog/identity",
+            "/model_catalog/primary",
+            "/model_catalog/models/argon/provider",
+        ] {
+            let mut tampered = original.clone();
+            *tampered.pointer_mut(pointer).unwrap() = serde_json::json!("tampered");
+            std::fs::write(&manifest, serde_json::to_vec(&tampered).unwrap()).unwrap();
             let error = FrozenWorkspace::load(project.path(), run.path())
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("Exomonad.Workspace is reserved"), "{error}");
+            assert!(
+                error.contains("frozen model catalog differs from captured launch configuration"),
+                "{pointer}: {error}"
+            );
         }
+        std::fs::write(&manifest, serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(FrozenWorkspace::load(project.path(), run.path()).is_ok());
+    }
+
+    #[test]
+    fn generated_model_bytes_and_added_authored_shadow_fail_input_admission() {
+        let project = catalog_project();
+        let run = tempfile::tempdir().unwrap();
+        let selected = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let generated = selected.workspace_resources().join("Exomonad/Models.hs");
+        let original = std::fs::read(&generated).unwrap();
+        std::fs::write(&generated, "module Exomonad.Models where\n").unwrap();
+        let error = FrozenWorkspace::load(project.path(), run.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("frozen workspace input changed: resources/Exomonad/Models.hs"),
+            "{error}"
+        );
+        std::fs::write(&generated, original).unwrap();
+        assert!(FrozenWorkspace::load(project.path(), run.path()).is_ok());
+
+        let shadow = project.path().join(".exomonad/Exomonad/Models.hs");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(shadow, "module Exomonad.Models where\n").unwrap();
+        assert!(
+            selected
+                .verify_current_inputs(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("workspace source bytes changed since preparation")
+        );
+        // Reopening keeps the captured source, including after an authored shadow appears.
+        let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(
+            std::fs::read(retained.workspace_resources().join("Exomonad/Models.hs")).unwrap(),
+            selected
+                .model_catalog
+                .as_ref()
+                .unwrap()
+                .render_haskell_models()
+                .unwrap()
+                .as_bytes()
+        );
     }
 
     #[test]
