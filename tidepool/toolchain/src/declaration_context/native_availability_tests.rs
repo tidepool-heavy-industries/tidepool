@@ -2439,15 +2439,19 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             .find(|group| group.binding.artifact() == artifact && group.original_ordinal == ordinal)
             .unwrap()
     };
+    // Type-only selection omits executable edges; retained scope proofs own custody.
     assert!(
-        typed.binding_dependencies().contains(&(
-            ArtifactBindingNode::Group(group(b_id, 7)),
-            ArtifactBindingNode::Group(group(a_id, 9001)),
-            crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                dependent_ordinal: 7,
-                required_ordinal: 9001,
-            },
-        )),
+        typed.selection_snapshot().scopes.values().any(|scope| scope
+            .proof()
+            .dependencies
+            .contains(&(
+                ArtifactBindingNode::Group(group(b_id, 7)),
+                ArtifactBindingNode::Group(group(a_id, 9001)),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 9001,
+                },
+            ))),
         "type-only custody preserves the exact backedge that native consumption refuses"
     );
 }
@@ -8568,25 +8572,37 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .unwrap()
         .clone();
     assert!(full.is_full());
+    // Available groups live in retained scope proofs, independently of execution selection.
+    let retained_groups = issued
+        .selection_snapshot()
+        .scopes
+        .values()
+        .flat_map(|scope| scope.proof().nodes.iter())
+        .filter_map(|node| match node {
+            ArtifactBindingNode::Group(group)
+                if group.binding.artifact() == entry.descriptor.id =>
+            {
+                Some(*group)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        retained_groups
+            .iter()
+            .map(|group| (group.binding.artifact(), group.original_ordinal))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(entry.descriptor.id, 3), (entry.descriptor.id, 7)]),
+        "retained proof membership must match the independently authored groups",
+    );
     assert_eq!(
         full.issued_group_carriers()
             .unwrap()
             .into_keys()
             .collect::<BTreeSet<_>>(),
-        issued
-            .capture_graph_selection()
-            .native_groups
-            .into_iter()
-            .collect(),
-        "checked offer membership must match the independent eager issued view",
+        retained_groups,
+        "checked offer membership must match the exact retained issued groups",
     );
-    assert!(full
-        .issued_group_carriers()
-        .unwrap()
-        .keys()
-        .any(
-            |group| group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 3
-        ));
     assert!(support.artifacts().selected_native_groups().is_empty());
     let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
         producer: producer.sha256(),
