@@ -3013,7 +3013,13 @@ mod tests {
     fn source_merge_keeps_native_choices_with_the_selected_exact_issuer() {
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool, empty: bool| {
+        let foreign_inventory = ArtifactInventory::default();
+        let issue = |marker: &str, with_caller: bool, empty: bool, foreign: bool| {
+            let inventory = if foreign {
+                &foreign_inventory
+            } else {
+                &inventory
+            };
             let selected = if with_caller {
                 &entries[..]
             } else {
@@ -3041,9 +3047,11 @@ mod tests {
             )
             .unwrap()
         };
-        for empty_winner in [false, true] {
-            let winner = issue("WinnerMarker", false, empty_winner);
-            let historical = issue("HistoricalMarker", true, false);
+        for (empty_winner, cross_inventory) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let winner = issue("WinnerMarker", false, empty_winner, false);
+            let historical = issue("HistoricalMarker", true, false, cross_inventory);
             let parent = &entries[1];
             let owner = &parent.descriptor.owner;
             let pair = |support: &CompilerSourceSupport| {
@@ -3081,9 +3089,17 @@ mod tests {
                 .into_iter()
                 .chain(historical.artifacts.binding_dependencies())
                 .collect::<BTreeSet<_>>();
+            type_query_work::take();
             let joined = winner
                 .merge(&historical)
                 .expect("a losing historical issuer does not replace the selected input choice");
+            let merge_work = type_query_work::take();
+            assert_eq!(
+                merge_work.resolved_rows, 0,
+                "chosen bindings are not rediscovered"
+            );
+            assert_eq!(merge_work.census_rows, joined.projection.roles.len());
+            assert!(!joined.selected.rows.is_empty());
             let (kernel, kernel_projection, kernel_decisions) = winner
                 .artifacts
                 .merge_compiler_inputs_with_demand(
@@ -3107,6 +3123,7 @@ mod tests {
                 kernel.capture_graph_selection(),
                 prior_constructor.capture_graph_selection()
             );
+            type_query_work::take();
             let mut prior_support = winner
                 .rebuild(
                     kernel_projection,
@@ -3120,7 +3137,25 @@ mod tests {
                 .unwrap()
                 .retain_normalized_availability(historical.native_availability())
                 .unwrap();
+            let prior_work = type_query_work::take();
+            assert!(
+                prior_work.resolved_rows > 0,
+                "the reference rebuild calibrates removed work"
+            );
             prior_support.input_decisions = kernel_decisions;
+            assert_eq!(joined.selected, prior_support.selected);
+            assert_eq!(
+                joined.native_offer_observations().unwrap(),
+                prior_support.native_offer_observations().unwrap()
+            );
+            for row in joined.selected.values() {
+                for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                    assert!(
+                        Arc::ptr_eq(entry, &joined.artifacts.lease.payloads[&binding.artifact]),
+                        "chosen row acquires the final payload owner"
+                    );
+                }
+            }
             assert_eq!(
                 joined.artifacts.capture_graph_selection(),
                 prior_support.artifacts.capture_graph_selection(),
