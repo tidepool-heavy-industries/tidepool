@@ -6074,13 +6074,17 @@ impl ArtifactView {
                 }
             }
         }
-        let mut custody = retained_ids
-            .difference(&initial)
-            .map(|id| {
-                self.resolve_binding(*id, owned)
-                    .map(InventoryNodeKey::Artifact)
+        // Hidden native dependencies preserve every owned issuer as custody;
+        // the explicit publication namespace remains the source choice.
+        let mut custody = owned
+            .iter()
+            .copied()
+            .filter(|node| {
+                matches!(node, InventoryNodeKey::Artifact(binding)
+                if retained_ids.contains(&binding.artifact)
+                    && !initial.contains(&binding.artifact))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
             InventoryNodeKey::Group(group) if group.binding.artifact() != original && ids.contains(&group.binding.artifact()))));
         if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact() == original)) {
@@ -14893,7 +14897,7 @@ mod tests {
         assert_eq!(recovery.node_count(), 0);
     }
 
-    fn check_hidden_native_custody_bindings(branches: usize, reverse: bool) {
+    fn check_hidden_native_custody_bindings(branches: usize, reverse: bool, publication: bool) {
         let inventory = ArtifactInventory::default();
         let hidden = Arc::new(issued_native_groups(
             "HiddenCustody",
@@ -14903,7 +14907,11 @@ mod tests {
         ));
         let root = Arc::new(issued_native_groups(
             "CustodyRoot",
-            vec![(0, vec![issued_source(&hidden, 7)])],
+            if publication {
+                vec![(0, vec![]), (9, vec![issued_source(&hidden, 7)])]
+            } else {
+                vec![(0, vec![issued_source(&hidden, 7)])]
+            },
             &[],
             &BTreeMap::new(),
         ));
@@ -14913,13 +14921,6 @@ mod tests {
         let canonical = Arc::new(ArtifactEntry::canonical(
             product.module_interface().unwrap().clone(),
         ));
-        let mut broad = inventory
-            .admit_shared_with_demand(
-                &inventory.empty_view(),
-                vec![canonical.clone()],
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
         let mut issuers = (0..branches)
             .map(|index| {
                 inventory
@@ -14947,6 +14948,19 @@ mod tests {
         if reverse {
             issuers.reverse();
         }
+        let roles = CompilerInputProjection::from_issued_entries(&[root.clone()])
+            .unwrap()
+            .interface_only();
+        let mut broad = if publication {
+            issuers[0]
+                .select_publication_roots(
+                    root.descriptor.id,
+                    vec![root.descriptor.id, canonical.descriptor.id],
+                )
+                .unwrap()
+        } else {
+            issuers[0].with_compiler_projection(&roles).unwrap()
+        };
         for issued in &issuers {
             broad = broad.retain_custody(issued).unwrap();
         }
@@ -14958,7 +14972,38 @@ mod tests {
             .filter(|binding| binding.artifact == hidden.descriptor.id)
             .collect::<BTreeSet<_>>();
         assert_eq!(expected_hidden.len(), branches);
-        let selected = broad.select_roots(vec![canonical.descriptor.id]).unwrap();
+        let canonical_binding = before
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == canonical.descriptor.id)
+            .copied()
+            .unwrap();
+        assert!(before.selections.iter().flat_map(|scope| &scope.dependencies)
+            .any(|(source, target, edge)| matches!((source, target, edge),
+                (ArtifactBindingNode::Artifact(binding), ArtifactBindingNode::Artifact(carrier), ArtifactDependency::Interface)
+                if binding.artifact == root.descriptor.id && *carrier == canonical_binding)));
+        let expected_groups = broad.selected_native_groups();
+        assert_eq!(
+            expected_groups,
+            if publication {
+                BTreeSet::from([NativeGroupKey {
+                    artifact: root.descriptor.id,
+                    original_ordinal: 0,
+                }])
+            } else {
+                BTreeSet::new()
+            }
+        );
+        let selected = if publication {
+            broad
+                .select_publication_roots(
+                    root.descriptor.id,
+                    vec![root.descriptor.id, canonical.descriptor.id],
+                )
+                .unwrap()
+        } else {
+            broad.select_roots(vec![canonical.descriptor.id]).unwrap()
+        };
         let graph = selected.capture_graph_selection();
         assert_eq!(
             graph
@@ -14970,8 +15015,8 @@ mod tests {
             expected_hidden,
         );
         assert_eq!(graph.namespace, broad.capture_graph_selection().namespace);
-        assert!(selected.selected_native_groups().is_empty());
-        assert!(graph.roots.iter().all(|node| matches!(node, ArtifactBindingNode::Artifact(binding) if binding.artifact == canonical.descriptor.id)));
+        assert_eq!(selected.selected_native_groups(), expected_groups);
+        assert_eq!(graph.roots, before.roots);
         assert!(graph
             .selections
             .iter()
@@ -15006,7 +15051,12 @@ mod tests {
 
     #[test]
     fn hidden_native_custody_preserves_independent_bindings_without_selection() {
-        check_hidden_native_custody_bindings(2, false);
+        check_hidden_native_custody_bindings(2, false, false);
+    }
+
+    #[test]
+    fn publication_custody_preserves_hidden_bindings_of_undemanded_bodies() {
+        check_hidden_native_custody_bindings(2, false, true);
     }
 
     proptest::proptest! {
@@ -15015,8 +15065,9 @@ mod tests {
         fn hidden_native_custody_histories_preserve_exact_graphs(
             branches in 2usize..6,
             reverse in proptest::bool::ANY,
+            publication in proptest::bool::ANY,
         ) {
-            check_hidden_native_custody_bindings(branches, reverse);
+            check_hidden_native_custody_bindings(branches, reverse, publication);
         }
     }
 
