@@ -635,7 +635,7 @@ proptest! {
         let Err(CompileError::ExtractFailed(detail)) =
             context.clone().extend_issued_compiler_support(&other)
         else { panic!("a competing selected original must refuse publication reopening") };
-        prop_assert!(detail.starts_with("published selection changes a selected original dependency"));
+        prop_assert!(detail.starts_with("exact declaration context: published selection changes a selected original dependency"));
         prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.owner)));
         prop_assert!(detail.contains(&format!("{:?}", helper.descriptor.id)));
         prop_assert!(detail.contains(&format!("{:?}", other_helper.descriptor.id)));
