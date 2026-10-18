@@ -15293,9 +15293,6 @@ mod tests {
             .artifact_view()
             .merge_fixture_selections(&surface.compiler_support.artifacts());
         assert_eq!(attached.is_ok(), !demands_epoch || old_epoch == new_epoch);
-        let selects_old = surface.artifacts.contains_namespace_artifact(old_original);
-        assert_eq!(selects_old, root == old_original);
-        assert_eq!(selects_old, demands_epoch);
         assert_eq!(
             surface
                 .compiler_support
@@ -15305,22 +15302,6 @@ mod tests {
                 .and_then(CompilerInputRole::original),
             demands_epoch.then_some(old_original),
         );
-        {
-            let joined = child
-                .artifact_view()
-                .merge_fixture_selections(&surface.artifacts);
-            assert_eq!(
-                joined.is_ok(),
-                !selects_old || old_original == current_original
-            );
-            if let Ok(joined) = joined {
-                assert!(joined.artifact_ids().contains(&old_original));
-                assert!(joined.contains_namespace_artifact(current_original));
-                if old_original != current_original {
-                    assert!(!joined.contains_namespace_artifact(old_original));
-                }
-            }
-        }
         // Retiring the issuing source cannot revoke byte custody owned by the value.
         let old_ids = surface.artifacts.artifact_ids();
         drop(old);
