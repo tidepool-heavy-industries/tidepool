@@ -146,7 +146,9 @@ metadata. Complete compilation inputs preserve their exact owner frontier;
 only subsets of the same issued fact handles may be removed. Selection keeps
 source precedence, and a whole owner containing any excluded or shadowed fact
 must yield only its selected facts. Equal paths, hashes or artifact IDs cannot
-equate independently issued physical facts.
+equate independently issued physical facts. Metadata-owner expiry does not
+release files while a materialized view still owns their directory lease;
+lifetime assertions follow the last owning view.
 
 ## Immutable build fixtures
 
@@ -279,7 +281,11 @@ miss cannot enter fresh graph issuance. Regressions cross `bind_segment` and
 actual target admission, rather than querying a carrier view as an offer owner.
 Adding issued offer custody preserves the receiving namespace exactly. Historical
 canonical interfaces may coexist in separate authenticated scopes; uniqueness
-applies to selected compiler roles, not every retained payload. Compiler input
+applies to selected compiler roles, not every retained payload. Physical metadata
+presence alone grants no import role and establishes no selected-owner conflict.
+Use owner-bound offer and view methods to observe historical issuance and admit
+demand. Keep deliberate cross-owner authentication refusal tests distinct from
+those observations. Compiler input
 joins carry each surviving role's issuer binding rather than resolving equal
 payload IDs against the receiving inventory.
 
