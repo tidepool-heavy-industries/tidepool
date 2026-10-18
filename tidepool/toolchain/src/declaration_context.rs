@@ -1153,14 +1153,11 @@ impl NativeTransportAvailability {
         let ArtifactPayload::Original(product) = &original.payload else {
             return Err(failure("normalized native row is not original"));
         };
-        Ok(ArtifactEntry::canonical(
+        Ok(ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
-                .ok_or_else(|| failure("normalized native row lacks canonical owner"))?
-                .clone(),
-        )
-        .descriptor
-        .id)
+                .ok_or_else(|| failure("normalized native row lacks canonical owner"))?,
+        ))
     }
 
     fn validate_full_evidence(&self) -> Result<(), CompileError> {

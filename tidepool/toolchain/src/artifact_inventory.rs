@@ -762,14 +762,11 @@ impl NativeOriginalRequirement {
                 },
             ));
         };
-        let canonical = ArtifactEntry::canonical(
+        let canonical = ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
-                .ok_or_else(|| failure("private original lacks canonical carrier"))?
-                .clone(),
-        )
-        .descriptor
-        .id;
+                .ok_or_else(|| failure("private original lacks canonical carrier"))?,
+        );
         let canonical_binding = match scope {
             NativeAvailabilityQualificationScope::CurrentNamespace => {
                 let Some(binding) = lease.selection.namespace.get(&canonical).copied() else {
@@ -2074,14 +2071,11 @@ pub(crate) fn restore_recovery_interface_dependencies(
     }
     for entry in entries.iter_mut() {
         if let ArtifactPayload::Original(product) = &entry.payload {
-            let canonical = ArtifactEntry::canonical(
+            let canonical = ArtifactEntry::canonical_artifact_id(
                 product
                     .module_interface()
-                    .ok_or_else(|| failure("recovered native lacks canonical carrier"))?
-                    .clone(),
-            )
-            .descriptor
-            .id;
+                    .ok_or_else(|| failure("recovered native lacks canonical carrier"))?,
+            );
             let direct = edges
                 .iter()
                 .filter(|(from, _, _)| *from == entry.descriptor.id)
@@ -4175,9 +4169,7 @@ impl ArtifactInventory {
                         ArtifactPayload::Original(product) => {
                             !parent_ids.contains(id)
                                 && product.module_interface().is_some_and(|canonical| {
-                                    ids.contains(
-                                        &ArtifactEntry::canonical(canonical.clone()).descriptor.id,
-                                    )
+                                    ids.contains(&ArtifactEntry::canonical_artifact_id(canonical))
                                 })
                         }
                         _ => false,
@@ -6352,9 +6344,7 @@ impl ArtifactView {
                 };
                 Some((
                     id,
-                    ArtifactEntry::canonical(product.module_interface()?.clone())
-                        .descriptor
-                        .id,
+                    ArtifactEntry::canonical_artifact_id(product.module_interface()?),
                 ))
             })
             .collect::<BTreeMap<_, _>>();

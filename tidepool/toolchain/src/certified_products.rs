@@ -3622,16 +3622,13 @@ impl CertifiedSourceSelection {
                 .insert(
                     key,
                     ReceiptSourceSelection::Native {
-                        interface: crate::artifact_inventory::ArtifactEntry::canonical(
+                        interface: crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(
                             product
                                 .module_interface()
                                 .ok_or(CertificationError::Mismatch(
                                     "compiler original canonical interface",
-                                ))?
-                                .clone(),
-                        )
-                        .descriptor
-                        .id,
+                                ))?,
+                        ),
                         native: ReceiptNativeSelection {
                             origin: ReceiptNativeOrigin::NewProduct,
                             owner: witness.owner.clone(),
@@ -3714,9 +3711,7 @@ impl CertifiedSourceSelection {
                 "compiler current canonical interface",
             ));
         }
-        let interface = crate::artifact_inventory::ArtifactEntry::canonical(canonical.clone())
-            .descriptor
-            .id;
+        let interface = crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical);
         if let Some(previous) = self.modules.get(&key) {
             if previous.interface() != interface {
                 return Err(CertificationError::Mismatch(

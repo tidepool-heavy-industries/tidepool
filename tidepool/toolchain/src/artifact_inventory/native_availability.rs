@@ -252,14 +252,11 @@ fn bind_input_demand(
                 }
             }
         }
-        let canonical = ArtifactEntry::canonical(
+        let canonical = ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
-                .ok_or_else(|| failure("native canonical carrier missing"))?
-                .clone(),
-        )
-        .descriptor
-        .id;
+                .ok_or_else(|| failure("native canonical carrier missing"))?,
+        );
         let mut compatible = Vec::new();
         for (group, support) in supports {
             let node = InventoryNodeKey::Group(group);
@@ -1076,14 +1073,11 @@ impl IssuedNativeOffer {
                     ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
                 ));
             };
-            let interface = ArtifactEntry::canonical(
+            let interface = ArtifactEntry::canonical_artifact_id(
                 product
                     .module_interface()
-                    .ok_or_else(|| failure("complete availability lacks canonical interface"))?
-                    .clone(),
-            )
-            .descriptor
-            .id;
+                    .ok_or_else(|| failure("complete availability lacks canonical interface"))?,
+            );
             let carrier = *source
                 .selection
                 .namespace
@@ -1279,14 +1273,11 @@ impl IssuedNativeOffer {
                 ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
             ));
         };
-        let interface = ArtifactEntry::canonical(
+        let interface = ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
-                .ok_or_else(|| failure("native offer lacks its canonical interface"))?
-                .clone(),
-        )
-        .descriptor
-        .id;
+                .ok_or_else(|| failure("native offer lacks its canonical interface"))?,
+        );
         let (body, custody) = match proof {
             None => {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
@@ -1479,14 +1470,11 @@ impl IssuedNativeOffer {
                 },
             ));
         };
-        let interface = ArtifactEntry::canonical(
+        let interface = ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
-                .ok_or_else(|| failure("recovered native offer lacks its canonical interface"))?
-                .clone(),
-        )
-        .descriptor
-        .id;
+                .ok_or_else(|| failure("recovered native offer lacks its canonical interface"))?,
+        );
         if interface != facts.interface || entry.descriptor.owner != facts.owner {
             return Err(failure(
                 "recovered native offer differs from its original interface or owner",
