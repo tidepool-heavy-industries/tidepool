@@ -25,17 +25,29 @@ impl RunAuth {
         use exomonad_actor::Backend;
         use harness::transport::{NativeTransportContract, ResponsesProtocol, ResponsesRoute};
         provider.validate()?;
+        let limits = provider.inference_limits.resolve(provider.backend);
+        if provider.backend == Backend::OpenAIPlan {
+            if provider.endpoint.as_deref().is_some_and(|endpoint| {
+                endpoint != harness::transport::client::CHATGPT_PLAN_ENDPOINT
+            }) {
+                return Err("OpenAI plan requires its official account endpoint".into());
+            }
+            let path = provider
+                .credential_file
+                .clone()
+                .ok_or("OpenAI plan requires a credential file")?;
+            let accounts = SavedAccounts::beside(path).map_err(|error| error.to_string())?;
+            return RunAccountAuth::new_with_limits(store, run, accounts, limits)
+                .map(Self::OpenAIPlan)
+                .map_err(|error| error.to_string());
+        }
         let credential = match (&provider.credential_file, &provider.credential_env) {
             (Some(path), None) => CredentialReference::File { path: path.clone() },
             (None, Some(name)) => CredentialReference::Env { name: name.clone() },
             _ => return Err("provider must select one credential source".into()),
         };
         let (route, protocol, endpoint) = match provider.backend {
-            Backend::OpenAIPlan => (
-                ResponsesRoute::ChatGptPlan,
-                ResponsesProtocol::Standard,
-                harness::transport::client::CHATGPT_PLAN_ENDPOINT,
-            ),
+            Backend::OpenAIPlan => unreachable!("account provider was constructed above"),
             Backend::DeepSeek => (
                 ResponsesRoute::DeepSeek,
                 ResponsesProtocol::Standard,
@@ -47,7 +59,6 @@ impl RunAuth {
                 harness::transport::client::GEMINI_INTERACTIONS_ENDPOINT,
             ),
         };
-        let limits = provider.inference_limits.resolve(provider.backend);
         let admission = NativeTransportAdmission::rehydrate(NativeTransportContract {
             route,
             protocol,
@@ -63,16 +74,7 @@ impl RunAuth {
             Backend::GeminiInteractions => GeminiAuth::from_admission(admission)
                 .map(Self::Gemini)
                 .map_err(|e| e.to_string()),
-            Backend::OpenAIPlan => {
-                let path = provider
-                    .credential_file
-                    .clone()
-                    .ok_or("OpenAI plan requires a credential file")?;
-                let accounts = SavedAccounts::beside(path).map_err(|e| e.to_string())?;
-                RunAccountAuth::new_with_limits(store, run, accounts, limits)
-                    .map(Self::OpenAIPlan)
-                    .map_err(|e| e.to_string())
-            }
+            Backend::OpenAIPlan => unreachable!("account provider was constructed above"),
         }
     }
 
@@ -171,6 +173,31 @@ impl Auth for RunAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_catalog_refuses_discarded_endpoint_or_credential_authority() {
+        use crate::exomonad::model_catalog::ProviderConfig;
+        let store = Arc::new(harness::store::Store::memory().unwrap());
+        let mut provider = ProviderConfig {
+            backend: exomonad_actor::Backend::OpenAIPlan,
+            credential_file: Some("/not-read/tidepool-account".into()),
+            credential_env: None,
+            endpoint: Some("http://127.0.0.1:9876/responses".into()),
+            inference_limits: Default::default(),
+        };
+        let error = RunAuth::from_provider(&provider, store.clone(), "offline".into())
+            .err()
+            .expect("account endpoint override must refuse before credential access");
+        assert_eq!(error, "OpenAI plan requires its official account endpoint");
+        provider.endpoint = None;
+        provider.credential_file = None;
+        provider.credential_env = Some("TIDEPOOL_UNREAD_ACCOUNT_KEY".into());
+        let error = RunAuth::from_provider(&provider, store.clone(), "offline".into())
+            .err()
+            .expect("account backend must refuse an API-key environment reference");
+        assert_eq!(error, "OpenAI plan requires a credential file");
+        assert!(store.events(None).unwrap().is_empty());
+    }
 
     #[test]
     fn injected_contract_refuses_backend_and_limits_before_startup_work() {
