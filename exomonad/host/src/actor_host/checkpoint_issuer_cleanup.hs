@@ -1,6 +1,6 @@
 do
   outcome <- stopAgent (responseActor producerRequest)
   case outcome of
-    StoppedNow -> display True
-    AlreadyStopped -> display True
-    unexpected -> display unexpected
+    StoppedNow -> display True >> pure ()
+    AlreadyStopped -> display True >> pure ()
+    unexpected -> display (show unexpected) >> pure ()

@@ -5,5 +5,5 @@ let offlineStopped result = case result of
       AlreadyStopped -> True
       _ -> False
 if offlineStopped offlineEditorStopped && offlineStopped offlineTesterStopped
-  then display True
-  else display (offlineEditorStopped, offlineTesterStopped)
+  then display True >> pure ()
+  else display (show (offlineEditorStopped, offlineTesterStopped)) >> pure ()
