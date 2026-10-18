@@ -18422,15 +18422,25 @@ mod tests {
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let output = root.join("consumer-output");
         std::fs::create_dir(&output).unwrap();
+        let inspection_module = |imports: bool| {
+            let target = "result";
+            let import = if imports {
+                "import PrefixSelectedSupport\n"
+            } else {
+                ""
+            };
+            let expression = if imports { "selected" } else { "(0 :: Int)" };
+            (format!("module Consumer where\n{import}{target} :: Int\n{target} = {expression}\n__tidepool_inspect_0 = {target}\n"), target)
+        };
         let source_path = output.join("Consumer.hs");
-        std::fs::write(&source_path,
-            "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n__tidepool_inspect_0 = result\n").unwrap();
+        let (inspection_source, inspection_target) = inspection_module(true);
+        std::fs::write(&source_path, inspection_source).unwrap();
         let inspection_output = output.join("inspection.cbor");
         let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
         command
             .input(&source_path)
             .includes(&includes)
-            .inspect_type("result")
+            .inspect_type(inspection_target)
             .inspect_out(&inspection_output)
             .inspection_strict()
             .output_dir(&output);
@@ -18647,15 +18657,8 @@ mod tests {
                     let next_output = root.join(format!("consumer-{label}"));
                     std::fs::create_dir(&next_output).unwrap();
                     let next_source = next_output.join("Consumer.hs");
-                    std::fs::write(
-                &next_source,
-                if imports {
-                    "module Consumer where\nimport PrefixSelectedSupport\nresult = selected\n"
-                } else {
-                    "module Consumer where\nresult = (0 :: Int)\n"
-                },
-            )
-            .unwrap();
+                    let (inspection_source, inspection_target) = inspection_module(imports);
+                    std::fs::write(&next_source, inspection_source).unwrap();
                     let (next_endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
                     let next_offer = crate::artifacts::ModuleCandidateOffer::select_inspection(
                         compiler_identity.producer_bytes(),
@@ -18670,7 +18673,7 @@ mod tests {
                     command
                         .input(&next_source)
                         .includes(&includes)
-                        .inspect_type("result")
+                        .inspect_type(inspection_target)
                         .inspect_out(next_output.join("inspection.cbor"))
                         .inspection_strict()
                         .output_dir(&next_output);
@@ -18684,6 +18687,16 @@ mod tests {
                         ),
                     )
                     .unwrap();
+                    std::fs::write(
+                        root.join(format!("consumer-{label}.stdout")),
+                        &next_run.output.stdout,
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        root.join(format!("consumer-{label}.stderr")),
+                        &next_run.output.stderr,
+                    )
+                    .unwrap();
                     let (next_observations, next_physical_owner) =
                         observations(next_cursor, ordinal);
                     assert_eq!(
@@ -18693,11 +18706,6 @@ mod tests {
                     for row in &next_observations {
                         assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
                     }
-                    std::fs::write(
-                        root.join(format!("consumer-{label}.stderr")),
-                        &next_run.output.stderr,
-                    )
-                    .unwrap();
                     crate::diag::decode_extract_result(
                         next_run.success(),
                         &next_run.output.stdout,
