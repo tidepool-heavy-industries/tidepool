@@ -441,7 +441,7 @@ fn haskell_literal(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn config() -> InferenceConfig {
+    fn fixture_config() -> InferenceConfig {
         InferenceConfig {
             profile: "work".into(),
             providers: BTreeMap::from([(
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn exact_selected_catalog_owns_identity() {
-        let mut config = config();
+        let mut config = fixture_config();
         let initial = config.resolve().unwrap();
         config.models.insert(
             "unused".into(),
@@ -497,12 +497,12 @@ mod tests {
     #[test]
     fn profiles_refuse_unknown_duplicate_empty_and_missing_primary() {
         for allowed in [vec![], vec!["unknown"], vec!["flash", "flash"]] {
-            let mut config = config();
+            let mut config = fixture_config();
             config.profiles.get_mut("work").unwrap().allowed =
                 allowed.into_iter().map(str::to_string).collect();
             assert!(config.resolve().is_err());
         }
-        let mut config = config();
+        let mut config = fixture_config();
         config.profiles.get_mut("work").unwrap().default = "missing".into();
         assert!(config.resolve().is_err());
         config.profile = "missing".into();
@@ -512,16 +512,16 @@ mod tests {
     #[test]
     fn model_admission_refuses_bad_effort_provider_and_constructor() {
         for constructor in ["lower", "9Bad", "A.B", "Just", "True", ""] {
-            let mut config = config();
+            let mut config = fixture_config();
             config.models.get_mut("flash").unwrap().constructor = constructor.into();
             assert!(config.resolve().is_err(), "{constructor}");
         }
-        let mut config = config();
+        let mut config = fixture_config();
         config
             .models
             .insert("other".into(), config.models["flash"].clone());
         assert!(config.resolve().is_err());
-        let mut config = config();
+        let mut config = fixture_config();
         config.models.get_mut("flash").unwrap().effort = "medium".into();
         assert!(config.resolve().is_err());
         config.models.get_mut("flash").unwrap().provider = "unknown".into();
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn credentials_are_references_with_exclusive_valid_shape() {
-        let mut provider = config().providers.remove("deepseek").unwrap();
+        let mut provider = fixture_config().providers.remove("deepseek").unwrap();
         provider.credential_env = Some("KEY-WITH-DASH".into());
         assert!(provider.validate().is_err());
         provider.credential_env = Some("VALID_KEY".into());
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn gemini_catalog_admits_only_argon() {
-        let mut config = config();
+        let mut config = fixture_config();
         config.providers.get_mut("deepseek").unwrap().backend = Backend::GeminiInteractions;
         assert!(config.resolve().is_err());
         config.models.get_mut("flash").unwrap().model = "gemini-4-argon".into();
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn renderer_emits_provider_specific_closed_choices() {
-        let mut config = config();
+        let mut config = fixture_config();
         for (key, backend, model, constructor, effort) in [
             (
                 "argon",
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn renderer_escapes_catalog_keys_and_identity_with_existing_haskell_owner() {
-        let mut catalog = config().resolve().unwrap();
+        let mut catalog = fixture_config().resolve().unwrap();
         let model = catalog.models.remove("flash").unwrap();
         catalog.primary = "key\"\n\\".into();
         catalog.models.insert(catalog.primary.clone(), model);
@@ -631,11 +631,11 @@ mod tests {
             "EffortHigh",
             "ModelSelectionEnvelope",
         ] {
-            let mut config = config();
+            let mut config = fixture_config();
             config.models.get_mut("flash").unwrap().constructor = constructor.into();
             assert!(config.resolve().is_err(), "{constructor}");
         }
-        let mut catalog = config().resolve().unwrap();
+        let mut catalog = fixture_config().resolve().unwrap();
         catalog.models.get_mut("flash").unwrap().constructor = "ArgonOptions".into();
         assert!(catalog.render_haskell_models().is_err());
     }
@@ -664,7 +664,7 @@ mod tests {
         assert!(InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded).is_err());
     }
 
-    fn persona_argon_config() -> super::super::ExomonadConfig {
+    fn persona_argon_fixture_config() -> super::super::ExomonadConfig {
         toml::from_str(include_str!(
             "../../../examples/persona/.exomonad/config.argon.toml"
         ))
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn shipped_argon_profile_applies_and_renders_exact_admitted_choices() {
         use exomonad_actor::{ArgonEffort, DeepSeekReasoning};
-        let mut config = persona_argon_config();
+        let mut config = persona_argon_fixture_config();
         config.launch.embedded = Some(
             toml::from_str(
                 "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn shipped_argon_profile_rejects_invalid_effort_before_applying_defaults() {
-        let mut config = persona_argon_config();
+        let mut config = persona_argon_fixture_config();
         let original = config.defaults.clone();
         config
             .inference
@@ -739,7 +739,7 @@ mod tests {
             .effort = "max".into();
         assert!(config.apply_inference().is_err());
         assert_eq!(config.defaults, original);
-        let mut config = persona_argon_config();
+        let mut config = persona_argon_fixture_config();
         config
             .inference
             .as_mut()
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn selected_catalog_identity_binds_primary_keys_providers_options_and_limits() {
-        let base = persona_argon_config().inference.unwrap();
+        let base = persona_argon_fixture_config().inference.unwrap();
         let identity = base.resolve().unwrap().identity;
         let mut variants = Vec::new();
 
