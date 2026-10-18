@@ -610,6 +610,30 @@ mod tests {
     use tidepool_codegen::suspension::RealmId;
 
     #[test]
+    fn family_launch_installers_match_the_runtime_live_payload_policy() {
+        use tidepool_effect::LivePayloadPolicy;
+        use tidepool_protocol::effects::agent_launch::{fork_agent, spawn_agent};
+
+        for effect in [fork_agent(), spawn_agent()] {
+            let (constructor, field) = effect
+                .verbs
+                .iter()
+                .find_map(|verb| {
+                    verb.args
+                        .iter()
+                        .position(|argument| argument.name == "install")
+                        .map(|field| (verb.ctor, field))
+                })
+                .expect("model launch schema retains its installer");
+            assert_eq!(
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                LivePayloadPolicy::ValueField(field),
+                "{constructor} installer must cross as the runtime's retained live value"
+            );
+        }
+    }
+
+    #[test]
     fn generated_actor_key_bridge_decodes_every_active_nominal_key() {
         use super::ActorEffectKeyWire;
         use tidepool_bridge::{FromHaskell, HaskellValue};
