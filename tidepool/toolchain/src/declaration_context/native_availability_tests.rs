@@ -1248,6 +1248,15 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .cloned()
             .unwrap();
+        assert!(
+            issued.issued_groups(input.issued_artifacts()).is_err(),
+            "carrier-only custody cannot authenticate the opaque consumer Group proof"
+        );
+        assert!(!input
+            .issued_artifacts()
+            .selected_native_groups()
+            .iter()
+            .any(|key| key.artifact == consumer_entry.descriptor.id));
         let consumer_offer = input
             .native_offers()
             .iter()
