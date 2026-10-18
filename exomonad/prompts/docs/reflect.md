@@ -10,7 +10,14 @@ reflect :: Member Reflect effects => Int -> Eff effects (Either ReflectError [Co
 data ConversationTurn = ConversationTurn
   { turnIdentity :: Text, turnState :: ConversationTurnState
   , turnStartedAt :: Maybe Text
-  , turnCompletedAt :: Maybe Text, turnItems :: [TurnItem] }
+  , turnCompletedAt :: Maybe Text, turnItems :: [TurnItem]
+  , turnObservations :: [TurnObservation] }
+data TurnObservation = TurnObservation
+  { observationEventId :: Int
+  , observationProvider :: Maybe Text, observationModel :: Maybe Text
+  , observationInputTokens :: Maybe Int, observationCachedTokens :: Maybe Int
+  , observationOutputTokens :: Maybe Int, observationReasoningTokens :: Maybe Int
+  , observationDurationMs :: Maybe Int }
 data ConversationTurnState
   = TurnInProgress | TurnCompleted (Maybe Text) | TurnInterrupted | TurnUnknown
 data TurnItem
@@ -31,6 +38,14 @@ means retained history has no response observation. Optional timestamps may be
 missing in every state and do not indicate progress. The active turn includes
 only messages and tool activity already recorded; a pending result is never fabricated.
 Fewer than `n` turns returns the ones that exist; `n <= 0` returns none.
+
+`turnObservations` exposes retained provider usage and elapsed request time.
+Missing counters remain `Nothing`; a reported zero remains `Just 0`. Output
+counts include reasoning, so do not add reasoning again. Duration includes
+transport queue and authentication time. Use the turn identity and observation
+event ID to locate the original Store evidence, including raw provider usage.
+An empty observation list means no request observations were retained;
+unreadable retained events return `ReflectUnreadable`.
 
 Because it is an ordinary effect, a question you ask later — a Jev evaluation
 among them — gets your recent context without you spending a turn restating it.

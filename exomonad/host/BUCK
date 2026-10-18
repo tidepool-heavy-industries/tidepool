@@ -3812,6 +3812,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f67656e6572617465645f6d6f64656c5f63686f696365732e6873",
+    src = "src/actor_host/fixtures/generated_model_choices.hs",
+    out = "generated_model_choices.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6861726e6573735f757365636173655f6173796e632e6873",
     src = "src/actor_host/fixtures/harness_usecase_async.hs",
     out = "harness_usecase_async.hs",

@@ -225,6 +225,7 @@
     "exomonad/host/src/actor_host/fixtures/deferred_reply_sibling.hs",
     "exomonad/host/src/actor_host/fixtures/deferred_reply_spawn.hs",
     "exomonad/host/src/actor_host/fixtures/embedded_cold_declaration.hs",
+    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs",
     "exomonad/host/src/actor_host/fixtures/harness_usecase_async.hs",
     "exomonad/host/src/actor_host/fixtures/harness_usecase_persona_accumulate_four.hs",
     "exomonad/host/src/actor_host/fixtures/harness_usecase_persona_accumulate_one.hs",

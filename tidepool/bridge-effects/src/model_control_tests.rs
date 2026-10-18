@@ -1,7 +1,8 @@
 use crate::{
     Backend, DeepSeekReasoning, Model, ModelAnnotationEnvelope, ModelControlStep,
     ModelLimitEnvelope, ModelOutcomeEnvelope, ModelReceiptEnvelope, ModelRequestEnvelope,
-    ModelRequestLimits, ModelUsageEnvelope, OpenAIModel, OpenAIReasoning, Reasoning,
+    ModelRequestLimits, ModelRequestObservationEnvelope, ModelSelectionEnvelope,
+    ModelUsageEnvelope, OpenAIModel, OpenAIReasoning, Reasoning,
 };
 use serde_json::{json, Value};
 
@@ -29,6 +30,17 @@ fn model_control_steps_roundtrip_and_preserve_semantic_callback_value() {
         invocation_id: "invocation".into(),
         parent_cell: "cell".into(),
         requests: vec!["request".into()],
+        request_observations: vec![ModelRequestObservationEnvelope {
+            request_id: "request".into(),
+            provider: "gemini_interactions".into(),
+            model: "gemini-4-argon".into(),
+            input_tokens: Some(5),
+            cached_tokens: None,
+            output_tokens: Some(3),
+            reasoning_tokens: Some(0),
+            duration_ms: 17,
+        }],
+        duration_ms: 23,
         counts: counts.clone(),
         cell_counts: counts,
         outcome: ModelOutcomeEnvelope::ModelTypedOutcome {
@@ -86,11 +98,28 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         tools: Vec::new(),
         result_schema: None,
         after_tool: true,
+        selection: None,
     };
     let valid = serde_json::to_value(&request).unwrap();
     assert_eq!(
         serde_json::from_value::<ModelRequestEnvelope>(valid.clone()).unwrap(),
         request
+    );
+    let mut selected = request.clone();
+    selected.reasoning = None;
+    selected.selection = Some(ModelSelectionEnvelope {
+        catalog_identity: "frozen-catalog".into(),
+        key: "argon".into(),
+        reasoning: Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
+    });
+    let selected_wire = serde_json::to_value(&selected).unwrap();
+    assert_eq!(
+        selected_wire["selection"]["catalog_identity"],
+        "frozen-catalog"
+    );
+    assert_eq!(
+        serde_json::from_value::<ModelRequestEnvelope>(selected_wire).unwrap(),
+        selected
     );
     for (selection, expected) in [
         (Model::DeepSeekFlash, json!({"tag":"DeepSeekFlash"})),
