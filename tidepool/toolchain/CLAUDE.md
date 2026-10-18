@@ -282,6 +282,9 @@ canonical interfaces may coexist in separate authenticated scopes; uniqueness
 applies to selected compiler roles, not every retained payload. Compiler input
 joins carry each surviving role's issuer binding rather than resolving equal
 payload IDs against the receiving inventory.
+Recorded native choices follow that selected original and canonical binding
+pair. Another issuer's equal payload role retains its immutable dependencies as
+custody; it does not contribute a competing current input choice.
 
 Resolve carried selections through the owner's preferred-input path before
 deriving fallbacks from current executable roots. Classify a supplied proof using

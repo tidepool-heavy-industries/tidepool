@@ -2613,6 +2613,297 @@ mod tests {
     }
 
     #[test]
+    fn source_merge_keeps_native_choices_with_the_selected_exact_issuer() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let issue = |marker: &str, with_caller: bool, empty: bool| {
+            let selected = if with_caller {
+                &entries[..]
+            } else {
+                &entries[..2]
+            };
+            let mut issued = selected.to_vec();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    issued,
+                    if empty {
+                        NativeArtifactDemand::ScopeInterfaces
+                    } else {
+                        NativeArtifactDemand::AllGroups
+                    },
+                )
+                .unwrap();
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                view,
+            )
+            .unwrap()
+        };
+        for empty_winner in [false, true] {
+            let winner = issue("WinnerMarker", false, empty_winner);
+            let historical = issue("HistoricalMarker", true, false);
+            let parent = &entries[1];
+            let owner = &parent.descriptor.owner;
+            let pair = |support: &CompilerSourceSupport| {
+                let row = &support.selected[owner];
+                (row.interface.0, row.original.as_ref().unwrap().0)
+            };
+            assert_eq!(
+                winner.projection.snapshot_roles()[owner],
+                historical.projection.snapshot_roles()[owner]
+            );
+            assert_ne!(pair(&winner), pair(&historical));
+            let winner_choices = winner.input_decisions.facts[owner].groups.clone();
+            assert_eq!(winner_choices.is_empty(), empty_winner);
+            let historical_choices = historical.input_decisions.facts[owner].groups.clone();
+            assert_eq!(historical_choices.len(), 1);
+            let caller = &entries[2];
+            let caller_group =
+                historical.input_decisions.facts[&caller.descriptor.owner].groups[&3];
+            let historical_parent = historical_choices[&7];
+            let expected_edge = (
+                InventoryNodeKey::Group(caller_group),
+                InventoryNodeKey::Group(historical_parent),
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 3,
+                    required_ordinal: 7,
+                },
+            );
+            assert!(historical
+                .artifacts
+                .binding_dependencies()
+                .contains(&expected_edge));
+            let expected_edges = winner
+                .artifacts
+                .binding_dependencies()
+                .into_iter()
+                .chain(historical.artifacts.binding_dependencies())
+                .collect::<BTreeSet<_>>();
+            let joined = winner
+                .merge(&historical)
+                .expect("a losing historical issuer does not replace the selected input choice");
+            assert_eq!(pair(&joined), pair(&winner));
+            assert_eq!(joined.input_decisions.facts[owner].groups, winner_choices);
+            let selected_groups = joined.artifacts.capture_graph_selection().native_groups;
+            assert!(selected_groups.contains(&caller_group));
+            assert!(
+                selected_groups.contains(&historical_parent),
+                "the losing parent's exact Group remains selected through its actual caller root"
+            );
+            assert!(expected_edges.is_subset(
+                &joined
+                    .artifacts
+                    .binding_dependencies()
+                    .into_iter()
+                    .collect()
+            ));
+            let reverse = historical.merge(&winner).unwrap();
+            assert_eq!(pair(&reverse), pair(&historical));
+            assert_eq!(
+                reverse.input_decisions.facts[owner].groups,
+                historical_choices
+            );
+            drop(reverse);
+            drop(winner);
+            drop(historical);
+            assert!(joined
+                .artifacts
+                .binding_dependencies()
+                .contains(&expected_edge));
+        }
+    }
+
+    #[test]
+    fn source_choice_affinity_does_not_resolve_unselected_ambiguous_custody() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let issue = |marker: &str, with_caller: bool| {
+            let selected = if with_caller {
+                &entries[..]
+            } else {
+                &entries[..2]
+            };
+            let mut issued = selected.to_vec();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), issued)
+                .unwrap();
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                view,
+            )
+            .unwrap()
+        };
+        let winner = issue("SelectedNamespaceMarker", false);
+        let historical = issue("HistoricalNamespaceMarker", true);
+        let extra = issue("CustodyOnlyMarker", false);
+        let mut losing = historical
+            .artifacts
+            .retain_custody(&extra.artifacts)
+            .unwrap();
+        // Exercise the artifact merge boundary with authentic issued choices
+        // and graphs, but no losing namespace endorsement. Metadata role
+        // equality cannot resolve or promote this ambiguous byte custody.
+        losing.replace_namespace(&BTreeMap::new());
+        let parent = &entries[1];
+        {
+            let state = losing.lease.inventory.0.lock().unwrap();
+            let owned = &losing.read_projection(&state).nodes;
+            assert!(
+                matches!(losing.resolve_binding(parent.descriptor.id, owned),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                        if artifact == parent.descriptor.id))
+            );
+        }
+        let expected = losing
+            .binding_dependencies()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let (joined, projection, decisions) = winner
+            .artifacts
+            .merge_compiler_inputs_with_demand(
+                &winner.projection,
+                &losing,
+                &historical.projection,
+                CompilerNativeDemand::SourceSelections {
+                    left: Some(&winner.input_decisions),
+                    right: Some(&historical.input_decisions),
+                },
+                CompilerInputValidation::Closed,
+            )
+            .expect("unselected ambiguous custody cannot veto an exact selected choice");
+        assert_eq!(
+            projection,
+            winner.projection.merge(&historical.projection).unwrap()
+        );
+        assert_eq!(
+            decisions.facts[&parent.descriptor.owner].groups,
+            winner.input_decisions.facts[&parent.descriptor.owner].groups
+        );
+        let selected = joined.capture_graph_selection().native_groups;
+        let caller_group =
+            historical.input_decisions.facts[&entries[2].descriptor.owner].groups[&3];
+        let historical_parent =
+            historical.input_decisions.facts[&parent.descriptor.owner].groups[&7];
+        assert!(selected.contains(&caller_group));
+        assert!(selected.contains(&historical_parent));
+        drop(extra);
+        drop(historical);
+        drop(losing);
+        assert!(expected.is_subset(&joined.binding_dependencies().into_iter().collect()));
+    }
+
+    #[test]
+    fn source_merge_refuses_different_group_choices_with_the_same_exact_issuer() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries[..2].to_vec(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let groups = BTreeSet::from([
+            NativeGroupKey {
+                artifact: entries[0].descriptor.id,
+                original_ordinal: 9,
+            },
+            NativeGroupKey {
+                artifact: entries[1].descriptor.id,
+                original_ordinal: 7,
+            },
+        ]);
+        let supports = ["FirstGroupMarker", "SecondGroupMarker"].map(|marker| {
+            let mut issued = entries[..2].to_vec();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_recovery_selection(&base, issued, &groups)
+                .unwrap();
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
+                view,
+            )
+            .unwrap()
+        });
+        for entry in &entries[..2] {
+            let owner = &entry.descriptor.owner;
+            assert_eq!(supports[0].selected[owner], supports[1].selected[owner]);
+            assert_ne!(
+                supports[0].input_decisions.facts[owner].groups,
+                supports[1].input_decisions.facts[owner].groups
+            );
+        }
+        for (left, right) in [(&supports[0], &supports[1]), (&supports[1], &supports[0])] {
+            assert!(
+                matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if entries[..2].iter().any(|entry| entry.descriptor.id == artifact)))
+            );
+        }
+    }
+
+    fn decision_affinity_entries() -> Vec<Arc<ArtifactEntry>> {
+        use crate::certified_products::tests::{
+            original_groups_fixture_with_interface, recovered_witness_fixtures,
+        };
+        use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
+        let product = |module: &str, ordinal, imports| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(ordinal, imports)],
+                    1,
+                    &BTreeMap::new(),
+                    module.as_bytes().to_vec(),
+                ),
+                [2; 32],
+            )
+        };
+        let import = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
+            let finalized = crate::certified_products::finalize_original_for_inventory(
+                product.clone(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let definitions =
+                crate::certified_products::original_native_group_definitions(&finalized, ordinal)
+                    .unwrap();
+            let binder = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => &binding.identity,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                    &bindings[0].identity
+                }
+            }
+            .clone();
+            PendingImportOwner::Source {
+                owner: finalized.owner().clone(),
+                original_ordinal: ordinal,
+                binder,
+            }
+        };
+        let child = product("AffinityChild", 9, vec![]);
+        let parent = product("AffinityParent", 7, vec![import(&child, 9)]);
+        let caller = product("AffinityCaller", 3, vec![import(&parent, 7)]);
+        recovered_witness_fixtures(&[child, parent, caller])
+            .into_iter()
+            .map(|row| Arc::new(ArtifactEntry::original([2; 32], row.product).unwrap()))
+            .collect()
+    }
+
+    #[test]
     fn checked_input_issuance_refuses_distinct_group_choices_before_recording_domain() {
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
