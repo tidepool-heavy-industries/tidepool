@@ -7092,6 +7092,128 @@ tidepool-reuse-error: witness failed\n";
     }
 
     #[test]
+    fn accepted_queued_transaction_cancellation_reports_exact_retirement_without_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_bin = compile_control_ack_worker(directory.path());
+        // The first ordinary job holds the only worker at its real END
+        // barrier. The second transaction is accepted but cannot yet start.
+        std::fs::write(directory.path().join("phase"), [2]).unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: Some(100),
+            rss_ceiling_mb: Some(u64::MAX),
+            request_deadline_secs: Some(20),
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
+        };
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let result = serve(&config, prepared);
+            settled_tx.send(()).unwrap();
+            result
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test waits for actual daemon readiness"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let request_dir = directory.path().to_owned();
+        let first_socket = socket.clone();
+        let first_epoch = binding.epoch;
+        let first = std::thread::spawn(move || {
+            execute(
+                &first_socket,
+                &first_epoch,
+                &request_dir,
+                &["Expr.hs".into()],
+            )
+        });
+        while !directory.path().join("stalled").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "first worker never reached its END barrier"
+            );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test waits for exact worker control barrier"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let mut queued =
+            begin_transaction_with_cancellation(&socket, &binding.epoch, Some(&cancellation))
+                .unwrap();
+        assert_eq!(
+            queued.admission_id,
+            AdmissionId(2),
+            "second actual admission is known before cancellation"
+        );
+        assert_eq!(
+            queued.next_request,
+            RequestOrdinal(1),
+            "queued transaction has submitted no request"
+        );
+        cancellation.cancel();
+        let cancelled = std::thread::spawn(move || end_transaction(&mut queued));
+        std::fs::write(directory.path().join("release"), b"release first END").unwrap();
+        assert_eq!(first.join().unwrap().unwrap().stdout, b"1");
+        let result = cancelled.join().unwrap();
+        // Settle the daemon even on the counterfactual skip's missing receipt,
+        // so the sensitivity failure itself cannot leak a test-owned daemon.
+        let recovered = execute(
+            &socket,
+            &binding.epoch,
+            directory.path(),
+            &["Expr.hs".into()],
+        )
+        .unwrap();
+        let pids = std::fs::read_to_string(directory.path().join("worker-pids")).unwrap();
+        request_stop(&socket).unwrap();
+        settled_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("daemon did not settle");
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        let DaemonClose::Retired(retirement) =
+            result.expect("accepted queued cancellation must receive its retirement receipt")
+        else {
+            panic!("queued cancellation cannot become successful END");
+        };
+        assert_eq!(retirement.epoch, binding.epoch);
+        assert_eq!(retirement.admission_id, 2);
+        assert_eq!(retirement.worker_slot, 0);
+        assert!(matches!(
+            retirement.worker,
+            crate::CompilerWorkerRetirement::Reaped(_)
+        ));
+        assert_eq!(
+            recovered.stdout, b"1",
+            "no cancelled work replay and fresh replacement counter"
+        );
+        assert_eq!(
+            pids.lines().count(),
+            2,
+            "exact old worker retired before replacement"
+        );
+        assert!(!Path::new("/proc")
+            .join(pids.lines().next().unwrap())
+            .exists());
+    }
+
+    #[test]
     fn one_shot_response_commits_after_cleanup_and_only_early_disconnect_replaces_worker() {
         let scratch = tempfile::tempdir().unwrap();
         let fixture = compile_control_ack_worker(scratch.path());
