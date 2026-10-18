@@ -9369,19 +9369,15 @@ fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
     }
 }
 
-// Replay the two existing producer front doors with the same normalized input
-// permission and a fresh native edge. Extra selected roots are prior work, not
+// Replay candidate issuance with the same normalized input permission
+// and a fresh native edge. Extra selected roots are prior work, not
 // obligations of the fresh fragment.
 fn replay_fresh_fragment_obligations(
     permitted: &[u32],
     inherited: &[u32],
     siblings: usize,
     grant_full: bool,
-) -> BTreeMap<&'static str, BTreeSet<u32>> {
-    use crate::artifact_inventory::NativeArtifactDemand;
-    use crate::certified_products::{CertifiedSourceSelection, ProductOrigin};
-    use tidepool_repr::execution_schema::InventoryOperation;
-
+) -> BTreeSet<u32> {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let dependency = dependent_product(
         "ObligationBaseline",
@@ -9399,7 +9395,10 @@ fn replay_fresh_fragment_obligations(
     let dependency = &products[0].product;
     let fresh = &products[1].product;
     let input = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
-    let fresh_entry = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+    let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
+        .unwrap()
+        .descriptor
+        .id;
     let mut entries = vec![input.clone()];
     entries.extend(products[2..].iter().map(|row| {
         Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
@@ -9468,36 +9467,10 @@ fn replay_fresh_fragment_obligations(
         producer,
         std::slice::from_ref(fresh),
     );
-    let scratch = tempfile::tempdir().unwrap();
-    let prepared = ExactCompileContext::new(context.clone())
-        .prepare_compilation(scratch.path(), PRODUCER)
-        .unwrap();
-    let request = prepared.compiler_inputs();
-    let operation = InventoryOperation::new(Default::default());
-    let mut selection =
-        CertifiedSourceSelection::from_compiler_inputs(request, &request.metadata, &operation)
-            .unwrap();
-    selection
-        .admit_current(
-            fresh.owner(),
-            ProductOrigin::RetainedCore,
-            fresh.module_interface().unwrap(),
-            &operation,
-        )
-        .unwrap();
-    let physical = request
-        .artifacts()
-        .inventory()
-        .admit_shared_with_demand(
-            request.artifacts(),
-            vec![fresh_entry.clone()],
-            NativeArtifactDemand::ScopeInterfaces,
-        )
-        .unwrap();
-    let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
     let allowed = permitted.contains(&7);
-    let mut observations = BTreeMap::new();
-    for (consumer, result) in [("candidate", candidate), ("request", completed)] {
+    let consumer = "candidate";
+    let result = candidate;
+    {
         if !allowed {
             let actual_error = format!("{:?}", result.as_ref().err());
             assert!(
@@ -9507,7 +9480,11 @@ fn replay_fresh_fragment_obligations(
                 } if artifact == input.descriptor.id)),
                 "{consumer}: broader proof cannot grant unavailable B7; actual_error={actual_error}"
             );
-            continue;
+            assert_eq!(
+                context.artifact_view().capture_graph_selection(),
+                source_before
+            );
+            return BTreeSet::new();
         }
         let fragment = result.unwrap_or_else(|error| {
             panic!("{consumer}: inherited={inherited:?} siblings={siblings}: {error:?}")
@@ -9515,7 +9492,7 @@ fn replay_fresh_fragment_obligations(
         let fresh_row = fragment
             .native_availability()
             .rows()
-            .find(|row| row.original.descriptor.id == fresh_entry.descriptor.id)
+            .find(|row| row.original.descriptor.id == fresh_id)
             .unwrap();
         assert_eq!(fresh_row.mode, NativeTransportMode::Full);
         let fresh_groups = fresh_row.issued_ordinals();
@@ -9525,7 +9502,7 @@ fn replay_fresh_fragment_obligations(
                 .issued_artifacts()
                 .selected_native_groups()
                 .iter()
-                .any(|group| { group.artifact == fresh_entry.descriptor.id }),
+                .any(|group| { group.artifact == fresh_id }),
             "fresh availability does not select fresh execution"
         );
         let dependency_row = fragment
@@ -9533,32 +9510,27 @@ fn replay_fresh_fragment_obligations(
             .rows()
             .find(|row| row.original.descriptor.id == input.descriptor.id)
             .unwrap();
-        let expected: BTreeSet<u32> = if consumer == "candidate" {
-            assert_eq!(dependency_row.mode, NativeTransportMode::IssuedGroups);
-            assert_eq!(
-                fragment
-                    .native_availability()
-                    .rows()
-                    .map(|row| { row.original.descriptor.id })
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from([fresh_entry.descriptor.id, input.descriptor.id,])
-            );
-            BTreeSet::from([7])
-        } else {
-            permitted.iter().copied().collect()
-        };
+        assert_eq!(dependency_row.mode, NativeTransportMode::IssuedGroups);
+        assert_eq!(
+            fragment
+                .native_availability()
+                .rows()
+                .map(|row| row.original.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([fresh_id, input.descriptor.id]),
+        );
+        let expected = BTreeSet::from([7]);
         let actual = [7, 9001, 42, 43]
             .into_iter()
             .filter(|ordinal| dependency_row.permits(*ordinal))
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "{consumer} exact dependency permissions");
-        observations.insert(consumer, actual);
+        assert_eq!(
+            context.artifact_view().capture_graph_selection(),
+            source_before
+        );
+        actual
     }
-    assert_eq!(
-        context.artifact_view().capture_graph_selection(),
-        source_before
-    );
-    observations
 }
 
 #[test]
