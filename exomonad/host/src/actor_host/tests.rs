@@ -634,13 +634,14 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let setup = dispatch_haskell_script(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/roster_setup.hs",
-                    ),
-                )
-                .await;
+                let setup = campaign
+                    .drive_native_admission(dispatch_haskell_script(
+                        root.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "exomonad/host/src/actor_host/roster_setup.hs",
+                        ),
+                    ))
+                    .await;
                 assert_eq!(setup["status"], "committed", "{setup:?}");
                 let mut children = Vec::new();
                 while children.len() < 2 {
@@ -977,13 +978,14 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let setup = dispatch_haskell_script(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/progress_setup.hs",
-                    ),
-                )
-                .await;
+                let setup = campaign
+                    .drive_native_admission(dispatch_haskell_script(
+                        root.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "exomonad/host/src/actor_host/progress_setup.hs",
+                        ),
+                    ))
+                    .await;
                 assert_eq!(setup["status"], "committed", "{setup:?}");
                 let child = campaign
                     .next_deployment(
@@ -1464,10 +1466,10 @@ async fn fresh_context_child_reaches_its_supervisor_through_parent_agent() {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_id = campaign.actor.identity();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         &tidepool_testing::fixture_source("exomonad/host/src/actor_host/notification_setup.hs"),
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -1571,10 +1573,10 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         &tidepool_testing::fixture_source("exomonad/host/src/actor_host/notification_setup.hs"),
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -1805,10 +1807,10 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
         root_reply.to_string().to_lowercase().contains("no match"),
         "{root_reply:?}"
     );
-    let idle_setup = dispatch_haskell_script(
+    let idle_setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\nRight idle <- spawnSubagent (FreshCtx \"idle notification recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
-    )
+    ))
     .await;
     assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
     let idle = campaign
@@ -1886,13 +1888,14 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
                 let root = campaign.root_installation.policy.clone();
                 let output_store =
                     display_output::open_run_store(campaign.session_root.path()).unwrap();
-                let setup = dispatch_haskell_script(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/notification_setup.hs",
-                    ),
-                )
-                .await;
+                let setup = campaign
+                    .drive_native_admission(dispatch_haskell_script(
+                        root.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "exomonad/host/src/actor_host/notification_setup.hs",
+                        ),
+                    ))
+                    .await;
                 assert_eq!(setup["status"], "committed", "{setup:?}");
                 let child = campaign
                     .next_deployment("recipient policy", Duration::from_secs(120), |event| {
@@ -1990,13 +1993,14 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let setup = dispatch_haskell_script(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/notification_setup.hs",
-                    ),
-                )
-                .await;
+                let setup = campaign
+                    .drive_native_admission(dispatch_haskell_script(
+                        root.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "exomonad/host/src/actor_host/notification_setup.hs",
+                        ),
+                    ))
+                    .await;
                 assert_eq!(setup["status"], "committed", "{setup:?}");
                 let child = campaign
                     .next_deployment("recipient policy", Duration::from_secs(120), |event| {
@@ -2073,13 +2077,13 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
          Right worker <- spawnSubagent (FreshCtx \"reply-whole-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-whole\" :: Text\n\
          Right answer <- request @[Text] worker [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]] (defaultRequestOptions { requestLabel = Just requestName })",
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -2955,10 +2959,10 @@ async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         &tidepool_testing::fixture_source("exomonad/host/src/actor_host/request_update_setup.hs"),
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -3125,13 +3129,13 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
          Right worker <- spawnSubagent (FreshCtx \"reply-preview-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-preview\" :: Text\n\
          Right answer <- request @String worker (\"a readable reply\" :: String) (defaultRequestOptions { requestLabel = Just requestName })",
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -3191,13 +3195,13 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
+    let setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
          Right worker <- spawnSubagent (FreshCtx \"reply-preview-text-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-preview-text\" :: Text\n\
          Right answer <- request @Text worker (\"a readable reply\" :: Text) (defaultRequestOptions { requestLabel = Just requestName })",
-    )
+    ))
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
