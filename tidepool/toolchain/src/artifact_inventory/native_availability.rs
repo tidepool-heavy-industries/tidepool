@@ -772,9 +772,9 @@ impl NativeOfferContribution {
 
     /// Restrict an already issued contribution to authenticated dependency roots.
     pub(crate) fn for_groups(
-        &self,
+        self: &Arc<Self>,
         roots: &BTreeSet<NativeGroupBinding>,
-    ) -> Result<Self, CompileError> {
+    ) -> Result<Arc<Self>, CompileError> {
         let state = self
             .offer
             .0
@@ -796,6 +796,9 @@ impl NativeOfferContribution {
             return Err(failure("restricted native contribution exceeds its issuer"));
         }
         drop(state);
+        if reachable == self.reachable {
+            return Ok(Arc::clone(self));
+        }
         let originals = reachable
             .iter()
             .filter_map(|node| match node {
@@ -803,12 +806,12 @@ impl NativeOfferContribution {
                 _ => None,
             })
             .collect();
-        Ok(Self {
+        Ok(Arc::new(Self {
             offer: self.offer.clone(),
             reachable,
             originals,
             identity: OnceLock::new(),
-        })
+        }))
     }
 
     pub(crate) fn offer(&self) -> &IssuedNativeOffer {
@@ -1976,6 +1979,91 @@ mod normalized_dependency_tests {
     use crate::declaration_context::{
         ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
     };
+
+    #[test]
+    fn contribution_restriction_shares_only_unchanged_closed_membership() {
+        let producer = CanonicalProducerIdentity::from_producer_bytes(b"contribution-sharing");
+        let product = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "ContributionSharing",
+                vec![(7, vec![]), (9001, vec![])],
+                29,
+                &BTreeMap::new(),
+                b"contribution interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let products = recovered_witness_fixtures(&[product])
+            .into_iter()
+            .map(|witness| witness.product)
+            .collect::<Vec<_>>();
+        let inputs = OriginalCompilerInputs::from_checked_support_products(
+            &CompilerSourceSupport::empty(),
+            producer.sha256(),
+            &products,
+        )
+        .unwrap();
+        let original = ArtifactEntry::original(producer.sha256(), products[0].clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let offer = inputs
+            .issued_offers()
+            .iter()
+            .find(|offer| offer.original() == original)
+            .unwrap();
+        assert!(offer.is_full());
+        let issued = Arc::new(
+            offer
+                .contribution_for(&BTreeSet::from([original]))
+                .unwrap()
+                .unwrap(),
+        );
+        let key = |original_ordinal| NativeGroupKey {
+            artifact: original,
+            original_ordinal,
+        };
+        let roots = [7, 9001]
+            .into_iter()
+            .flat_map(|ordinal| issued.groups(key(ordinal)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(roots.len(), 2);
+        let closed = issued.for_groups(&roots).unwrap();
+        let identity = closed.identity().unwrap();
+        let repeated = closed.for_groups(&roots).unwrap();
+        assert!(Arc::ptr_eq(&closed, &repeated));
+        assert_eq!(repeated.identity.get(), Some(&identity));
+        assert_eq!(
+            repeated.snapshot_facts().unwrap(),
+            closed.snapshot_facts().unwrap()
+        );
+        assert!(repeated.offer().same_issuance(offer));
+
+        let only_seven = closed.groups(key(7)).collect::<BTreeSet<_>>();
+        assert_eq!(only_seven.len(), 1);
+        let narrowed = closed.for_groups(&only_seven).unwrap();
+        assert!(!Arc::ptr_eq(&closed, &narrowed));
+        assert!(narrowed.identity.get().is_none());
+        assert!(narrowed.permits(key(7)));
+        assert!(!narrowed.permits(key(9001)));
+        assert!(closed.permits(key(9001)));
+        assert!(narrowed.offer().same_issuance(offer));
+        let narrow_identity = narrowed.identity().unwrap();
+        let narrow_repeat = narrowed.for_groups(&only_seven).unwrap();
+        assert!(Arc::ptr_eq(&narrowed, &narrow_repeat));
+        assert_eq!(narrow_repeat.identity.get(), Some(&narrow_identity));
+
+        let empty = narrowed.for_groups(&BTreeSet::new()).unwrap();
+        assert!(!Arc::ptr_eq(&narrowed, &empty));
+        assert!(empty.originals().is_empty());
+        assert!(!empty.permits(key(7)));
+        assert!(!empty.permits(key(9001)));
+        assert!(empty.offer().same_issuance(offer));
+        assert!(Arc::ptr_eq(
+            &empty,
+            &empty.for_groups(&BTreeSet::new()).unwrap()
+        ));
+    }
 
     fn exhaustive_group_supports<'a>(
         rows: impl Iterator<Item = &'a Arc<crate::declaration_context::NativeTransportAvailability>>,

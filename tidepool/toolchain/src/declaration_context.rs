@@ -1500,7 +1500,7 @@ impl RequestNativeAvailability {
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         > = BTreeMap::new();
         for (_, (contribution, roots)) in roots_by_contribution {
-            let restricted = Arc::new(contribution.for_groups(&roots)?);
+            let restricted = contribution.for_groups(&roots)?;
             for id in restricted.originals() {
                 dependencies
                     .entry(*id)
@@ -1560,7 +1560,7 @@ impl RequestNativeAvailability {
                         }
                     }
                     if !roots.is_empty() {
-                        contributions.push(Arc::new(contribution.for_groups(&roots)?));
+                        contributions.push(contribution.for_groups(&roots)?);
                     }
                 }
                 selected.mode = NativeTransportMode::IssuedGroups;
