@@ -3010,12 +3010,14 @@ pub fn finish_cell_program_admitted(
     let prepared = outcome.action?;
     match outcome.close {
         crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
-        crate::CompilerTransactionClose::Unconfirmed(evidence)
-        | crate::CompilerTransactionClose::Retired(evidence) => {
+        crate::CompilerTransactionClose::Unconfirmed(evidence) => {
             tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?evidence, "cell program publication refused");
             return Err(
                 CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
             );
+        }
+        crate::CompilerTransactionClose::Retired(evidence) => {
+            return Err(CompileError::CompilerPreparationRetired(Box::new(evidence)).into());
         }
     }
     if !belongs_to_owner {

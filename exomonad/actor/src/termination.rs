@@ -1797,6 +1797,27 @@ mod tests {
             !issued.is_clean(),
             "abnormal resource settlement cannot authorize compiler publication"
         );
+        let tidepool_runtime::CompilerTransactionClose::Retired(evidence) = &issued else {
+            unreachable!()
+        };
+        let failure = tidepool_toolchain::failclass::classify_compile(
+            &tidepool_toolchain::CompileError::CompilerPreparationRetired(Box::new(
+                evidence.clone(),
+            )),
+        );
+        assert_eq!(
+            failure.cause,
+            Some(tidepool_toolchain::failclass::CompileFailureCause::CompilerActionRetired)
+        );
+        let encoded = serde_json::to_value(&failure.cause).unwrap();
+        assert_eq!(encoded["kind"], "compiler_action_retired");
+        assert_eq!(
+            serde_json::from_value::<Option<tidepool_toolchain::failclass::CompileFailureCause>>(
+                encoded
+            )
+            .unwrap(),
+            failure.cause
+        );
         owner.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
             334,
         ))));

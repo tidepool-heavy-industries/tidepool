@@ -69,7 +69,7 @@ pub enum CompileError {
     CompilerEndpoint(#[source] tidepool_extract_cmd::SpawnError),
     /// An abnormal close preserves its action and retirement evidence.
     /// Unconfirmed input use retains descriptors; neither abnormal outcome permits replay.
-    #[error("compiler transaction did not finish cleanly")]
+    #[error("compiler transaction close is unconfirmed")]
     CompilerCloseUnconfirmed(
         Box<
             tidepool_extract_cmd::CompilerTransactionOutcome<
@@ -77,12 +77,24 @@ pub enum CompileError {
             >,
         >,
     ),
+    /// The action remains abnormal even though its exact request resources retired.
+    #[error("compiler action retired without successful completion")]
+    CompilerActionRetired(
+        Box<
+            tidepool_extract_cmd::CompilerTransactionOutcome<
+                Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+            >,
+        >,
+    ),
+    /// Completed preparation cannot publish after abnormal compiler retirement.
+    #[error("compiler preparation retired without a successful compiler action")]
+    CompilerPreparationRetired(Box<tidepool_extract_cmd::CompilerTransactionCloseEvidence>),
     /// A prepared runtime product cannot borrow another transaction's closure.
     #[error(transparent)]
     CompilerPublication(#[from] tidepool_extract_cmd::CompilerTransactionPublicationError),
     /// Completed host preparation is unusable without a clean compiler END.
     /// An uncertain close also retains the exact input directories.
-    #[error("completed compiler preparation did not finish cleanly")]
+    #[error("completed compiler preparation close is unconfirmed")]
     CompilerPreparationCloseUnconfirmed(
         Box<tidepool_extract_cmd::CompilerTransactionCloseEvidence>,
     ),
@@ -168,9 +180,11 @@ impl CompileError {
         match &outcome.close {
             tidepool_extract_cmd::CompilerTransactionClose::Clean
             | tidepool_extract_cmd::CompilerTransactionClose::NotStarted => {}
-            tidepool_extract_cmd::CompilerTransactionClose::Unconfirmed(_)
-            | tidepool_extract_cmd::CompilerTransactionClose::Retired(_) => {
+            tidepool_extract_cmd::CompilerTransactionClose::Unconfirmed(_) => {
                 return Err(Self::CompilerCloseUnconfirmed(Box::new(outcome)));
+            }
+            tidepool_extract_cmd::CompilerTransactionClose::Retired(_) => {
+                return Err(Self::CompilerActionRetired(Box::new(outcome)));
             }
         }
         outcome.action.map_err(|mut error| {
