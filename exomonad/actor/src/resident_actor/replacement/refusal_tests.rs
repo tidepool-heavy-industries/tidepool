@@ -114,6 +114,14 @@ impl Fixture {
     }
 
     async fn behavior(&self) -> (Behavior, super::super::invocation_work::tests::Fixture) {
+        self.behavior_with_capabilities(crate::ActorCapabilities::default())
+            .await
+    }
+
+    async fn behavior_with_capabilities(
+        &self,
+        capabilities: crate::ActorCapabilities,
+    ) -> (Behavior, super::super::invocation_work::tests::Fixture) {
         let mut owner = super::super::invocation_work::tests::Fixture::start().await;
         let id = SessionId(0xE201);
         let machines = Arc::new(ActorMachineRegistry::new());
@@ -138,7 +146,8 @@ impl Fixture {
                 resource_scope: RealmId::fresh(),
                 lexical_scope: ScopeId::ROOT,
             },
-        );
+        )
+        .with_capabilities(capabilities);
         let mut behavior = Behavior::with_boot(
             descriptor,
             owner.environment.clone(),
@@ -372,6 +381,133 @@ fn failure(
         Err(error) => error,
         Ok(_) => panic!("refusal fixture must not stage a successor"),
     }
+}
+
+#[tokio::test]
+async fn replacement_preserves_nonempty_authority_across_grant_order_and_refuses_changes() {
+    let fixture = Fixture::compile_mode(true);
+    let low = crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekLow);
+    let high = crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh);
+    let permission = crate::ModelPermission {
+        operation: crate::ModelOperation::ModelCall,
+        family: crate::ModelFamily::DeepSeek,
+    };
+    let identity = |key: &str, model| {
+        crate::AdmittedModelIdentity::new("catalog".into(), key.into(), "provider".into(), model)
+            .unwrap()
+    };
+    let grants = crate::ModelPermissions::new(vec![
+        crate::ModelGrant::new(
+            permission,
+            identity("flash", crate::Model::DeepSeekFlash),
+            vec![low, high],
+        )
+        .unwrap(),
+        crate::ModelGrant::new(
+            permission,
+            identity("pro", crate::Model::DeepSeekPro),
+            vec![low],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let capabilities = crate::ActorCapabilities::default().with_model_permissions(grants);
+    let (mut behavior, owner) = fixture
+        .behavior_with_capabilities(capabilities.clone())
+        .await;
+    let actor = owner.actor.identity();
+    let parent = behavior.descriptor.placement().session;
+    let factory_calls = fixture.with_factory(&mut behavior, false);
+    let requests = vec![
+        tidepool_bridge_effects::ModelGrantRequest {
+            operation: permission.operation,
+            catalog_identity: "catalog".into(),
+            key: "pro".into(),
+            efforts: vec![low],
+        },
+        tidepool_bridge_effects::ModelGrantRequest {
+            operation: permission.operation,
+            catalog_identity: "catalog".into(),
+            key: "flash".into(),
+            efforts: vec![high, low],
+        },
+    ];
+    let reordered = capabilities
+        .model_permissions()
+        .admit_child_requests(&requests)
+        .unwrap();
+    assert_ne!(
+        &reordered,
+        capabilities.model_permissions(),
+        "the fixture must change grant and effort order"
+    );
+    assert!(reordered.is_subset_of(capabilities.model_permissions()));
+    assert!(capabilities.model_permissions().is_subset_of(&reordered));
+    let (mut definition, placement) = fixture.definition(&behavior, parent).await;
+    definition.child.model_permissions = requests.clone();
+    let staged = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.stage_replacement(actor, definition))
+        .await
+        .expect("equal authority in a different authored order reaches real replacement readiness");
+    assert_eq!(staged.descriptor.capabilities(), &capabilities);
+    let custody = staged.placement_custody.clone();
+    drop(staged);
+    custody
+        .cleanup(&behavior.environment.runner, parent)
+        .await
+        .unwrap();
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
+    {
+        let mut checkout = behavior
+            .environment
+            .runner
+            .machines_for_test()
+            .checkout_run(parent)
+            .unwrap();
+        assert!(checkout
+            .machine()
+            .compile_view_in(placement.lexical_scope)
+            .is_none());
+        checkout.restore_suspended(Vec::new());
+    }
+    for mutation in 0..4 {
+        let (mut definition, _) = fixture.definition(&behavior, SessionId(0xE20F)).await;
+        definition.child.model_permissions = requests.clone();
+        match mutation {
+            0 => definition.child.model_permissions[0].key = "ungranted-model".into(),
+            1 => definition.child.model_permissions[1].efforts.push(
+                crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekMax),
+            ),
+            2 => {
+                definition.child.model_permissions.remove(0);
+            }
+            _ => definition.child.requested_effects.reverse(),
+        }
+        let result = behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(behavior.stage_replacement(actor, definition))
+            .await;
+        assert!(
+            result.is_err(),
+            "mutation {mutation} must not change immutable authority or effect order"
+        );
+        assert_eq!(
+            factory_calls.load(Ordering::Relaxed),
+            0,
+            "mutation {mutation} refuses before provisioning a candidate"
+        );
+        assert_eq!(behavior.descriptor.capabilities(), &capabilities);
+    }
+    behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(verify_retained_predecessor_custody(&behavior, actor))
+        .await;
+    drop(behavior);
+    owner.finish().await;
 }
 
 #[tokio::test]

@@ -370,7 +370,9 @@ where
         permissions
             .validate_declared_effects(&requested_effects)
             .map_err(|error| reject(&error.to_string()))?;
-        if &permissions != self.descriptor.capabilities().model_permissions()
+        let current_permissions = self.descriptor.capabilities().model_permissions();
+        if !permissions.is_subset_of(current_permissions)
+            || !current_permissions.is_subset_of(&permissions)
             || requested_effects != self.descriptor.capabilities().effect_keys()
         {
             return Err(reject(
