@@ -538,7 +538,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         &late_target,
         &late_accepted,
         &issued.recovery_products,
-        &issued.groups,
+        &[],
         &late_selection,
         &catalog,
         &mut PackageInterfaceValidation::default(),
@@ -564,7 +564,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .unwrap();
     let late_groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &demanded_view,
-        &issued.groups,
+        &[],
         late_request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
