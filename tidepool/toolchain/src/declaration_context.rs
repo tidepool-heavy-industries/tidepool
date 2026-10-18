@@ -14590,7 +14590,90 @@ mod tests {
         let base_request = base
             .prepare_compilation(&scratch.path().join("base"), &producer)
             .unwrap();
-        assert_eq!(base_request.groups.len(), 1);
+        assert!(base_request.groups.is_empty());
+        let demand = |request: &ExactCompilationRequest, module: &str| {
+            let inputs = request.compiler_inputs();
+            assert!(inputs.artifacts().selected_native_groups().is_empty());
+            let (id, product) = inputs
+                .metadata
+                .entries
+                .values()
+                .find_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(product) if product.owner().module == module => {
+                        Some((entry.descriptor.id, product.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let definitions =
+                crate::certified_products::original_native_group_definitions(&product, 7).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            let imports = [crate::certified_products::PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: 7,
+                binder: binding.identity.clone(),
+            }];
+            let validation = PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let mut fixed = inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .unwrap();
+            let target = inputs
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut fixed,
+                    &inputs.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selection,
+                )
+                .unwrap();
+            let groups = target
+                .selection
+                .groups_for_target(&target.artifacts, None, &imports)
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            let group = groups.iter().next().unwrap();
+            assert_eq!(group.binding.artifact(), id);
+            assert_eq!(group.original_ordinal, 7);
+            assert!(
+                target.artifacts.selected_native_groups().is_empty(),
+                "target demand does not promote compiler-input selection"
+            );
+            let physical = request
+                .artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.interface.unit == product.owner().unit
+                        && artifact.interface.module == module
+                })
+                .unwrap();
+            assert_eq!(
+                std::fs::read(&physical.product.as_ref().unwrap().path).unwrap(),
+                product.product_bytes()
+            );
+            product
+        };
+        let base_native = demand(&base_request, "Native");
+        assert_eq!(base_native.owner().module_version.0, [7; 32]);
+        assert!(matches!(
+            crate::certified_products::original_native_group_imports(&base_native, 7).unwrap()[0],
+            crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+        ));
         let native_descriptor = |request: &ExactCompilationRequest| {
             let bytes = std::fs::read(&request.manifest).unwrap();
             let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
@@ -14602,7 +14685,7 @@ mod tests {
                 .unwrap();
             let fields = row.as_array().unwrap();
             assert_eq!(fields.len(), 10);
-            assert_eq!(fields[6].as_array().unwrap().len(), 1);
+            assert!(fields[6].as_array().unwrap().is_empty());
             assert_eq!(fields[8], Value::Array(vec![text("full-carrier")]));
             assert_eq!(fields[9], text("compiler-original"));
             let descriptor = fields[7].as_array().unwrap();
@@ -14646,15 +14729,18 @@ mod tests {
             .unwrap();
         assert_eq!(native_descriptor(&joined_request), base_descriptor);
         let joined_owner = joined_request.materialization.as_ref().unwrap();
+        assert!(joined_request.groups.is_empty());
         assert!(
             joined_owner.groups.is_empty(),
-            "joining adds no native payload"
+            "availability selects no compiler group"
         );
         assert_eq!(joined_owner._parents.len(), 2);
         let base_owner = base_request.materialization.as_ref().unwrap();
         for branch in [&left_request, &right_request] {
             let owner = branch.materialization.as_ref().unwrap();
-            assert_eq!(owner.groups.len(), 1);
+            assert!(branch.groups.is_empty());
+            assert!(owner.groups.is_empty());
+            assert_eq!(owner.rows.len(), 1);
             assert!(Arc::ptr_eq(&owner._parents[0], base_owner));
         }
         let mut visited = Vec::new();
@@ -14664,59 +14750,130 @@ mod tests {
         assert_eq!(visited.len(), 4, "the diamond visits its shared base once");
         assert_eq!(visited[0], Arc::as_ptr(base_owner));
         assert_eq!(visited[3], Arc::as_ptr(joined_owner));
-        assert_eq!(
-            joined_request
-                .groups
+        for (branch, module, version, generation) in [
+            (&base_request, "Native", 7, 11),
+            (&left_request, "Left", 8, 12),
+            (&right_request, "Right", 9, 13),
+        ] {
+            let original = demand(branch, module);
+            let selected = demand(&joined_request, module);
+            assert_eq!(selected.owner(), original.owner());
+            assert_eq!(selected.owner().module_version.0, [version; 32]);
+            assert_eq!(selected.product_bytes(), original.product_bytes());
+            assert_eq!(
+                selected.certification_bytes(),
+                original.certification_bytes()
+            );
+            assert!(std::ptr::eq(
+                crate::certified_products::original_native_group_definitions(&selected, 7)
+                    .unwrap()
+                    .bindings(),
+                crate::certified_products::original_native_group_definitions(&original, 7)
+                    .unwrap()
+                    .bindings(),
+            ));
+            let imports =
+                crate::certified_products::original_native_group_imports(&selected, 7).unwrap();
+            assert!(std::ptr::eq(
+                imports,
+                crate::certified_products::original_native_group_imports(&original, 7).unwrap()
+            ));
+            assert!(
+                matches!(imports[0], crate::certified_products::PendingImportOwner::Retained { generation: actual, .. } if actual == generation)
+            );
+            let physical = branch
+                .artifacts
                 .iter()
-                .map(|group| group.owner().module.as_str())
-                .collect::<Vec<_>>(),
-            ["Native", "Left", "Right"]
-        );
-        for branch in [&base_request, &left_request, &right_request] {
-            let original = branch
-                .materialization
-                .as_ref()
-                .unwrap()
-                .groups
-                .first()
+                .find(|artifact| artifact.interface.module == module)
                 .unwrap();
-            let selected = joined_request
-                .groups
-                .iter()
-                .find(|group| group.owner() == original.owner())
-                .unwrap();
-            assert!(std::ptr::eq(selected.group(), original.group()));
-            assert_eq!(selected.imports(), original.imports());
+            assert!(
+                joined_request.artifacts.contains(physical),
+                "joined custody shares exact issued paths"
+            );
         }
 
         let replacement = extend(&initial, product("Native", 10, 22));
         let replacement_request = replacement
             .prepare_compilation(&scratch.path().join("replacement"), &producer)
             .unwrap();
-        let replacement_owner = replacement_request.materialization.as_ref().unwrap();
-        let selected = RetainedArtifactMaterialization::selected_group_refs(
-            [joined_owner.as_ref(), replacement_owner.as_ref()],
-            &replacement
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .metadata_snapshot(),
-        );
-        assert_eq!(
-            selected.len(),
-            1,
-            "unselected modules and old versions are excluded"
-        );
-        assert_eq!(selected[0].owner().module_version.0, [10; 32]);
-        assert!(std::ptr::eq(
-            selected[0].group(),
-            replacement_request.groups[0].group()
-        ));
+        assert!(replacement_request.groups.is_empty());
+        let selected = demand(&replacement_request, "Native");
+        assert_eq!(selected.owner().module_version.0, [10; 32]);
+        assert_ne!(selected.owner(), base_native.owner());
         assert!(matches!(
-            selected[0].imports()[0],
+            crate::certified_products::original_native_group_imports(&selected, 7).unwrap()[0],
             crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
         ));
+        {
+            let metadata = &replacement_request.compiler_inputs().metadata;
+            let mixed = RetainedArtifactMaterialization::select_custody(
+                &[
+                    Arc::clone(joined_owner),
+                    Arc::clone(replacement_request.materialization.as_ref().unwrap()),
+                ],
+                &metadata.retained,
+            )
+            .unwrap();
+            let expected = metadata
+                .entries
+                .values()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>();
+            let mut actual = BTreeSet::new();
+            let mut stored_rows = 0;
+            mixed.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                actual.extend(owner.rows.keys().copied());
+                stored_rows += owner.rows.len();
+                assert!(owner.groups.is_empty());
+            });
+            assert_eq!(
+                actual, expected,
+                "mixed custody excludes old Native and unrelated Left/Right rows"
+            );
+            assert_eq!(
+                stored_rows,
+                expected.len(),
+                "excluded or shadowed physical rows are not retained"
+            );
+            let selected_rows = mixed.selected_rows(metadata);
+            let mut selected_files = selected_rows
+                .values()
+                .map(|row| row.artifact())
+                .collect::<Vec<_>>();
+            let mut expected_files = replacement_request.artifacts.clone();
+            selected_files.sort_by(|left, right| left.interface.path.cmp(&right.interface.path));
+            expected_files.sort_by(|left, right| left.interface.path.cmp(&right.interface.path));
+            assert_eq!(
+                selected_files, expected_files,
+                "selected facts retain only the replacement's issuing files"
+            );
+        }
+        let base_directory = Arc::downgrade(base_owner._directory.as_ref().unwrap());
+        let base_file = base_request
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "Native")
+            .unwrap()
+            .product
+            .as_ref()
+            .unwrap()
+            .path
+            .clone();
+        drop(base_request);
+        drop(left_request);
+        drop(right_request);
+        drop(left);
+        drop(right);
+        drop(base);
+        drop(joined);
+        assert!(base_directory.upgrade().is_some());
+        assert!(
+            base_file.exists(),
+            "joined request retains the issued physical file"
+        );
+        drop(joined_request);
+        assert!(base_directory.upgrade().is_none());
+        assert!(!base_file.exists());
     }
 
     fn check_retained_value_compiler_selection(old_epoch: u8, new_epoch: u8, demands_epoch: bool) {
@@ -14824,6 +14981,77 @@ mod tests {
         let original = context
             .prepare_compilation(&scratch.path().join("original"), &producer)
             .unwrap();
+        assert!(
+            original.groups.is_empty(),
+            "Full availability alone selects no compiler group"
+        );
+        {
+            let inputs = original.compiler_inputs();
+            let (id, native) = inputs
+                .metadata
+                .entries
+                .values()
+                .find_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(native)
+                        if native.owner().module == "HiddenNative" =>
+                    {
+                        Some((entry.descriptor.id, native))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(native.owner().module_version.0, [7; 32]);
+            let definitions =
+                crate::certified_products::original_native_group_definitions(native, 7).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            let imports = [crate::certified_products::PendingImportOwner::Source {
+                owner: native.owner().clone(),
+                original_ordinal: 7,
+                binder: binding.identity.clone(),
+            }];
+            assert!(matches!(
+                crate::certified_products::original_native_group_imports(native, 7).unwrap()[0],
+                crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+            ));
+            let validation = PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let mut fixed = inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .unwrap();
+            let target = inputs
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut fixed,
+                    &inputs.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selection,
+                )
+                .unwrap();
+            let groups = target
+                .selection
+                .groups_for_target(&target.artifacts, None, &imports)
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            let group = groups.iter().next().unwrap();
+            assert_eq!(group.binding.artifact(), id);
+            assert_eq!(group.original_ordinal, 7);
+            assert!(target.artifacts.selected_native_groups().is_empty());
+        }
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
         let weak = Arc::downgrade(private_owner);
@@ -14951,10 +15179,9 @@ mod tests {
             request.groups.is_empty(),
             "retained private custody is not executable demand"
         );
-        assert_eq!(
-            original.groups.len(),
-            1,
-            "the lexical parent selected its native payload"
+        assert!(
+            original.groups.is_empty(),
+            "lexical visibility and Full availability do not select compiler execution"
         );
         assert!(request
             .context()
