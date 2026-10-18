@@ -2042,14 +2042,21 @@ impl ModuleCandidateOffer {
         &self,
         source_directory: &Path,
     ) -> Result<Vec<crate::declaration_join::ExactSourceWitness>, CompileError> {
-        let request = self.exact.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("source-only offer cannot admit exact outputs".into())
-        })?;
-        Ok(request
-            .validate_outputs(source_directory)?
+        Ok(self
+            .admit_exact_outputs(source_directory)?
             .into_iter()
             .map(|source| source.witness)
             .collect())
+    }
+
+    pub(crate) fn admit_exact_outputs(
+        &self,
+        source_directory: &Path,
+    ) -> Result<Vec<crate::declaration_context::ExactSourceAdmission>, CompileError> {
+        let request = self.exact.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("source-only offer cannot admit exact outputs".into())
+        })?;
+        request.validate_outputs(source_directory)
     }
 
     pub fn manifest_path(&self) -> Option<&Path> {

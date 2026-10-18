@@ -18571,7 +18571,6 @@ mod tests {
                         &[],
                     )
                     .unwrap();
-                    let next_request = next_offer.exact.as_ref().unwrap().clone();
                     let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
                     command
                         .input(&next_source)
@@ -18604,7 +18603,7 @@ mod tests {
                         &next_run.output.stderr,
                     )
                     .expect("actual resident input history compiles");
-                    let admissions = next_request.validate_outputs(&next_output).unwrap();
+                    let admissions = applied.admit_exact_outputs(&next_output).unwrap();
                     assert_eq!(admissions.len(), 1);
                     if imports {
                         assert!(admissions[0].selected_originals.contains_key(&owner));
