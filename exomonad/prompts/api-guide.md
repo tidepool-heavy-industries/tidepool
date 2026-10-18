@@ -128,7 +128,8 @@ or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
 `ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
 The options carry the actual typed `AgentSpec`, an explicit `Model modelFamily`,
 instructions, an optional ordinary text label, lifetime, and limits. Each actor's
-`currentModel` pins its admitted family and exact model/effort selection.
+`currentModel` is its actor-local default selection: the fixed model and launch
+effort. Later conversational effort changes do not rewrite this value.
 `Exomonad.Models.primaryModel` is the root profile default. Construct other exact
 catalog selections with `openAI`, `argon`, or `deepSeek`, using
 `Exomonad.Models.catalogIdentity`, a catalog key, and that family's typed options.
