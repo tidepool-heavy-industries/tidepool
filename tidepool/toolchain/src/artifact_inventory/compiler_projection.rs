@@ -163,6 +163,224 @@ pub(crate) struct CompilerSourceSupport {
     input_decisions: IssuedInputNativeDecisions,
 }
 
+/// One request's ordered composition. Exact role issuers and explicit input
+/// decisions are carried before the final graph is published once.
+pub(crate) struct CompilerSourceComposition<'a> {
+    sources: Vec<&'a CompilerSourceSupport>,
+    projection: CompilerInputProjection,
+    selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    issuers: BTreeMap<ExactModuleIdentity, usize>,
+    decisions: IssuedInputNativeDecisions,
+    historical_roots: BTreeSet<InventoryNodeKey>,
+    views: CompilerViewComposition<'a>,
+}
+
+impl<'a> CompilerSourceComposition<'a> {
+    pub(crate) fn new(first: &'a CompilerSourceSupport) -> Self {
+        Self {
+            sources: vec![first],
+            projection: first.projection.clone(),
+            selected: first.selected.rows.clone(),
+            issuers: first
+                .projection
+                .roles
+                .keys()
+                .map(|owner| (owner.clone(), 0))
+                .collect(),
+            decisions: first.input_decisions.clone(),
+            historical_roots: BTreeSet::new(),
+            views: CompilerViewComposition::new(&first.artifacts),
+        }
+    }
+
+    pub(crate) fn push(&mut self, incoming: &'a CompilerSourceSupport) -> Result<(), CompileError> {
+        crate::host_work::checkpoint()?;
+        let first_merge = self.sources.len() == 1;
+        let previous = self.projection.clone();
+        let incoming_index = self.sources.len();
+        let mut touched = BTreeSet::new();
+        // Role conflicts precede native-choice checks in each ordered prefix.
+        for (owner, role) in &incoming.projection.roles {
+            #[cfg(test)]
+            composition_work::incoming_role();
+            self.projection.admit_role(owner.clone(), role.clone())?;
+            if previous.roles.get(owner) != self.projection.roles.get(owner) {
+                self.selected
+                    .insert(owner.clone(), incoming.selected.rows[owner].clone());
+                self.issuers.insert(owner.clone(), incoming_index);
+            }
+            touched.insert(owner.clone());
+        }
+        if first_merge {
+            // A first merge resolves even untouched baseline Original roles.
+            // Later prefixes already carry that issued decision, including an
+            // explicit empty one, and need visit only incoming owners.
+            touched.extend(previous.roles.keys().cloned());
+            #[cfg(test)]
+            composition_work::baseline_roles(previous.roles.len());
+        }
+        self.sources.push(incoming);
+        for owner in touched {
+            let role = &self.projection.roles[&owner];
+            let row = &self.selected[&owner];
+            self.historical_roots
+                .insert(InventoryNodeKey::Artifact(row.interface.0));
+            self.historical_roots.extend(
+                row.original
+                    .iter()
+                    .map(|(binding, _)| InventoryNodeKey::Artifact(*binding)),
+            );
+            let Some(original) = role.original() else {
+                self.decisions.facts.remove(&owner);
+                continue;
+            };
+            let left = (previous.roles.get(&owner) == Some(role))
+                .then(|| self.decisions.facts.get(&owner))
+                .flatten()
+                .filter(|fact| &fact.role == role);
+            let right = (incoming.projection.roles.get(&owner) == Some(role))
+                .then(|| incoming.input_decisions.facts.get(&owner))
+                .flatten()
+                .filter(|fact| &fact.role == role);
+            let mut groups = left.map(|fact| fact.groups.clone()).unwrap_or_default();
+            let choices: Vec<NativeGroupBinding> = if let Some(right) = right {
+                right.groups.values().copied().collect()
+            } else if left.is_some() {
+                Vec::new()
+            } else {
+                let source = self.sources[self.issuers[&owner]];
+                let requirement = match NativeOriginalRequirement::from_role(role.clone()) {
+                    Some(issued) => Some(issued),
+                    None => {
+                        NativeOriginalRequirement::from_selected_view(original, &source.artifacts)?
+                    }
+                };
+                requirement
+                    .into_iter()
+                    .flat_map(|requirement| {
+                        requirement
+                            .selection
+                            .snapshot()
+                            .roots
+                            .keys()
+                            .filter_map(|root| match root {
+                                ArtifactBindingNode::Group(group)
+                                    if group.binding.artifact() == original =>
+                                {
+                                    Some(*group)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            extend_checked_input_group_choices(original, &mut groups, choices.iter().copied())?;
+            self.historical_roots
+                .extend(choices.into_iter().map(InventoryNodeKey::Group));
+            if first_merge {
+                self.historical_roots
+                    .extend(groups.values().copied().map(InventoryNodeKey::Group));
+            }
+            self.decisions.facts.insert(
+                owner,
+                RecordedInputNativeDecision {
+                    role: role.clone(),
+                    groups,
+                },
+            );
+        }
+        // Proof/payload/acquisition incompatibility in an earlier prefix must
+        // refuse before a later contribution can report another role error.
+        self.views.push(&incoming.artifacts)?;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<CompilerSourceSupport, CompileError> {
+        if self.sources.len() == 1 {
+            return Ok(self.sources[0].clone());
+        }
+        let mut namespace = BTreeMap::new();
+        for row in self.selected.values() {
+            #[cfg(test)]
+            composition_work::final_role();
+            namespace.insert(row.interface.0.artifact, row.interface.0);
+            for (binding, _) in &row.original {
+                namespace.insert(binding.artifact, *binding);
+            }
+        }
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .chain(
+                self.decisions
+                    .facts
+                    .values()
+                    .flat_map(|fact| fact.groups.values().copied().map(InventoryNodeKey::Group)),
+            )
+            .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        composition_work::namespace_join();
+        let artifacts = self.views.finish(namespace, roots, self.historical_roots)?;
+        self.projection.validate(&artifacts)?;
+        let mut offers = Vec::new();
+        for source in self.sources {
+            for offer in source.native_offers.iter() {
+                if !offers.contains(offer) {
+                    offers.push(offer.clone());
+                }
+            }
+        }
+        let artifacts = artifacts.retain_issued_offer_custody(offers.iter().cloned())?;
+        for row in self.selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        Ok(CompilerSourceSupport {
+            projection: self.projection,
+            artifacts,
+            native_offers: offers.into(),
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(self.selected)),
+            input_decisions: self.decisions,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(super) mod composition_work {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Counts {
+        pub incoming_roles: usize,
+        pub baseline_roles: usize,
+        pub final_roles: usize,
+        pub namespace_joins: usize,
+        pub pair_roles: usize,
+    }
+    thread_local! {
+        static COUNTS: std::cell::RefCell<Counts> = const {
+            std::cell::RefCell::new(Counts { incoming_roles: 0, baseline_roles: 0, final_roles: 0, namespace_joins: 0, pair_roles: 0 })
+        };
+    }
+    pub(super) fn take() -> Counts {
+        COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
+    }
+    pub(super) fn incoming_role() {
+        COUNTS.with(|counts| counts.borrow_mut().incoming_roles += 1);
+    }
+    pub(super) fn baseline_roles(count: usize) {
+        COUNTS.with(|counts| counts.borrow_mut().baseline_roles += count);
+    }
+    pub(super) fn final_role() {
+        COUNTS.with(|counts| counts.borrow_mut().final_roles += 1);
+    }
+    pub(super) fn namespace_join() {
+        COUNTS.with(|counts| counts.borrow_mut().namespace_joins += 1);
+    }
+    pub(crate) fn pair_role() {
+        COUNTS.with(|counts| counts.borrow_mut().pair_roles += 1);
+    }
+}
+
 /// A recorded choice is not authority until its role and exact Group references
 /// have been authenticated with the source acquisition owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2019,6 +2237,404 @@ impl CompilerInputProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issued_source_batch_visits_contributions_without_rescanning_prefix_roles() {
+        for count in [1, 8, 32] {
+            let mut expected = BTreeMap::new();
+            let sources = (0..count)
+                .map(|index| {
+                    let inventory = ArtifactInventory::default();
+                    let entry = Arc::new(crate::artifact_inventory::tests::entry(
+                        &format!("BatchValue{index}"),
+                        &[],
+                    ));
+                    assert!(expected
+                        .insert(entry.descriptor.owner.clone(), entry.descriptor.id)
+                        .is_none());
+                    let view = inventory
+                        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                        .unwrap();
+                    let projection =
+                        CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                    CompilerSourceSupport::new(projection, view, []).unwrap()
+                })
+                .collect::<Vec<_>>();
+            // Expected owners/IDs came from the fixture values before either
+            // input admission or composition; returned views do not define it.
+            assert_eq!(expected.len(), count);
+            let baseline = CompilerSourceSupport::empty();
+            composition_work::take();
+            let mut composition = CompilerSourceComposition::new(&baseline);
+            for source in &sources {
+                composition.push(source).unwrap();
+            }
+            let batch = composition.finish().unwrap();
+            let batch_work = composition_work::take();
+            let mut reference = baseline;
+            for source in &sources {
+                reference = reference.merge(source).unwrap();
+            }
+            let reference_work = composition_work::take();
+            assert_eq!(batch_work.incoming_roles, count);
+            assert_eq!(batch_work.baseline_roles, 0);
+            assert_eq!(batch_work.final_roles, count);
+            assert_eq!(batch_work.namespace_joins, 1);
+            assert_eq!(batch_work.pair_roles, 0);
+            assert_eq!(reference_work.pair_roles, count * (count + 1) / 2);
+            assert_eq!(
+                batch
+                    .selected
+                    .rows
+                    .iter()
+                    .map(|(owner, row)| (owner.clone(), row.interface.0.artifact))
+                    .collect::<BTreeMap<_, _>>(),
+                expected
+            );
+            assert_eq!(batch.projection, reference.projection);
+            assert_eq!(
+                batch.artifacts.capture_graph_selection(),
+                reference.artifacts.capture_graph_selection()
+            );
+            assert_eq!(
+                batch.artifacts.binding_dependencies(),
+                reference.artifacts.binding_dependencies()
+            );
+        }
+    }
+
+    #[test]
+    fn issued_source_batch_preserves_empty_decisions_and_first_merge_policy() {
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture(
+                "BatchChoice",
+                vec![(7, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let entry = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let inventory = ArtifactInventory::default();
+        let full = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let unissued = CompilerSourceSupport::new(projection.clone(), full.clone(), []).unwrap();
+        let artifact_only = full
+            .select_roots(vec![projection.roles[&entry.descriptor.owner].interface()])
+            .unwrap();
+        assert!(artifact_only.selected_native_groups().is_empty());
+        assert!(artifact_only.artifact_ids().contains(&entry.descriptor.id));
+        let explicit_empty =
+            CompilerSourceSupport::from_selected_issuance(projection, artifact_only).unwrap();
+        let owner = &entry.descriptor.owner;
+        assert!(!unissued.input_decisions.facts.contains_key(owner));
+        assert!(explicit_empty.input_decisions.facts[owner]
+            .groups
+            .is_empty());
+        let expected_groups = full
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_groups.len(), 1);
+        let unrelated = CompilerSourceSupport::empty();
+        for empty_first in [true, false] {
+            let contributions = if empty_first {
+                [&explicit_empty, &unrelated]
+            } else {
+                [&unrelated, &explicit_empty]
+            };
+            let mut composition = CompilerSourceComposition::new(&unissued);
+            let mut reference = unissued.clone();
+            for source in contributions {
+                composition.push(source).unwrap();
+                reference = reference.merge(source).unwrap();
+            }
+            let batch = composition.finish().unwrap();
+            let actual = batch.input_decisions.facts[owner]
+                .groups
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if empty_first {
+                assert!(
+                    actual.is_empty(),
+                    "an explicit first empty suppresses fallback"
+                );
+            } else {
+                assert_eq!(
+                    actual, expected_groups,
+                    "an earlier resolved choice remains issued"
+                );
+            }
+            assert_eq!(batch.input_decisions, reference.input_decisions);
+            assert_eq!(
+                batch.artifacts.capture_graph_selection(),
+                reference.artifacts.capture_graph_selection()
+            );
+        }
+    }
+
+    #[test]
+    fn issued_source_batch_refuses_a_conflicting_prefix_before_later_inputs() {
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture(
+                "BatchAmbiguous",
+                vec![(7, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let original = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let inventory = ArtifactInventory::default();
+        let sources = ["BatchLeft", "BatchRight"].map(|marker| {
+            let view = inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        original.clone(),
+                        Arc::new(crate::artifact_inventory::tests::entry(marker, &[])),
+                    ],
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+            CompilerSourceSupport::from_selected_issuance(projection, view).unwrap()
+        });
+        let owner = &original.descriptor.owner;
+        assert_ne!(
+            sources[0].input_decisions.facts[owner].groups,
+            sources[1].input_decisions.facts[owner].groups
+        );
+        for order in [[0, 1], [1, 0]] {
+            let baseline = CompilerSourceSupport::empty();
+            let mut composition = CompilerSourceComposition::new(&baseline);
+            composition.push(&sources[order[0]]).unwrap();
+            let error = composition.push(&sources[order[1]]).unwrap_err();
+            assert!(matches!(error, CompileError::ArtifactInventory(error)
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == original.descriptor.id)));
+        }
+    }
+
+    #[test]
+    fn issued_source_batch_preserves_earlier_payload_failure_over_later_role_failure() {
+        let selected = Arc::new(crate::artifact_inventory::tests::entry(
+            "BatchSelected",
+            &[],
+        ));
+        let spare = Arc::new(crate::artifact_inventory::tests::entry("BatchSpare", &[]));
+        let incoming = Arc::new(crate::artifact_inventory::tests::entry(
+            "BatchIncoming",
+            &[],
+        ));
+        let make = |rows: Vec<Arc<ArtifactEntry>>, role: Arc<ArtifactEntry>| {
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), rows)
+                .unwrap();
+            CompilerSourceSupport::new(
+                CompilerInputProjection::from_issued_entries(&[role]).unwrap(),
+                view,
+                [],
+            )
+            .unwrap()
+        };
+        let baseline = make(vec![selected.clone(), spare.clone()], selected.clone());
+        let mut damaged = make(vec![incoming.clone(), spare.clone()], incoming);
+        // Deliberate owner-local corruption of an unselected sealed payload.
+        // This is a negative defense control, not another admission issuer.
+        let lease = Arc::get_mut(&mut damaged.artifacts.lease).expect("private fixture view");
+        let entry = lease.payloads.get_mut(&spare.descriptor.id).unwrap();
+        Arc::make_mut(entry).descriptor.package_imports_sha256 = [9; 32];
+        let changed = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_source_module_interface(
+                [2; 32],
+                "unit",
+                "BatchSelected",
+                [9; 32],
+                BTreeMap::new(),
+                None,
+            ),
+        ));
+        assert_ne!(selected.descriptor.id, changed.descriptor.id);
+        let later = make(vec![changed.clone()], changed);
+        for early_payload in [true, false] {
+            let inputs = if early_payload {
+                [&damaged, &later]
+            } else {
+                [&later, &damaged]
+            };
+            let mut batch = CompilerSourceComposition::new(&baseline);
+            let mut visited = 0;
+            let actual = inputs
+                .into_iter()
+                .try_for_each(|input| {
+                    visited += 1;
+                    batch.push(input)
+                })
+                .unwrap_err();
+            let expected = inputs
+                .into_iter()
+                .try_fold(baseline.clone(), |prefix, input| prefix.merge(input))
+                .unwrap_err();
+            match (actual, expected) {
+                (
+                    CompileError::ArtifactInventory(actual),
+                    CompileError::ArtifactInventory(expected),
+                ) => {
+                    if early_payload {
+                        assert!(
+                            matches!(actual.failure, ArtifactInventoryFailure::MetadataConflict { artifact } if artifact == spare.descriptor.id)
+                        );
+                        assert!(
+                            matches!(expected.failure, ArtifactInventoryFailure::MetadataConflict { artifact } if artifact == spare.descriptor.id)
+                        );
+                    } else {
+                        assert!(matches!(
+                            actual.failure,
+                            ArtifactInventoryFailure::OwnerConflict { .. }
+                        ));
+                        assert!(matches!(
+                            expected.failure,
+                            ArtifactInventoryFailure::OwnerConflict { .. }
+                        ));
+                    }
+                }
+                _ => panic!("mixed failure lost its owning typed boundary"),
+            }
+            assert_eq!(
+                visited, 1,
+                "the later bad contribution must remain unvisited"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn issued_source_batch_matches_scoped_choice_history_model(
+            baseline_mode in 0usize..5,
+            modes in proptest::collection::vec(0usize..5, 0..12),
+        ) {
+            // Logical modes: interface, unissued Original A, explicit Empty A,
+            // issued Group A, issued Group B. A and B have the SAME payload
+            // and ordinal but independently issued graph bindings.
+            let product = crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "BatchHistory", vec![(7, vec![])], 1, &BTreeMap::new(),
+                ), [2; 32],
+            );
+            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                .remove(0).product;
+            let original = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+            let owner = &original.descriptor.owner;
+            let inventory = ArtifactInventory::default();
+            let views = ["BatchHistoryA", "BatchHistoryB"].map(|marker| {
+                inventory.admit_shared(&inventory.empty_view(), vec![
+                    original.clone(), Arc::new(crate::artifact_inventory::tests::entry(marker, &[])),
+                ]).unwrap()
+            });
+            let projection = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap();
+            let canonical_id = projection.roles[owner].interface();
+            let canonical_only = views[0].select_roots(vec![canonical_id]).unwrap();
+            let sources = [
+                CompilerSourceSupport::new(projection.interface_only(), canonical_only.clone(), []).unwrap(),
+                CompilerSourceSupport::new(projection.clone(), views[0].clone(), []).unwrap(),
+                CompilerSourceSupport::from_selected_issuance(projection.clone(), canonical_only).unwrap(),
+                CompilerSourceSupport::from_selected_issuance(projection.clone(), views[0].clone()).unwrap(),
+                CompilerSourceSupport::from_selected_issuance(projection, views[1].clone()).unwrap(),
+            ];
+            let issued_groups = views.each_ref().map(|view| {
+                let groups = view.capture_graph_selection().roots.into_iter().filter_map(|root| {
+                    match root {
+                        ArtifactBindingNode::Group(group) if group.binding.artifact() == original.descriptor.id => Some(group),
+                        _ => None,
+                    }
+                }).collect::<Vec<_>>();
+                assert_eq!(groups.len(), 1);
+                groups[0]
+            });
+            let [group_a, group_b] = issued_groups;
+            proptest::prop_assert_ne!(group_a, group_b);
+            proptest::prop_assert_eq!(sources[3].input_decisions.facts[owner].groups[&7], group_a);
+            proptest::prop_assert_eq!(sources[4].input_decisions.facts[owner].groups[&7], group_b);
+            let [canonical_a, canonical_b] = views.each_ref().map(|view| {
+                let bindings = view.capture_graph_selection().bindings.into_iter()
+                    .filter(|binding| binding.artifact == canonical_id).collect::<Vec<_>>();
+                assert_eq!(bindings.len(), 1);
+                bindings[0]
+            });
+            let canonical_bindings = [canonical_a, canonical_a, canonical_a, canonical_a, canonical_b];
+            for (source, expected) in sources.iter().zip(canonical_bindings) {
+                proptest::prop_assert_eq!(source.selected[owner].interface.0, expected);
+            }
+            let fact = |mode| match mode {
+                0 | 1 => None,
+                2 => Some(BTreeSet::<u8>::new()),
+                3 => Some(BTreeSet::from([0])),
+                4 => Some(BTreeSet::from([1])),
+                _ => unreachable!(),
+            };
+            let mut has_original = baseline_mode != 0;
+            let mut chosen_issuer = baseline_mode;
+            let mut expected = fact(baseline_mode);
+            let mut composition = CompilerSourceComposition::new(&sources[baseline_mode]);
+            let mut refused = false;
+            for mode in modes {
+                let prior_original = has_original;
+                has_original |= mode != 0;
+                if !prior_original && mode != 0 {
+                    chosen_issuer = mode;
+                }
+                if has_original {
+                    let left = prior_original.then_some(expected.clone()).flatten();
+                    let right = (mode != 0).then(|| fact(mode)).flatten();
+                    expected = Some(match (left, right) {
+                        (Some(mut left), Some(right)) => { left.extend(right); left }
+                        (Some(left), None) => left,
+                        (None, Some(right)) => right,
+                        (None, None) => BTreeSet::from([u8::from(chosen_issuer == 4)]),
+                    });
+                }
+                let result = composition.push(&sources[mode]);
+                if expected.as_ref().is_some_and(|groups| groups.len() > 1) {
+                    proptest::prop_assert!(matches!(result,
+                        Err(CompileError::ArtifactInventory(error))
+                            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                                if artifact == original.descriptor.id)));
+                    refused = true;
+                    break;
+                }
+                proptest::prop_assert!(result.is_ok(), "lawful history refused: {:?}", result.err());
+            }
+            if !refused {
+                let batch = composition.finish().unwrap();
+                let actual = batch.input_decisions.facts.get(owner).map(|fact| {
+                    fact.groups.values().map(|group| {
+                        if *group == group_a { 0 }
+                        else if *group == group_b { 1 }
+                        else { panic!("composition invented a third scoped choice") }
+                    }).collect::<BTreeSet<u8>>()
+                });
+                proptest::prop_assert_eq!(actual, expected);
+                proptest::prop_assert_eq!(batch.selected[owner].interface.0, canonical_bindings[chosen_issuer]);
+                proptest::prop_assert_eq!(batch.projection.roles[owner].original().is_some(), has_original);
+            }
+        }
+    }
 
     // The ordinary type-query front door parses Names through the existing
     // signature codec; interface authority still comes from the admitted view.

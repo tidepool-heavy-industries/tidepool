@@ -5194,6 +5194,52 @@ mod tests {
     }
 
     #[test]
+    fn checked_value_surface_batch_preserves_independent_capture_histories() {
+        checked_value_custody_histories(|captured, _| {
+            let baseline =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                    .map_err(|error| error.to_string())?;
+            let batch = baseline
+                .clone()
+                .extend_retained_value_artifacts(std::slice::from_ref(captured))
+                .map_err(|error| error.to_string())?;
+            let reference = baseline
+                .extend_retained_value_artifacts_reference(std::slice::from_ref(captured))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                batch.compiler_input_projection(),
+                reference.compiler_input_projection()
+            );
+            assert_eq!(batch.lexical_graph(), reference.lexical_graph());
+            assert_eq!(
+                batch.artifact_view().capture_graph_selection(),
+                reference.artifact_view().capture_graph_selection()
+            );
+            assert_eq!(
+                batch.artifact_view().binding_dependencies(),
+                reference.artifact_view().binding_dependencies()
+            );
+            assert_eq!(
+                batch.compiler_source_support().recorded_input_decisions(),
+                reference
+                    .compiler_source_support()
+                    .recorded_input_decisions()
+            );
+            assert_eq!(
+                batch
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .map_err(|error| error.to_string())?,
+                reference
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .map_err(|error| error.to_string())?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn program_value_admission_preserves_unselected_native_offer_custody() {
         use super::*;
         use crate::artifact_inventory::ArtifactBindingNode;

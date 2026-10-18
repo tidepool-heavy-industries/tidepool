@@ -296,13 +296,73 @@ readers wherever independent production consumers still need them. Test-only
 observations should name compiler surface versus historical custody explicitly;
 do not delete an adverse history merely because the aggregate graph changes.
 
-## Review decisions required
+## Concrete step 2 boundary
 
-- Confirm the proposed compiler-surface split and one batch composition, with
-  current compile-time native availability preserved. Approve exact concrete
-  types before implementing the ownership change.
-- Confirm use-boundary custody retention and the no-format-change recovery
-  limit; a discovered missing durable carrier is a blocker, not permission to
-  discard older scopes.
-- Decide the smallest native stage only after source review and actual resource
-  availability. This NEXT plan is not an RC acceptance prerequisite.
+Step 1 is source-reviewed. Step 2 is an isolated NEXT source implementation;
+normal/cfg compilation, execution and integration qualification remain pending.
+Step 3 narrowing, use handoff and recovery changes require a further review.
+The release candidate is untouched.
+
+`CompilerSourceComposition` borrows the ordered opaque input supports. It carries
+persistent roles and explicit decision domains, plus the exact selected row and
+input issuer for each winning role. Each contribution checks incoming roles;
+only the first actual merge also resolves untouched baseline roles. An absent
+native decision is filled by the existing issuer policy, while an explicitly
+empty decision remains empty. A changed role cannot inherit its predecessor's
+decision. There is no lookup by payload name or latest history.
+
+`CompilerViewComposition` checks each contribution's issued scope proofs and
+payload/acquisition compatibility before a later contribution is inspected.
+This preserves an earlier payload refusal rather than replacing it with a later
+role refusal. It retains immutable input parents and flat historical selected
+seeds, not intermediate prefix views or read projections. Exact namespace and
+root publication happens once after the fold. Final association, selected-owner,
+materialization and native-offer custody checks remain in their existing owners.
+This is not a claim that the entire function performs one graph traversal.
+
+The retained-template composition joins equal-on-overlap graph nodes and their
+existing compiler supports. It counts only newly introduced edges and refuses
+monotone node/edge limits at each prefix, after that prefix's support check.
+Union of closed input graphs is closed when shared nodes agree; the final
+canonical/closure validator remains. Same-Arc template inputs keep their existing
+fast path. The extra template lifetime join is removed only because both private
+value issuers already place that exact template support in the value surface.
+
+There is one context rebuild/finalization after source, template and lexical
+composition. All three existing checked offer callers use that same entry point.
+No historical view is narrowed; no publication-time aggregate, new wire data or
+recovery authority is introduced. The previous checked-value fold and its template
+merge are cfg-only differential controls. General pairwise support merging stays
+available to its independent production consumers.
+
+The seven new focused controls are:
+
+- independent fixture-owner/ID expectations and cfg-only actual role/namespace
+  work counts, with the old quadratic role scan as a sensitivity reference;
+- explicit Empty versus absent input decisions and first-merge policy;
+- independent equal-payload scopes with conflicting selected ordinals;
+- earlier hidden-payload conflict versus later role conflict, in both orders;
+- a generated five-mode ordered decision model with independently named scopes;
+- actual published-source issuance/provenance and conflicting prefix refusal;
+- existing independently captured hidden-child histories compared with the old
+  fold, supplementing their unchanged independent custody assertions.
+
+The work counters cover incoming roles, first baseline roles, final roles,
+namespace joins and old pairwise role visits. They do not measure physical byte
+reads, total graph visits, allocations or wall time. Representation fixtures do
+not replace later production compiler/use/cold-recovery histories. The resource
+limit prefix logic is source-reviewed separately from those native obligations.
+
+## Remaining review and execution decisions
+
+- Independently review the exact step 2 implementation and mixed-failure history,
+  especially protected-template/native hidden carriers and foreign inventories.
+- Compile owning toolchain normal/cfg and directly affected runtime consumers at
+  the next admitted NEXT resource boundary; preserve the first diagnostic.
+- Run authoritative discovery and the seven exact focused controls, plus existing
+  capture, host-binding, template and durable histories selected by the reviewer.
+- Review step 3's use-boundary custody retention before implementing it. The
+  no-format-change recovery limit remains: a missing durable carrier is a
+  blocker, not permission to discard older scopes.
+- Measure a representative packaged history only after correctness acceptance.
+  There is no speed, memory or integration-ready claim from this source parcel.

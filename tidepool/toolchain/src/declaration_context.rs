@@ -3904,6 +3904,88 @@ pub(crate) struct RetainedTemplateImports {
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
 }
 
+struct RetainedTemplateComposition<'a> {
+    first: Option<&'a Arc<RetainedTemplateImports>>,
+    joined: Option<(
+        BTreeSet<ExactModuleIdentity>,
+        BTreeMap<ExactModuleIdentity, RetainedTemplateNode>,
+        usize,
+        crate::artifact_inventory::CompilerSourceComposition<'a>,
+    )>,
+}
+
+impl<'a> RetainedTemplateComposition<'a> {
+    fn new(first: Option<&'a Arc<RetainedTemplateImports>>) -> Self {
+        Self {
+            first,
+            joined: None,
+        }
+    }
+
+    fn push(&mut self, incoming: &'a Arc<RetainedTemplateImports>) -> Result<(), CompileError> {
+        let Some(first) = self.first else {
+            self.first = Some(incoming);
+            return Ok(());
+        };
+        if self.joined.is_none() && Arc::ptr_eq(first, incoming) {
+            return Ok(());
+        }
+        if first.producer != incoming.producer {
+            return Err(failure("template producers differ"));
+        }
+        let (roots, graph, edges, support) = self.joined.get_or_insert_with(|| {
+            (
+                first.roots.clone(),
+                first.graph.clone(),
+                first
+                    .graph
+                    .values()
+                    .map(|node| node.interface.imports.len())
+                    .sum(),
+                crate::artifact_inventory::CompilerSourceComposition::new(&first.compiler_support),
+            )
+        });
+        for (owner, node) in &incoming.graph {
+            match graph.get(owner) {
+                Some(previous) if previous != node => {
+                    return Err(failure("retained templates select conflicting originals"));
+                }
+                Some(_) => {}
+                None => {
+                    *edges += node.interface.imports.len();
+                    graph.insert(owner.clone(), node.clone());
+                }
+            }
+        }
+        roots.extend(incoming.roots.iter().cloned());
+        support.push(&incoming.compiler_support)?;
+        // Union of individually closed, equal-on-overlap graphs remains closed.
+        // The monotone resource limits still refuse at the same prefix, after
+        // support compatibility, without walking that growing graph again.
+        if graph.len() > 4096 || *edges > 65536 {
+            return Err(failure("retained template roots or producer differ"));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Option<Arc<RetainedTemplateImports>>, CompileError> {
+        let Some(first) = self.first else {
+            return Ok(None);
+        };
+        let Some((roots, graph, _, support)) = self.joined else {
+            return Ok(Some(first.clone()));
+        };
+        let joined = Arc::new(RetainedTemplateImports {
+            producer: first.producer,
+            roots,
+            graph,
+            compiler_support: support.finish()?,
+        });
+        joined.validate(joined.producer, joined.compiler_support.artifacts())?;
+        Ok(Some(joined))
+    }
+}
+
 fn template_selects_owner(templates: &[String], owner: &ExactModuleIdentity) -> bool {
     templates.iter().any(|template| {
         template
@@ -4100,6 +4182,7 @@ impl RetainedTemplateImports {
         Ok(())
     }
 
+    #[cfg(test)]
     fn merge(left: &Arc<Self>, right: &Arc<Self>) -> Result<Arc<Self>, CompileError> {
         if Arc::ptr_eq(left, right) {
             return Ok(left.clone());
@@ -7701,6 +7784,50 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn extend_retained_value_artifacts(
+        self,
+        values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    ) -> Result<Self, CompileError> {
+        let mut producer = self.owner.facts.producer;
+        let mut support = crate::artifact_inventory::CompilerSourceComposition::new(
+            &self.owner.facts.compiler_support,
+        );
+        let mut templates =
+            RetainedTemplateComposition::new(self.owner.facts.template_imports.as_ref());
+        let mut lexical = self.owner.facts.lexical.to_vec();
+        for value in values {
+            let incoming_producer = value
+                .certified_interface()
+                .interface()
+                .toolchain_identity_sha256();
+            producer = Self::checked_producer(producer, incoming_producer)?;
+            support.push(value.compiler_source_support())?;
+            if let Some(retained) = value.template_imports() {
+                // Each private compiler surface was issued after this same
+                // template support entered it. Its custody need not be joined
+                // again merely to compose the protected template graph.
+                templates.push(retained)?;
+            }
+            lexical.extend_from_slice(value.source_lexical());
+        }
+        let support = support.finish()?;
+        let templates = templates.finish()?;
+        let lexical = self
+            .owner
+            .facts
+            .lexical
+            .replace(compose_lexical_nodes(&lexical)?)?;
+        self.rebuild(|facts| {
+            facts.producer = producer;
+            facts.compiler_support = support;
+            facts.template_imports = templates;
+            facts.lexical = lexical;
+            facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+        })
+        .finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn extend_retained_value_artifacts_reference(
         mut self,
         values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
@@ -8318,15 +8445,18 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn admit_producer(mut self, producer: [u8; 32]) -> Result<Self, CompileError> {
-        if producer == [0; 32]
-            || (self.owner.facts.producer != [0; 32] && producer != self.owner.facts.producer)
-        {
-            return Err(failure("producer identity differs"));
-        }
+        let producer = Self::checked_producer(self.owner.facts.producer, producer)?;
         if self.owner.facts.producer != producer {
             self = self.rebuild(|facts| facts.producer = producer);
         }
         Ok(self)
+    }
+
+    fn checked_producer(current: [u8; 32], producer: [u8; 32]) -> Result<[u8; 32], CompileError> {
+        if producer == [0; 32] || (current != [0; 32] && producer != current) {
+            return Err(failure("producer identity differs"));
+        }
+        Ok(producer)
     }
 
     /// Finalize a context at its issuing boundary. Historical custody remains
@@ -13191,6 +13321,53 @@ mod tests {
                 assert_eq!(issued.owner.facts.template_imports, retained);
                 issued.normalize().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn compiler_surface_batch_preserves_published_policy_and_conflicting_prefix() {
+        use crate::artifact_inventory::CompilerSourceComposition;
+        let issued = published_original_fixture();
+        let root = identity("fixture", "Alpha");
+        let publication = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let published = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .with_published_source_originals(&publication)
+            .unwrap();
+        let changed = issued
+            .issue_published_source_original("other-revision", "input", &root)
+            .unwrap();
+        let changed = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .with_published_source_originals(&changed)
+            .unwrap();
+        let baseline = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let reusable = issued.compiler_source_support();
+        let published = published.compiler_source_support();
+        let changed = changed.compiler_source_support();
+        let expected = published.projection().snapshot_roles()[&root].clone();
+        assert!(expected.is_published_source_original());
+        for inputs in [
+            [reusable, published, reusable],
+            [published, reusable, published],
+        ] {
+            let mut batch = CompilerSourceComposition::new(baseline.compiler_source_support());
+            for input in inputs {
+                batch.push(input).unwrap();
+            }
+            let batch = batch.finish().unwrap();
+            // Expected full policy/provenance comes from the actual publication
+            // issuer before composition, not the legacy implementation.
+            assert_eq!(batch.projection().snapshot_roles()[&root], expected);
+        }
+        for (first, second) in [(published, changed), (changed, published)] {
+            let mut batch = CompilerSourceComposition::new(baseline.compiler_source_support());
+            batch.push(first).unwrap();
+            assert!(batch.push(second).is_err());
+            // The caller must stop at the refused prefix; another occurrence
+            // of the original policy is not permitted to heal it.
         }
     }
 

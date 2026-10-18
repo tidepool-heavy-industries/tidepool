@@ -18,8 +18,8 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
-    RecordedInputNativeDecision,
+    CompilerSourceComposition, CompilerSourceSupport, InputNativeDecision,
+    IssuedInputNativeDecisions, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -1063,6 +1063,15 @@ fn checked_input_group_choices(
     groups: impl IntoIterator<Item = NativeGroupBinding>,
 ) -> Result<imbl::OrdMap<u32, NativeGroupBinding>, CompileError> {
     let mut selected = imbl::OrdMap::new();
+    extend_checked_input_group_choices(original, &mut selected, groups)?;
+    Ok(selected)
+}
+
+fn extend_checked_input_group_choices(
+    original: ArtifactId,
+    selected: &mut imbl::OrdMap<u32, NativeGroupBinding>,
+    groups: impl IntoIterator<Item = NativeGroupBinding>,
+) -> Result<(), CompileError> {
     for group in groups {
         if group.binding.artifact() != original {
             return Err(failure("input decision group differs from its original"));
@@ -1076,7 +1085,7 @@ fn checked_input_group_choices(
             ));
         }
     }
-    Ok(selected)
+    Ok(())
 }
 
 enum CompilerNativeDemand<'a> {
@@ -4834,6 +4843,97 @@ struct ViewDraft {
         Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
 }
 
+/// Request-local compatibility of already-issued compiler views. Checking a
+/// contribution does not publish a prefix graph or reinterpret its namespace.
+struct CompilerViewComposition<'a> {
+    first: &'a ArtifactView,
+    parents: Vec<Arc<ViewLease>>,
+    proofs: imbl::OrdMap<ArtifactSelectionId, ImmutableScopeProofRef>,
+    payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+}
+
+impl<'a> CompilerViewComposition<'a> {
+    fn new(first: &'a ArtifactView) -> Self {
+        Self {
+            first,
+            parents: vec![Arc::clone(&first.lease)],
+            proofs: first.lease.selection.scopes.clone(),
+            payloads: first.lease.payloads.clone(),
+        }
+    }
+
+    fn push(&mut self, incoming: &'a ArtifactView) -> Result<(), CompileError> {
+        for (scope, proof) in &incoming.lease.selection.scopes {
+            match self.proofs.get(scope) {
+                Some(previous)
+                    if !Arc::ptr_eq(previous.proof(), proof.proof())
+                        && previous.proof() != proof.proof() =>
+                {
+                    return Err(failure("scope identity has differing immutable proofs"));
+                }
+                Some(_) => {}
+                None => {
+                    self.proofs.insert(*scope, proof.clone());
+                }
+            }
+        }
+        self.first.validate_issued_merge(incoming)?;
+        for (id, incoming) in &incoming.lease.payloads {
+            let retained = match self.payloads.get(id) {
+                Some(previous) => ArtifactEntry::merge_catalog_input_custody(previous, incoming)?,
+                None => Arc::clone(incoming),
+            };
+            self.payloads.insert(*id, retained);
+        }
+        self.parents.push(Arc::clone(&incoming.lease));
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        namespace: BTreeMap<ArtifactId, ArtifactBinding>,
+        roots: BTreeSet<InventoryNodeKey>,
+        historical_roots: BTreeSet<InventoryNodeKey>,
+    ) -> Result<ArtifactView, CompileError> {
+        let state = self.first.lease.inventory.0.lock().expect("inventory lock");
+        let entries = namespace
+            .keys()
+            .map(|id| (*id, Arc::clone(&self.payloads[id])))
+            .collect();
+        SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &self.parents);
+        drop(state);
+        let joined = ArtifactView::new(ViewDraft {
+            roots: Vec::new(),
+            selection,
+            inventory: self.first.lease.inventory.clone(),
+            parents: self.parents,
+            issuing_payloads: self.payloads.into_iter().collect(),
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        // Earlier successful selections remain historical custody. They can
+        // carry authored lifetime edges even after a later role promotion.
+        let custody = joined
+            .roots()
+            .iter()
+            .copied()
+            .chain(joined.custody_roots().iter().copied())
+            .chain(historical_roots)
+            .filter(|node| !roots.contains(node))
+            .collect::<BTreeSet<_>>();
+        let retained = joined.inventory().retain(
+            roots.into_iter().collect(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = joined.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
+    }
+}
+
 fn replace_snapshot_namespace(
     snapshot: &mut ExactSelectionSnapshot,
     namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
@@ -7009,6 +7109,8 @@ impl ArtifactView {
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
         for (owner, role) in selected.snapshot_roles() {
+            #[cfg(test)]
+            compiler_projection::composition_work::pair_role();
             let source = if projection.snapshot_roles().get(owner) == Some(role) {
                 self
             } else if incoming.snapshot_roles().get(owner) == Some(role) {
