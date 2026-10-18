@@ -1686,10 +1686,49 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             vec![],
             selection,
         )?;
+        drop(fixed);
         demanded
             .selection
             .groups_for_target(&demanded.artifacts, None, imports)
     };
+    let mut failed_then_retried = admitted
+        .inventory()
+        .bind_segment(&admitted, vec![], &selected)
+        .unwrap();
+    let fixed_before = failed_then_retried.observed_binding_state();
+    let cursor_before = admitted.capture_graph_selection();
+    let mixed = [demand.clone(), denied_demand.clone()];
+    assert!(matches!(admitted.inventory().admit_bound_target(
+        &mut failed_then_retried, &admitted,
+        NativeArtifactDemand::CertifiedTargetImports(&mixed), vec![], &selected,
+    ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+            artifact, original_ordinal: 9001,
+        } if artifact == b_id)));
+    assert_eq!(
+        failed_then_retried.observed_binding_state(),
+        fixed_before,
+        "a valid staged B7 followed by denied B9001 publishes no payload or choice"
+    );
+    assert_eq!(admitted.capture_graph_selection(), cursor_before);
+    let retried = admitted
+        .inventory()
+        .admit_bound_target(
+            &mut failed_then_retried,
+            &admitted,
+            NativeArtifactDemand::CertifiedTargetImports(std::slice::from_ref(&demand)),
+            vec![],
+            &selected,
+        )
+        .unwrap();
+    drop(failed_then_retried);
+    assert_eq!(
+        retried
+            .selection
+            .groups_for_target(&retried.artifacts, None, std::slice::from_ref(&demand))
+            .unwrap(),
+        exact
+    );
     let groups = consume(&admitted, &selected, std::slice::from_ref(&demand))
         .expect("the issued B receipt authorizes its exact group7");
     assert_eq!(groups, exact);

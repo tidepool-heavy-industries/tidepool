@@ -2797,6 +2797,36 @@ impl CertifiedSourceSelection {
             })
     }
 
+    pub(crate) fn target_original(
+        &self,
+        owner: &CachedHomeOwner,
+    ) -> CertResult<Option<Arc<crate::artifact_inventory::ArtifactEntry>>> {
+        let mut original: Option<Arc<crate::artifact_inventory::ArtifactEntry>> = None;
+        for row in self.issued_native_availability() {
+            let Some(entry) = row.target_original(owner) else {
+                continue;
+            };
+            if original
+                .as_ref()
+                .is_some_and(|previous| previous.descriptor.id != entry.descriptor.id)
+            {
+                return Err(CertificationError::Mismatch(
+                    "competing target original issuers",
+                ));
+            }
+            original = Some(match original {
+                Some(previous) => {
+                    crate::artifact_inventory::ArtifactEntry::merge_catalog_input_custody(
+                        &previous, entry,
+                    )
+                    .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+                }
+                None => Arc::clone(entry),
+            });
+        }
+        Ok(original)
+    }
+
     pub(crate) fn native_group_support(
         &self,
         key: crate::artifact_inventory::NativeGroupKey,

@@ -1062,6 +1062,15 @@ impl NativeTransportAvailability {
         product.owner()
     }
 
+    /// Borrow the checked physical row for one demanded exact owner. This
+    /// supplies payload identity only; target permission remains a per-key query.
+    pub(crate) fn target_original(
+        &self,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Option<&Arc<ArtifactEntry>> {
+        (self.original_owner() == owner).then_some(&self.original)
+    }
+
     /// Resolve one dependency through this physical request's issued row.
     /// A retained parent proof cannot grant another row's or ordinal's rights.
     pub(crate) fn dependency_support(
