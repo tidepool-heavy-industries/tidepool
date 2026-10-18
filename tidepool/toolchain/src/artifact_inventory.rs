@@ -9846,6 +9846,15 @@ mod tests {
         let proof = NativeOriginalRequirement::from_selected_view(id, &view)
             .unwrap()
             .unwrap();
+        let issued = proof
+            .selection
+            .graph_selection()
+            .native_groups
+            .iter()
+            .filter(|group| group.binding.artifact() == id && group.original_ordinal == 7)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(issued.len(), 1);
         let offer = IssuedNativeOffer::issue(id, &view, Some(proof)).unwrap();
         drop(view);
         assert_eq!(inventory.node_count(), 0);
@@ -9856,10 +9865,21 @@ mod tests {
 
         let reopened = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
         assert!(inventory.node_count() > 0);
-        assert!(reopened.selected_native_groups().contains(&NativeGroupKey {
-            artifact: id,
-            original_ordinal: 7,
-        }));
+        assert!(reopened.selected_native_groups().is_empty());
+        assert!(reopened
+            .entries()
+            .iter()
+            .any(|entry| entry.descriptor.id == id));
+        assert_eq!(
+            offer
+                .group_bindings(NativeGroupKey {
+                    artifact: id,
+                    original_ordinal: 7,
+                })
+                .collect::<BTreeSet<_>>(),
+            issued,
+            "the exact available Group survives without becoming execution demand"
+        );
         drop(reopened);
         drop(offer);
         assert!(payload.upgrade().is_none());
