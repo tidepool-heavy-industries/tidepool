@@ -3972,6 +3972,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "chrono",
+ "ciborium",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
