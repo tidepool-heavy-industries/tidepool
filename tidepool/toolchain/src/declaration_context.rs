@@ -18460,6 +18460,108 @@ mod tests {
                 std::fs::write(path, b"changed after owned capture").unwrap();
             }
         }
+        let trace = PathBuf::from(
+            std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE")
+                .expect("owned resident runner must retain its compiler trace"),
+        );
+        let trace_rows = || {
+            let bytes = std::fs::read(&trace).expect("read owned compiler trace");
+            // The append writer may have only published part of its last row.
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map(|end| {
+                    std::str::from_utf8(&bytes[..end])
+                        .expect("invalid complete compiler trace text")
+                        .lines()
+                        .map(|line| {
+                            serde_json::from_str::<serde_json::Value>(line)
+                                .expect("malformed complete compiler trace row")
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let observations = |cursor: usize, ordinal: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let events = trace_rows();
+                assert!(events.len() >= cursor, "owned compiler trace was truncated");
+                let completed = events[cursor..]
+                    .iter()
+                    .filter(|event| {
+                        event["fields"]["phase"] == "compiler_service"
+                            && event["span"]["request_mode"] == "inspection"
+                            && event["span"]["transaction"] == true
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    completed.len() <= 1,
+                    "ambiguous completed physical inspection request"
+                );
+                if let Some(completed) = completed.first() {
+                    assert_eq!(completed["fields"]["exit_code"].as_i64(), Some(0));
+                    let span = &completed["span"];
+                    let epoch = span["daemon_epoch"]
+                        .as_str()
+                        .expect("physical daemon epoch");
+                    let admission = span["admission_id"].as_u64().expect("physical admission");
+                    let worker = span["worker_pid"].as_u64().expect("physical worker");
+                    let physical = span["physical_execution"]
+                        .as_str()
+                        .expect("physical request");
+                    assert!(!epoch.is_empty() && admission > 0 && worker > 0);
+                    assert_eq!(span["request_ordinal"].as_u64(), Some(ordinal));
+                    let rows = events[cursor..]
+                        .iter()
+                        .filter_map(|event| {
+                            if event["span"]["physical_execution"].as_str() != Some(physical) {
+                                return None;
+                            }
+                            let raw = event["fields"]["line"]
+                                .as_str()?
+                                .strip_prefix("tidepool-validation ")?;
+                            let row: serde_json::Value =
+                                serde_json::from_str(raw).expect("malformed validation summary");
+                            if row["owner"] != "original_inputs"
+                                || row["reason"] != "scope_acquisition"
+                            {
+                                return None;
+                            }
+                            assert_eq!(event["span"]["daemon_epoch"].as_str(), Some(epoch));
+                            assert_eq!(event["span"]["admission_id"].as_u64(), Some(admission));
+                            assert_eq!(event["span"]["request_ordinal"].as_u64(), Some(ordinal));
+                            assert_eq!(event["span"]["worker_pid"].as_u64(), Some(worker));
+                            assert_eq!(row["worker_pid"].as_u64(), Some(worker));
+                            Some(row)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(rows.len() <= 1, "ambiguous scope acquisition summary");
+                    if !rows.is_empty() {
+                        for row in &rows {
+                            assert_eq!(
+                                row["outcome"], "success",
+                                "scope acquisition did not complete"
+                            );
+                            for kind in ["certificate", "packages", "census", "graph"] {
+                                for suffix in ["hits", "misses"] {
+                                    row["counts"][format!("original_inputs.{kind}.{suffix}")]
+                                        .as_u64()
+                                        .expect("required measured counter is absent");
+                                }
+                            }
+                        }
+                        return (rows, (epoch.to_owned(), admission, worker));
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "completed physical request or its scope acquisition summary was not observed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let first_cursor = trace_rows().len();
         let history = tidepool_extract_cmd::with_compiler_transaction(
             |_| {},
             || {
@@ -18490,39 +18592,8 @@ mod tests {
                     compiler_identity.producer_bytes(),
                     "owned input reuse requires the declared resident compiler"
                 );
-                let observations = |stderr: &[u8]| {
-                    let rows = String::from_utf8_lossy(stderr)
-                        .lines()
-                        .filter_map(|line| {
-                            let raw = line.strip_prefix("tidepool-validation ")?;
-                            let row: serde_json::Value = serde_json::from_str(raw).unwrap();
-                            (row["owner"] == "original_inputs"
-                                && row["reason"] == "scope_acquisition")
-                                .then_some(row)
-                        })
-                        .collect::<Vec<_>>();
-                    assert!(
-                        !rows.is_empty(),
-                        "actual scope acquisition summary was not observed"
-                    );
-                    for row in &rows {
-                        assert_eq!(
-                            row["outcome"], "success",
-                            "scope acquisition did not complete"
-                        );
-                        assert!(row["worker_pid"].as_u64().unwrap() > 0);
-                        for kind in ["certificate", "packages", "census", "graph"] {
-                            for suffix in ["hits", "misses"] {
-                                row["counts"][format!("original_inputs.{kind}.{suffix}")]
-                                    .as_u64()
-                                    .expect("required measured counter is absent");
-                            }
-                        }
-                    }
-                    rows
-                };
-                let first_observations = observations(&run.output.stderr);
-                let worker_pid = first_observations[0]["worker_pid"].as_u64().unwrap();
+                let (first_observations, physical_owner) = observations(first_cursor, 1);
+                let worker_pid = physical_owner.2;
                 let count = |rows: &[serde_json::Value], wanted: &str| -> u64 {
                     rows.iter()
                         .map(|row| {
@@ -18545,9 +18616,9 @@ mod tests {
                 assert!(count(&first_observations, "original_inputs.graph.misses") > 0);
                 // The compiler universe owns its retained input reader across A/B/A.
                 // Each request and its backing files remain live until actual close.
-                for (label, context, imports) in [
-                    ("empty", Arc::new(empty.clone()), false),
-                    ("again", persisted.clone(), true),
+                for (label, context, imports, ordinal) in [
+                    ("empty", Arc::new(empty.clone()), false, 2),
+                    ("again", persisted.clone(), true, 3),
                 ] {
                     let next_output = root.join(format!("consumer-{label}"));
                     std::fs::create_dir(&next_output).unwrap();
@@ -18580,6 +18651,7 @@ mod tests {
                         .inspection_strict()
                         .output_dir(&next_output);
                     let applied = next_offer.apply_to(command, &next_output).unwrap();
+                    let next_cursor = trace_rows().len();
                     let next_run = crate::CompileError::compiler_invocation_result(
                         next_endpoint.execute_with_input_files(
                             applied.command(),
@@ -18588,7 +18660,12 @@ mod tests {
                         ),
                     )
                     .unwrap();
-                    let next_observations = observations(&next_run.output.stderr);
+                    let (next_observations, next_physical_owner) =
+                        observations(next_cursor, ordinal);
+                    assert_eq!(
+                        next_physical_owner, physical_owner,
+                        "history changed physical transaction or worker"
+                    );
                     for row in &next_observations {
                         assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
                     }
