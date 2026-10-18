@@ -3,27 +3,34 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Focused contracts for the production candidate workflow compositions.
-module Fixture.WorkflowExamplesChecks (workflowContracts) where
+module Fixture.WorkflowExamplesChecks
+  ( workflowContracts, successfulSettlements, startReceiptWorker, requestBlocked
+  , producedOutcome, blockedOutcome ) where
 
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, Member, interpret, run)
 import qualified Control.Monad.Freer.State as State
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Exomonad.Contrib.Types (Candidate (..), Outcome (..), Task (..))
+import Exomonad.Contrib.Types (Candidate (..), Outcome (..), Task (..), WorkProgress)
 import Project.WorkflowExamples
-import Tidepool.Agent.Ref.Internal (internalAgentRef, agentIdentity)
+import Project.Work (workspaceAgentSpec)
+import Tidepool.Actors.Exomonad
+  ( spawnSubagent, SpawnContext (FreshCtx), defaultSpawnOptions
+  , requestWithProgress, defaultRequestOptions )
+import Tidepool.Agent.Ref.Internal (AgentRef, internalAgentRef, agentIdentity)
 import Tidepool.Agent.Reply.Internal
   ( Replies (..), RequestId (..), requestIdNumber, responseRequestId
-  , newRequestHandles, fillResponse, Progress (..)
-  , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
+  , Request, newRequestHandles, Progress (..)
+  , ResponseResult (..), ExecutionReceipt (..)
   , RequestError (..), ReplyError (..), ResponseFailure (..)
   )
 import Tidepool.Agent.Watch.Internal
   ( AwaitError (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), AwaitDecision (..)
-  , RawWatchObservation (..), Watches (..), ForgetWatchOutcome (..)
+  , RawWatchObservation (..), Watches (..), ForgetWatchOutcome (..), await, response
   )
 import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal (..)
@@ -33,7 +40,7 @@ import Tidepool.Effects.Core
 import Tidepool.Agent.Launch (Workspace (..))
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Actors.Spawn (SpawnError (SpawnRefused))
-import Tidepool.Model (Model, OpenAI, OpenAIOptions (..), OpenAIReasoning (..), openAI, modelSelection, modelPermissionRequests, noModelPermissions)
+import Tidepool.Model (Model, KnownFamily, SpawnAgent, OpenAI, OpenAIOptions (..), OpenAIReasoning (..), openAI, modelSelection, modelPermissionRequests, noModelPermissions)
 import Tidepool.Aeson (toJSON)
 
 data Event
@@ -126,7 +133,7 @@ runHarness script action =
           answer : rest -> do
             State.put current { requestReservations = rest }
             pure answer
-      SubmitRequestWith identity _ _ _ -> do
+      SubmitRequestWith identity _ _ _ _ -> do
         record (RequestSubmitted identity)
         current <- State.get
         case requestSubmissions current of
@@ -234,37 +241,17 @@ workflowContracts = do
 
   let actor = internalAgentRef 41 3
       failedTask = taskFixture "terminal-failure"
-      producedTask = taskFixture "produced"
-      blockedTask = taskFixture "blocked"
-      (failedRequest, _) = newRequestHandles () (RequestId 101) actor
-      (producedRequest, _) = newRequestHandles () (RequestId 102) actor
-      (blockedRequest, _) = newRequestHandles () (RequestId 103) actor
-      producedCandidate = Candidate
-        { candidateCommit = GitOid "1123456789abcdef0123456789abcdef01234567"
-        , reportedChecks = ["compiled"]
-        , remainingGates = ["review"]
-        }
-      blockedReason = "required check missing"
-      blockedEvidence = ["cargo test was not run"]
-      producedReceipt = ResponseResult (Produced producedCandidate)
-        (ExecutionReceipt (RequestId 102) 41 3) NoBoundWorktree
-      blockedReceipt = ResponseResult (Blocked blockedReason blockedEvidence)
-        (ExecutionReceipt (RequestId 103) 41 3) NoBoundWorktree
-      -- Filling is intentionally sequenced before running the lazy projection.
-      readyRequests = fillResponse producedRequest producedReceipt `seq`
-        fillResponse blockedRequest blockedReceipt `seq` ()
+      (failedRequest, _) = newRequestHandles (RequestId 101) actor
       mixedAdmissions =
         [ CandidateSpawnRefused first (SpawnRefused "fixture spawn refusal")
         , CandidateRequestRefused second actor requestRefusal
         , CandidateRequested failedTask actor failedRequest (Progress (RequestId 101))
-        , CandidateRequested producedTask actor producedRequest (Progress (RequestId 102))
-        , CandidateRequested blockedTask actor blockedRequest (Progress (RequestId 103))
         ]
       observationScript = initialScript
         { awaitRegistration = Right 9
         , awaitFailures = [(RequestId 101, ResponseTargetFailed "terminal failure")]
         }
-      (mixedObservation, observationTrace) = readyRequests `seq`
+      (mixedObservation, observationTrace) =
         runHarness observationScript (awaitCandidates mixedAdmissions)
   assert "settlement observation keeps mixed refusals and response outcomes in input order"
     (case mixedObservation of
@@ -272,20 +259,9 @@ workflowContracts = do
         [ CandidateSpawnNotAdmitted spawnTask (SpawnRefused "fixture spawn refusal")
         , CandidateRequestNotAdmitted requestTask retainedActor (RequestReservationRejected ReplyUnauthorized)
         , CandidateResponseUnavailable failedIdentity failedActor (ResponseTargetFailed "terminal failure")
-        , CandidateResponseReceived producedIdentity producedActor actualProduced
-        , CandidateResponseReceived blockedIdentity blockedActor actualBlocked
-        ] -> spawnTask == first && requestTask == second
-          && failedIdentity == failedTask && producedIdentity == producedTask && blockedIdentity == blockedTask
+        ] -> spawnTask == first && requestTask == second && failedIdentity == failedTask
           && agentIdentity retainedActor == (41, 3)
           && agentIdentity failedActor == (41, 3)
-          && agentIdentity producedActor == (41, 3)
-          && agentIdentity blockedActor == (41, 3)
-          && responseValue actualProduced == Produced producedCandidate
-          && responseExecution actualProduced == ExecutionReceipt (RequestId 102) 41 3
-          && responseWorktree actualProduced == NoBoundWorktree
-          && responseValue actualBlocked == Blocked blockedReason blockedEvidence
-          && responseExecution actualBlocked == ExecutionReceipt (RequestId 103) 41 3
-          && responseWorktree actualBlocked == NoBoundWorktree
       _ -> False)
   assert "settlement await uses the generated watch admission and exact returned watch"
     (events observationTrace == [AwaitRegistered, AwaitObserved 9, AwaitForgotten 9])
@@ -325,3 +301,72 @@ workflowContracts = do
       , CheckpointReleased "checkpoint-1"
       , AwaitRegistered
       ])
+
+-- Successful replies are materialized by the hosted request owner. Compare its
+-- original receipts with the production candidate wrapper's repeated projection.
+successfulSettlements
+  :: Member Watches effects
+  => AgentRef -> Request (Outcome Candidate) -> Request (Outcome Candidate)
+  -> Eff effects ()
+successfulSettlements actor producedRequest blockedRequest = do
+  produced <- await (response producedRequest)
+  blocked <- await (response blockedRequest)
+  let producedTask = taskFixture "produced"
+      blockedTask = taskFixture "blocked"
+      requestRefusal = RequestReservationRejected ReplyUnauthorized
+      admissions =
+        [ CandidateSpawnRefused (taskFixture "spawn-refused") (SpawnRefused "fixture spawn refusal")
+        , CandidateRequestRefused (taskFixture "request-refused") actor requestRefusal
+        , CandidateRequested producedTask actor producedRequest (Progress (responseRequestId producedRequest))
+        , CandidateRequested blockedTask actor blockedRequest (Progress (responseRequestId blockedRequest))
+        ]
+  observed <- awaitCandidates admissions
+  assert "candidate settlement preserves successful values and original runtime receipts in mixed input order"
+    (case (produced, blocked, observed) of
+      (Right originalProduced, Right originalBlocked, CandidateObservationReady
+        [ CandidateSpawnNotAdmitted spawnTask (SpawnRefused "fixture spawn refusal")
+        , CandidateRequestNotAdmitted requestTask retainedActor (RequestReservationRejected ReplyUnauthorized)
+        , CandidateResponseReceived producedIdentity producedActor actualProduced
+        , CandidateResponseReceived blockedIdentity blockedActor actualBlocked
+        ]) -> spawnTask == taskFixture "spawn-refused" && requestTask == taskFixture "request-refused"
+          && producedIdentity == producedTask && blockedIdentity == blockedTask
+          && agentIdentity retainedActor == agentIdentity actor
+          && agentIdentity producedActor == agentIdentity actor
+          && agentIdentity blockedActor == agentIdentity actor
+          && responseValue actualProduced == producedOutcome
+          && responseValue actualBlocked == blockedOutcome
+          && actualProduced == originalProduced && actualBlocked == originalBlocked
+          && responseExecution actualProduced == receiptFor producedRequest
+          && responseExecution actualBlocked == receiptFor blockedRequest
+      _ -> False)
+  where
+    receiptFor request = let (identity, incarnation) = agentIdentity actor
+      in ExecutionReceipt (responseRequestId request) identity incarnation
+
+producedOutcome :: Outcome Candidate
+producedOutcome = Produced
+  (Candidate (GitOid "1123456789abcdef0123456789abcdef01234567") ["compiled"] ["review"])
+
+blockedOutcome :: Outcome Candidate
+blockedOutcome = Blocked "required check missing" ["cargo test was not run"]
+
+startReceiptWorker
+  :: (KnownFamily modelFamily, Member (SpawnAgent modelFamily) effects
+     , Member AgentLaunch effects, Member Replies effects)
+  => Model modelFamily -> Eff effects (AgentRef, Request (Outcome Candidate))
+startReceiptWorker model = do
+  admitted <- spawnSubagent (FreshCtx "Return the requested candidate outcome.") SameDir
+    (defaultSpawnOptions model workspaceAgentSpec)
+  let actor = require admitted
+  requested <- requestWithProgress @WorkProgress @(Outcome Candidate) actor
+    (taskFixture "produced") defaultRequestOptions
+  pure (actor, fst (require requested))
+
+requestBlocked :: Member Replies effects => AgentRef -> Eff effects (Request (Outcome Candidate))
+requestBlocked actor = do
+  requested <- requestWithProgress @WorkProgress @(Outcome Candidate) actor
+    (taskFixture "blocked") defaultRequestOptions
+  pure (fst (require requested))
+
+require :: Show issue => Either issue value -> value
+require = either (error . ("workflow fixture admission: " <>) . show) id

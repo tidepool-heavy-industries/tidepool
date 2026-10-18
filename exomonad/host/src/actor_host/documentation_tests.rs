@@ -2789,6 +2789,50 @@ async fn candidate_reports_preserve_admissions_receipts_and_observation_failures
                     "import Fixture.WorkflowExamplesChecks\nworkflowContracts",
                 )
                 .await;
+                let (setup, child) = campaign
+                    .dispatch_native_spawn_setup(
+                        "candidate receipt worker",
+                        "(receiptWorker, producedRequest) <- startReceiptWorker currentModel",
+                        Duration::from_secs(180),
+                    )
+                    .await;
+                assert_eq!(setup["status"], "committed", "{setup}");
+                campaign
+                    .await_native_activation(
+                        child.actor.identity(),
+                        "produced candidate request",
+                        Duration::from_secs(120),
+                    )
+                    .await;
+                let produced = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "import Fixture.WorkflowExamplesChecks\nrespond producedOutcome",
+                )
+                .await;
+                assert_eq!(produced["status"], "replied", "{produced}");
+                committed(
+                    root.as_ref(),
+                    "blockedRequest <- requestBlocked receiptWorker",
+                )
+                .await;
+                campaign
+                    .await_native_activation(
+                        child.actor.identity(),
+                        "blocked candidate request",
+                        Duration::from_secs(120),
+                    )
+                    .await;
+                let blocked = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "import Fixture.WorkflowExamplesChecks\nrespond blockedOutcome",
+                )
+                .await;
+                assert_eq!(blocked["status"], "replied", "{blocked}");
+                committed(
+                    root.as_ref(),
+                    "successfulSettlements receiptWorker producedRequest blockedRequest",
+                )
+                .await;
             })
         })
         .await;
