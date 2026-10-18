@@ -70,7 +70,9 @@ Notebook inspection feedback may be a binding handle. Behavioral assertions
 must follow the existing output or inspection owner to the evaluated value;
 immediate feedback text is not itself proof of the result. `display` publishes
 through the ordinary output coordinator. Hosted tests follow its receipt into
-the Store, and component campaigns use their existing actor-output driver.
+the Store. Component campaigns use `TestCampaign::drive_actor_output` while
+awaiting any operation that can publish output, including named authored tool
+handlers.
 
 Recipe activation messages present the typed request; they are separate from
 the fresh context seed supplied during provider attachment. Assert payload
