@@ -7415,6 +7415,8 @@ impl ArtifactView {
             )?;
             scope_proof::install(&mut state, proofs);
         }
+        // Namespace bindings were resolved in the operands' retained closures.
+        // Preserving both seed frontiers keeps every binding in this final closure.
         let selection = selection_snapshot_for_lease(&state, namespace, &roots, &custody, &[]);
         let ids = selection
             .retained_nodes()
