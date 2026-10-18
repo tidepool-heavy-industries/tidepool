@@ -2586,6 +2586,13 @@ pub(crate) enum NativeGroupCandidates {
     NewProduct(BTreeSet<crate::artifact_inventory::NativeGroupBinding>),
 }
 
+/// Distinct authority owners for an exact historical body. Unfinished product
+/// constraints still require their original receiving-view validation.
+pub(crate) enum CertifiedNativeGroupSupport<'a> {
+    Issued(&'a crate::artifact_inventory::IssuedNativeOffer),
+    NewProductDependency(&'a crate::artifact_inventory::NativeOriginalRequirement),
+}
+
 impl NativeGroupCandidates {
     pub(crate) fn bindings(&self) -> &BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
         match self {
@@ -2776,6 +2783,40 @@ impl CertifiedSourceSelection {
         self.native_selections()
             .flat_map(|native| native.availability.requirements())
             .chain(self.private_native.requirements())
+    }
+
+    /// Only unfinished products carry raw dependency constraints. Issued
+    /// availability is consumed through its exact owner at actual body demand.
+    pub(crate) fn new_product_native_requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.native_selections()
+            .flat_map(|native| match &native.availability {
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies.as_slice(),
+                ReceiptNativeAvailability::Issued(_) => &[],
+            })
+    }
+
+    pub(crate) fn native_group_support(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        owner: &CachedHomeOwner,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<CertifiedNativeGroupSupport<'_>> {
+        self.issued_native_availability()
+            .find_map(|row| row.dependency_support(key, owner)?.offer_for_group(group))
+            .map(CertifiedNativeGroupSupport::Issued)
+            .or_else(|| {
+                self.new_product_native_requirements()
+                    .find(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .contains(&group)
+                    })
+                    .map(CertifiedNativeGroupSupport::NewProductDependency)
+            })
     }
 
     fn visible_modules(

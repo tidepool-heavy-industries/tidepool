@@ -1109,7 +1109,22 @@ pub(crate) struct NativeDependencySupport<'a> {
     key: NativeGroupKey,
 }
 
-impl NativeDependencySupport<'_> {
+impl<'a> NativeDependencySupport<'a> {
+    pub(crate) fn offer_for_group(
+        &self,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&'a crate::artifact_inventory::IssuedNativeOffer> {
+        self.availability
+            .contributions
+            .iter()
+            .find_map(|contribution| {
+                contribution
+                    .groups(self.key)
+                    .any(|candidate| candidate == group)
+                    .then(|| contribution.offer())
+            })
+    }
+
     pub(crate) fn groups(
         &self,
     ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
