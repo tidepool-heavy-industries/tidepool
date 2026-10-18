@@ -14637,6 +14637,50 @@ mod tests {
             crate::certified_products::original_native_group_imports(&selected, 7).unwrap()[0],
             crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
         ));
+        {
+            let metadata = &replacement_request.compiler_inputs().metadata;
+            let mixed = RetainedArtifactMaterialization::select_custody(
+                &[
+                    Arc::clone(joined_owner),
+                    Arc::clone(replacement_request.materialization.as_ref().unwrap()),
+                ],
+                &metadata.retained,
+            )
+            .unwrap();
+            let expected = metadata
+                .entries
+                .values()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>();
+            let mut actual = BTreeSet::new();
+            let mut stored_rows = 0;
+            mixed.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                actual.extend(owner.rows.keys().copied());
+                stored_rows += owner.rows.len();
+                assert!(owner.groups.is_empty());
+            });
+            assert_eq!(
+                actual, expected,
+                "mixed custody excludes old Native and unrelated Left/Right rows"
+            );
+            assert_eq!(
+                stored_rows,
+                expected.len(),
+                "excluded or shadowed physical rows are not retained"
+            );
+            let selected_rows = mixed.selected_rows(metadata);
+            let mut selected_files = selected_rows
+                .values()
+                .map(|row| row.artifact())
+                .collect::<Vec<_>>();
+            let mut expected_files = replacement_request.artifacts.clone();
+            selected_files.sort_by(|left, right| left.interface.path.cmp(&right.interface.path));
+            expected_files.sort_by(|left, right| left.interface.path.cmp(&right.interface.path));
+            assert_eq!(
+                selected_files, expected_files,
+                "selected facts retain only the replacement's issuing files"
+            );
+        }
         let base_directory = Arc::downgrade(base_owner._directory.as_ref().unwrap());
         let base_file = base_request
             .artifacts
