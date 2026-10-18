@@ -80,6 +80,9 @@ Most changes touch one of three layers, and it helps to know which:
   evidence through exact references rather than embedding complete snapshots
   at every consumer. Preserve typed failure distinctions, including missing
   versus inaccessible storage; a failed observation does not establish absence.
+  State the scope of each uniqueness rule. A retained collection may contain
+  alternatives that cannot coexist in one selected execution. Check conflicts
+  at that selection boundary; do not apply its namespace policy to all custody.
 - Keep a value coupled to the metadata required to interpret it, through return
   values, storage and presentation. Audit downstream consumers when admission
   enriches metadata; correct execution with an older rendering table is still
@@ -344,6 +347,10 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   Direct storage manipulation belongs in storage, migration or deliberate
   corruption tests whose purpose requires it; identify that boundary and keep
   a valid control constructed through the appropriate owner.
+  When fixture setup fails, inspect the issuer's returned ownership contract
+  before changing the next field or assertion. Retaining a capability's handle
+  need not put its private evidence into the caller's view. Follow the owner API
+  rather than assembling a view that merely resembles its internal graph.
 - Assert an independently observable contract. Check the exact scripted message
   through its parsed structure, attachment access after owner retirement, or an
   execution witness from the test body. Do not substitute a substring search
@@ -454,7 +461,10 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   exit status and log/report. Report compilation, execution and unqualified
   work separately. Frozen release acceptance must use one bundle-owned source,
   profile, compiler and asset contract through the central qualification owner.
-- Run language-appropriate formatting and `git diff --check`. Review the final
-  diff for stale callers, duplicated policy, unused surface, rendered-string
+- Run pinned language-appropriate formatting and `git diff --check` before
+  assembling the frozen candidate, including after small follow-up fixes. A
+  later source correction needs a matching build; do not relabel prior artifacts
+  or repeat unaffected behavioral tests solely for a whitespace-only change.
+  Review the final diff for stale callers, duplicated policy, unused surface, rendered-string
   control flow and obsolete comments. Keep the open migration obligations in
   `plans/typed-build-and-test-delivery.md`; qualification requires actual runs.

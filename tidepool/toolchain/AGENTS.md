@@ -17,11 +17,20 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   CPP, TH and other untracked inputs cannot authorize replay without complete
   evidence; completed source observations remain distinct from replay eligibility.
 - `CertifiedSourceSelection` owns compiler roles. Full artifact custody and
-  `recovery_products` may retain several native versions of one module;
-  authored consumers use the issued `SelectedOriginalClosure`. Validate its
+  `recovery_products` may retain several native versions of one module.
+  Recovery acquisition distinguishes their full certified `ArtifactId`s, even
+  when `CachedHomeOwner` is equal. Namespace uniqueness belongs to each restored
+  context; dependency conflicts belong to the exact consuming closure, not the
+  union of historical payloads. Keep duplicate original references and mismatched
+  descriptors rejected independently of that policy.
+  Authored consumers use the issued `SelectedOriginalClosure`. Validate its
   native dependencies through exact artifact/group edges, including historical
   children, rather than flattening custody into a module map. History tests
   must carry certification through the production consumer that needs selection.
+  Recovery tests acquire independently issued contexts together, then restore
+  each exact context separately. Include equal cached owners with distinct
+  certificates, and a refusal control where one selected consumer requires
+  conflicting originals. Isolated graph validation does not exercise acquisition.
   A native group can retain an exact issued carrier without an Original entry
   in the compiler namespace. Test that case alongside explicit namespace choices
   and genuinely competing group carriers. A broader artifact lookup must not
@@ -41,6 +50,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Artifact-only custody and unions across carriers cannot supply that proof.
   Availability preserves exact dependency graphs without selecting executable
   groups or restoring source, lexical or instance authority.
+  An opaque native offer owns its group proof separately from its receiving
+  artifact view. Carrier-only retention cannot be turned into group ownership
+  by copying roots. Availability fixtures consume the existing checked issuer
+  with the same projection, view and offer, then carry its normalized result;
+  they do not reconstruct or reissue graph permissions.
   Published originals retain their issuer's immutable artifact/group selection
   separately from later executable demand. Reopening and recovery validate that
   proof against exact retained custody; a broader inventory cannot recreate it.

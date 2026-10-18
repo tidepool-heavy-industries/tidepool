@@ -127,6 +127,12 @@ and integration are useful steps when risk warrants them; a small bounded change
 may need one owner and one focused check. Measure useful overlap, defects found,
 coordination cost, and accepted-delivery time separately.
 
+Schedule checks by their actual dependencies, not by a blanket suite barrier.
+A fixture failure before the behavior under test need not delay an independent
+production history on the same immutable candidate. Keep the failed gate open,
+respect shared resource limits, and require the complete acceptance set before
+release. Run uncontended performance measurements after correctness work settles.
+
 Explore Haskell notebook composition deliberately: combine commands, retained
 evidence, Jev judgments, typed requests, routing, and `Await` joins where that
 reduces total tool calls and model rounds while preserving failure boundaries.
