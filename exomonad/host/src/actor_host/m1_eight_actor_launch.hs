@@ -6,10 +6,10 @@ import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 do
-  Right seed <- checkpoint "eight measured captured actors"
+  Right seed <- checkpoint currentModel "eight measured captured actors"
   let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
       labels = ["measure-a", "measure-b", "measure-c", "measure-d", "measure-e", "measure-f", "measure-g", "measure-h"]
-      options label = (defaultSpawnOptions workerSpec)
+      options label = (defaultSpawnOptions currentModel workerSpec)
         { spawnLabel = Just label, spawnLifetime = ActorOwned }
       input = "Run the bounded offline workload then respond 42." :: Text
   admissions <- mapM (\label -> spawnSubagent (ForkCtx seed) (ForkWorktree projectHead) (options label)) labels

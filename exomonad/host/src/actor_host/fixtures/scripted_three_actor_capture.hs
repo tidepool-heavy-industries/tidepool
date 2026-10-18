@@ -4,13 +4,17 @@
 import qualified Tidepool.Agent.Contract as A
 import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
+
+let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 
 capturedValue <- retainedAction
 let capturedGetter = capturedValue + 1
-Right seed <- checkpoint "same-cell three-actor capture"
+Right seed <- checkpoint currentModel "same-cell three-actor capture"
 let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
-let workerOptions = (defaultSpawnOptions workerSpec)
-      { spawnModel = Just (OpenAIModel Gpt6Luna), spawnLifetime = ActorOwned }
+let workerOptions = (defaultSpawnOptions currentModel workerSpec)
+      { spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned }
 Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
   (workerOptions { spawnLabel = Just "three-actor-alpha" })
 Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

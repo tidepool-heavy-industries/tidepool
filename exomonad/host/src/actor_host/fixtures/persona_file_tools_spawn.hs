@@ -17,4 +17,4 @@ Right fileCompanion <- do
           && "Reload" `notElem` effects && "ContextReadWrite" `notElem` effects
         _ -> False)
       spawnSubagent (FreshCtx "Repair the draft with the installed file tools. Complete this request with the active typed reply tool.") SameDir
-        (defaultValidatedSpawnOptions approved)
+        (defaultValidatedSpawnOptions currentModel approved)

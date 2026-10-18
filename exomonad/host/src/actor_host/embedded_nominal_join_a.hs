@@ -7,12 +7,12 @@ import Tidepool.Actors.Exomonad
 
 data M2JoinA = M2JoinA Int deriving (Show, Eq)
 m2JoinA <- do
-  Right seed <- checkpoint "original nominal join inputs"
+  Right seed <- checkpoint currentModel "original nominal join inputs"
   let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
   Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "original-alpha", spawnLifetime = ActorOwned })
+    ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "original-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "original-beta", spawnLifetime = ActorOwned })
+    ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "original-beta", spawnLifetime = ActorOwned })
   Right alphaRequest <- request @M2Reply alpha m2OriginalInput
     (defaultRequestOptions { requestLabel = Just "original-alpha" })
   Right betaRequest <- request @M2Reply beta m2OriginalInput

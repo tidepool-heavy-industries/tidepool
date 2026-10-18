@@ -1,14 +1,21 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 
-import Project.Work (workspaceAgentSpec)
-import Tidepool.Effects.Core (Commands, Console, Lookup)
+import qualified Tidepool.Agent.Contract as A
+import qualified AgentSpec as Installed
+import qualified Project.Tools as Tools
+import Project.Work (WorkspaceEffects)
 import Tidepool.Actors.Exomonad
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
 
-Right rootSeed <- checkpoint "recursive root native helper"
-let recursiveSpec = workspaceAgentSpec
-let recursiveOptions = (defaultSpawnOptions recursiveSpec)
-      { spawnModel = Just (OpenAIModel Gpt6Luna), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
+let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
+
+Right rootSeed <- checkpoint currentModel "recursive root native helper"
+let recursiveSpec = Installed.agentSpec :: A.AgentSpec (Tools.WorkspaceTools (ForkAgent CurrentModelFamily ': WorkspaceEffects)) (ForkAgent CurrentModelFamily ': WorkspaceEffects)
+let recursiveOptions = (defaultSpawnOptions currentModel recursiveSpec)
+      { spawnPermissions = modelPermissions [allowForkAgent (fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow))], spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
 Right recursiveChild <- spawnSubagent (ForkCtx rootSeed) (ForkWorktree projectHead) recursiveOptions
 Right childRequest <- request @Int recursiveChild (RecursiveRootInput 20) defaultRequestOptions
 childWatch <- watch (Just "recursive-child-reply") (settlement childRequest)

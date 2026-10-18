@@ -6,12 +6,12 @@ import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 do
-  Right seed <- checkpoint "embedded parent checkpoint before later failure"
+  Right seed <- checkpoint currentModel "embedded parent checkpoint before later failure"
   let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
   Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "checkpoint-alpha", spawnLifetime = ActorOwned })
+    ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "checkpoint-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "checkpoint-beta", spawnLifetime = ActorOwned })
+    ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "checkpoint-beta", spawnLifetime = ActorOwned })
   Right alphaRequest <- request @Text alpha ("read the captured Haskell context" :: Text)
     (defaultRequestOptions { requestLabel = Just "checkpoint-alpha" })
   Right betaRequest <- request @Text beta ("read the captured Haskell context" :: Text)

@@ -103,24 +103,21 @@ fn published_notebook_sources_match_authored_fixtures() {
 }
 
 #[tokio::test]
-async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
-    for (primary, effort_type, invalid, expected_option) in [
+async fn frozen_static_model_selections_typecheck_all_primary_families() {
+    for (primary, invalid, expected_option) in [
         (
             "argon",
-            "ArgonEffort",
-            "Models.Argon (Models.DeepSeekOptions Models.DeepSeekHigh)",
+            "Models.argon \"catalog\" \"argon\" (Models.DeepSeekOptions Models.DeepSeekHigh)",
             "ArgonOptions",
         ),
         (
             "flash",
-            "DeepSeekReasoning",
-            "Models.Flash (Models.OpenAIOptions Models.OpenAILow)",
+            "Models.deepSeek \"catalog\" \"flash\" (Models.OpenAIOptions Models.OpenAILow)",
             "DeepSeekOptions",
         ),
         (
             "sol",
-            "OpenAIReasoning",
-            "Models.Sol (Models.ArgonOptions Models.EffortLow)",
+            "Models.openAI \"catalog\" \"sol\" (Models.ArgonOptions Models.EffortLow)",
             "OpenAIOptions",
         ),
     ] {
@@ -132,17 +129,28 @@ async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
                 std::fs::create_dir_all(&authored).unwrap();
                 let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
                     "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
-                )).unwrap();
+                ))
+                .unwrap();
                 let inference = project.inference.as_mut().unwrap();
-                inference.providers.insert("openai".into(), ProviderConfig {
-                    backend: exomonad_actor::Backend::OpenAIPlan,
-                    credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
-                    credential_env: None, endpoint: None, inference_limits: Default::default(),
-                });
-                inference.models.insert("sol".into(), ModelConfig {
-                    provider: "openai".into(), model: "gpt-6.1-sol".into(),
-                    constructor: "Sol".into(), effort: "high".into(),
-                });
+                inference.providers.insert(
+                    "openai".into(),
+                    ProviderConfig {
+                        backend: exomonad_actor::Backend::OpenAIPlan,
+                        credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
+                        credential_env: None,
+                        endpoint: None,
+                        inference_limits: Default::default(),
+                    },
+                );
+                inference.models.insert(
+                    "sol".into(),
+                    ModelConfig {
+                        provider: "openai".into(),
+                        model: "gpt-6.1-sol".into(),
+                        effort: "high".into(),
+                        allowed_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    },
+                );
                 let profile = inference.profiles.get_mut("argon").unwrap();
                 profile.default = primary.into();
                 profile.allowed.push("sol".into());
@@ -155,23 +163,30 @@ async fn frozen_generated_model_choices_typecheck_all_primary_backends() {
                 project.apply_inference().unwrap();
                 config.model = project.defaults.model.clone();
                 config.reasoning = project.defaults.reasoning;
-                std::fs::write(authored.join("config.toml"), toml::to_string(&project).unwrap()).unwrap();
+                std::fs::write(
+                    authored.join("config.toml"),
+                    toml::to_string(&project).unwrap(),
+                )
+                .unwrap();
                 let fixture = tidepool_testing::fixture_source(
-                    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs"
+                    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs",
                 );
-                std::fs::write(authored.join("GeneratedModelChecks.hs"), format!(
-                    "{fixture}\nstagePrimary :: Member Core.ContextReadWrite effects => Models.{effort_type} -> Eff effects ()\nstagePrimary = Models.setNextEffort\n"
-                )).unwrap();
+                std::fs::write(authored.join("GeneratedModelChecks.hs"), fixture).unwrap();
                 super::test_campaign::commit_workspace(&config.workspace);
-                config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace, &config.run_directory.path()
-                ).unwrap());
+                config.workspace_inputs = Some(
+                    crate::exomonad::workspace::FrozenWorkspace::load(
+                        &config.workspace,
+                        &config.run_directory.path(),
+                    )
+                    .unwrap(),
+                );
             },
-        ).await;
+        )
+        .await;
         campaign.run_scenario(|campaign| Box::pin(async move {
             let root = campaign.root_installation.policy.clone();
             let source = format!(
-                "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\ndisplay (GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Models.ModelSelectionEnvelope identity _ _ -> identity))"
+                "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\nimport qualified Tidepool.Internal.ModelControl as Control\ndisplay (Models.modelSelection currentModel == Models.modelSelection Models.primaryModel && GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Control.ModelSelectionEnvelope identity _ _ -> identity))"
             );
             let result = displayed(campaign, root.as_ref(), &source).await;
             assert_eq!(super::test_campaign::committed_display_text(&result), "True");
@@ -828,7 +843,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
                     concat!(
             "import qualified Tidepool.Agent.Contract as A\n",
             "Right worker <- spawnSubagent (FreshCtx \"notebook reply worker\") SameDir ",
-            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n",
+            "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n",
         ),
                 )
                 .await;
@@ -957,7 +972,7 @@ async fn record_actor_launch_publishes_and_routes_child_reply() {
 import Tidepool.Worktree (workspaceFor)
 Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
 Right launcherWorkspace <- workspaceFor launcherTree
-launcher <- R.start (R.withWorkspace launcherWorkspace launchDefinition)"#,
+launcher <- R.start (R.withWorkspace launcherWorkspace (launchDefinition currentModel (knownEffects @'[AgentLaunch, SpawnAgent CurrentModelFamily, Replies, Actor])))"#,
                 )
                 .await;
                 committed(
@@ -1581,7 +1596,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "import qualified Tidepool.Agent.Contract as A\n",
             "data Report = Report Int deriving Show\n",
             "Right worker <- spawnSubagent (FreshCtx \"activation preview worker\") SameDir ",
-            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+            "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
         ),
                 )
                 .await;
@@ -1851,7 +1866,7 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
                     concat!(
                         "import qualified Tidepool.Agent.Contract as A\n",
                         "Right spawned <- spawnSubagent (FreshCtx \"observe once\") SameDir ",
-                        "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+                        "(defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
                     ),
                 )
                 .await;
@@ -2464,7 +2479,7 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         concat!(
             "rejected <- spawnSubagent (FreshCtx \"bad seed control\") ",
             "(ForkWorktree (atRef (GitRef \"refs/heads/tidepool-missing-seed\"))) ",
-            "(defaultSpawnOptions workspaceAgentSpec)\n",
+            "(defaultSpawnOptions currentModel workspaceAgentSpec)\n",
             "display (show rejected)",
         ),
     )
@@ -2484,9 +2499,9 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         root.as_ref(),
         concat!(
             "let parentOnly = 41 :: Int\n",
-            "Right captured <- checkpoint \"independent fork context\"\n",
+            "Right captured <- checkpoint currentModel \"independent fork context\"\n",
             "Right peer <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead) ",
-            "((defaultSpawnOptions workspaceAgentSpec) { spawnLifetime = RunOwned, ",
+            "((defaultSpawnOptions currentModel workspaceAgentSpec) { spawnLifetime = RunOwned, ",
             "spawnLabel = Just \"run-owned-peer\" })",
         ),
     )

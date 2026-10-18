@@ -7,7 +7,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Agent.Reply (Replies)
 checked <- validateAgentSpec AgentSpec.invalidSpec
 refused <- spawnSubagent (FreshCtx "Must not be launched.") SameDir
-  (defaultSpawnOptions AgentSpec.invalidSpec)
+  (defaultSpawnOptions currentModel AgentSpec.invalidSpec)
 plain <- validateAgentSpec (defaultWorkbenchSpec @'[Replies])
 research <- validateAgentSpec Researcher.researcherSpec
 display (DT.pack (case checked of Left failure -> show failure; Right _ -> "scalar unexpectedly accepted"))

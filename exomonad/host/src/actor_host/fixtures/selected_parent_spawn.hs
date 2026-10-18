@@ -3,7 +3,7 @@ import qualified Tidepool.Actors.Spawn as Spawn
 import qualified Tidepool.Agent.Contract as Contract
 import qualified Tidepool.Agent.Watch as Await
 import Tidepool.Agent.Reply (Replies, Request, retainRequest)
-import Tidepool.Effects.Core (Actor, AgentLaunch, Commands, WorkerLifetime(..))
+import Tidepool.Effects.Core (Actor, AgentLaunch, SpawnAgent, Commands, WorkerLifetime(..))
 import Tidepool.Effects.Row (knownEffects)
 let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedLeaf = Actor.ActorDefinition
@@ -15,7 +15,7 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedParent :: Actor.ActorDefinition () ((->) (Bool, Maybe (Request Int))) ()
     selectedParent = Actor.ActorDefinition
       { Actor.label = "selected-launch-parent"
-      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, Replies, Await.Watches])
+      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, SpawnAgent CurrentModelFamily, Replies, Await.Watches])
       , Actor.initialization = \() -> pure (False, Nothing)
       , Actor.behavior = \() initial -> Actor.serve initial $ \(accepted, response) observe -> do
           next <- case response of
@@ -23,11 +23,11 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
               leaf <- Actor.startActor selectedLeaf ()
               leafExit <- Actor.awaitExit leaf
               wider <- Spawn.spawnSubagent (Spawn.FreshCtx "refused wider child") Spawn.SameDir
-                (Spawn.defaultSpawnOptions (Contract.defaultAsyncWorkbenchSpec @'[Replies, Commands]))
+                (Spawn.defaultSpawnOptions currentModel (Contract.defaultAsyncWorkbenchSpec @'[Replies, Commands]))
               duplicate <- Spawn.spawnSubagent (Spawn.FreshCtx "refused duplicate child") Spawn.SameDir
-                (Spawn.defaultSpawnOptions (Contract.defaultAsyncWorkbenchSpec @'[Replies, Replies]))
+                (Spawn.defaultSpawnOptions currentModel (Contract.defaultAsyncWorkbenchSpec @'[Replies, Replies]))
               native <- Spawn.spawnSubagent (Spawn.FreshCtx "accepted subset child") Spawn.SameDir
-                (Spawn.defaultSpawnOptions (Contract.defaultAsyncWorkbenchSpec @'[Replies]))
+                (Spawn.defaultSpawnOptions currentModel (Contract.defaultAsyncWorkbenchSpec @'[Replies]))
               worker <- case native of
                 Left failure -> error (tshow failure)
                 Right admitted -> pure admitted
@@ -47,4 +47,4 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
               pure (accepted && settled == Right 42, response)
           pure (observe next, next)
       , Actor.onShutdown = \_ -> pure () }
-selectedOwner <- Actor.startActor selectedParent ()
+selectedOwner <- Actor.startActor (Actor.withModelPermissions (modelPermissions [allowSpawnAgent currentModel]) selectedParent) ()

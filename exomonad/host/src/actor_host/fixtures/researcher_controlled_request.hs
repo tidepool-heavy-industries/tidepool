@@ -7,13 +7,17 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Inspection (display)
 import qualified Project.Researcher as Researcher
 import Project.PositiveReport (PositiveReport)
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
+
+let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 
 Right checkedResearcher <- validateAgentSpec Researcher.researcherSpec
 researcher <- do
   spawned <- spawnSubagent
     (FreshCtx "Use search and open for source evidence. Complete each request with its active reply tool; preserve returned source URLs and references.")
     SameDir
-    ((defaultValidatedSpawnOptions checkedResearcher) { spawnModel = Just (OpenAIModel Gpt6Luna) })
+    ((defaultValidatedSpawnOptions currentModel checkedResearcher) { spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow) })
   case spawned of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready

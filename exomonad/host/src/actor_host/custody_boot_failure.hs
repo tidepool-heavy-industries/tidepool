@@ -9,5 +9,5 @@ let brokenSpec = (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWork
       { A.specTools = error "intentional Haskell installer failure after custody installation" }
 Right workerAgent <- spawnSubagent (FreshCtx "Run the failing native installer.")
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions brokenSpec)
+  ((defaultSpawnOptions currentModel brokenSpec)
     { spawnLabel = Just "worker", spawnLifetime = ActorOwned })

@@ -5,10 +5,14 @@ import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
 import Project.Work (WorkspaceEffects)
 import Tidepool.Actors.Exomonad
+import qualified Exomonad.Models as Models
+import qualified Tidepool.Model.Selection as Selection
+
+let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key options
 
 let freshDefaultOptions :: SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
-    freshDefaultOptions = (defaultSpawnOptions Installed.agentSpec)
-      { spawnModel = Just (OpenAIModel Gpt6Luna), spawnLifetime = ActorOwned
+    freshDefaultOptions = (defaultSpawnOptions currentModel Installed.agentSpec)
+      { spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned
       , spawnInstructions = Just "Execute the shell, then settle the Text request with respond."
       }
 Right freshDefaultChild <- spawnSubagent (FreshCtx "Return a pure typed Text response after the real command.")

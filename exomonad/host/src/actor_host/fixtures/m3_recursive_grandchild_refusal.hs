@@ -1,2 +1,2 @@
-Right unavailableSeed <- checkpoint "leaf has no launch effect"
+Right unavailableSeed <- checkpoint currentModel "leaf has no launch effect"
 display False

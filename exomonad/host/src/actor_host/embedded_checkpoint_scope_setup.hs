@@ -5,9 +5,9 @@ import Data.Text (Text)
 let x = 41 :: Int
 let getX = x + 1
 data SeedBox mode = SeedBox
-  { seedState :: mode :- State (Maybe ContextCheckpoint)
-  , storeSeed :: mode :- Call ContextCheckpoint NoReply
-  , readSeed :: mode :- Call () (R.Reply (Maybe ContextCheckpoint))
+  { seedState :: mode :- State (Maybe (ContextCheckpoint CurrentModelFamily))
+  , storeSeed :: mode :- Call (ContextCheckpoint CurrentModelFamily) NoReply
+  , readSeed :: mode :- Call () (R.Reply (Maybe (ContextCheckpoint CurrentModelFamily)))
   } deriving Generic
 let seedBox = R.definition "embedded-checkpoint-seeds" (Actor.Selected (knownEffects @'[])) SeedBox
       { seedState = Nothing

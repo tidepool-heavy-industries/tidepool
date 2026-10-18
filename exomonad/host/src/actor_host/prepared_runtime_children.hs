@@ -5,7 +5,7 @@ let preparedChildSpec = PreparedSpec.agentSpec @'[Replies]
 preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
   let name = "prepared-child-" <> Text.pack (show ordinal)
   spawned <- spawnSubagent (FreshCtx "Execute the prepared probe") SameDir
-    ((defaultSpawnOptions preparedChildSpec) { spawnLabel = Just name })
+    ((defaultSpawnOptions currentModel preparedChildSpec) { spawnLabel = Just name })
   actor <- case spawned of
     Left failure -> error ("prepared child spawn failed: " <> Text.pack (show failure))
     Right admitted -> pure admitted

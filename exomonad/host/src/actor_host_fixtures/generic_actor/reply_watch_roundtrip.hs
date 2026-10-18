@@ -11,11 +11,11 @@ first3 (value, _, _) = value
 second3 (_, value, _) = value
 third3 (_, _, value) = value
 -- TIDEPOOL-ITEM --
-Right replyTypesContext <- checkpoint "nominal reply types and helpers"
+Right replyTypesContext <- checkpoint currentModel "nominal reply types and helpers"
 Right workerAgent <- spawnSubagent
   (ForkCtx replyTypesContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "worker"
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just "Complete the worker assignment and report its typed result."
@@ -23,7 +23,7 @@ Right workerAgent <- spawnSubagent
 Right witnessAgent <- spawnSubagent
   (ForkCtx replyTypesContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "witness"
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just "Complete the witness assignment and report its typed result."
@@ -31,7 +31,7 @@ Right witnessAgent <- spawnSubagent
 Right scaffoldAgent <- spawnSubagent
   (ForkCtx replyTypesContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "scaffold"
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just "Complete the scaffold assignment and report its typed result."

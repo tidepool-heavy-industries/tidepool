@@ -7,7 +7,7 @@ import Tidepool.Actors.Exomonad
 
 Right workerAgent <- spawnSubagent (FreshCtx "Return an effectful command closure.")
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "producer", spawnLifetime = ActorOwned })
 Right worker <- request @(() -> Eff '[Replies, Commands, Lookup, BoundWorktree] Cmd.Job) workerAgent ()
   (defaultRequestOptions { requestLabel = Just "producer" })

@@ -795,7 +795,7 @@ async fn public_replace_spec_pins_admitted_handler_and_refuses_changed_surface()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn child_backend_mismatch_refuses_before_admission_and_parent_can_request_valid_child() {
+async fn child_ungranted_model_refuses_before_admission_and_parent_can_request_valid_child() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 3);
     let (provider, mut requests) = hosted_script_provider();
@@ -808,7 +808,7 @@ async fn child_backend_mismatch_refuses_before_admission_and_parent_can_request_
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
-            host.input("Refuse one child's backend without retiring its parent.")
+            host.input("Refuse one child's ungranted model without retiring its parent.")
                 .await
                 .unwrap();
             let root = harness::model::AgentPath("/root".into());
@@ -825,8 +825,8 @@ async fn child_backend_mismatch_refuses_before_admission_and_parent_can_request_
             next_hosted_script_round(&mut requests, &mut pending, &root)
                 .await
                 .call(
-                    "child-backend-refusal",
-                    include_str!("fixtures/child_backend_refusal.hs"),
+                    "child-model-grant-refusal",
+                    include_str!("fixtures/child_model_grant_refusal.hs"),
                 );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_after.assert_authored_value(
@@ -835,7 +835,7 @@ async fn child_backend_mismatch_refuses_before_admission_and_parent_can_request_
                     host.runtime.run_identity(),
                     host.context.actor.identity(),
                 ),
-                "child-backend-refusal",
+                "child-model-grant-refusal",
                 "True",
             );
             let after = host
@@ -849,7 +849,7 @@ async fn child_backend_mismatch_refuses_before_admission_and_parent_can_request_
                 .collect::<Vec<_>>();
             assert_eq!(
                 before, after,
-                "backend refusal admits no child or installation"
+                "model grant refusal admits no child or installation"
             );
             assert!(
                 pending.is_empty(),

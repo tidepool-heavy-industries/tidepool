@@ -995,6 +995,7 @@ impl TestCampaign {
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
+        configure_campaign_model_catalog(&mut config);
         let super::model_free::ModelFreeSession {
             session_root,
             host_incarnation,
@@ -1621,6 +1622,97 @@ pub(super) fn declared_workspace_package() -> std::path::PathBuf {
         .parent()
         .expect("the declared authored workspace resource has a package parent")
         .to_path_buf()
+}
+
+/// Admit the exact model choices used by the model-free hosted fixtures.
+/// Provider attachment remains scripted; these credentials are never opened.
+fn configure_campaign_model_catalog(config: &mut ActorHostConfig) {
+    use crate::exomonad::model_catalog::{
+        InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
+    };
+    if config
+        .workspace_inputs
+        .as_ref()
+        .is_some_and(|inputs| inputs.model_catalog.is_some())
+    {
+        return;
+    }
+    let authored = config.workspace.join(".exomonad");
+    if config.workspace_inputs.is_none() {
+        crate::exomonad::write_fixture_project_config(&authored, config.model.value(), |project| {
+            project.defaults.reasoning = config.reasoning;
+        });
+    }
+    crate::exomonad::edit_fixture_project_config(&authored, |project| {
+        let backend = config.model.backend();
+        let mut models = BTreeMap::new();
+        let mut add = |key: &str, model: &str| {
+            models.insert(
+                key.into(),
+                ModelConfig {
+                    provider: "scripted".into(),
+                    model: model.into(),
+                    effort: config.reasoning.value().into(),
+                    allowed_efforts: match backend {
+                        exomonad_actor::Backend::OpenAIPlan => {
+                            vec!["low".into(), "medium".into(), "high".into()]
+                        }
+                        exomonad_actor::Backend::DeepSeek => {
+                            vec!["low".into(), "high".into(), "max".into()]
+                        }
+                        exomonad_actor::Backend::GeminiInteractions => {
+                            vec!["low".into(), "medium".into(), "high".into()]
+                        }
+                    },
+                },
+            );
+        };
+        add("primary", config.model.value());
+        for (key, model) in &project.models {
+            assert_eq!(
+                model.backend(),
+                backend,
+                "fixture alias retains the provider family"
+            );
+            add(key, model.value());
+        }
+        if backend == exomonad_actor::Backend::OpenAIPlan {
+            add("sol", "gpt-6-sol");
+            add("luna", "gpt-6-luna");
+            add("child-preparation-model", "child-preparation-model");
+        }
+        let allowed = models.keys().cloned().collect();
+        project.inference = Some(InferenceConfig {
+            profile: "scripted".into(),
+            providers: BTreeMap::from([(
+                "scripted".into(),
+                ProviderConfig {
+                    backend,
+                    credential_file: Some("/tmp/tidepool-scripted-unread-credential".into()),
+                    credential_env: None,
+                    endpoint: None,
+                    inference_limits: Default::default(),
+                },
+            )]),
+            models,
+            profiles: BTreeMap::from([(
+                "scripted".into(),
+                ProfileConfig {
+                    default: "primary".into(),
+                    allowed,
+                },
+            )]),
+        });
+        project.apply_inference().unwrap();
+    });
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("freeze the scripted model catalog before root admission"),
+    );
 }
 
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
