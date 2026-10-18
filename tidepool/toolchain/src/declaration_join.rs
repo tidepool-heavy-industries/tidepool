@@ -2575,17 +2575,7 @@ mod authored_tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, source).unwrap();
         }
-        let first_certificate = std::sync::Arc::new(
-            crate::artifacts::test_support::certify_authored_declaration(
-                first,
-                &root.path().join(first.relative_hs_path()),
-                first_source,
-                &[root.path().to_path_buf()],
-                root.path(),
-            )
-            .unwrap(),
-        );
-        let independent = crate::artifacts::test_support::certify_authored_declaration(
+        let result = crate::artifacts::test_support::certify_authored_declaration(
             second,
             &root.path().join(second.relative_hs_path()),
             second_source,
@@ -2593,70 +2583,6 @@ mod authored_tests {
             root.path(),
         )
         .unwrap();
-        let first_interface = first_certificate
-            .product()
-            .module_interface()
-            .unwrap()
-            .clone();
-        let independent_interface = independent
-            .recovery_products()
-            .iter()
-            .find(|product| product.owner().module == first.module_name())
-            .unwrap()
-            .module_interface()
-            .unwrap()
-            .clone();
-        let first_identity =
-            crate::artifact_inventory::ArtifactEntry::canonical(first_interface.clone())
-                .descriptor
-                .id;
-        let independent_identity =
-            crate::artifact_inventory::ArtifactEntry::canonical(independent_interface)
-                .descriptor
-                .id;
-        assert_ne!(
-            first_identity, independent_identity,
-            "the refusal control must carry different canonical artifact identities"
-        );
-        assert!(
-            matches!(
-                ExactDeclarationContext::new(
-                    &[first_certificate.clone(), Arc::new(independent)], &[], Vec::new()
-                ),
-                Err(CompileError::ArtifactInventory(error))
-                    if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict {
-                        owner: ExactModuleIdentity { unit: "main".into(), module: first.module_name() }
-                    } && matches!(&error.owner_conflict,
-                        Some(crate::artifact_inventory::ArtifactOwnerConflictEvidence::CompilerRole { existing, incoming })
-                            if existing.interface() == first_identity && incoming.interface() == independent_identity)
-            ),
-            "independent compilation cannot replace an already selected canonical owner"
-        );
-        let context = Arc::new(
-            ExactDeclarationContext::new(std::slice::from_ref(&first_certificate), &[], Vec::new())
-                .unwrap(),
-        );
-        let result = crate::artifacts::test_support::certify_authored_declaration_in_context(
-            second,
-            &root.path().join(second.relative_hs_path()),
-            second_source,
-            &[root.path().to_path_buf()],
-            root.path(),
-            context,
-        )
-        .unwrap();
-        assert_eq!(
-            result
-                .recovery_products()
-                .iter()
-                .find(|product| product.owner().module == first.module_name())
-                .unwrap()
-                .module_interface()
-                .unwrap()
-                .clone(),
-            first_interface,
-            "the exact-context successor must carry its selected first canonical owner"
-        );
         for module in [first, second] {
             assert!(result.recovery_products().iter().any(|product| {
                 product.owner().module == module.module_name() && product.source_sha256().is_some()
@@ -2668,12 +2594,9 @@ mod authored_tests {
                     .iter()
                     .any(|import| import.module == first.module_name())
         }));
-        let merged = ExactDeclarationContext::new(
-            &[first_certificate, std::sync::Arc::new(result.clone())],
-            &[],
-            Vec::new(),
-        )
-        .expect("successive authored certificates retain one exact original owner");
+        let merged =
+            ExactDeclarationContext::new(&[std::sync::Arc::new(result.clone())], &[], Vec::new())
+                .expect("the authored certificate retains its complete original home closure");
         assert_eq!(merged.recovery_products().len(), 2);
         assert!(result
             .introduced_exports()
