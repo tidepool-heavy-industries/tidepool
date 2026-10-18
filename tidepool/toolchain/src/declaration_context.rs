@@ -17096,25 +17096,50 @@ mod tests {
         let later = request
             .validate_receipt(&receipt, None, request.context())
             .unwrap();
+        let additional = support_product("Additional");
+        let mut expected_roots = BTreeMap::new();
+        let mut expected_roles = BTreeMap::new();
+        for product in [&owner, &relay, &additional] {
+            let native = ArtifactEntry::original([2; 32], product.clone()).unwrap();
+            let interface = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+            expected_roles.insert(
+                native.descriptor.owner.clone(),
+                CompilerInputRole::ReusableOriginal {
+                    interface: interface.descriptor.id,
+                    original: native.descriptor.id,
+                },
+            );
+            expected_roots.insert(interface.descriptor.id, interface.descriptor);
+            expected_roots.insert(native.descriptor.id, native.descriptor);
+        }
         let context = request
             .admit_fixture_support(
                 context,
-                &support_offer(&[hidden.clone(), owner, relay, support_product("Additional")]),
+                &support_offer(&[hidden.clone(), owner, relay, additional]),
                 &[later],
                 None,
             )
             .unwrap();
+        let support = &request.program_support.as_ref().unwrap().compiler_support;
+        // Merged support roots retain each source role's canonical interface
+        // and native original as distinct issued payloads.
         assert_eq!(
-            request
-                .program_support
-                .as_ref()
-                .unwrap()
-                .compiler_support
+            support
                 .artifacts()
                 .root_entries()
-                .len(),
-            3
+                .into_iter()
+                .map(|entry| (entry.descriptor.id, entry.descriptor.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            expected_roots
         );
+        let actual_roles = support
+            .projection()
+            .snapshot_roles()
+            .iter()
+            .map(|(owner, role)| (owner.clone(), role.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual_roles, expected_roles);
+        assert!(!actual_roles.contains_key(&identity("fixture", "Hidden")));
         assert!(context.lexical_graph().is_empty());
         let effective = request
             .in_program_context(&directory.path().join("program-inputs"), context.clone())
