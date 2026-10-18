@@ -493,6 +493,9 @@ impl RunRecoveryStore {
     pub fn database_id(&self) -> [u8; 16] {
         self.database_id
     }
+    pub(crate) fn shares_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handle, &other.handle)
+    }
     fn stopped(&self) -> StoreError {
         store_error(
             self.path(),

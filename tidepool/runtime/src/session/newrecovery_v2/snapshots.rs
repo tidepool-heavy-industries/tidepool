@@ -9,6 +9,7 @@ use cid::Cid;
 use fvm_ipld_blockstore::Blockstore;
 use imbl::OrdMap;
 use parking_lot::Mutex;
+use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::exact_context::{
     hydrate_context, hydrate_map, lookup_map, read_value, MaterializedContext, MaterializedMap,
     Materializer, SnapshotMapRoot, StagedBlocks,
@@ -195,6 +196,105 @@ struct Acquired {
     contexts: BTreeMap<ContextRoot, Arc<MaterializedContext>>,
 }
 
+/// Compiler authority and its committed representation travel together when
+/// a scope is captured. Editing compiler facts creates `New` again.
+#[derive(Clone)]
+pub(crate) enum ScopedCompilerContext {
+    New(Arc<ExactDeclarationContext>),
+    Stored(Arc<StoredCompilerContext>),
+}
+
+pub(crate) struct StoredCompilerContext {
+    exact: Arc<ExactDeclarationContext>,
+    materialized: Arc<MaterializedContext>,
+    origin: ContextStoreOrigin,
+}
+
+#[derive(Clone)]
+struct ContextStoreOrigin {
+    store: Arc<RunRecoveryStore>,
+    domain: RecoveryDomainId,
+    lineage: u64,
+}
+
+impl ScopedCompilerContext {
+    pub(crate) fn new(exact: Arc<ExactDeclarationContext>) -> Self {
+        Self::New(exact)
+    }
+
+    pub(crate) fn exact(&self) -> &Arc<ExactDeclarationContext> {
+        match self {
+            Self::New(exact) => exact,
+            Self::Stored(stored) => &stored.exact,
+        }
+    }
+}
+
+/// This association has candidate-owned block custody. It cannot become a
+/// cloneable stored context before its own publication is installed.
+pub(crate) struct PreparedCompilerContext {
+    context: StoredCompilerContext,
+}
+
+impl PreparedCompilerContext {
+    pub(crate) fn root(&self) -> &ContextRoot {
+        self.context.materialized.root()
+    }
+
+    pub(crate) fn exact(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context.exact
+    }
+}
+
+pub(crate) struct StagedCompilerContextPublication {
+    staged: StagedRecoveryManifest,
+    context: PreparedCompilerContext,
+}
+
+/// Native installation still owns the store's existing exclusion and recovery
+/// obligation. Only its successful acknowledgement releases `Stored`.
+pub(crate) struct CompilerContextInstallation {
+    installation: crate::session::recovery_store::NativeInstallationReceipt,
+    context: PreparedCompilerContext,
+}
+
+static_assertions::assert_not_impl_any!(PreparedCompilerContext: Clone, Copy);
+static_assertions::assert_not_impl_any!(StagedCompilerContextPublication: Clone, Copy);
+static_assertions::assert_not_impl_any!(CompilerContextInstallation: Clone, Copy);
+
+impl CompilerContextInstallation {
+    pub(crate) fn state(&self) -> &RecoveryDomainState {
+        &self.installation.state
+    }
+
+    pub(crate) fn exact(&self) -> &Arc<ExactDeclarationContext> {
+        self.context.exact()
+    }
+
+    pub(crate) fn installed_blocking(self) -> Result<ScopedCompilerContext, StoreError> {
+        self.installation.installed_blocking()?;
+        Ok(ScopedCompilerContext::Stored(Arc::new(
+            self.context.context,
+        )))
+    }
+}
+
+impl StagedCompilerContextPublication {
+    pub(crate) fn commit(self) -> StoreDisposition<(RecoveryGraph, CompilerContextInstallation)> {
+        match self.staged.commit() {
+            StoreDisposition::Committed((graph, installation)) => StoreDisposition::Committed((
+                graph,
+                CompilerContextInstallation {
+                    installation,
+                    context: self.context,
+                },
+            )),
+            StoreDisposition::Refused(error) => StoreDisposition::Refused(error),
+            StoreDisposition::RecoveryRequired(error) => StoreDisposition::RecoveryRequired(error),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RecoveryGraph {
     store: Arc<RunRecoveryStore>,
@@ -242,6 +342,85 @@ impl Blockstore for RecoveryGraph {
     }
 }
 impl RecoveryGraph {
+    fn context_origin(&self) -> ContextStoreOrigin {
+        ContextStoreOrigin {
+            store: self.store.clone(),
+            domain: self.domain,
+            lineage: self.lineage,
+        }
+    }
+
+    fn owns_context_receipt(&self, context: &StoredCompilerContext) -> bool {
+        if !self.store.shares_owner(&context.origin.store)
+            || self.domain != context.origin.domain
+            || self.lineage != context.origin.lineage
+        {
+            return false;
+        }
+        let root = context.materialized.root();
+        self.materialized_contexts
+            .get(root)
+            .is_some_and(|owned| Arc::ptr_eq(owned, &context.materialized))
+            || self
+                .acquired
+                .lock()
+                .contexts
+                .get(root)
+                .is_some_and(|owned| Arc::ptr_eq(owned, &context.materialized))
+    }
+
+    pub(crate) fn stage_compiler_context(
+        &self,
+        artifact_root: &Path,
+        context: &ScopedCompilerContext,
+        previous: Option<&ContextRoot>,
+    ) -> Result<(Self, PreparedCompilerContext), crate::session::SessionError> {
+        self.store
+            .ensure_ready()
+            .map_err(|error| crate::session::SessionError::RecoveryStore(Box::new(error)))?;
+        if let ScopedCompilerContext::Stored(stored) = context {
+            if self.owns_context_receipt(stored) {
+                return Ok((
+                    self.clone(),
+                    PreparedCompilerContext {
+                        context: StoredCompilerContext {
+                            exact: stored.exact.clone(),
+                            materialized: stored.materialized.clone(),
+                            origin: stored.origin.clone(),
+                        },
+                    },
+                ));
+            }
+        }
+        let artifacts = super::materialize_missing_context_artifacts(
+            self,
+            artifact_root,
+            context.exact(),
+            previous,
+        )?;
+        let mut candidate = self.candidate();
+        for artifact in artifacts {
+            candidate
+                .insert_artifact(artifact)
+                .map_err(|error| crate::session::recovery::graph_error(artifact_root, error))?;
+        }
+        let materialized = candidate
+            .materialize_compiler_context(context.exact(), previous)
+            .map_err(|error| crate::session::recovery::graph_error(artifact_root, error))?;
+        Ok((
+            candidate
+                .seal()
+                .map_err(|error| crate::session::recovery::graph_error(artifact_root, error))?,
+            PreparedCompilerContext {
+                context: StoredCompilerContext {
+                    exact: context.exact().clone(),
+                    materialized,
+                    origin: self.context_origin(),
+                },
+            },
+        ))
+    }
+
     pub(crate) fn empty(
         store: Arc<RunRecoveryStore>,
         domain: RecoveryDomainId,
@@ -666,6 +845,15 @@ impl RecoveryGraphCandidate {
         context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
         previous: Option<&ContextRoot>,
     ) -> Result<ContextRoot, RecoveryError> {
+        self.materialize_compiler_context(context, previous)
+            .map(|context| context.root().clone())
+    }
+
+    fn materialize_compiler_context(
+        &mut self,
+        context: &ExactDeclarationContext,
+        previous: Option<&ContextRoot>,
+    ) -> Result<Arc<MaterializedContext>, RecoveryError> {
         let base = previous.map(|root| self.graph.context(root)).transpose()?;
         let mut materializer = Materializer::new(&self.graph);
         let context =
@@ -673,10 +861,16 @@ impl RecoveryGraphCandidate {
         let packet = materializer.finish()?;
         self.graph.stage_packet(packet);
         let root = context.root().clone();
+        // A successful materialization may reproduce an already owned block
+        // root. Keep its existing representation receipt so earlier exact
+        // owners do not lose their graph-custody association.
+        if let Some(owned) = self.graph.materialized_contexts.get(&root) {
+            return Ok(owned.clone());
+        }
         self.graph
             .materialized_contexts
-            .insert(root.clone(), context);
-        Ok(root)
+            .insert(root, context.clone());
+        Ok(context)
     }
     pub(crate) fn replace_surface(
         &mut self,
@@ -795,6 +989,21 @@ pub(crate) struct StagedRecoveryManifest {
     pub(crate) work: crate::session::RecoveryPublicationWork,
 }
 impl StagedRecoveryManifest {
+    pub(crate) fn with_compiler_context(
+        self,
+        context: PreparedCompilerContext,
+    ) -> Result<StagedCompilerContextPublication, RecoveryError> {
+        if !self.graph.owns_context_receipt(&context.context) {
+            return Err(error(
+                "compiler context does not belong to this staged publication",
+            ));
+        }
+        Ok(StagedCompilerContextPublication {
+            staged: self,
+            context,
+        })
+    }
+
     pub(crate) fn commit(
         self,
     ) -> StoreDisposition<(
