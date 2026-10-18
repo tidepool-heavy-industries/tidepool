@@ -11365,9 +11365,15 @@ mod tests {
             .iter()
             .map(|view| CompilerInputProjection::from_issued_entries(&view.entries()).unwrap())
             .collect::<Vec<_>>();
+        let conflict = projections[0]
+            .merge(&projections[1])
+            .expect_err("combined custody cannot select incompatible source originals");
         assert!(
-            projections[0].merge(&projections[1]).is_err(),
-            "combined custody cannot select incompatible source originals"
+            matches!(&conflict, CompileError::ArtifactInventory(error) if matches!(
+                error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { existing, incoming, .. }
+                    if existing == original_ids[0] && incoming == original_ids[1]
+            )),
+            "actual_error={conflict:?}"
         );
         assert!(
             RecoveredArtifactInventory::capture_bound(
