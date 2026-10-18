@@ -775,6 +775,15 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
             if required == &dependency)),
         "the issued fragment intentionally leaves its baseline dependency unoffered"
     );
+    assert_eq!(
+        private.native_availability.rows().map(|row| row.original.descriptor.id).collect::<BTreeSet<_>>(),
+        BTreeSet::from([private.native_offers[0].original()]),
+        "normalizing a fresh fragment against its effective namespace must not grant baseline bodies"
+    );
+    assert!(private
+        .native_availability
+        .rows()
+        .all(|row| row.original.descriptor.owner != dependency));
     assert_eq!(private.native_offers.len(), 1);
     let groups = private.native_offers[0]
         .issued_group_carriers()

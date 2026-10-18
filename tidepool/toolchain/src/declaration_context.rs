@@ -961,7 +961,7 @@ impl OriginalCompilerInputs {
         };
         artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
         let native_availability =
-            RequestNativeAvailability::issue_checked(&projection, &artifacts, &native_offers)?;
+            RequestNativeAvailability::issue_checked(&effective, &artifacts, &native_offers)?;
         Ok(Self {
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
