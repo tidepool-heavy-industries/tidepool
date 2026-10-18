@@ -2191,6 +2191,19 @@ def _run_cohort(args) -> int:
     descriptor = verify(args.descriptor.absolute())
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
+    requested_tests = getattr(args, "exact_test", None)
+    if requested_tests is not None:
+        if not requested_tests or any(not name for name in requested_tests):
+            raise ValueError("--exact-test requires a nonempty cohort selection")
+        if len(set(requested_tests)) != len(requested_tests):
+            raise ValueError("--exact-test cannot repeat a test")
+        if not set(requested_tests) <= set(cohort["tests"]):
+            raise ValueError("--exact-test must select only tests in the sealed cohort")
+    selected_tests = [name for name in cohort["tests"]
+                      if requested_tests is None or name in requested_tests]
+    selected_count = len(selected_tests)
+    selected_timeouts = {name: timeout for name, timeout in cohort.get("case_timeouts", {}).items()
+                         if name in selected_tests}
     requested_trace_profile = getattr(args, "trace_profile", None)
     trace_profile = requested_trace_profile or "minimal"
     required_compiler_mode = cohort.get("compiler_mode")
@@ -2228,7 +2241,7 @@ def _run_cohort(args) -> int:
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
-               "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
+               "--expected-count", str(selected_count), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
     if compiler_workers is not None:
         command.extend(["--compiler-workers", str(compiler_workers)])
@@ -2239,12 +2252,12 @@ def _run_cohort(args) -> int:
             command.extend(["--" + name.replace("_", "-"), str(value)])
     if trace_profile == "full" or cohort.get("retain_artifacts", False):
         command.append("--retain-artifacts")
-    for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
+    for name, timeout in sorted(selected_timeouts.items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
         command.extend(["--delegated-service", "--service-slice", service_slice])
     command.extend(NativeRunnerResources.from_environment(descriptor["environment"]).arguments())
-    for name in cohort["tests"]:
+    for name in selected_tests:
         command.extend(["--exact", name])
     if cohort["ignored"]:
         command.append("--ignored")
@@ -2256,7 +2269,7 @@ def _run_cohort(args) -> int:
         )
     record_paths = sorted((output / "tests").glob("*.json"))
     records = [json.loads(path.read_text()) for path in record_paths]
-    exact = {record["test"] for record in records} == set(cohort["tests"])
+    exact = {record["test"] for record in records} == set(selected_tests)
     def case_confirmed(record):
         execution = record["execution"]
         return (record["passed"] and type(execution.get("executed_test_count")) is int
@@ -2266,10 +2279,12 @@ def _run_cohort(args) -> int:
                 and (not cohort.get("require_confirmed_cleanup", False)
                      or all(execution.get(domain + "_cleanup_status") == "confirmed"
                             for domain in ("process", "hosted", "compiler"))))
-    confirmed = exact and len(records) == cohort["expected_count"] and all(
+    confirmed = exact and len(records) == selected_count and all(
         case_confirmed(record) for record in records)
     case_premises = {}
     for name, premises in cohort.get("case_premises", {}).items():
+        if name not in selected_tests:
+            continue
         matching = [record for record in records if record["test"] == name]
         case_premises[name] = {
             "premises": premises,
@@ -2277,7 +2292,7 @@ def _run_cohort(args) -> int:
         }
     compiler_allowance_selection_confirmed = True
     if compiler_workers is not None or any(value is not None for value in allowances.values()):
-        compiler_allowance_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
+        compiler_allowance_selection_confirmed = exact and len(records) == selected_count and all(
             (record.get("execution") or {}).get("compiler_allowances") == {
                 "requested_foreground_jobs": allowances["foreground_jobs"],
                 "requested_preparation_jobs": allowances["preparation_jobs"], "worker_processes": selected_workers}
@@ -2292,27 +2307,28 @@ def _run_cohort(args) -> int:
             compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed,
             requested_trace_profile=trace_profile)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
-    trace_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
+    trace_selection_confirmed = exact and len(records) == selected_count and all(
         compiler_trace_selection(record.get("execution") or {}, trace_profile) for record in records)
     completed = behavioral_completed and compiler_allowance_selection_confirmed and trace_selection_confirmed
     code = result.returncode if result.returncode else int(not completed)
     execution_counts = [(record.get("execution") or {}).get("executed_test_count") for record in records]
     observed_counts = [value for value in execution_counts if type(value) is int and value >= 0]
-    unknown_counts = len(execution_counts) - len(observed_counts) + max(cohort["expected_count"] - len(records), 0)
+    unknown_counts = len(execution_counts) - len(observed_counts) + max(selected_count - len(records), 0)
     report = {"schema": 2, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
+              "sealed_cohort": cohort, "selected_tests": selected_tests,
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
               "trace_selection_confirmed": trace_selection_confirmed,
-              "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
+              "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, selected_count),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
                              "compiler_mode": compiler_mode, "trace_profile": trace_profile,
                              "compiler_allowances": {"requested_foreground_jobs": allowances["foreground_jobs"],
                                                      "requested_preparation_jobs": allowances["preparation_jobs"],
                                                      "worker_processes": selected_workers},
-                             "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
-              "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
-              "executed_test_count": sum(observed_counts) if exact and len(records) == cohort["expected_count"] and not unknown_counts else None,
+                             "timeout_seconds": cohort["timeout"], "case_timeout_seconds": selected_timeouts},
+              "elapsed_ns": time.monotonic_ns() - started, "expected_count": selected_count,
+              "executed_test_count": sum(observed_counts) if exact and len(records) == selected_count and not unknown_counts else None,
               "observed_executed_test_subtotal": sum(observed_counts),
               "unknown_execution_count": unknown_counts,
               "behavioral_completed": behavioral_completed,
@@ -2661,6 +2677,8 @@ def main(argv=None) -> int:
     run = commands.add_parser("run")
     run.add_argument("descriptor", type=Path)
     run.add_argument("--cohort", required=True, choices=tuple(cohorts()))
+    run.add_argument("--exact-test", action="append",
+                     help="repeat to select exact members of the sealed cohort (default: all)")
     run.add_argument("--output", required=True, type=Path)
     run.add_argument("--jobs", type=int, default=1,
                      help="maximum concurrent test processes (default: 1)")

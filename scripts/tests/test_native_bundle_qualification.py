@@ -2568,6 +2568,33 @@ class NativeQualificationTests(unittest.TestCase):
                         execute.assert_not_called()
                         query.assert_not_called()
 
+    def test_exact_cohort_subsets_preserve_full_contract_and_selected_counts(self):
+        for selected in (qualification.M2_TESTS[:1], qualification.M2_TESTS[1:],
+                         list(reversed(qualification.M2_TESTS))):
+            with self.subTest(selected=selected):
+                self.assert_run_scheduling('owned-resident', 1, 1, compiler_workers=2,
+                                           exact_tests=selected)
+
+    def test_exact_cohort_subset_refuses_empty_duplicate_and_nonmembers_before_launch(self):
+        for selected in ([], [''], ['outside::cohort'],
+                         [qualification.M2_TESTS[0], qualification.M2_TESTS[0]],
+                         [qualification.M2_TESTS[0], qualification.M1_TESTS[0]]):
+            with self.subTest(selected=selected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = {'external_inputs': {'runtime_tools': {'path': '/frozen/tools'}},
+                              'cohorts': qualification.cohorts()}
+                args = SimpleNamespace(jobs=1, service_slice=None, delegated_service=False,
+                                       descriptor=root / 'descriptor', cohort='m2', output=root / 'output',
+                                       exact_test=selected)
+                with patch.dict(os.environ, {}, clear=True), \
+                     patch.object(qualification, 'verify', return_value=descriptor) as verify, \
+                     patch.object(qualification, 'run_owned_qualification_runner') as launch:
+                    with self.assertRaises(ValueError):
+                        qualification.run_cohort(args)
+                    verify.assert_called_once()
+                    launch.assert_not_called()
+                self.assertFalse(args.output.exists())
+
     def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
         for compiler_mode in (None, 'owned-resident'):
             with self.subTest(compiler_mode=compiler_mode):
@@ -2595,7 +2622,7 @@ class NativeQualificationTests(unittest.TestCase):
         self.assert_run_scheduling('owned-resident', trace_profile='full')
 
     def assert_run_scheduling(self, compiler_mode, foreground_jobs=None, preparation_jobs=None,
-                              receipt_foreground_jobs=None, expected_code=0, compiler_workers=None, receipt_workers=None, trace_profile=None, invalid_capture=False):
+                              receipt_foreground_jobs=None, expected_code=0, compiler_workers=None, receipt_workers=None, trace_profile=None, invalid_capture=False, exact_tests=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             descriptor_path = root / 'qualification.json'
@@ -2607,11 +2634,14 @@ class NativeQualificationTests(unittest.TestCase):
                           'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
                           'profile': 'fast-dev', 'stdlib_mode': 'source-backed'}
 
+            selected = [name for name in qualification.M2_TESTS
+                        if exact_tests is None or name in exact_tests]
+
             def execute(command, **kwargs):
                 tests = root / 'evidence/tests'
                 tests.mkdir()
                 cohort = descriptor['cohorts']['m2']
-                for index, name in enumerate(cohort['tests']):
+                for index, name in enumerate(selected):
                     qualification.write_json(tests / f'{index}.json', {
                         'test': name, 'passed': True,
                         'execution': {'executed_test_count': 1, 'exit_code': 0,
@@ -2631,6 +2661,9 @@ class NativeQualificationTests(unittest.TestCase):
                 arguments = ['run', str(descriptor_path), '--cohort', 'm2',
                     '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',
                     '--service-slice', 'tidepool-completion-build.slice']
+                if exact_tests is not None:
+                    for name in exact_tests:
+                        arguments.extend(["--exact-test", name])
                 if trace_profile is not None:
                     arguments.extend(['--trace-profile', trace_profile])
                 if compiler_mode is not None:
@@ -2661,24 +2694,29 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(command[command.index('--jobs') + 1], '4')
             self.assertIn('--delegated-service', command)
             self.assertEqual(command[command.index('--service-slice') + 1], 'tidepool-completion-build.slice')
-            self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--exact'], qualification.M2_TESTS)
+            self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--exact'], selected)
             self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--case-timeout'],
-                             [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
+                             [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]) if name in selected])
             self.assertEqual(report['scheduling'], {
-                'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
+                'jobs': 4, 'effective_jobs': min(4, len(selected)), 'delegated_service': True,
                 'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident',
                 'trace_profile': trace_profile or 'minimal',
                 'compiler_allowances': {'requested_foreground_jobs': foreground_jobs,
                                         'requested_preparation_jobs': preparation_jobs, 'worker_processes': compiler_workers or 1},
                 'timeout_seconds': 600,
-                'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
+                'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST] if name in selected}})
             for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
                 if value is None:
                     self.assertNotIn(flag, command)
                 else:
                     self.assertEqual(command[command.index(flag) + 1], str(value))
             self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
-            self.assertEqual(report['executed_test_count'], len(descriptor['cohorts']['m2']['tests']))
+            self.assertEqual(report['expected_count'], len(selected))
+            self.assertEqual(report['executed_test_count'], len(selected))
+            self.assertEqual(report['selected_tests'], selected)
+            self.assertEqual(report['sealed_cohort'], descriptor['cohorts']['m2'])
+            self.assertEqual(descriptor['cohorts'], qualification.cohorts())
+            self.assertEqual(command[command.index('--expected-count') + 1], str(len(selected)))
             self.assertTrue(report['behavioral_completed'])
             self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0 or invalid_capture)
             self.assertEqual(report['trace_selection_confirmed'], not invalid_capture)
