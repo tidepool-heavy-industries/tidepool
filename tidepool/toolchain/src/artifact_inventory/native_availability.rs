@@ -1620,6 +1620,44 @@ impl IssuedNativeOffer {
         .then_some(qualification)
     }
 
+    /// Observe an issued carrier's affinity without granting any body groups.
+    /// Empty and partial rows keep their normalized permission unchanged.
+    pub(crate) fn matches_direct_canonical_binding(&self, namespace: &ArtifactView) -> bool {
+        let Some(canonical) = namespace.lease.selection.namespace.get(&self.0.interface) else {
+            return false;
+        };
+        self.0.custody.artifact_carriers.iter().any(|carrier| {
+            if carrier.artifact != self.0.original
+                || namespace
+                    .lease
+                    .selection
+                    .namespace
+                    .get(&self.0.original)
+                    .is_some_and(|selected| selected != carrier)
+            {
+                return false;
+            }
+            let source = ArtifactBindingNode::Artifact(*carrier);
+            let proof = self
+                .custody_snapshot()
+                .scopes
+                .get(&carrier.selection)
+                .expect("checked native offer retains its carrier scope")
+                .proof();
+            let start = proof
+                .dependencies
+                .partition_point(|(from, _, _)| *from < source);
+            proof.dependencies[start..]
+                .iter()
+                .take_while(|(from, _, _)| *from == source)
+                .any(|(_, target, edge)| {
+                    *target == ArtifactBindingNode::Artifact(*canonical)
+                        && *edge == ArtifactDependency::Interface
+                        && self.0.custody.reachable.contains(target)
+                })
+        })
+    }
+
     pub(crate) fn issued_group_carriers(
         &self,
     ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {

@@ -556,6 +556,7 @@ impl OriginalCompilerInputs {
             &metadata,
             &issued.artifacts,
             &issued.native_availability,
+            &issued.native_offers,
         )?;
         selection
             .finish_new_product_availability(&metadata.retained, &transport.availability)
@@ -1689,27 +1690,6 @@ impl RequestNativeAvailability {
             .filter(|row| row.classification == NativeInputClassification::PrivateInput)
     }
 
-    pub(crate) fn receipt_original(
-        &self,
-        unit: &str,
-        module: &str,
-        version: &tidepool_repr::execution_schema::ModuleVersion,
-    ) -> Result<Option<&NativeTransportAvailability>, CompileError> {
-        let mut candidates = self.issued().filter(|row| {
-            let owner = row.original_owner();
-            owner.unit == unit && owner.module == module && &owner.module_version == version
-        });
-        let first = candidates.next();
-        if candidates.next().is_some() {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeOwnerAmbiguity {
-                    owner: first.unwrap().original.descriptor.owner.clone(),
-                },
-            ));
-        }
-        Ok(first.map(Arc::as_ref))
-    }
-
     pub(crate) fn requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
@@ -1734,9 +1714,38 @@ impl RequestNativeAvailability {
 
 /// Transport can own dependency bodies without issuing compiler namespace roles.
 /// Exact issuer bindings remain in the offers; transport records body availability.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AdvertisedNativeOriginals(Arc<BTreeMap<ExactModuleIdentity, ArtifactId>>);
+
+impl AdvertisedNativeOriginals {
+    pub(crate) fn receipt_original<'a>(
+        &self,
+        availability: &'a RequestNativeAvailability,
+        unit: &str,
+        module: &str,
+        version: &tidepool_repr::execution_schema::ModuleVersion,
+    ) -> Result<Option<&'a NativeTransportAvailability>, CompileError> {
+        let Some(id) = self.0.get(&identity(unit, module)) else {
+            return Ok(None);
+        };
+        let row = availability
+            .0
+            .get(id)
+            .ok_or_else(|| failure("advertised native original lost its issued row"))?;
+        Ok(
+            (row.classification == NativeInputClassification::PrivateInput
+                && row.original_owner().unit == unit
+                && row.original_owner().module == module
+                && &row.original_owner().module_version == version)
+                .then_some(row.as_ref()),
+        )
+    }
+}
+
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
     availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    advertised: AdvertisedNativeOriginals,
 }
 
 impl NativeCompilerTransport {
@@ -1745,13 +1754,25 @@ impl NativeCompilerTransport {
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: &RequestNativeAvailability,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
         let normalized = normalized.for_canonical_roles(roles, artifacts)?;
         normalized.validate_role_coverage(roles)?;
+        Self::from_normalized_rows(roles, projection, artifacts, normalized, offers)
+    }
+
+    fn from_normalized_rows(
+        roles: &CompilerInputProjection,
+        projection: &CompilerArtifactMetadata,
+        artifacts: &ArtifactView,
+        normalized: RequestNativeAvailability,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+    ) -> Result<Self, CompileError> {
         let mut metadata = CompilerArtifactMetadata {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
         };
+        let mut advertised = BTreeMap::new();
         for row in normalized.rows() {
             row.validate_full_evidence()?;
             if row.mode == NativeTransportMode::Full
@@ -1769,16 +1790,43 @@ impl NativeCompilerTransport {
             }
             crate::artifact_inventory::validate_consumed_native_namespace(
                 &row.original,
-                &metadata.entries,
+                &projection.entries,
             )?;
-            metadata.entries.insert(
-                row.original.descriptor.owner.clone(),
-                Arc::clone(&row.original),
-            );
+            let owner = &row.original.descriptor.owner;
+            let Some(role) = roles.snapshot_roles().get(owner) else {
+                continue;
+            };
+            let direct = match role.original() {
+                Some(original) => original == row.original.descriptor.id,
+                None => {
+                    role.interface() == row.canonical
+                        && offers.iter().any(|offer| {
+                            offer.original() == row.original.descriptor.id
+                                && offer.matches_direct_canonical_binding(artifacts)
+                        })
+                }
+            };
+            if direct
+                && advertised
+                    .insert(owner.clone(), row.original.descriptor.id)
+                    .is_some_and(|previous| previous != row.original.descriptor.id)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                        owner: owner.clone(),
+                    },
+                ));
+            }
+        }
+        for (owner, id) in &advertised {
+            metadata
+                .entries
+                .insert(owner.clone(), Arc::clone(&normalized.0[id].original));
         }
         Ok(Self {
             metadata,
             availability: normalized.0,
+            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         })
     }
 
@@ -1869,7 +1917,7 @@ impl NativeCompilerTransport {
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
         roots: &BTreeSet<ArtifactId>,
     ) -> Result<Self, CompileError> {
-        let mut metadata = CompilerArtifactMetadata {
+        let metadata = CompilerArtifactMetadata {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
         };
@@ -1977,11 +2025,8 @@ impl NativeCompilerTransport {
                     .clone();
                 crate::artifact_inventory::validate_consumed_native_namespace(
                     &entry,
-                    &metadata.entries,
+                    &projection.entries,
                 )?;
-                metadata
-                    .entries
-                    .insert(entry.descriptor.owner.clone(), entry);
                 let contributions = availability.entry(*original).or_default();
                 if !contributions
                     .iter()
@@ -2033,11 +2078,13 @@ impl NativeCompilerTransport {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
-        let availability = Arc::new(availability);
-        Ok(Self {
-            metadata,
-            availability,
-        })
+        Self::from_normalized_rows(
+            roles,
+            projection,
+            artifacts,
+            RequestNativeAvailability(Arc::new(availability)),
+            offers,
+        )
     }
 }
 
@@ -2134,6 +2181,10 @@ impl RequestCompilerInputs {
         RequestNativeAvailability(Arc::clone(&self.native_transport.availability))
     }
 
+    pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
+        self.native_transport.advertised.clone()
+    }
+
     pub(crate) fn available_original_sources(
         &self,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
@@ -2176,6 +2227,7 @@ impl ProtectedScaffoldRequirements {
             &metadata,
             support.artifacts(),
             support.native_availability(),
+            support.native_offers(),
         )?;
         Ok(RequestCompilerInputs {
             source_support: Arc::new(support),
@@ -7237,17 +7289,13 @@ impl ExactDeclarationContext {
             .collect::<BTreeSet<_>>();
         for certificate in authored {
             self = self.admit_producer(certificate.toolchain_identity_sha256())?;
-            let incoming = certificate
-                .compiler_source_support()
-                .for_source_owners(&selected_sources)?;
+            let incoming = certificate.publication_compiler_support(&selected_sources)?;
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }
         for join in joins {
             self = self.admit_producer(join.toolchain_identity_sha256())?;
-            let incoming = join
-                .compiler_source_support()
-                .for_source_owners(&selected_sources)?;
+            let incoming = join.publication_compiler_support(&selected_sources)?;
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }

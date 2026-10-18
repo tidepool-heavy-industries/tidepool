@@ -2528,6 +2528,7 @@ pub(crate) struct CertifiedSourceSelection {
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
     private_native: crate::declaration_context::RequestNativeAvailability,
+    private_advertised: crate::declaration_context::AdvertisedNativeOriginals,
     input_origin: CertifiedInputOrigin,
 }
 
@@ -2745,6 +2746,7 @@ impl CertifiedSourceSelection {
             modules: Arc::new(BTreeMap::new()),
             produced_types: None,
             private_native: Default::default(),
+            private_advertised: Default::default(),
             input_origin: CertifiedInputOrigin::NewProducts,
         }
     }
@@ -2798,6 +2800,7 @@ impl CertifiedSourceSelection {
         selected.input_origin =
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         selected.private_native = inputs.private_native_availability();
+        selected.private_advertised = inputs.advertised_native_originals();
         for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -3453,8 +3456,8 @@ impl CertifiedSourceSelection {
             "unversioned source lacks compiler selection",
         ))?;
         let original = self
-            .private_native
-            .receipt_original(unit, module, version)
+            .private_advertised
+            .receipt_original(&self.private_native, unit, module, version)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
             .ok_or(CertificationError::Mismatch(
                 "source outside compiler selection",
