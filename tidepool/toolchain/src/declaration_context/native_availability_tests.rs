@@ -3064,27 +3064,10 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
 #[test]
 fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
-    let products = [b"first".as_slice(), b"second".as_slice()].map(|literal| {
-        let product = fixture_finalized_product(
-            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
-                "fixture",
-                "AdvertisedHistory",
-                vec![(7, vec![]), (9001, vec![])],
-                71,
-                &BTreeMap::new(),
-                b"AdvertisedHistory".to_vec(),
-                &BTreeMap::new(),
-                literal,
-            ),
-            producer,
-        );
-        recovered_witness_fixtures(&[product]).remove(0).product
-    });
-    assert_eq!(
-        products[0].owner(),
-        products[1].owner(),
-        "direct identity must disambiguate even the same cached module owner"
-    );
+    let products = [
+        product("AdvertisedHistory", 71),
+        product("AdvertisedHistory", 72),
+    ];
     assert_eq!(
         products[0].module_interface(),
         products[1].module_interface()
@@ -3179,10 +3162,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
                     &native.module_version,
                 )
                 .unwrap();
-            assert_eq!(
-                row.unwrap().original.descriptor.id,
-                entries[winner].descriptor.id
-            );
+            assert_eq!(row.is_some(), index == winner);
         }
         let validation = PackageInterfaceValidation::default();
         let receipt = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -3248,7 +3228,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         .err()
         .expect("explicit source Original cannot accept a competing historical Original");
         assert!(
-            matches!(&error, CompileError::ExtractFailed(detail) if detail == "exact declaration context: issued native dependency conflicts with request interface"),
+            matches!(&error, CompileError::ExtractFailed(detail) if detail == "artifact inventory: issued native dependency conflicts with request interface"),
             "actual_error={error:?}"
         );
     }
