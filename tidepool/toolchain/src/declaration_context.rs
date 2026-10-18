@@ -11349,7 +11349,7 @@ mod tests {
                 CompilerInputProjection::from_issued_entries(&views[index].entries()).unwrap();
             let context = combined
                 .context_with_graph_selection(
-                    selections[index].clone(),
+                    &selections[index],
                     &projection.roles(),
                     vec![],
                 )
