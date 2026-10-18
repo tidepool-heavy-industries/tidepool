@@ -5185,10 +5185,14 @@ fn compile_invocation_inner(
                 original_entry: None,
             })
         })();
-        invocation_timing.finish(portable.is_ok());
-        return portable.map_err(|error| {
-            retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error)
+        let portable = portable.map_err(|error| {
+            invocation_timing.retry("failure_retention");
+            let error = retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error);
+            invocation_timing.advance("refusal_return");
+            error
         });
+        invocation_timing.finish(portable.is_ok());
+        return portable;
     }
     let extracted = extract_and_read(
         run,
