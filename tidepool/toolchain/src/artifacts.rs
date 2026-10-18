@@ -1791,6 +1791,8 @@ impl ModuleCandidateOffer {
         )?;
         timing.advance("private_native_availability");
         let private = private_native_availability(&context, producer, selected.as_deref())?;
+        let producer_bytes = producer.to_vec();
+        let include_paths = include.to_vec();
         timing.advance("prepare_exact_input");
         let exact = compile_context_with_declarations(compile_context, context.clone())
             .prepare_compilation_with_private_input(
@@ -1807,8 +1809,8 @@ impl ModuleCandidateOffer {
         timing.advance("assemble_offer");
         let offer = Self {
             selected,
-            producer: producer.to_vec(),
-            include: include.to_vec(),
+            producer: producer_bytes,
+            include: include_paths,
             exact: Some(exact),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
