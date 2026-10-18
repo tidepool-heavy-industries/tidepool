@@ -7043,29 +7043,28 @@ impl ArtifactView {
             let selected_sources = match &demand {
                 CompilerNativeDemand::SourceSelections { left, right } => {
                     let mut sources = Vec::new();
-                    let shares_selected_issuer = |candidate: &Self| -> Result<bool, CompileError> {
-                        let state = candidate.lease.inventory.0.lock().expect("inventory lock");
-                        let owned = &candidate.read_projection(&state).nodes;
-                        for id in [role.interface(), original] {
-                            if namespace.get(&id) != Some(&candidate.resolve_binding(id, owned)?) {
-                                return Ok(false);
-                            }
-                        }
-                        Ok(true)
+                    let shares_selected_issuer = |candidate: &Self| {
+                        // The chosen source was resolved above. A losing source
+                        // must name that same pair in its own namespace; its
+                        // broader custody cannot supply a substitute binding.
+                        std::ptr::eq(candidate, source)
+                            || [role.interface(), original].into_iter().all(|id| {
+                                candidate.lease.selection.namespace.get(&id) == namespace.get(&id)
+                            })
                     };
                     // Equal payload roles can belong to different issuances.
                     // Choices follow the selected canonical/original pair;
                     // the other source's immutable graph remains in custody.
                     if projection.snapshot_roles().get(owner) == Some(role) {
                         if let Some(left) = left {
-                            if shares_selected_issuer(self)? {
+                            if shares_selected_issuer(self) {
                                 sources.push(*left);
                             }
                         }
                     }
                     if incoming.snapshot_roles().get(owner) == Some(role) {
                         if let Some(right) = right {
-                            if shares_selected_issuer(other)? {
+                            if shares_selected_issuer(other) {
                                 sources.push(*right);
                             }
                         }
