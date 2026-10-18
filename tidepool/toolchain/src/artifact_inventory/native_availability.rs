@@ -103,27 +103,45 @@ impl<'a> NativeDependencyCatalog<'a> {
         Ok(qualifications)
     }
 
-    fn groups(
+    fn group_supports(
         &self,
         key: NativeGroupKey,
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
-    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
-        let mut groups = imbl::OrdSet::new();
+    ) -> Vec<(NativeGroupBinding, &IssuedNativeOffer)> {
+        let mut supports = BTreeMap::new();
         match &self.0 {
             DependencyGrantSource::Request(inputs) => {
                 for row in inputs.availability_rows() {
                     if let Some(support) = row.dependency_support(key, owner) {
-                        groups.extend(support.groups());
+                        for group in support.groups() {
+                            if let Some(offer) = support.offer_for_group(group) {
+                                supports.entry(group).or_insert(offer);
+                            }
+                        }
                     }
                 }
             }
             DependencyGrantSource::Source { offers, .. } => {
                 for offer in offers {
-                    groups.extend(offer.group_bindings(key));
+                    for group in offer.group_bindings(key) {
+                        supports.entry(group).or_insert(offer);
+                    }
                 }
             }
         }
-        Ok(groups)
+        supports.into_iter().collect()
+    }
+
+    fn groups(
+        &self,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
+        Ok(self
+            .group_supports(key, owner)
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect())
     }
 }
 
@@ -141,9 +159,33 @@ pub(super) fn bind_certified_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    mut incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
+) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
+    bind_input_demand(
+        state,
+        parent,
+        entries,
+        incoming,
+        demanded,
+        NativeDemandSource::Certified(selection),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum NativeDemandSource<'a> {
+    Certified(&'a crate::certified_products::CertifiedSourceSelection),
+    Catalog(&'a NativeDependencyCatalog<'a>),
+}
+
+fn bind_input_demand(
+    state: &mut InventoryState,
+    parent: &ArtifactView,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    mut incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    demanded: &BTreeSet<NativeGroupKey>,
+    source: NativeDemandSource<'_>,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let namespace = parent.namespace();
     let mut retained_offers = Vec::new();
@@ -160,24 +202,66 @@ pub(super) fn bind_certified_input_demand(
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(failure("native demand lacks original payload"));
         };
-        if !selection.permits_native_group(key.artifact, product.owner(), key.original_ordinal) {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact: key.artifact,
-                    original_ordinal: key.original_ordinal,
-                },
-            ));
-        }
-        let resolution = selection
-            .native_group_candidates(*key, product.owner())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let crate::certified_products::NativeGroupCandidates::IssuedAvailability(candidates) =
-            resolution
-        else {
-            // Only a current product may issue a new body graph. Its inherited
-            // dependency requirements have already passed the raw proof check.
-            continue;
+        let mut supports = match source {
+            NativeDemandSource::Certified(selection) => {
+                if !selection.permits_native_group(
+                    key.artifact,
+                    product.owner(),
+                    key.original_ordinal,
+                ) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: key.artifact,
+                            original_ordinal: key.original_ordinal,
+                        },
+                    ));
+                }
+                let resolution = selection
+                    .native_group_candidates(*key, product.owner())
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+                let crate::certified_products::NativeGroupCandidates::IssuedAvailability(
+                    candidates,
+                ) = resolution
+                else {
+                    continue;
+                };
+                candidates
+                    .into_iter()
+                    .map(|group| {
+                        selection
+                            .native_group_support(*key, product.owner(), group)
+                            .map(|support| (group, support))
+                            .ok_or_else(|| {
+                                admission_failure(
+                                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                                        artifact: key.artifact,
+                                        original_ordinal: key.original_ordinal,
+                                    },
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            NativeDemandSource::Catalog(catalog) => catalog
+                .group_supports(*key, product.owner())
+                .into_iter()
+                .map(|(group, offer)| {
+                    (
+                        group,
+                        crate::certified_products::CertifiedNativeGroupSupport::Issued(offer),
+                    )
+                })
+                .collect(),
         };
+        if let NativeDemandSource::Catalog(catalog) = source {
+            if let InputNativeDecision::IssuedChoices(choices) =
+                catalog.decision(&entry.descriptor.owner)
+            {
+                if let Some(chosen) = choices.get(&key.original_ordinal) {
+                    supports.retain(|(group, _)| group == chosen);
+                }
+            }
+        }
         let canonical = ArtifactEntry::canonical(
             product
                 .module_interface()
@@ -187,15 +271,7 @@ pub(super) fn bind_certified_input_demand(
         .descriptor
         .id;
         let mut compatible = Vec::new();
-        for group in candidates {
-            let Some(support) = selection.native_group_support(*key, product.owner(), group) else {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact: key.artifact,
-                        original_ordinal: key.original_ordinal,
-                    },
-                ));
-            };
+        for (group, support) in supports {
             let node = InventoryNodeKey::Group(group);
             let (owned, payloads, retained_offer) = match support {
                 crate::certified_products::CertifiedNativeGroupSupport::Issued(offer) => {
@@ -277,6 +353,11 @@ pub(super) fn bind_certified_input_demand(
             if namespace
                 .get(&key.artifact)
                 .is_some_and(|selected| *selected != carrier)
+            {
+                continue;
+            }
+            if matches!(source, NativeDemandSource::Catalog(_))
+                && !namespace.contains_key(&canonical)
             {
                 continue;
             }
@@ -381,16 +462,14 @@ pub(super) fn bind_certified_input_demand(
 /// execution. Resolve only their certified imports from the supplied offers;
 /// proof roots remain separate from these dependency choices.
 pub(super) fn bind_fresh_product_dependencies(
-    state: &InventoryState,
+    state: &mut InventoryState,
     parent: &ArtifactView,
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
     dependencies: &NativeDependencyCatalog<'_>,
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
-) -> Result<(), CompileError> {
-    let namespace = parent.namespace();
-    let projection = parent.read_projection(state);
+) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let mut wanted = BTreeSet::new();
     for group in fresh {
         let entry = &entries[&group.artifact];
@@ -427,114 +506,25 @@ pub(super) fn bind_fresh_product_dependencies(
             }
         }
     }
-    if wanted.is_empty() {
-        return Ok(());
-    }
-    let mut offered = imbl::OrdSet::new();
-    for key in &wanted {
-        let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
-            unreachable!("certified dependency has an original owner")
-        };
-        offered.extend(
-            dependencies
-                .groups(*key, product.owner())?
-                .into_iter()
-                .map(InventoryNodeKey::Group),
-        );
-    }
-    // Issued bindings must still be in this admission's retained custody.
-    // Following their immutable edges does not choose another historical offer.
-    for node in &offered {
-        if !state.contains_node(node)
-            || admitted_closure(state, [*node].into_iter())
-                .iter()
-                .any(|node| !projection.nodes.contains(node))
-        {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeRootOutsideView {
-                    artifact: node.artifact(),
-                },
-            ));
-        }
-    }
-    for key in wanted {
-        let mut candidates = BTreeSet::new();
-        let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
-            unreachable!("certified native dependency has an original owner")
-        };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-            .descriptor
-            .id;
-        if let Some(binding) = namespace.get(&canonical) {
-            for node in &offered {
-                let InventoryNodeKey::Group(group) = node else {
-                    continue;
-                };
-                if group.binding.artifact() != key.artifact
-                    || group.original_ordinal != key.original_ordinal
-                {
-                    continue;
-                }
-                // A scoped Group issuer is not its artifact carrier. Follow
-                // the checked same-original Interface edge without collapsing
-                // distinct Groups that happen to share that carrier.
-                let compatible = state.outgoing(*node).any(|(target, edge)| {
-                    let InventoryNodeKey::Artifact(carrier) = target else {
-                        return false;
-                    };
-                    carrier.artifact == key.artifact
-                        && *edge == ArtifactDependency::Interface
-                        && !namespace
-                            .get(&key.artifact)
-                            .is_some_and(|selected| *selected != carrier)
-                        && state.outgoing(target).any(|(target, edge)| {
-                            target == InventoryNodeKey::Artifact(*binding)
-                                && *edge == ArtifactDependency::Interface
-                        })
-                });
-                if compatible {
-                    candidates.insert(*group);
-                }
-            }
-        }
-        if let InputNativeDecision::IssuedChoices(choices) =
-            dependencies.decision(&entries[&key.artifact].descriptor.owner)
-        {
-            if let Some(chosen) = choices.get(&key.original_ordinal) {
-                if !candidates.contains(chosen) {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::NativeGroupUnavailable {
-                            artifact: key.artifact,
-                            original_ordinal: key.original_ordinal,
-                        },
-                    ));
-                }
-                candidates = BTreeSet::from([*chosen]);
-            }
-        }
-        let Some(group) = candidates.first().copied() else {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact: key.artifact,
-                    original_ordinal: key.original_ordinal,
-                },
-            ));
-        };
-        if candidates.len() != 1 {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::BindingAmbiguity {
-                    artifact: key.artifact,
-                },
-            ));
-        }
-        // This group's immutable edges own its historical children. Do not
-        // resolve each child again against the receiving namespace.
-        for node in admitted_closure(state, [InventoryNodeKey::Group(group)].into_iter()) {
+    let acquired = bind_input_demand(
+        state,
+        parent,
+        entries,
+        BTreeMap::new(),
+        &wanted,
+        NativeDemandSource::Catalog(dependencies),
+    )?;
+    for group in acquired.bindings.values() {
+        // Historical children follow this exact acquired owner. These are
+        // dependency edges for new bodies, never executable request roots.
+        for node in admitted_closure(state, [InventoryNodeKey::Group(*group)].into_iter()) {
             if let InventoryNodeKey::Group(group) = node {
-                validate_consumed_native_namespace(
-                    &entries[&group.binding.artifact()],
-                    consumed_namespace,
-                )?;
+                let entry = acquired
+                    .entries
+                    .get(&group.binding.artifact())
+                    .or_else(|| entries.get(&group.binding.artifact()))
+                    .ok_or_else(|| failure("acquired native dependency payload missing"))?;
+                validate_consumed_native_namespace(entry, consumed_namespace)?;
                 required
                     .entry(NativeGroupKey {
                         artifact: group.binding.artifact(),
@@ -545,7 +535,7 @@ pub(super) fn bind_fresh_product_dependencies(
             }
         }
     }
-    Ok(())
+    Ok(acquired)
 }
 
 /// Consuming exact native support must respect a selected compiler role. An

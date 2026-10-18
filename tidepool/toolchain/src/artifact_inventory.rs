@@ -3886,9 +3886,10 @@ impl ArtifactInventory {
                 }
             }
         }
+        let mut demanded_offers = Vec::new();
         if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
-            native_availability::bind_fresh_product_dependencies(
-                &state,
+            let acquired = native_availability::bind_fresh_product_dependencies(
+                &mut state,
                 parent,
                 consumed_namespace
                     .as_ref()
@@ -3898,9 +3899,10 @@ impl ArtifactInventory {
                 dependencies,
                 &mut required_groups,
             )?;
+            selected.extend(acquired.entries);
+            demanded_offers.extend(acquired.offers);
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
-        let mut demanded_offers = Vec::new();
         if let ArtifactRootIntent::Certified(selection) = root_intent {
             let native_availability::CertifiedNativeDemandAcquisition {
                 entries: incoming,
