@@ -18435,8 +18435,11 @@ mod tests {
                 .match_product(&first_request, &input, &source, &changed, &operation)
                 .err()
                 .expect("lexically different evidence must not match the issued receipt");
-            assert!(matches!(refusal, CompileError::ExtractFailed(message)
-                if message == "source-cache-ineligible evidence differs from exact fresh proof"));
+            assert!(
+                matches!(&refusal, CompileError::ExtractFailed(message)
+                    if message == "exact declaration context: source-cache-ineligible evidence differs from exact fresh proof"),
+                "{refusal:?}"
+            );
         }
         let restricted = InventoryOperation::new(InventoryDecodeLimits {
             max_work: bytes.len() * 64 - 1,
