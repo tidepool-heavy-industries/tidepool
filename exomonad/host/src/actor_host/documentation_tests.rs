@@ -102,88 +102,74 @@ fn published_notebook_sources_match_authored_fixtures() {
     );
 }
 
-#[tokio::test]
-async fn frozen_static_model_selections_typecheck_all_primary_families() {
-    for (primary, invalid, expected_option) in [
-        (
-            "argon",
-            "Models.argon \"catalog\" \"argon\" (Models.DeepSeekOptions Models.DeepSeekHigh)",
-            "ArgonOptions",
-        ),
-        (
-            "flash",
-            "Models.deepSeek \"catalog\" \"flash\" (Models.OpenAIOptions Models.OpenAILow)",
-            "DeepSeekOptions",
-        ),
-        (
-            "sol",
-            "Models.openAI \"catalog\" \"sol\" (Models.ArgonOptions Models.EffortLow)",
-            "OpenAIOptions",
-        ),
-    ] {
-        let campaign = TestCampaign::start_with_config(
-            |admission| admission,
-            |config| {
-                use crate::exomonad::model_catalog::{ModelConfig, ProviderConfig};
-                let authored = config.workspace.join(".exomonad");
-                std::fs::create_dir_all(&authored).unwrap();
-                let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
-                    "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
-                ))
-                .unwrap();
-                let inference = project.inference.as_mut().unwrap();
-                inference.providers.insert(
-                    "openai".into(),
-                    ProviderConfig {
-                        backend: exomonad_actor::Backend::OpenAIPlan,
-                        credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
-                        credential_env: None,
-                        endpoint: None,
-                        inference_limits: Default::default(),
-                    },
-                );
-                inference.models.insert(
-                    "sol".into(),
-                    ModelConfig {
-                        provider: "openai".into(),
-                        model: "gpt-6.1-sol".into(),
-                        effort: "high".into(),
-                        allowed_efforts: vec!["low".into(), "medium".into(), "high".into()],
-                    },
-                );
-                let profile = inference.profiles.get_mut("argon").unwrap();
-                profile.default = primary.into();
-                profile.allowed.push("sol".into());
-                project.haskell = crate::exomonad::workspace::HaskellConfig {
-                    source_roots: vec![".".into()],
-                    modules: vec!["GeneratedModelChecks".into()],
-                    ..Default::default()
-                };
-                project.prompts = Default::default();
-                project.apply_inference().unwrap();
-                config.model = project.defaults.model.clone();
-                config.reasoning = project.defaults.reasoning;
-                std::fs::write(
-                    authored.join("config.toml"),
-                    toml::to_string(&project).unwrap(),
+async fn check_frozen_static_model_selection(
+    primary: &'static str,
+    invalid: &'static str,
+    expected_option: &'static str,
+) {
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            use crate::exomonad::model_catalog::{ModelConfig, ProviderConfig};
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            let mut project: crate::exomonad::ExomonadConfig = toml::from_str(include_str!(
+                "../../../../exomonad/examples/persona/.exomonad/config.argon.toml"
+            ))
+            .unwrap();
+            let inference = project.inference.as_mut().unwrap();
+            inference.providers.insert(
+                "openai".into(),
+                ProviderConfig {
+                    backend: exomonad_actor::Backend::OpenAIPlan,
+                    credential_file: Some("/tmp/tidepool-typecheck-unread-credential".into()),
+                    credential_env: None,
+                    endpoint: None,
+                    inference_limits: Default::default(),
+                },
+            );
+            inference.models.insert(
+                "sol".into(),
+                ModelConfig {
+                    provider: "openai".into(),
+                    model: "gpt-6.1-sol".into(),
+                    effort: "high".into(),
+                    allowed_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                },
+            );
+            let profile = inference.profiles.get_mut("argon").unwrap();
+            profile.default = primary.into();
+            profile.allowed.push("sol".into());
+            project.haskell = crate::exomonad::workspace::HaskellConfig {
+                source_roots: vec![".".into()],
+                modules: vec!["GeneratedModelChecks".into()],
+                ..Default::default()
+            };
+            project.prompts = Default::default();
+            project.apply_inference().unwrap();
+            config.model = project.defaults.model.clone();
+            config.reasoning = project.defaults.reasoning;
+            std::fs::write(
+                authored.join("config.toml"),
+                toml::to_string(&project).unwrap(),
+            )
+            .unwrap();
+            let fixture = tidepool_testing::fixture_source(
+                "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs",
+            );
+            std::fs::write(authored.join("GeneratedModelChecks.hs"), fixture).unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
                 )
-                .unwrap();
-                let fixture = tidepool_testing::fixture_source(
-                    "exomonad/host/src/actor_host/fixtures/generated_model_choices.hs",
-                );
-                std::fs::write(authored.join("GeneratedModelChecks.hs"), fixture).unwrap();
-                super::test_campaign::commit_workspace(&config.workspace);
-                config.workspace_inputs = Some(
-                    crate::exomonad::workspace::FrozenWorkspace::load(
-                        &config.workspace,
-                        &config.run_directory.path(),
-                    )
-                    .unwrap(),
-                );
-            },
-        )
-        .await;
-        campaign.run_scenario(|campaign| Box::pin(async move {
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
             let root = campaign.root_installation.policy.clone();
             let source = format!(
                 "import qualified Exomonad.Models as Models\nimport qualified GeneratedModelChecks\nimport qualified Tidepool.Internal.ModelControl as Control\ndisplay (Models.modelSelection currentModel == Models.modelSelection Models.primaryModel && GeneratedModelChecks.primaryMatches \"{primary}\" && GeneratedModelChecks.checkCatalog (case Models.modelSelection Models.primaryModel of Control.ModelSelectionEnvelope identity _ _ -> identity))"
@@ -197,7 +183,36 @@ async fn frozen_static_model_selections_typecheck_all_primary_families() {
             assert_eq!(refusal["items"][0]["failureLayer"], "compile", "{primary}: {refusal}");
             assert!(refusal.to_string().contains(expected_option), "{primary}: {refusal}");
         })).await;
-    }
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_argon_primary() {
+    check_frozen_static_model_selection(
+        "argon",
+        "Models.argon \"catalog\" \"argon\" (Models.DeepSeekOptions Models.DeepSeekHigh)",
+        "ArgonOptions",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_deepseek_primary() {
+    check_frozen_static_model_selection(
+        "flash",
+        "Models.deepSeek \"catalog\" \"flash\" (Models.OpenAIOptions Models.OpenAILow)",
+        "DeepSeekOptions",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn frozen_static_model_selection_typechecks_openai_primary() {
+    check_frozen_static_model_selection(
+        "sol",
+        "Models.openAI \"catalog\" \"sol\" (Models.ArgonOptions Models.EffortLow)",
+        "OpenAIOptions",
+    )
+    .await;
 }
 
 #[tokio::test]
