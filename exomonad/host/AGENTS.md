@@ -90,6 +90,9 @@ at the real provider attachment consumer.
 Provider changes must preserve unrelated authored launch configuration, including
 Haskell source roots, the selected agent spec, model aliases and prompts. Compare
 the resulting configuration with the original at the semantic field boundary.
+Preserve the configured source and prompt closure, including untracked or ignored
+authored modules; Git visibility is not a source inventory. Exclude runtime
+outputs according to their owning lifecycle rather than broad path patterns.
 Launch readiness must witness the selected spec and tool surface and publication
 of its declared startup context at the provider attachment consumer. A healthy
 host and zero operator inputs do not establish that identity. Missing a configured
