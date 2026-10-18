@@ -7580,6 +7580,51 @@ mod tests {
                 .unwrap();
             assert_eq!(restored.capture_graph_selection(), packet);
         }
+        let extra = Arc::new(issued_native_groups(
+            "ScopePacketUnrelated",
+            vec![(7, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let widened = inventory.admit_shared(&selected, vec![extra]).unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+        let partial = offer
+            .within_projection(&projection, &inventory.empty_view())
+            .unwrap()
+            .unwrap();
+        assert!(!partial.is_full());
+        assert!(partial.proof().is_some());
+        let empty = IssuedNativeOffer::issue(native.descriptor.id, &selected, None).unwrap();
+        for original in [&offer, &partial, &empty] {
+            use crate::exact_context::NativeOfferSnapshotBody;
+            let mut facts = original.snapshot_facts();
+            let selection = match &mut facts.body {
+                NativeOfferSnapshotBody::Empty(selection)
+                | NativeOfferSnapshotBody::Partial(selection)
+                | NativeOfferSnapshotBody::Full(selection) => selection,
+            };
+            let mut snapshot = selection.snapshot().as_ref().clone();
+            let required = snapshot.graph_selection().unwrap().selections.len();
+            for (scope, proof) in &widened.selection_snapshot().scopes {
+                snapshot.scopes.insert(*scope, proof.clone());
+            }
+            assert!(
+                snapshot.scopes.len() > required,
+                "the recorded selection holds extra authenticated availability facts"
+            );
+            *selection = ExactArtifactSelection::from_snapshot(Arc::new(snapshot));
+            let restored = facts.restore(&widened).unwrap();
+            assert_eq!(restored.snapshot_facts(), facts);
+            assert_eq!(restored.is_full(), original.is_full());
+            assert_eq!(
+                restored.issued_group_carriers().unwrap(),
+                original.issued_group_carriers().unwrap()
+            );
+            assert!(
+                facts.restore(&inventory.empty_view()).is_err(),
+                "missing actual acquisition still refuses"
+            );
+        }
         // Extra authenticated proof facts still cannot be appended to a selected
         // graph packet. The receiver's strict minimal-ancestry guard is unchanged.
         let mut excess = carrier_packet;

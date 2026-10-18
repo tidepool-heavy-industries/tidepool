@@ -1132,33 +1132,22 @@ impl IssuedNativeOffer {
                 "recovered native offer scope is outside acquisition custody",
             ));
         }
-        let nodes = snapshot
-            .retained_nodes()
+        let graph = snapshot
+            .graph_selection()
             .map_err(|_| failure("recovered native offer has malformed exact closure"))?;
-        let graph = ArtifactGraphSelection {
-            selections: snapshot
-                .scopes
-                .values()
-                .map(|proof| Arc::clone(proof.proof()))
-                .collect(),
-            bindings: nodes
-                .iter()
-                .filter_map(|node| match node {
-                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
-                    _ => None,
-                })
-                .collect(),
-            namespace: snapshot.namespace.values().copied().collect(),
-            roots: snapshot.roots.keys().copied().collect(),
-            native_groups: nodes
-                .iter()
-                .filter_map(|node| match node {
-                    ArtifactBindingNode::Group(group) => Some(*group),
-                    _ => None,
-                })
-                .collect(),
-            custody_roots: snapshot.custody_roots.keys().copied().collect(),
-        };
+        let nodes = graph
+            .bindings
+            .iter()
+            .copied()
+            .map(ArtifactBindingNode::Artifact)
+            .chain(
+                graph
+                    .native_groups
+                    .iter()
+                    .copied()
+                    .map(ArtifactBindingNode::Group),
+            )
+            .collect::<BTreeSet<_>>();
         if matches!(&facts.body, NativeOfferSnapshotBody::Empty(_))
             && (!graph.roots.is_empty()
                 || !graph.namespace.is_empty()
