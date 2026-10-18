@@ -6206,6 +6206,56 @@ impl ArtifactView {
         &self.lease.selection
     }
 
+    /// Restore the complete snapshot's proof custody after its selected graph
+    /// has been authenticated. Additional scopes own facts, not payload nodes.
+    pub(crate) fn recover_snapshot_scope_custody(
+        &self,
+        snapshot: &Arc<ExactSelectionSnapshot>,
+    ) -> Result<Self, CompileError> {
+        let live = self.selection_snapshot();
+        if live.roots != snapshot.roots
+            || live.namespace != snapshot.namespace
+            || live.custody_roots != snapshot.custody_roots
+            || live.scopes.iter().any(|(scope, proof)| {
+                snapshot
+                    .scopes
+                    .get(scope)
+                    .is_none_or(|provided| proof.proof() != provided.proof())
+            })
+            || snapshot
+                .scopes
+                .iter()
+                .any(|(scope, proof)| *scope != proof.proof().selection)
+        {
+            return Err(failure(
+                "complete snapshot differs from authenticated selection",
+            ));
+        }
+        let proofs = snapshot
+            .scopes
+            .values()
+            .map(|proof| Arc::clone(proof.proof()))
+            .collect::<Vec<_>>();
+        let authenticated = scope_proof::authenticate_custody(&proofs)?;
+        let mut state = self.lease.inventory.0.lock().expect("inventory lock");
+        let additions = scope_proof::prepare_install(&state, authenticated.into_proofs())?;
+        scope_proof::install(&mut state, additions);
+        drop(state);
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots: vec![],
+                selection: Arc::clone(snapshot),
+                inventory: self.lease.inventory.clone(),
+                parents: vec![Arc::clone(&self.lease)],
+                issuing_payloads: BTreeMap::new(),
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            BTreeSet::new(),
+        );
+        Ok(Self::from_custody(lease))
+    }
+
     /// Attach hydrated sharing only after inventory recovery has reissued the
     /// same exact facts. The decoded proof grants no payload authority.
     pub(crate) fn bind_selection_snapshot_baseline(

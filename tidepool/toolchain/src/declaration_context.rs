@@ -3316,11 +3316,24 @@ impl RecoveredArtifactInventory {
         }
         let snapshot = acquired.snapshot();
         let graph = snapshot.graph_selection().map_err(failure)?;
-        let mut context = self.context_with_graph_selection(
-            &graph,
-            &snapshot.compiler_roles(),
-            snapshot.lexical(),
-        )?;
+        let mut authenticated =
+            self.authenticate_graph_selection(&graph, &snapshot.compiler_roles())?;
+        authenticated.artifacts = authenticated
+            .artifacts
+            .recover_snapshot_scope_custody(snapshot.selection())?;
+        let compiler_support =
+            crate::artifact_inventory::CompilerSourceSupport::from_recovered_selection(
+                authenticated,
+            )?;
+        let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support,
+            producer: self.producer,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default()
+                .replace(snapshot.lexical())?,
+        })
+        .finish()?;
         let updated = context
             .owner
             .facts

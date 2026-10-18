@@ -123,10 +123,20 @@ impl ScopeProofV3 {
     }
 }
 
-pub(super) fn authenticate(
+/// Complete immutable proof custody grants no selected node or payload authority.
+pub(super) struct AuthenticatedScopeProofs(
+    BTreeMap<ArtifactSelectionId, (Arc<ScopeProofV3>, BindingRows)>,
+);
+
+impl AuthenticatedScopeProofs {
+    pub(super) fn into_proofs(self) -> impl Iterator<Item = Arc<ScopeProofV3>> {
+        self.0.into_values().map(|(proof, _)| proof)
+    }
+}
+
+pub(super) fn authenticate_custody(
     proofs: &[Arc<ScopeProofV3>],
-    selected: &BindingRows,
-) -> Result<BTreeMap<ArtifactSelectionId, (Arc<ScopeProofV3>, BindingRows)>, CompileError> {
+) -> Result<AuthenticatedScopeProofs, CompileError> {
     let mut authenticated = BTreeMap::new();
     for proof in proofs {
         let rows = proof.authenticated_rows()?;
@@ -181,6 +191,14 @@ pub(super) fn authenticate(
     if completed != authenticated.len() {
         return Err(failure("binding scope ancestry cycle"));
     }
+    Ok(AuthenticatedScopeProofs(authenticated))
+}
+
+pub(super) fn authenticate(
+    proofs: &[Arc<ScopeProofV3>],
+    selected: &BindingRows,
+) -> Result<BTreeMap<ArtifactSelectionId, (Arc<ScopeProofV3>, BindingRows)>, CompileError> {
+    let authenticated = authenticate_custody(proofs)?.0;
     let mut required = BTreeSet::new();
     let mut pending = selected
         .keys()
