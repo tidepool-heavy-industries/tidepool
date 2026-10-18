@@ -1193,6 +1193,10 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let expected_contracts = auth
+        .iter()
+        .map(|(key, auth)| (key.clone(), auth.admission().unwrap().contract().clone()))
+        .collect::<BTreeMap<_, _>>();
     runtime
         .configure_inference(auth["executor"].clone())
         .unwrap();
@@ -1349,6 +1353,8 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
             .count(),
         2
     );
+    let mut issued_models = std::collections::BTreeSet::new();
+    let mut issued_requests = std::collections::BTreeSet::new();
     for event in events
         .iter()
         .filter(|event| event.kind == "responses_transport")
@@ -1360,7 +1366,12 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
             Some(harness::transport::ResponsesRoute::DeepSeek)
         );
         assert_eq!(observation.returned_model, observation.requested_model);
-        assert_eq!(observation.usage.unwrap().cached_tokens, Some(0));
+        let usage = observation.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(9));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.cached_tokens, Some(0));
+        assert!(issued_requests.insert(event.request.as_ref().unwrap().0.clone()));
+        assert!(issued_models.insert(observation.requested_model.clone().unwrap()));
         let contract = store
             .native_transport_contract(event.request.as_ref().unwrap())
             .unwrap()
@@ -1370,13 +1381,15 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
             "deepseek-v4-pro" => "planner",
             other => panic!("unselected model: {other}"),
         };
-        assert_eq!(
-            contract.credential,
-            harness::transport::CredentialReference::File {
-                path: files.path().join(key)
-            }
-        );
+        assert_eq!(contract, expected_contracts[key]);
     }
+    assert_eq!(
+        issued_models,
+        std::collections::BTreeSet::from([
+            "deepseek-flash".to_owned(),
+            "deepseek-v4-pro".to_owned()
+        ])
+    );
     for (stop, task) in servers {
         stop.send(()).unwrap();
         task.await.unwrap();
