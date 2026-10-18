@@ -16346,12 +16346,6 @@ mod tests {
                 .and_then(CompilerInputRole::original),
             demands_epoch.then_some(old_original),
         );
-        assert!(surface
-            .artifacts
-            .descriptors()
-            .iter()
-            .any(|row| row.owner == identity("fixture", "Epoch")
-                && row.kind == ArtifactKind::OriginalModule));
         assert_eq!(
             surface
                 .compiler_support
@@ -16384,20 +16378,24 @@ mod tests {
             )),
             Err(error) => panic!("expected the compiler's typed original conflict: {error}"),
         }
-        // Retiring the issuing source cannot revoke byte custody owned by the value.
-        let old_ids = surface.artifacts.artifact_ids();
         drop(old);
-        assert_eq!(surface.artifacts.artifact_ids(), old_ids);
-        let retained = surface.artifacts.entries();
+        drop(value);
+        let retained = surface.compiler_support.artifacts().entries();
         let retained_epoch = retained
             .iter()
-            .find(|entry| entry.descriptor.id == old_original)
-            .unwrap();
-        let ArtifactPayload::Original(product) = &retained_epoch.payload else {
-            panic!("retained historical Epoch remains an original byte owner");
-        };
-        assert_eq!(product.interface_bytes(), old_interface.as_slice());
-        assert_eq!(product.product_bytes(), old_product.as_slice());
+            .find(|entry| entry.descriptor.id == old_original);
+        if demands_epoch {
+            let ArtifactPayload::Original(product) = &retained_epoch.unwrap().payload else {
+                panic!("selected historical Epoch remains an original byte owner");
+            };
+            assert_eq!(product.interface_bytes(), old_interface.as_slice());
+            assert_eq!(product.product_bytes(), old_product.as_slice());
+        } else {
+            assert!(
+                retained_epoch.is_none(),
+                "unused Epoch is not retained by the value"
+            );
+        }
     }
 
     #[test]
@@ -16418,7 +16416,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_value_keeps_nonlexical_originals_and_projected_file_custody() {
+    fn original_custody_keeps_nonlexical_originals_and_projected_file_custody() {
         let (initial, producer) = metadata_fixture();
         let native = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_witness_fixture(
@@ -16544,11 +16542,14 @@ mod tests {
                 value_entry[&identity("fixture", "Value")].descriptor.id,
             ])
             .unwrap();
-        let RetainedValueSourceSurface {
-            artifacts: retained,
-            lexical,
-            ..
-        } = context.retain_value_source_surface(&value, &[]).unwrap();
+        let retained = context
+            .artifact_view()
+            .retain_original_custody(&value)
+            .unwrap();
+        let lexical = context
+            .retain_value_source_surface(&value, &[])
+            .unwrap()
+            .lexical;
         assert!(lexical
             .iter()
             .all(|node| node.owner.module != "HiddenNative"));
@@ -18997,7 +18998,7 @@ mod tests {
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
         assert!(context.lexical_graph().is_empty());
         let RetainedValueSourceSurface {
-            artifacts: retained,
+            compiler_support: retained_support,
             lexical,
             ..
         } = context
@@ -19011,6 +19012,7 @@ mod tests {
                 &[],
             )
             .unwrap();
+        let retained = retained_support.artifacts();
         assert!(support
             .artifact_ids()
             .iter()
@@ -19019,7 +19021,7 @@ mod tests {
             .descriptors()
             .iter()
             .any(|entry| entry.owner == identity("fixture", "Hidden")
-                && entry.kind == ArtifactKind::OriginalModule));
+                && entry.kind == ArtifactKind::CanonicalModuleInterface));
         assert!(lexical.is_empty());
     }
 
@@ -19094,12 +19096,13 @@ mod tests {
                 .all(|node| node.owner != identity("fixture", "Hidden")));
         }
         let RetainedValueSourceSurface {
-            artifacts: view,
+            compiler_support: view_support,
             lexical,
             ..
         } = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
+        let view = view_support.artifacts();
         assert!(lexical
             .iter()
             .all(|node| node.owner != identity("fixture", "Hidden")));
@@ -19113,7 +19116,6 @@ mod tests {
             owners
         };
         let expected_owners = vec![
-            (identity("fixture", "Hidden"), ArtifactKind::OriginalModule),
             (
                 identity("fixture", "Hidden"),
                 ArtifactKind::CanonicalModuleInterface,
@@ -19147,17 +19149,20 @@ mod tests {
             imports: vec![],
         });
         let RetainedValueSourceSurface {
-            artifacts: earlier_view,
+            compiler_support: earlier_support,
             lexical: earlier_lexical,
             ..
         } = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
-        assert!(earlier_view
-            .descriptors()
-            .iter()
-            .any(|entry| entry.owner == identity("fixture", "LaterSupport")
-                && entry.kind == ArtifactKind::OriginalModule));
+        let earlier_view = earlier_support.artifacts();
+        assert!(
+            earlier_view
+                .descriptors()
+                .iter()
+                .all(|entry| { entry.owner != identity("fixture", "LaterSupport") }),
+            "unrelated later support is not retained by an earlier value"
+        );
         assert_eq!(
             typed_owners(&view),
             expected_owners,
