@@ -262,6 +262,23 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   accepted decisions visible in the parent workspace; a child's captured
   context does not receive later changes automatically. Review the concrete
   result and failure paths, then verify the integrated revision.
+- Give review and investigation passes one primary goal and two or three
+  adjacent secondary questions that reuse the same source context. For example,
+  while verifying ownership, inspect bypass APIs, redundant copying, and whether
+  tests enter through production consumers. The primary goal defines completion;
+  secondary findings need concrete evidence and bounded follow-ups, not silent
+  scope expansion. After merging a tranche, independently inspect its joined
+  consumers for incomplete migrations and surviving alternate routes.
+- The coordinator owns technical and editorial judgment throughout delivery.
+  Read critical diffs and production consumers directly; challenge proposed
+  boundaries, unnecessary mechanisms, and tests that do not exercise the claimed
+  behavior. Give workers concrete in-progress steering and take over bounded
+  critical work when direct intervention improves correctness or delivery time.
+  Delegation does not discharge this responsibility: status collection, task
+  routing, and passing counts alone are insufficient review. Distinguish fixture
+  mistakes from product defects, verify that each oracle detects its intended
+  failure, and require joined evidence for the actual user workflow. Use findings
+  to simplify or redirect the work before accepting more implementation.
 - Use an authored project workflow when Git delivery benefits from recursive
   implementation, exact-candidate review, repair, and integration. It is an
   optional composition, not a required agent role or hierarchy. General
