@@ -887,6 +887,7 @@ impl NativeOriginalRequirement {
 
     /// Preserve every distinct supplied choice. A published role owns its
     /// explicit selection; ordinary roles use their pre-merge source issuer.
+    #[cfg(test)]
     pub(crate) fn for_projection(
         projection: &CompilerInputProjection,
         view: &ArtifactView,
