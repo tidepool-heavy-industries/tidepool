@@ -94,6 +94,22 @@ fn shared_scope_and_selection_materialization_work_is_operation_local() {
         })
         .collect::<Vec<_>>();
     assert_eq!(store.get(&proof_cid).unwrap().unwrap(), expected);
+    let full_base = hydrate_selection(&store, &canonical[0]).unwrap();
+    let partial_base = hydrate_selection(&store, &canonical[1]).unwrap();
+    for (snapshot, canonical) in snapshots.iter().zip(&canonical) {
+        let mut materializer = Materializer::new(&store);
+        // Canonical identity is independent of the base chosen before or after
+        // the operation issues a receipt, including custody-only selections.
+        for base in [Some(&full_base), None, Some(&partial_base)] {
+            assert_eq!(
+                materializer
+                    .materialize_selection(base, snapshot)
+                    .unwrap()
+                    .root(),
+                canonical
+            );
+        }
+    }
     // The canonical oracle warms the immutable encoding owner in both arms;
     // this comparison varies physical store custody, not proof encoder warmth.
     for warm in [false, true] {
@@ -184,6 +200,24 @@ fn independent_scope_owners_authenticate_and_contradictory_bodies_refuse() {
     assert!(
         matches!(materializer.materialize_selection(None, &Arc::new(changed)), Err(SnapshotError::Malformed(message)) if message == "conflicting immutable scope proof")
     );
+    assert_eq!(
+        materializer
+            .materialize_selection(None, &snapshots[0])
+            .unwrap()
+            .root(),
+        first.root()
+    );
+    let other = materializer
+        .materialize_selection(None, &snapshots[1])
+        .unwrap();
+    install(&store, materializer.finish().unwrap());
+    assert_eq!(
+        hydrate_selection(&store, other.root())
+            .unwrap()
+            .snapshot()
+            .as_ref(),
+        snapshots[1].as_ref()
+    );
 }
 
 #[test]
@@ -223,6 +257,33 @@ fn scope_receipts_do_not_cross_store_or_failed_operation_boundaries() {
             .as_ref(),
         snapshots[0].as_ref()
     );
+}
+
+#[test]
+fn materialization_retains_exact_owners_once_and_releases_them_at_finish() {
+    let (proof, snapshots) = shared_scope_snapshots();
+    let snapshot = Arc::clone(&snapshots[0]);
+    drop(snapshots);
+    let snapshot_owner = Arc::downgrade(&snapshot);
+    let scope_owner = Arc::downgrade(&proof.0);
+    let store = MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    materializer.materialize_selection(None, &snapshot).unwrap();
+    let snapshot_refs = Arc::strong_count(&snapshot);
+    let scope_refs = Arc::strong_count(&proof.0);
+    for _ in 0..64 {
+        materializer.materialize_selection(None, &snapshot).unwrap();
+    }
+    assert_eq!(Arc::strong_count(&snapshot), snapshot_refs);
+    assert_eq!(Arc::strong_count(&proof.0), scope_refs);
+    drop(snapshot);
+    drop(proof);
+    assert!(snapshot_owner.upgrade().is_some());
+    assert!(scope_owner.upgrade().is_some());
+    let packet = materializer.finish().unwrap();
+    assert!(snapshot_owner.upgrade().is_none());
+    assert!(scope_owner.upgrade().is_none());
+    assert!(!packet.blocks().is_empty());
 }
 
 proptest! {
