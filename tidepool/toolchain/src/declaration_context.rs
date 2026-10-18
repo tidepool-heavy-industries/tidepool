@@ -62,7 +62,7 @@ struct DeclarationContextFacts {
     producer: [u8; 32],
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     lexical: crate::exact_context::ExactLexicalSnapshot,
-    template_imports: Option<Arc<RetainedTemplateImports>>,
+    template_imports: Option<Arc<TemplateImportEvidence>>,
     original_instance_environment: OriginalInstanceEnvironment,
 }
 
@@ -4510,13 +4510,18 @@ struct RetainedTemplateNode {
     interface: TemplateInterfaceNode,
 }
 
-/// Live checked-value custody, issued from the original compiler receipt.
-/// Neither a type projection nor recovered native availability can issue it.
+/// Checked template selection; physical custody and permissions belong to the
+/// containing checked value or declaration context's compiler support.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RetainedTemplateImports {
+pub(crate) struct TemplateImportEvidence {
     producer: [u8; 32],
     roots: BTreeSet<ExactModuleIdentity>,
     graph: BTreeMap<ExactModuleIdentity, RetainedTemplateNode>,
+}
+
+/// Capture retains physical support until it has entered the checked value.
+pub(crate) struct CapturedTemplateImports {
+    evidence: TemplateImportEvidence,
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
 }
 
@@ -4580,21 +4585,28 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
         })
 }
 
-impl RetainedTemplateImports {
-    pub(crate) fn compiler_source_support(
-        &self,
-    ) -> &crate::artifact_inventory::CompilerSourceSupport {
-        &self.compiler_support
-    }
-
-    pub(crate) fn retain_in(&self, artifacts: &ArtifactView) -> Result<ArtifactView, CompileError> {
-        artifacts.retain_custody(self.compiler_support.artifacts())
+impl CapturedTemplateImports {
+    pub(crate) fn into_value_support(
+        self,
+        artifacts: ArtifactView,
+        support: crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<
+        (
+            ArtifactView,
+            crate::artifact_inventory::CompilerSourceSupport,
+            Arc<TemplateImportEvidence>,
+        ),
+        CompileError,
+    > {
+        let artifacts = artifacts.retain_custody(self.compiler_support.artifacts())?;
+        let support = support.merge(&self.compiler_support)?;
+        Ok((artifacts, support, Arc::new(self.evidence)))
     }
 
     pub(crate) fn capture(
         original: &ExactDeclarationContext,
         templates: &[String],
-    ) -> Result<Option<Arc<Self>>, CompileError> {
+    ) -> Result<Option<Self>, CompileError> {
         let interfaces = original.compiler_source_support().selected_interfaces()?;
         let canonical = interfaces
             .values()
@@ -4663,16 +4675,22 @@ impl RetainedTemplateImports {
         let compiler_support = interfaces
             .support_for_owners(graph.keys().cloned().collect())?
             .retain_template_availability(&original.owner.facts.compiler_support)?;
-        let retained = Arc::new(Self {
-            producer: original.owner.facts.producer,
-            roots,
-            graph,
+        let retained = Self {
+            evidence: TemplateImportEvidence {
+                producer: original.owner.facts.producer,
+                roots,
+                graph,
+            },
             compiler_support,
-        });
-        retained.validate(original.owner.facts.producer, original.artifact_view())?;
+        };
+        retained
+            .evidence
+            .validate(original.owner.facts.producer, original.artifact_view())?;
         Ok(Some(retained))
     }
+}
 
+impl TemplateImportEvidence {
     fn validate(&self, producer: [u8; 32], artifacts: &ArtifactView) -> Result<(), CompileError> {
         if producer != self.producer
             || self.roots.is_empty()
@@ -4718,7 +4736,11 @@ impl RetainedTemplateImports {
         Ok(())
     }
 
-    fn merge(left: &Arc<Self>, right: &Arc<Self>) -> Result<Arc<Self>, CompileError> {
+    fn merge(
+        left: &Arc<Self>,
+        right: &Arc<Self>,
+        artifacts: &ArtifactView,
+    ) -> Result<Arc<Self>, CompileError> {
         if Arc::ptr_eq(left, right) {
             return Ok(left.clone());
         }
@@ -4738,9 +4760,8 @@ impl RetainedTemplateImports {
             producer: left.producer,
             roots: left.roots.union(&right.roots).cloned().collect(),
             graph,
-            compiler_support: left.compiler_support.merge(&right.compiler_support)?,
         });
-        merged.validate(merged.producer, merged.compiler_support.artifacts())?;
+        merged.validate(merged.producer, artifacts)?;
         Ok(merged)
     }
 }
@@ -8317,7 +8338,9 @@ impl ExactDeclarationContext {
                 item_timing.advance("merge_template_imports");
                 {
                     let updated = Some(match &self.owner.facts.template_imports {
-                        Some(existing) => RetainedTemplateImports::merge(existing, retained)?,
+                        Some(existing) => {
+                            TemplateImportEvidence::merge(existing, retained, self.artifact_view())?
+                        }
                         None => retained.clone(),
                     });
                     self = self.rebuild(|facts| facts.template_imports = updated);
@@ -13890,8 +13913,20 @@ mod tests {
                     .map(|owner| format!("import {}\n", owner.module))
                     .collect::<String>();
                 {
-                    let updated =
-                        RetainedTemplateImports::capture(&issued, &[template.clone()]).unwrap();
+                    let updated = CapturedTemplateImports::capture(&issued, &[template.clone()])
+                        .unwrap()
+                        .map(|captured| {
+                            let (_, support, evidence) = captured
+                                .into_value_support(
+                                    issued.artifact_view().clone(),
+                                    issued.compiler_source_support().clone(),
+                                )
+                                .unwrap();
+                            issued = issued
+                                .clone()
+                                .rebuild(|facts| facts.compiler_support = support);
+                            evidence
+                        });
                     issued = issued.rebuild(|facts| facts.template_imports = updated);
                 }
                 issued.normalize().unwrap();

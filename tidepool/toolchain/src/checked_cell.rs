@@ -1294,7 +1294,7 @@ pub struct CheckedValueArtifact {
     // Exact type/source selection; full native custody above grants no compiler role.
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
-    template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
+    template_imports: Option<Arc<crate::declaration_context::TemplateImportEvidence>>,
     directory: Arc<ValueInterfaceDirectory>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
@@ -2077,17 +2077,17 @@ impl CheckedValueInputs {
             .retain_output(&certificate)?,
         };
         let templates = cell.specification.template_sources();
-        let template_imports = crate::declaration_context::RetainedTemplateImports::capture(
+        let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
             original_execution,
             &templates,
         )?;
-        let artifact_view = match &template_imports {
-            Some(retained) => retained.retain_in(&artifact_view)?,
-            None => artifact_view,
-        };
-        let compiler_support = match &template_imports {
-            Some(retained) => retained_support.merge(retained.compiler_source_support())?,
-            None => retained_support,
+        let (artifact_view, compiler_support, template_imports) = match template_imports {
+            Some(captured) => {
+                let (artifacts, support, evidence) =
+                    captured.into_value_support(artifact_view, retained_support)?;
+                (artifacts, support, Some(evidence))
+            }
+            None => (artifact_view, retained_support, None),
         };
         Ok(Arc::new(CheckedValueArtifact {
             interface: input,
@@ -2134,7 +2134,7 @@ impl CheckedValueArtifact {
     }
     pub(crate) fn template_imports(
         &self,
-    ) -> Option<&Arc<crate::declaration_context::RetainedTemplateImports>> {
+    ) -> Option<&Arc<crate::declaration_context::TemplateImportEvidence>> {
         self.template_imports.as_ref()
     }
 }
@@ -6120,7 +6120,8 @@ mod tests {
     fn repeated_template_values_keep_exact_custody_and_private_permissions() {
         use super::*;
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+            NativeGroupKey,
         };
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::ExactLexicalNode;
@@ -6166,6 +6167,9 @@ mod tests {
                 unreachable!()
             };
             let native_owner = product.owner().clone();
+            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
             let owner = native.descriptor.owner.clone();
             let entries = vec![native.clone(), child, template_only.clone()];
             let inventory = ArtifactInventory::default();
@@ -6210,6 +6214,47 @@ mod tests {
                 .retain_issued_native_offers(full_support.native_offers().iter().cloned())
                 .unwrap(),
             );
+            // Observe the expected canonical closure from the original issuer,
+            // independently of the checked values whose transfer is under test.
+            let issuer_graph = original.artifact_view().capture_graph_selection();
+            let issuer_edges = original.artifact_view().binding_dependencies();
+            let mut pending = [canonical, template_only.descriptor.id]
+                .into_iter()
+                .map(|id| {
+                    ArtifactBindingNode::Artifact(
+                        *issuer_graph
+                            .namespace
+                            .iter()
+                            .find(|binding| binding.artifact == id)
+                            .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut expected_nodes = BTreeSet::new();
+            while let Some(node) = pending.pop() {
+                if expected_nodes.insert(node) {
+                    pending.extend(
+                        issuer_edges
+                            .iter()
+                            .filter_map(|(from, target, _)| (*from == node).then_some(*target)),
+                    );
+                }
+            }
+            let bindings = expected_nodes
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
+                    ArtifactBindingNode::Group(_) => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let edges = issuer_edges
+                .into_iter()
+                .filter(|(from, _, _)| expected_nodes.contains(from))
+                .collect::<BTreeSet<_>>();
+            assert!(
+                !edges.is_empty(),
+                "the issuer records a canonical dependency edge"
+            );
             let first =
                 capture_test_value_with_template(&original, false, false, 1, "import Epoch\n");
             let second = capture_test_value_with_template(
@@ -6220,28 +6265,14 @@ mod tests {
                 "import TemplateOnly\n",
             );
             let values = [first, second];
-            let mut bindings = BTreeSet::new();
-            let mut edges = BTreeSet::new();
             let mut directories = Vec::new();
             for value in &values {
-                let template = value.template_imports().expect("actual template capture");
-                let support = value.compiler_source_support();
-                let template_view = template.compiler_source_support().artifacts();
-                let graph = template_view.capture_graph_selection();
-                assert!(!graph.bindings.is_empty());
-                assert!(graph.bindings.iter().all(|binding| support
-                    .artifacts()
-                    .capture_graph_selection()
-                    .bindings
-                    .contains(binding)));
-                bindings.extend(graph.bindings);
-                edges.extend(template_view.binding_dependencies());
+                assert!(
+                    value.template_imports().is_some(),
+                    "actual template capture"
+                );
                 directories.push(value.directory.0.path().to_owned());
             }
-            assert!(
-                !edges.is_empty(),
-                "the template retains actual canonical dependency edges"
-            );
             let context = ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
                 .extend_retained_value_artifacts(&[
