@@ -2699,7 +2699,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     let directory_path = directory.path().to_path_buf();
     assert!(!materialization.rows.is_empty());
     assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
-    let offer = {
+    let (offer, retained_offers, retained_custody) = {
         let inputs = completed.compiler_inputs();
         assert!(inputs.artifacts().selected_native_groups().is_empty());
         let entry = context
@@ -2756,7 +2756,25 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, target.artifacts())
                 .unwrap()
                 .unwrap();
-        IssuedNativeOffer::issue(entry.descriptor.id, target.artifacts(), Some(proof)).unwrap()
+        let offer =
+            IssuedNativeOffer::issue(entry.descriptor.id, target.artifacts(), Some(proof)).unwrap();
+        let retained_offers = context
+            .compiler_source_support()
+            .retain_offers([offer.clone()])
+            .unwrap();
+        let retained_custody = context
+            .compiler_source_support()
+            .retain_custody(target.artifacts())
+            .unwrap();
+        assert!(retained_offers
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert!(retained_custody
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        (offer, retained_offers, retained_custody)
     };
     drop(completed);
     drop(context);
@@ -2768,8 +2786,19 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     offer.issued_group_carriers().unwrap();
     drop(offer);
     assert!(
+        directory_owner.upgrade().is_some(),
+        "custody-only support retains the acquired files after the original offer drops"
+    );
+    drop(retained_offers);
+    assert!(
+        directory_owner.upgrade().is_some(),
+        "the separately retained artifact custody still owns the acquired files"
+    );
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    drop(retained_custody);
+    assert!(
         directory_owner.upgrade().is_none(),
-        "the offer must release its last materialization lease"
+        "dropping the last custody-only support releases materialization"
     );
     assert!(!directory_path.exists());
 }

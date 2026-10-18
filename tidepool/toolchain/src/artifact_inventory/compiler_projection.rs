@@ -1140,11 +1140,26 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn retain_custody(&self, incoming: &ArtifactView) -> Result<Self, CompileError> {
-        self.rebuild(
-            self.projection.clone(),
-            self.artifacts.retain_custody(incoming)?,
-            self.native_offers.iter().cloned(),
-        )
+        let artifacts = self.artifacts.retain_custody(incoming)?;
+        let artifacts =
+            artifacts.retain_issued_offer_custody(self.native_offers.iter().cloned())?;
+        let mut selected = self.selected.rows.clone();
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        // Custody attachment preserves the exact namespace and executable
+        // roots. Its acquisition owners may change; its qualified rows cannot.
+        Ok(Self {
+            projection: self.projection.clone(),
+            artifacts,
+            native_offers: Arc::clone(&self.native_offers),
+            native_availability: self.native_availability.clone(),
+            selected: Arc::new(AdmittedCompilerRoles {
+                rows: selected,
+                home_units: Arc::clone(&self.selected.home_units),
+            }),
+            input_decisions: self.input_decisions.clone(),
+        })
     }
 
     pub(crate) fn retain_offers(
@@ -1161,11 +1176,38 @@ impl CompilerSourceSupport {
             // retained order. No new acquisition or seed is being attached.
             return Ok(self.clone());
         }
-        self.rebuild(
-            self.projection.clone(),
-            self.artifacts.clone(),
-            self.native_offers.iter().cloned().chain(incoming),
-        )
+        let mut offers = Vec::new();
+        let artifacts = self.artifacts.retain_issued_offer_custody(
+            self.native_offers
+                .iter()
+                .cloned()
+                .chain(incoming)
+                .filter_map(|offer| {
+                    if offers.contains(&offer) {
+                        None
+                    } else {
+                        offers.push(offer.clone());
+                        Some(offer)
+                    }
+                }),
+        )?;
+        let mut selected = self.selected.rows.clone();
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        // Raw offers add checked custody only. They cannot change the admitted
+        // namespace, normalized permissions or recorded execution decisions.
+        Ok(Self {
+            projection: self.projection.clone(),
+            artifacts,
+            native_offers: offers.into(),
+            native_availability: self.native_availability.clone(),
+            selected: Arc::new(AdmittedCompilerRoles {
+                rows: selected,
+                home_units: Arc::clone(&self.selected.home_units),
+            }),
+            input_decisions: self.input_decisions.clone(),
+        })
     }
 
     pub(crate) fn bind_snapshot_baseline(
@@ -3190,6 +3232,169 @@ mod tests {
             .into_iter()
             .map(|row| Arc::new(ArtifactEntry::original([2; 32], row.product).unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn custody_only_support_additions_preserve_qualified_rows_and_selected_owners() {
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture(
+                "CustodyPermissions",
+                vec![(7, vec![]), (9001, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let entry = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        for foreign in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let incoming_inventory = if foreign {
+                ArtifactInventory::default()
+            } else {
+                inventory.clone()
+            };
+            let full = incoming_inventory
+                .admit_shared(&incoming_inventory.empty_view(), vec![entry.clone()])
+                .unwrap();
+            let incoming =
+                CompilerSourceSupport::from_selected_issuance(projection.clone(), full).unwrap();
+            for ordinals in [Some(vec![7, 9001]), Some(vec![7]), Some(vec![]), None] {
+                let selected = ordinals
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|ordinal| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: *ordinal,
+                    })
+                    .collect();
+                let view = inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        &selected,
+                    )
+                    .unwrap();
+                let support = if ordinals.is_some() {
+                    CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap()
+                } else {
+                    CompilerSourceSupport::new(
+                        projection.for_source_owners(&BTreeSet::new()),
+                        view,
+                        [],
+                        Default::default(),
+                    )
+                    .unwrap()
+                };
+                let rows = support
+                    .native_availability
+                    .rows()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(rows.len(), usize::from(ordinals.is_some()));
+                for row in &rows {
+                    assert_eq!(row.permits(7), ordinals.as_ref().unwrap().contains(&7));
+                    assert_eq!(
+                        row.permits(9001),
+                        ordinals.as_ref().unwrap().contains(&9001)
+                    );
+                }
+                let original_namespace = support.artifacts.namespace();
+                let original_groups = support.artifacts.selected_native_groups();
+                let original_decisions = support.input_decisions.clone();
+                let expected_edges = incoming
+                    .artifacts
+                    .binding_dependencies()
+                    .into_iter()
+                    .filter(|(from, to, _)| {
+                        matches!(
+                            (from, to),
+                            (
+                                ArtifactBindingNode::Artifact(_),
+                                ArtifactBindingNode::Artifact(_)
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !expected_edges.is_empty(),
+                    "incoming native carriers have actual interface edges"
+                );
+                let custody_oracle = support
+                    .rebuild(
+                        support.projection.clone(),
+                        support
+                            .artifacts
+                            .retain_custody(&incoming.artifacts)
+                            .unwrap(),
+                        support.native_offers.iter().cloned(),
+                    )
+                    .unwrap();
+                let offers_oracle = support
+                    .rebuild(
+                        support.projection.clone(),
+                        support.artifacts.clone(),
+                        support
+                            .native_offers
+                            .iter()
+                            .chain(incoming.native_offers.iter())
+                            .cloned(),
+                    )
+                    .unwrap();
+                type_query_work::take();
+                let custody = support.retain_custody(&incoming.artifacts).unwrap();
+                let offers = support
+                    .retain_offers(incoming.native_offers.iter().cloned())
+                    .unwrap();
+                let work = type_query_work::take();
+                assert_eq!(
+                    work.resolved_rows, 0,
+                    "custody does not rederive selected associations"
+                );
+                assert_eq!(
+                    work.canonical_checks, 0,
+                    "custody does not revalidate selected interfaces"
+                );
+                assert_eq!(custody, custody_oracle);
+                assert_eq!(offers, offers_oracle);
+                drop(custody_oracle);
+                drop(offers_oracle);
+                for retained in [custody, offers] {
+                    assert_eq!(retained.artifacts.namespace(), original_namespace);
+                    assert_eq!(retained.artifacts.selected_native_groups(), original_groups);
+                    assert_eq!(retained.input_decisions, original_decisions);
+                    assert_eq!(retained.native_availability.rows().count(), rows.len());
+                    for (row, prior) in retained.native_availability.rows().zip(&rows) {
+                        assert!(Arc::ptr_eq(row, prior));
+                    }
+                    for row in retained.selected.values() {
+                        for (binding, entry) in
+                            std::iter::once(&row.interface).chain(row.original.iter())
+                        {
+                            assert!(Arc::ptr_eq(
+                                entry,
+                                &retained.artifacts.lease.payloads[&binding.artifact]
+                            ));
+                        }
+                    }
+                    assert!(Arc::ptr_eq(
+                        &retained.selected.home_units,
+                        &support.selected.home_units
+                    ));
+                    if retained.native_offers.len() > support.native_offers.len() {
+                        assert!(retained.native_offers.iter().any(|offer| offer.is_full()));
+                    }
+                    // The exact graph is retained as custody, not borrowed from
+                    // the incoming support's selected namespace or demand.
+                    let edges = retained.artifacts.binding_dependencies();
+                    assert!(expected_edges.iter().all(|edge| edges.contains(edge)));
+                }
+            }
+        }
     }
 
     #[test]
