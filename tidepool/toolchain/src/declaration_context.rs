@@ -533,7 +533,7 @@ impl OriginalCompilerInputs {
         selection: &mut crate::certified_products::CertifiedSourceSelection,
         baseline: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-    ) -> Result<(), CompileError> {
+    ) -> Result<ArtifactView, CompileError> {
         let physical = baseline.inventory().admit_certified_with_demand(
             baseline,
             entries,
@@ -552,7 +552,10 @@ impl OriginalCompilerInputs {
         )?;
         selection
             .finish_new_product_availability(&metadata.retained, &transport.availability)
-            .map_err(compiler_evidence_failure)
+            .map_err(compiler_evidence_failure)?;
+        // Return only physical custody. Continuation decisions belong to a
+        // later input admission against the completed selection.
+        Ok(issued.artifacts)
     }
 
     /// Reuse exact authored availability already carried by the context.
