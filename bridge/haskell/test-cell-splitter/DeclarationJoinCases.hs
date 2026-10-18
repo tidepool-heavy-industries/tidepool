@@ -618,7 +618,10 @@ declarationManifestCaptureChecks = bracket temporary removeDirectoryRecursive $ 
   unless (direct == typedWireInput && dispatched == ValidateJoin direct)
     (fail "direct and dispatched declaration readers changed the same captured body")
   -- Strict version cut: preserve canonical framing while changing only v4 to v3.
-  let oldVersion = BS.take 9 bytes <> BS.singleton 51 <> BS.drop 10 bytes
+  let version4Prefix = BS.pack [0x8c, 0x67, 84, 80, 68, 74, 79, 73, 78, 0x61, 52]
+  unless (BS.take (BS.length version4Prefix) bytes == version4Prefix)
+    (fail "version refusal fixture no longer has the declared canonical framing")
+  let oldVersion = BS.take 10 bytes <> BS.singleton 51 <> BS.drop 11 bytes
   forM_ [ BS.empty, BS.init bytes, bytes <> BS.singleton 0, oldVersion
         , BS.pack [0x98, 12] <> BS.tail bytes
         , toStrictByteString (encodeTerm (TList [TString "unknown-operation"])) ] $ \malformed -> do
