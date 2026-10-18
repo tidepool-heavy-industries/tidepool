@@ -289,7 +289,6 @@ import Tidepool.Effects.Core
   , GitOid (..)
   , GitFailureReceipt
   , AgentStopControlOutcome (..)
-  , Reflect
   , reflect
   , ConversationTurn (..)
   , TurnObservation (..)
