@@ -230,6 +230,10 @@ fn admit_original_entry(
                 let sites = parse_asks(asks)?.sites();
                 let products = seal_turn_outputs_with_validation(
                     offer,
+                    offer
+                        .exact
+                        .as_ref()
+                        .map(|request| request.receipt_admission()),
                     &root,
                     source_path,
                     &source,
