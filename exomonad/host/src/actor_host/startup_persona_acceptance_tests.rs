@@ -152,6 +152,7 @@ pub(super) fn configure_persona(
     .unwrap();
     std::fs::write(config.workspace.join(".gitignore"), ".exomonad/state/\n").unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.launch.embedded = config.embedded.clone();
         project.prompts.base = Some("prompts/base.md".into());
         project.prompts.agent = Some("prompts/agent.md".into());
         project.prompts.api_guide = Some("prompts/api-guide.md".into());
