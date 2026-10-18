@@ -44,11 +44,11 @@ data EvidenceTools mode = EvidenceTools
 
 -- For a small decision from a complete packet, prefer Jev. Use this turn when
 -- deciding requires fetching particular evidence and explaining the boundary.
-routeChange :: (Member ModelCall effects, AsyncEffects effects)
-            => (Text -> Eff effects Text)
+routeChange :: (KnownFamily modelFamily, Member (ModelCall modelFamily) effects, AsyncEffects effects)
+            => Model modelFamily -> (Text -> Eff effects Text)
             -> ChangePacket -> Eff effects (ModelResult RoutingDecision)
-routeChange readRef packet = invokeModel
-  (typedTurn @RoutingDecision
+routeChange model readRef packet = invokeModel
+  (typedTurn @RoutingDecision model
     (defaultSpec
       { specTools = EvidenceTools
           (presentWith id $ tool
@@ -71,13 +71,13 @@ data CoordinationTools mode = CoordinationTools
 
 -- A supplied sender enforces the admitted recipients. This turn can inspect,
 -- ask the owner, and report the observed delivery; it cannot widen authority.
-clarifyDependency :: (Member ModelCall effects, AsyncEffects effects)
-                  => (Text -> Eff effects Text)
+clarifyDependency :: (KnownFamily modelFamily, Member (ModelCall modelFamily) effects, AsyncEffects effects)
+                  => Model modelFamily -> (Text -> Eff effects Text)
                   -> (Clarification -> Eff effects Delivery)
                   -> Text -> Eff effects (ModelResult Text)
-clarifyDependency inspect sendQuestion packet = invokeModel
+clarifyDependency model inspect sendQuestion packet = invokeModel
   (withLimits (defaultLimits { requestLimit = Just 4, toolLimit = Just 3 })
-    (textTurn (defaultSpec { specTools = CoordinationTools
+    (textTurn model (defaultSpec { specTools = CoordinationTools
       (presentWith id $ tool "Inspect an admitted dependency" (inspect . reference))
       (presentWith presentJson $ tool
         "Ask the named owner a concrete clarification; report delivery outcome"
@@ -85,22 +85,22 @@ clarifyDependency inspect sendQuestion packet = invokeModel
       "Resolve one dependency ambiguity from this packet. Inspect only what is needed, ask at most one concrete question if unresolved, and return the observed state and next owner. Do not invent an acknowledgment."))
   packet
 
-prepareHandoff :: (Member ModelCall effects, AsyncEffects effects)
-               => (Text -> Eff effects Text)
+prepareHandoff :: (KnownFamily modelFamily, Member (ModelCall modelFamily) effects, AsyncEffects effects)
+               => Model modelFamily -> (Text -> Eff effects Text)
                -> Text -> Eff effects (ModelResult Text)
-prepareHandoff readRef packet = invokeModel
-  (textTurn (defaultSpec
+prepareHandoff model readRef packet = invokeModel
+  (textTurn model (defaultSpec
     { specTools = EvidenceTools (presentWith id $ tool
         "Read retained evidence" (readRef . reference)) })
     "Prepare a concise handoff: exact candidate, changed contract, completed checks, unverified behavior, next owner. Preserve evidence references. Inspect missing referenced facts; never turn compiled-only into passed.")
   packet
 
-investigateFailure :: (Member ModelCall effects, AsyncEffects effects)
-                   => (Text -> Eff effects Text)
+investigateFailure :: (KnownFamily modelFamily, Member (ModelCall modelFamily) effects, AsyncEffects effects)
+                   => Model modelFamily -> (Text -> Eff effects Text)
                    -> Text -> Eff effects (ModelResult Text)
-investigateFailure readRef packet = invokeModel
+investigateFailure model readRef packet = invokeModel
   (withLimits (defaultLimits { requestLimit = Just 4, toolLimit = Just 3 })
-    (textTurn (defaultSpec
+    (textTurn model (defaultSpec
       { specTools = EvidenceTools (presentWith id $ tool
           "Read retained failure evidence; no execution" (readRef . reference)) })
       "Inspect this one failure. Separate observation from hypothesis, cite the relevant retained output, and return the next discriminating check. Do not rerun commands to retrieve existing output."))

@@ -18,12 +18,17 @@ PUBLISHED_SKILLS = (
 )
 
 
-PROJECTED_SOURCES = ("Examples/ModelCallWorkflow.hs",)
+PROJECTED_SOURCE_SUFFIXES = frozenset({".hs", ".hs-boot", ".json", ".cbor", ".txt"})
 
 
-def provision(source: Path, output: Path, git: str) -> str:
+def git_environment():
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    return environment
+
+
+def recorded_workspace(source: Path, git: str):
+    environment = git_environment()
 
     def run(directory, *arguments):
         return subprocess.check_output([git, "-C", str(directory), *arguments],
@@ -44,6 +49,42 @@ def provision(source: Path, output: Path, git: str) -> str:
         raise ValueError("initialize the recorded workspace submodule before configuration")
     if run(repository, "cat-file", "-t", revision) != "commit":
         raise ValueError("recorded workspace object is not a commit")
+    return record, repository
+
+
+def selected_source_paths(source: Path, git: str) -> tuple[str, ...]:
+    record, repository = recorded_workspace(source, git)
+    return _source_paths(repository, record["revision"], git)
+
+
+def _source_paths(repository: Path, revision: str, git: str) -> tuple[str, ...]:
+    tree = subprocess.check_output([git, "-C", str(repository), "ls-tree", "-rz", revision],
+                                   env=git_environment())
+    selected = []
+    for entry in tree.split(b"\0"):
+        if not entry:
+            continue
+        header, encoded_path = entry.split(b"\t", 1)
+        relative = encoded_path.decode("utf-8")
+        if Path(relative).suffix not in PROJECTED_SOURCE_SUFFIXES:
+            continue
+        mode, kind, _ = header.decode("ascii").split(" ")
+        if mode not in {"100644", "100755"} or kind != "blob":
+            raise ValueError(f"workspace source is not an ordinary committed file: {relative}")
+        selected.append(relative)
+    return tuple(sorted(selected))
+
+
+def provision(source: Path, output: Path, git: str) -> str:
+    record, repository = recorded_workspace(source, git)
+    revision = record["revision"]
+    descriptor = source / "build/native-workspace-gitlink.json"
+    environment = git_environment()
+
+    def run(directory, *arguments):
+        return subprocess.check_output([git, "-C", str(directory), *arguments],
+                                       env=environment, text=True).strip()
+
     templates = source / "exomonad/examples/workspace/.exomonad/skills"
     for relative in PUBLISHED_SKILLS:
         published = subprocess.check_output(
@@ -60,7 +101,7 @@ def provision(source: Path, output: Path, git: str) -> str:
             [git, "-C", str(repository), "show", f"{revision}:{relative}"],
             env=environment,
         )
-        for relative in PROJECTED_SOURCES
+        for relative in _source_paths(repository, revision, git)
     }
     tree = run(repository, "rev-parse", revision + "^{tree}")
     output.mkdir()

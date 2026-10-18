@@ -138,7 +138,7 @@ filegroup(
         ".exomonad/workspace/checks/route-reply-setup.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_setup_hs",
         ".exomonad/workspace/checks/route-reply-worker.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_worker_hs",
         "bridge/haskell/examples/model-turns/ContextWorkflow.hs": "//bridge/haskell:context_workflow_example",
-        "bridge/haskell/examples/model-turns/Examples/JevFormWorkflow.hs": "//bridge/haskell:rust_input_examples_model_turns_Examples_JevFormWorkflow_hs",
+        "bridge/haskell/test-model-turn/Fixture/JevFormWorkflow.hs": "//bridge/haskell:rust_input_test_model_turn_Fixture_JevFormWorkflow_hs",
         "exomonad/actor/src/fixtures/AwaitRuntime.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f417761697452756e74696d652e6873",
         "exomonad/actor/src/fixtures/LookupPlanChoice.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e43686f6963652e6873",
         "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e4d6f64756c654f6e6c792e6873",

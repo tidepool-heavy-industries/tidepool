@@ -6,7 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 -- | Observe once, then reuse the typed response for presentation and policy.
-module Examples.JevPreparedWorkflow
+module Fixture.JevPreparedWorkflow
   ( CourierPacket, CourierResponse, courierQuestion, observeCourier, courierNotebook ) where
 
 import Prelude

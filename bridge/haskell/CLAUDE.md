@@ -70,6 +70,12 @@ package and compiler-option declarations; `scripts/buck2-haskell-components.py`
 projects them into the single `components.bzl` native graph. Listing a suite
 is discovery, not test execution.
 
+Authored workspace modules come from the recorded `.exomonad/workspace` Gitlink.
+`scripts/workspace-git-resource.py` owns their selected paths and original bytes;
+the Cabal projection uses that same selection for compilation and runtime inputs.
+The retained `exomonad/examples/workspace/.exomonad` tree is not a fallback source.
+Keep independent host-test fixtures in their own module namespace and source root.
+
 `tidepool-execution-schema` owns only the pure execution wire types and encoder.
 GHC projection, including `ExecutionIR`, stays in `tidepool-extract-internal`.
 Pure encoder tests depend on the former; candidate codec tests use the existing

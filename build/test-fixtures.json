@@ -9,7 +9,7 @@
     ".exomonad/workspace/checks/route-reply-setup.hs",
     ".exomonad/workspace/checks/route-reply-worker.hs",
     "bridge/haskell/examples/model-turns/ContextWorkflow.hs",
-    "bridge/haskell/examples/model-turns/Examples/JevFormWorkflow.hs",
+    "bridge/haskell/test-model-turn/Fixture/JevFormWorkflow.hs",
     "exomonad/actor/src/fixtures/AwaitRuntime.hs",
     "exomonad/actor/src/fixtures/LookupPlanChoice.hs",
     "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs",

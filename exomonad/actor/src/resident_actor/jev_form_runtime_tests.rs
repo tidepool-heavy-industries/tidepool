@@ -10,8 +10,8 @@ use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormTransit
 use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
-mod recording;
 mod composed;
+mod recording;
 
 struct MountedForm {
     actor: ActorRef,
@@ -288,26 +288,22 @@ impl Fixture {
             "Control.Monad (foldM, forM_)",
             "Tidepool.Inspection.Display (Display(..))",
             "Tidepool.Inspection.Tree (DisplayTree(..))",
-            "qualified Examples.JevFormWorkflow as Workflow",
+            "qualified Fixture.JevFormWorkflow as Workflow",
             "qualified Examples.JevComposedWorkflow as Composed",
             "qualified Jev.Recording as Recording",
         ] {
             preamble = insert_preamble_imports(&preamble, import);
         }
         let directory = tempfile::tempdir().expect("session source directory");
-        // Compile the canonical authored example supplied by this native
-        // target's immutable source input, without a second test workflow.
-        let examples = directory.path().join("Examples");
+        // Compile the owned workflow fixture from the native target's immutable
+        // source input; shared examples have their own namespace.
+        let examples = directory.path().join("Fixture");
         std::fs::create_dir(&examples).unwrap();
         std::fs::write(
             examples.join("JevFormWorkflow.hs"),
-            include_str!(
-                "../../../../bridge/haskell/examples/model-turns/Examples/JevFormWorkflow.hs"
-            ),
+            include_str!("../../../../bridge/haskell/test-model-turn/Fixture/JevFormWorkflow.hs"),
         )
         .unwrap();
-        // This test's declared canonical example takes precedence over any
-        // shared workspace publication of the same module.
         include.insert(0, directory.path().to_path_buf());
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())

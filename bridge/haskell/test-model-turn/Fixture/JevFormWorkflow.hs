@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeOperators #-}
 -- | An authored courier dialogue. Observation, policy, human choice and
 -- continuation execution are separate ordinary Haskell operations.
-module Examples.JevFormWorkflow
+module Fixture.JevFormWorkflow
   ( Route(..), RouteMeaning(..), RouteResult(..), RouteChoice(..)
   , RoutePacket, RouteResponse, routeChoices, routeQuestion, humanRouteForm
   , observeRoutes, chooseRouteUnder, routeResponseView
