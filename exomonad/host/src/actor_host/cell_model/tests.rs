@@ -106,6 +106,42 @@ impl ResponsesTransport for Script {
         })
     }
 }
+fn fixture_catalog() -> crate::exomonad::model_catalog::InferenceConfig {
+    use crate::exomonad::model_catalog::{
+        InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
+    };
+    use std::collections::BTreeMap;
+    InferenceConfig {
+        profile: "offline".into(),
+        providers: BTreeMap::from([(
+            "offline".into(),
+            ProviderConfig {
+                backend: exomonad_actor::Backend::OpenAIPlan,
+                credential_file: Some("/tmp/tidepool-offline-unread-credential".into()),
+                credential_env: None,
+                endpoint: None,
+                inference_limits: Default::default(),
+            },
+        )]),
+        models: BTreeMap::from([(
+            "primary".into(),
+            ModelConfig {
+                provider: "offline".into(),
+                model: "test-model".into(),
+                constructor: "Primary".into(),
+                effort: "low".into(),
+            },
+        )]),
+        profiles: BTreeMap::from([(
+            "offline".into(),
+            ProfileConfig {
+                default: "primary".into(),
+                allowed: vec!["primary".into()],
+            },
+        )]),
+    }
+}
+
 fn configure(config: &mut ActorHostConfig) {
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
@@ -117,6 +153,7 @@ fn configure(config: &mut ActorHostConfig) {
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["ModelFixture".into()];
+        project.inference = Some(fixture_catalog());
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -153,14 +190,25 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
     let script = Arc::new(ScriptState::default());
     let transport = script.clone();
     let retained = Arc::new(Mutex::new(None));
+    let catalog = fixture_catalog().resolve().unwrap();
+    let selected_transport = script.clone();
+    let mut inner = EmbeddedCellModelFactory::<Offline, _>::new(
+        store.clone(),
+        Arc::new(JobScheduler::new(4).unwrap()),
+        Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "test-model"),
+        Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
+        Arc::new(move || Script(transport.clone())),
+    );
+    inner.selection = Some(Arc::new(move |choice| {
+        let selected = catalog_model(&catalog, choice)?;
+        Ok((
+            Script(selected_transport.clone()),
+            selected.model.value().to_owned(),
+            super::super::reasoning_effort(&choice.reasoning),
+        ))
+    }));
     let factory = Arc::new(HoldingFactory {
-        inner: EmbeddedCellModelFactory::<Offline, _>::new(
-            store.clone(),
-            Arc::new(JobScheduler::new(4).unwrap()),
-            Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "test-model"),
-            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
-            Arc::new(move || Script(transport.clone())),
-        ),
+        inner,
         retained: retained.clone(),
     });
     let campaign = TestCampaign::start_with_model_factory(
@@ -277,6 +325,13 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
                         "the real caller Console effect must run once: {result}"
                     );
                 }
+                let invalid = super::super::test_campaign::dispatch_haskell_script_result(
+                    endpoint.as_ref(),
+                    "import qualified Exomonad.Models as Models\nlet invalidChoice = Models.Primary (Models.ArgonOptions Models.EffortLow)",
+                ).await.expect_err("wrong provider options must fail GHC typechecking");
+                let diagnostic = invalid.to_string();
+                assert!(diagnostic.contains("OpenAIOptions") && diagnostic.contains("ArgonOptions"),
+                    "expected an options type mismatch, got: {diagnostic}");
                 let requests = script.requests.lock().unwrap();
                 assert_eq!(requests.len(), 2);
                 assert!(requests
