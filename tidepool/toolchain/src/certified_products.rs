@@ -13487,7 +13487,8 @@ pub(crate) mod tests {
                 &item,
             )
             .unwrap()
-            .artifacts;
+            .artifacts()
+            .clone();
         assert_eq!(
             current.selected_native_groups(),
             BTreeSet::from([NativeGroupKey {
@@ -13517,7 +13518,8 @@ pub(crate) mod tests {
                 &physical,
             )
             .unwrap()
-            .artifacts;
+            .artifacts()
+            .clone();
         assert!(next.contains_namespace_artifact(future.descriptor.id));
         assert_eq!(next.selected_native_groups().len(), 2);
     }
