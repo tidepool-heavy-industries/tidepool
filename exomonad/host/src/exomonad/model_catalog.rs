@@ -367,7 +367,7 @@ primaryModel = {}
 allowedModels :: [(Text, Model)]
 allowedModels = [{}]
 
-setNextEffort :: Member Context.ContextReadWrite effects => {} -> Eff effects ()
+setNextEffort :: Member Core.ContextReadWrite effects => {} -> Eff effects ()
 setNextEffort = Context.setNextReasoning . Core.{}
 "#,
             declarations.join(" | "),
@@ -604,7 +604,7 @@ mod tests {
             "ModelSelectionEnvelope \"{}\" \"argon\"",
             catalog.identity
         )));
-        assert!(source.contains("setNextEffort :: Member Context.ContextReadWrite effects => DeepSeekReasoning -> Eff effects ()"));
+        assert!(source.contains("setNextEffort :: Member Core.ContextReadWrite effects => DeepSeekReasoning -> Eff effects ()"));
     }
 
     #[test]
@@ -708,7 +708,7 @@ mod tests {
             "data Model = Argon ArgonOptions | Flash DeepSeekOptions | Pro DeepSeekOptions"
         ));
         assert!(source.contains("primaryModel = Argon (ArgonOptions EffortHigh)"));
-        assert!(source.contains("setNextEffort :: Member Context.ContextReadWrite effects => ArgonEffort -> Eff effects ()"));
+        assert!(source.contains("setNextEffort :: Member Core.ContextReadWrite effects => ArgonEffort -> Eff effects ()"));
         assert_eq!(
             catalog.models["flash"].reasoning,
             Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
