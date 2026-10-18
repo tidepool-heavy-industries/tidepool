@@ -1483,9 +1483,19 @@ def analyze(record_path):
         "compiler_trace": {"bytes": daemon_path.stat().st_size, "sha256": sha256_file(daemon_path)},
     }
 
-    logical_counts = [phase["phase_record"].get("logical_compiler_requests") for phase in workload_phases]
-    observed_counts = [value for value in logical_counts if type(value) is int and value >= 0]
-    unknown_count = len(logical_counts) - len(observed_counts)
+    # Startup is reported separately. Only a unique observation for each
+    # owner-declared non-activation phase can contribute to this workload total.
+    expected_counter_phases = [name for name in KNOWN_ROSTERS.get(cohort_name, ())
+                               if name != "activation"]
+    observed_counts = []
+    unknown_count = 0
+    for name in expected_counter_phases:
+        rows = [phase for phase in workload_phases if phase["phase"] == name]
+        value = rows[0]["phase_record"].get("logical_compiler_requests") if len(rows) == 1 else None
+        if type(value) is int and value >= 0:
+            observed_counts.append(value)
+        else:
+            unknown_count += 1
     report = {
         "schema": 2,
         "whole_case_wall": case_wall_ledger(phases, roster),
@@ -1564,9 +1574,10 @@ def analyze(record_path):
         },
         "workload_request_service_joins": {
             "status": "complete" if phase_coverage["complete"] and workload_exact else "partial_or_unknown",
-            "logical_request_count": sum(observed_counts) if logical_counts and not unknown_count else None,
+            "logical_request_count": sum(observed_counts) if expected_counter_phases and phase_coverage["complete"] and not unknown_count else None,
             "observed_logical_request_subtotal": sum(observed_counts),
             "unknown_logical_request_phase_count": unknown_count,
+            "logical_request_count_scope": "declared_non_activation_workload_phases",
             "exact_phase_request_join_count": sum(phase["daemon_service_matched_count"] for phase in workload_phases),
         },
         "whole_physical_stream_reconciliation": {

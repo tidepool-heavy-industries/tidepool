@@ -1537,7 +1537,13 @@ class NativeQualificationTests(unittest.TestCase):
     def test_actual_report_entry_binds_claims_and_sidecar_without_promoting_behavior_exit(self):
         from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
 
-        for mutation in ("control", "source-backed", "partial", "missing", "failed", "cleanup-failed", "publication-failed"):
+        publication_faults = {
+            "publication-failed": "write", "failed-publication": "write",
+            "publication-stat-failed": "stat", "failed-publication-stat": "stat",
+            "publication-hash-failed": "hash", "failed-publication-hash": "hash",
+        }
+        for mutation in ("control", "source-backed", "partial", "missing", "failed", "cleanup-failed",
+                         *publication_faults, "historical", "missing-api"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 fixture = HarnessUsecasePerfReportTests()
@@ -1557,9 +1563,10 @@ class NativeQualificationTests(unittest.TestCase):
                     phase_path.unlink()
                 payload = json.loads(runner_path.read_text())
                 payload["test"] = qualification.HARNESS_PERFORMANCE_TESTS[0]
-                if mutation in ("failed", "cleanup-failed"):
+                failed_body = mutation == "failed" or mutation.startswith("failed-publication")
+                if failed_body or mutation == "cleanup-failed":
                     payload["passed"] = False
-                    if mutation == "failed":
+                    if failed_body:
                         payload["execution"]["exit_code"] = 101
                     else:
                         payload["execution"]["hosted_cleanup_status"] = "unconfirmed"
@@ -1567,6 +1574,9 @@ class NativeQualificationTests(unittest.TestCase):
                 reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
                 reporter_path.parent.mkdir(parents=True)
                 shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                if mutation in ("historical", "missing-api"):
+                    schema = 1 if mutation == "historical" else 2
+                    reporter_path.write_text(f"def analyze(path):\n    return {{'schema': {schema}}}\n")
                 qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
                 descriptor_path = root / "qualification.json"
                 descriptor_path.write_text("report-composition fixture; not frozen authority")
@@ -1582,14 +1592,27 @@ class NativeQualificationTests(unittest.TestCase):
 
                 def execute(command, **kwargs):
                     qualification.write_json(output / "tests/case.json", payload)
-                    return subprocess.CompletedProcess(command, 101 if mutation == "failed" else 0)
+                    return subprocess.CompletedProcess(command, 101 if failed_body else 0)
 
                 real_write = qualification.write_json
+                real_stat = Path.stat
+                real_hash = qualification.sha256
+                fault = publication_faults.get(mutation)
 
                 def write(path, value):
-                    if mutation == "publication-failed" and path.name == "harness-usecase-perf-report.json":
+                    if fault == "write" and path.name == "harness-usecase-perf-report.json":
                         raise OSError(errno.ENOSPC, "controlled sidecar publication failure")
                     real_write(path, value)
+
+                def stat(path, *args, **kwargs):
+                    if fault == "stat" and path.name == "harness-usecase-perf-report.json":
+                        raise OSError(errno.EIO, "controlled sidecar stat failure")
+                    return real_stat(path, *args, **kwargs)
+
+                def digest(path):
+                    if fault == "hash" and path.name == "harness-usecase-perf-report.json":
+                        raise OSError(errno.EIO, "controlled sidecar hash failure")
+                    return real_hash(path)
 
                 def run_owned(*args, **kwargs):
                     result, receipt = self.run_mocked_owned_runner(*args, **kwargs)
@@ -1606,14 +1629,23 @@ class NativeQualificationTests(unittest.TestCase):
                      patch.object(qualification.subprocess, "run", side_effect=execute) as launch, \
                      patch.object(qualification, "run_owned_qualification_runner", side_effect=run_owned), \
                      patch.object(qualification, "write_json", side_effect=write), \
+                     patch.object(Path, "stat", stat), \
+                     patch.object(qualification, "sha256", side_effect=digest), \
                      contextlib.redirect_stderr(io.StringIO()):
                     code = qualification.main(["run", str(descriptor_path), "--cohort", "harness-performance",
                                                "--output", str(output), "--jobs", "1"])
                 launch.assert_called_once()
                 self.assertEqual(json.loads((output / "tests/case.json").read_text())["execution"]["executed_test_count"], 1)
-                if mutation == "publication-failed":
-                    self.assertEqual(code, 1)
+                if fault:
+                    self.assertEqual(code, 101 if failed_body else 1)
                     self.assertFalse((output / "report.json").exists())
+                    owner = json.loads((output / "run-owner.json").read_text())
+                    self.assertTrue(owner["runner_reaped"])
+                    self.assertEqual(owner["runner_exit_code"], 101 if failed_body else 0)
+                    self.assertEqual(owner["measurement_publication"]["operation"], fault)
+                    self.assertEqual(owner["measurement_publication"]["status"], "failed")
+                    self.assertEqual(owner["case_cleanup"][0]["executed_test_count"], 1)
+                    self.assertNotIn("report_path", owner)
                     continue
                 report = json.loads((output / "report.json").read_text())
                 self.assertEqual(report["schema"], 2)
@@ -1623,6 +1655,7 @@ class NativeQualificationTests(unittest.TestCase):
                 measurement = qualification.read_measurement(output / "report.json")
                 expected = ("qualified_frozen_timing" if mutation == "control" else
                             "failed_workload_diagnostics" if mutation in ("failed", "cleanup-failed") else
+                            "unassessed" if mutation in ("historical", "missing-api") else
                             "insufficient_observations")
                 self.assertEqual(measurement["assessment"]["status"], expected, measurement["assessment"])
                 if mutation == "source-backed":
@@ -1636,7 +1669,8 @@ class NativeQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "identity mismatch"):
                     qualification.read_measurement(output / "report.json")
                 sidecar.write_bytes(original)
-                report["measurement"]["assessment"]["status"] = "unassessed"
+                report["measurement"]["assessment"]["status"] = (
+                    "insufficient_observations" if expected == "unassessed" else "unassessed")
                 qualification.write_json(output / "report.json", report)
                 with self.assertRaisesRegex(ValueError, "assessment differs"):
                     qualification.read_measurement(output / "report.json")

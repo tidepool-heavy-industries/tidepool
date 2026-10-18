@@ -2281,13 +2281,6 @@ def _run_cohort(args) -> int:
             compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed,
             requested_trace_profile=trace_profile)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
-        measurement_path = output / "harness-usecase-perf-report.json"
-        write_json(measurement_path, measurement)
-        measurement = {key: measurement[key] for key in
-                       ("schema", "assessment", "workload_assessment", "reporter") if key in measurement}
-        measurement["observation_report"] = {
-            "path": measurement_path.name, "bytes": measurement_path.stat().st_size,
-            "sha256": sha256(measurement_path)}
     trace_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
         compiler_trace_selection(record.get("execution") or {}, trace_profile) for record in records)
     completed = behavioral_completed and compiler_allowance_selection_confirmed and trace_selection_confirmed
@@ -2365,13 +2358,31 @@ def _run_cohort(args) -> int:
         case_process_cleanup_status=case_process_cleanup_status,
         owner_state="reaped",
     )
+    publication_stage = "report_publication"
+    publication_operation = "write"
     try:
+        if "measurement_reporter" in cohort:
+            publication_stage = "measurement_publication"
+            measurement_path = output / "harness-usecase-perf-report.json"
+            write_json(measurement_path, measurement)
+            publication_operation = "stat"
+            measurement_bytes = measurement_path.stat().st_size
+            publication_operation = "hash"
+            measurement_digest = sha256(measurement_path)
+            report["measurement"] = {key: measurement[key] for key in
+                                     ("schema", "assessment", "workload_assessment", "reporter") if key in measurement}
+            report["measurement"]["observation_report"] = {
+                "path": measurement_path.name, "bytes": measurement_bytes,
+                "sha256": measurement_digest}
+        publication_stage = "report_publication"
+        publication_operation = "write"
         write_json(output / "report.json", report)
     except (OSError, ValueError, TypeError) as error:
         owner_receipt.pop("report_path", None)
         owner_receipt["owner_state"] = "failed"
-        owner_receipt["report_publication"] = {
-            "status": "failed", "error": f"{type(error).__name__}: {error}"}
+        owner_receipt[publication_stage] = {
+            "status": "failed", "operation": publication_operation,
+            "error": f"{type(error).__name__}: {error}"}
         signal_owner = _active_qualification_signal_owner
         if signal_owner is not None:
             signal_owner.phase = "failed"
@@ -2422,13 +2433,14 @@ def read_measurement(report_path: Path) -> dict:
 
 def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path,
                                 compiler_allowance_selection_confirmed=True, requested_trace_profile=None):
-    def unavailable(reason, **facts):
+    def unavailable(reason, *, unassessed=False, **facts):
         execution = (records[0].get("execution") or {}) if len(records) == 1 else {}
         failed = (type(execution.get("exit_code")) is int and execution["exit_code"] != 0
                   or execution.get("status") in ("timeout", "interrupted", "spawn_failed", "launch_identity_failed", "runner_failed")
                   or len(records) == 1 and records[0].get("passed") is False
                      and type(execution.get("executed_test_count")) is int)
-        status = "failed_workload_diagnostics" if failed else "insufficient_observations"
+        status = ("failed_workload_diagnostics" if failed else "unassessed" if unassessed
+                  else "insufficient_observations")
         return {"schema": 2, "assessment": {
             "kind": "frozen_workload_timing",
             "status": status, "reason": reason},
@@ -2452,9 +2464,16 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
     spec.loader.exec_module(reporter)
     try:
         report = reporter.analyze(runner_record_path)
+        if not isinstance(report, dict) or type(report.get("schema")) is not int or report["schema"] != 2:
+            return unavailable("historical observation schema is unassessed", unassessed=True)
+        if (not callable(getattr(reporter, "claim_assessment", None))
+                or not hasattr(getattr(reporter, "ClaimKind", None), "WORKLOAD_TIMING")
+                or not all(hasattr(getattr(reporter, "AssessmentStatus", None), name)
+                           for name in ("UNASSESSED", "DIAGNOSTICS", "QUALIFIED", "INSUFFICIENT"))):
+            return unavailable("reporter claim API is unassessed", unassessed=True)
         source_assessment = reporter.claim_assessment(report, reporter.ClaimKind.WORKLOAD_TIMING)
         if source_assessment["status"] == reporter.AssessmentStatus.UNASSESSED.value:
-            return unavailable("historical observation schema is unassessed")
+            return unavailable("historical observation schema is unassessed", unassessed=True)
     except (OSError, ValueError, TypeError, KeyError) as error:
         return unavailable(f"Harness performance evidence was rejected: {error}",
                            runner_record=str(runner_record_path))

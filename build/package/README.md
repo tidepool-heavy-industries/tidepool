@@ -718,6 +718,9 @@ attribution requires the production preparation owner or canonical `actor_path =
 missing actor paths remain unknown. Queue or startup evidence is not inferred
 from counts or timestamps. Absent or invalid counts remain null, with a known
 subtotal and unknown operand count; they are not zero work.
+The logical workload count covers the declared non-activation phases; startup
+is reported separately. Missing or duplicate required phase observations keep
+that total unknown even if every retained prefix counter is zero.
 
 Schema2 observations carry an explicit `assessment.kind` and `assessment.status`.
 The raw reporter can issue `workload_timing` with `valid_workload_timing`,

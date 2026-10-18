@@ -411,6 +411,33 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(aggregate["logical_request_count"], 0)
         self.assertEqual(aggregate["unknown_logical_request_phase_count"], 0)
 
+    def test_logical_request_aggregate_requires_the_exact_owned_roster(self):
+        for mutation, unknown in (("zero-prefix", 7), ("missing", 1), ("duplicate", 1),
+                                  ("empty", 8), ("missing-control", 0)):
+            with self.subTest(mutation=mutation):
+                record = self.make_complete_case(trace_profile="minimal")
+                self.add_owner_summaries()
+                path = self.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(path)
+                if mutation == "zero-prefix":
+                    phases = [row for row in phases if row["phase"] in ("environment", "first-arithmetic")]
+                elif mutation == "missing":
+                    phases = [row for row in phases if row["phase"] != "reuse-retained"]
+                elif mutation == "duplicate":
+                    phases.append(next(row for row in phases if row["phase"] == "first-arithmetic"))
+                elif mutation == "empty":
+                    phases = phases[:2]
+                else:
+                    phases = [row for row in phases if row["phase"] != "activation"]
+                self.write_jsonl(path, phases)
+                report = reporter.analyze(record)
+                aggregate = report["workload_request_service_joins"]
+                self.assertIsNone(aggregate["logical_request_count"])
+                self.assertEqual(aggregate["unknown_logical_request_phase_count"], unknown)
+                self.assertEqual(aggregate["observed_logical_request_subtotal"],
+                                 1 if mutation in ("duplicate", "missing-control") else 0)
+                self.assertEqual(report["assessment"]["status"], "insufficient_observations")
+
     def test_source_timing_claim_does_not_require_frozen_preparation(self):
         record = self.make_complete_case(trace_profile="minimal")
         self.add_owner_summaries()
