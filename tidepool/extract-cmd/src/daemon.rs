@@ -4443,13 +4443,14 @@ mod tests {
         assert_eq!(queued.slot, 0);
         let (client, server) = UnixStream::pair().unwrap();
         let (_accepted, acceptance) = std::sync::mpsc::channel();
+        let queued_busy = std::sync::Arc::new(AtomicBool::new(true));
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         tx.send(PendingJob {
             admission_id: AdmissionId(99),
             queued_at: Instant::now(),
             job: Job::Transaction(server),
             accepted: acceptance,
-            permit: None,
+            permit: Some(AdmissionPermit(std::sync::Arc::clone(&queued_busy))),
             resource_permit: queued,
         })
         .unwrap();
@@ -4466,6 +4467,7 @@ mod tests {
         assert!(!resources.alive[0].load(Ordering::Acquire));
         assert!(!resources.alive[1].load(Ordering::Acquire));
         drop(rx); // Accepted queued work is never executed by an unavailable slot.
+        assert!(!queued_busy.load(Ordering::Acquire));
         let mut client = client;
         assert_eq!(client.read(&mut [0u8; 1]).unwrap(), 0);
         assert_eq!(resources.usage.lock().unwrap().jobs, 3);
