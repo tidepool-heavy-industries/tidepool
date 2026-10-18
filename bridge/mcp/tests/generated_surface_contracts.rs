@@ -127,7 +127,7 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
         let identity = key
             .nominal_identity()
             .expect("active catalogue keys have nominal owners");
-        format!("{}.{}", identity.module, identity.name)
+        identity.render()
     };
     let expected = vec![
         named(

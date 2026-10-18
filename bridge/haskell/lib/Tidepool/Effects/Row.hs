@@ -21,10 +21,13 @@ import Tidepool.Effects.Core (ActorContext)
 import Tidepool.Effects.Core (AgentControl)
 import Tidepool.Effects.Core (AgentInspection)
 import Tidepool.Effects.Core (AgentLaunch)
+import Tidepool.Effects.Core (Argon)
 import Tidepool.Effects.Core (AskUser)
 import Tidepool.Effects.Core (BoundWorktree)
 import Tidepool.Effects.Core (Commands)
 import Tidepool.Effects.Core (Console)
+import Tidepool.Effects.Core (DeepSeek)
+import Tidepool.Effects.Core (ForkAgent)
 import Tidepool.Effects.Core (FsRead)
 import Tidepool.Effects.Core (FsWrite)
 import Tidepool.Effects.Core (Green)
@@ -33,11 +36,13 @@ import Tidepool.Effects.Core (Journal)
 import Tidepool.Effects.Core (Lookup)
 import Tidepool.Effects.Core (ModelCall)
 import Tidepool.Effects.Core (Notifications)
+import Tidepool.Effects.Core (OpenAI)
 import Tidepool.Effects.Core (Reflect)
 import Tidepool.Effects.Core (RepoEvent)
 import Tidepool.Effects.Core (ResourceScopes)
 import Tidepool.Effects.Core (Sleep)
 import Tidepool.Effects.Core (Source)
+import Tidepool.Effects.Core (SpawnAgent)
 import Tidepool.Effects.Core (Web)
 import Tidepool.Effects.Core (WorktreeAllocation)
 import Tidepool.Effects.Core (WorktreeIntegration)
@@ -75,31 +80,39 @@ class Subset (child :: [Type -> Type]) (parent :: [Type -> Type])
 instance Subset '[] parent
 instance (Contains effect parent, Subset effects parent) => Subset (effect ': effects) parent
 
-instance KnownEffect ResourceScopes where effectWitness = EffectWitness EffectResourceScopes
-instance KnownEffect Replies where effectWitness = EffectWitness EffectReplies
-instance KnownEffect Watches where effectWitness = EffectWitness EffectWatches
-instance KnownEffect ActorContext where effectWitness = EffectWitness EffectActorContext
-instance KnownEffect AgentLaunch where effectWitness = EffectWitness EffectAgentLaunch
-instance KnownEffect AgentInspection where effectWitness = EffectWitness EffectAgentInspection
-instance KnownEffect AgentControl where effectWitness = EffectWitness EffectAgentControl
-instance KnownEffect BoundWorktree where effectWitness = EffectWitness EffectBoundWorktree
-instance KnownEffect WorktreeRegistry where effectWitness = EffectWitness EffectWorktreeRegistry
-instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness EffectWorktreeAllocation
-instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
-instance KnownEffect Sleep where effectWitness = EffectWitness EffectSleep
-instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
-instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
-instance KnownEffect AskUser where effectWitness = EffectWitness EffectAskUser
-instance KnownEffect Green where effectWitness = EffectWitness EffectGreen
-instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
-instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
-instance KnownEffect ModelCall where effectWitness = EffectWitness EffectModelCall
-instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
-instance KnownEffect Reflect where effectWitness = EffectWitness EffectReflect
-instance KnownEffect Lookup where effectWitness = EffectWitness EffectLookup
-instance KnownEffect RepoEvent where effectWitness = EffectWitness EffectRepoEvent
-instance KnownEffect Source where effectWitness = EffectWitness EffectSource
-instance KnownEffect Journal where effectWitness = EffectWitness EffectJournal
-instance KnownEffect Web where effectWitness = EffectWitness EffectWeb
-instance KnownEffect FsRead where effectWitness = EffectWitness EffectFsRead
-instance KnownEffect FsWrite where effectWitness = EffectWitness EffectFsWrite
+instance KnownEffect (ResourceScopes) where effectWitness = EffectWitness EffectResourceScopes
+instance KnownEffect (Replies) where effectWitness = EffectWitness EffectReplies
+instance KnownEffect (Watches) where effectWitness = EffectWitness EffectWatches
+instance KnownEffect (ActorContext) where effectWitness = EffectWitness EffectActorContext
+instance KnownEffect (AgentLaunch) where effectWitness = EffectWitness EffectAgentLaunch
+instance KnownEffect (AgentInspection) where effectWitness = EffectWitness EffectAgentInspection
+instance KnownEffect (AgentControl) where effectWitness = EffectWitness EffectAgentControl
+instance KnownEffect (BoundWorktree) where effectWitness = EffectWitness EffectBoundWorktree
+instance KnownEffect (WorktreeRegistry) where effectWitness = EffectWitness EffectWorktreeRegistry
+instance KnownEffect (WorktreeAllocation) where effectWitness = EffectWitness EffectWorktreeAllocation
+instance KnownEffect (WorktreeIntegration) where effectWitness = EffectWitness EffectWorktreeIntegration
+instance KnownEffect (Sleep) where effectWitness = EffectWitness EffectSleep
+instance KnownEffect (Commands) where effectWitness = EffectWitness EffectCommands
+instance KnownEffect (Console) where effectWitness = EffectWitness EffectConsole
+instance KnownEffect (AskUser) where effectWitness = EffectWitness EffectAskUser
+instance KnownEffect (Green) where effectWitness = EffectWitness EffectGreen
+instance KnownEffect (Notifications) where effectWitness = EffectWitness EffectNotifications
+instance KnownEffect (Jev) where effectWitness = EffectWitness EffectJev
+instance KnownEffect (ModelCall OpenAI) where effectWitness = EffectWitness EffectModelCallOpenAI
+instance KnownEffect (ModelCall Argon) where effectWitness = EffectWitness EffectModelCallArgon
+instance KnownEffect (ModelCall DeepSeek) where effectWitness = EffectWitness EffectModelCallDeepSeek
+instance KnownEffect (ForkAgent OpenAI) where effectWitness = EffectWitness EffectForkAgentOpenAI
+instance KnownEffect (ForkAgent Argon) where effectWitness = EffectWitness EffectForkAgentArgon
+instance KnownEffect (ForkAgent DeepSeek) where effectWitness = EffectWitness EffectForkAgentDeepSeek
+instance KnownEffect (SpawnAgent OpenAI) where effectWitness = EffectWitness EffectSpawnAgentOpenAI
+instance KnownEffect (SpawnAgent Argon) where effectWitness = EffectWitness EffectSpawnAgentArgon
+instance KnownEffect (SpawnAgent DeepSeek) where effectWitness = EffectWitness EffectSpawnAgentDeepSeek
+instance KnownEffect (Actor) where effectWitness = EffectWitness EffectActor
+instance KnownEffect (Reflect) where effectWitness = EffectWitness EffectReflect
+instance KnownEffect (Lookup) where effectWitness = EffectWitness EffectLookup
+instance KnownEffect (RepoEvent) where effectWitness = EffectWitness EffectRepoEvent
+instance KnownEffect (Source) where effectWitness = EffectWitness EffectSource
+instance KnownEffect (Journal) where effectWitness = EffectWitness EffectJournal
+instance KnownEffect (Web) where effectWitness = EffectWitness EffectWeb
+instance KnownEffect (FsRead) where effectWitness = EffectWitness EffectFsRead
+instance KnownEffect (FsWrite) where effectWitness = EffectWitness EffectFsWrite

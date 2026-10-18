@@ -34,6 +34,16 @@ pub struct HaskellEffectIdentity {
     pub name: &'static str,
 }
 
+impl HaskellEffectIdentity {
+    pub fn render(self) -> String {
+        let mut rendered = format!("{}.{}", self.module, self.name);
+        for argument in self.arguments {
+            rendered.push_str(&format!(" {}.{}", argument.module, argument.name));
+        }
+        rendered
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ActorEffectKey {
     #[serde(rename = "Replies")]
@@ -191,6 +201,48 @@ impl ActorEffectKey {
             Self::SpawnAgentOpenAI => "SpawnAgent",
             Self::SpawnAgentArgon => "SpawnAgent",
             Self::SpawnAgentDeepSeek => "SpawnAgent",
+        }
+    }
+
+    pub const fn haskell_row_entry(self) -> &'static str {
+        match self {
+            Self::ResourceScopes => "ResourceScopes",
+            Self::Replies => "Replies",
+            Self::Watches => "Watches",
+            Self::ActorContext => "ActorContext",
+            Self::AgentLaunch => "AgentLaunch",
+            Self::AgentInspection => "AgentInspection",
+            Self::AgentControl => "AgentControl",
+            Self::BoundWorktree => "BoundWorktree",
+            Self::WorktreeRegistry => "WorktreeRegistry",
+            Self::WorktreeAllocation => "WorktreeAllocation",
+            Self::WorktreeIntegration => "WorktreeIntegration",
+            Self::Sleep => "Sleep",
+            Self::Commands => "Commands",
+            Self::Console => "Console",
+            Self::AskUser => "AskUser",
+            Self::Green => "Green",
+            Self::Notifications => "Notifications",
+            Self::Jev => "Jev",
+            Self::ModelCallOpenAI => "ModelCall OpenAI",
+            Self::ModelCallArgon => "ModelCall Argon",
+            Self::ModelCallDeepSeek => "ModelCall DeepSeek",
+            Self::ForkAgentOpenAI => "ForkAgent OpenAI",
+            Self::ForkAgentArgon => "ForkAgent Argon",
+            Self::ForkAgentDeepSeek => "ForkAgent DeepSeek",
+            Self::SpawnAgentOpenAI => "SpawnAgent OpenAI",
+            Self::SpawnAgentArgon => "SpawnAgent Argon",
+            Self::SpawnAgentDeepSeek => "SpawnAgent DeepSeek",
+            Self::Actor => "Actor",
+            Self::Reflect => "Reflect",
+            Self::Lookup => "Lookup",
+            Self::RepoEvent => "RepoEvent",
+            Self::Source => "Source",
+            Self::Journal => "Journal",
+            Self::Web => "Web",
+            Self::FsRead => "FsRead",
+            Self::FsWrite => "FsWrite",
+            Self::Forks => "Forks",
         }
     }
 

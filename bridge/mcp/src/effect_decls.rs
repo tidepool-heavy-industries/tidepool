@@ -277,3 +277,29 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
 // Worktree, RepoEvent, Journal, and Green are opt-in effects outside the base row.
 // Their declarations come from src/generated/.
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    use exomonad_tool::{ModelFamily, ModelOperation, ModelPermission};
+
+    #[test]
+    fn distinct_families_share_a_head_without_row_argument_authority() {
+        let specialize = |family| {
+            crate::model_call_decl().for_model_permission(ModelPermission {
+                operation: ModelOperation::ModelCall,
+                family,
+            })
+        };
+        let openai = specialize(ModelFamily::OpenAI);
+        let argon = specialize(ModelFamily::Argon);
+        let override_args = RowArgs::at("ModelCall", ["DeepSeek"]);
+        assert_eq!(row_entry(&openai, &override_args), "ModelCall OpenAI");
+        assert_eq!(row_entry(&argon, &override_args), "ModelCall Argon");
+        assert_eq!(
+            crate::build_effect_stack_type_at(&[openai, argon], &override_args),
+            "'[ModelCall OpenAI, ModelCall Argon]"
+        );
+        assert_ne!(openai.model_permission, argon.model_permission);
+    }
+}

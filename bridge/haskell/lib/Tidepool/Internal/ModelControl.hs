@@ -4,7 +4,7 @@ module Tidepool.Internal.ModelControl where
 import Prelude
 import Data.Text (Text)
 import Tidepool.Aeson
-import Tidepool.Effects.Core (Model, Reasoning)
+import Tidepool.Effects.Core (Reasoning)
 import qualified Tidepool.Aeson.KeyMap as KM
 
 controlObject :: [Text] -> (Object -> Result a) -> Value -> Result a
@@ -13,6 +13,24 @@ controlObject allowed parse = withObject "ModelCall control" $ \o ->
 
 controlCount :: Int -> Result Int
 controlCount count = if count < 0 then Error "negative ModelCall count" else pure count
+
+data ModelOperation = ModelCall | ForkAgent | SpawnAgent deriving (Show, Eq)
+instance ToJSON ModelOperation where
+  toJSON ModelCall = toJSON ("model_call" :: Text)
+  toJSON ForkAgent = toJSON ("fork_agent" :: Text)
+  toJSON SpawnAgent = toJSON ("spawn_agent" :: Text)
+instance FromJSON ModelOperation where
+  parseJSON = withText "ModelOperation" $ \value -> case value of
+    "model_call" -> pure ModelCall
+    "fork_agent" -> pure ForkAgent
+    "spawn_agent" -> pure SpawnAgent
+    _ -> Error "unknown ModelCall control value"
+
+data ModelGrantRequest = ModelGrantRequest ModelOperation Text Text [Reasoning] deriving (Show, Eq)
+instance ToJSON ModelGrantRequest where
+  toJSON (ModelGrantRequest f0 f1 f2 f3) = object ["operation" .= f0, "catalog_identity" .= f1, "key" .= f2, "efforts" .= f3]
+instance FromJSON ModelGrantRequest where
+  parseJSON = controlObject ["operation", "catalog_identity", "key", "efforts"] $ \o -> pure ModelGrantRequest <*> (o .: "operation") <*> (o .: "catalog_identity") <*> (o .: "key") <*> (o .: "efforts")
 
 data ModelLimitEnvelope = ModelRequestsLimit | ModelToolsLimit | ModelTokensLimit | ModelDeadlineLimit deriving (Show, Eq)
 instance ToJSON ModelLimitEnvelope where
@@ -34,11 +52,17 @@ instance ToJSON ModelRequestLimits where
 instance FromJSON ModelRequestLimits where
   parseJSON = controlObject ["requests", "tools", "reported_tokens", "seconds"] $ \o -> pure ModelRequestLimits <*> ((o .:? "requests") >>= traverse controlCount) <*> ((o .:? "tools") >>= traverse controlCount) <*> ((o .:? "reported_tokens") >>= traverse controlCount) <*> ((o .:? "seconds") >>= traverse controlCount)
 
-data ModelRequestEnvelope = ModelRequestEnvelope Text Text (Maybe Model) (Maybe Reasoning) ModelRequestLimits Value (Maybe Value) Bool deriving (Show, Eq)
+data ModelSelectionEnvelope = ModelSelectionEnvelope Text Text Reasoning deriving (Show, Eq)
+instance ToJSON ModelSelectionEnvelope where
+  toJSON (ModelSelectionEnvelope f0 f1 f2) = object ["catalog_identity" .= f0, "key" .= f1, "reasoning" .= f2]
+instance FromJSON ModelSelectionEnvelope where
+  parseJSON = controlObject ["catalog_identity", "key", "reasoning"] $ \o -> pure ModelSelectionEnvelope <*> (o .: "catalog_identity") <*> (o .: "key") <*> (o .: "reasoning")
+
+data ModelRequestEnvelope = ModelRequestEnvelope Text Text ModelRequestLimits Value (Maybe Value) Bool ModelSelectionEnvelope deriving (Show, Eq)
 instance ToJSON ModelRequestEnvelope where
-  toJSON (ModelRequestEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["instructions" .= f0, "input" .= f1, "model" .= f2, "reasoning" .= f3, "limits" .= f4, "tools" .= f5, "result_schema" .= f6, "after_tool" .= f7]
+  toJSON (ModelRequestEnvelope f0 f1 f2 f3 f4 f5 f6) = object ["instructions" .= f0, "input" .= f1, "limits" .= f2, "tools" .= f3, "result_schema" .= f4, "after_tool" .= f5, "selection" .= f6]
 instance FromJSON ModelRequestEnvelope where
-  parseJSON = controlObject ["instructions", "input", "model", "reasoning", "limits", "tools", "result_schema", "after_tool"] $ \o -> pure ModelRequestEnvelope <*> (o .: "instructions") <*> (o .: "input") <*> (o .:? "model") <*> (o .:? "reasoning") <*> (o .: "limits") <*> (o .: "tools") <*> (o .:? "result_schema") <*> (o .: "after_tool")
+  parseJSON = controlObject ["instructions", "input", "limits", "tools", "result_schema", "after_tool", "selection"] $ \o -> pure ModelRequestEnvelope <*> (o .: "instructions") <*> (o .: "input") <*> (o .: "limits") <*> (o .: "tools") <*> (o .:? "result_schema") <*> (o .: "after_tool") <*> (o .: "selection")
 
 data ModelUsageEnvelope = ModelUsageEnvelope Int Int Int Int deriving (Show, Eq)
 instance ToJSON ModelUsageEnvelope where
@@ -64,11 +88,17 @@ instance FromJSON ModelOutcomeEnvelope where
       "exhausted" -> controlObject ["kind", "value"] (\o -> pure ModelExhaustedOutcome <*> (o .: "value")) (Object o)
       _ -> Error "unknown ModelCall control variant"
 
-data ModelReceiptEnvelope = ModelReceiptEnvelope Text Text [Text] ModelUsageEnvelope ModelUsageEnvelope ModelOutcomeEnvelope deriving (Show, Eq)
+data ModelRequestObservationEnvelope = ModelRequestObservationEnvelope Text Text Text (Maybe Int) (Maybe Int) (Maybe Int) (Maybe Int) Int deriving (Show, Eq)
+instance ToJSON ModelRequestObservationEnvelope where
+  toJSON (ModelRequestObservationEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["request_id" .= f0, "provider" .= f1, "model" .= f2, "input_tokens" .= f3, "cached_tokens" .= f4, "output_tokens" .= f5, "reasoning_tokens" .= f6, "duration_ms" .= f7]
+instance FromJSON ModelRequestObservationEnvelope where
+  parseJSON = controlObject ["request_id", "provider", "model", "input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "duration_ms"] $ \o -> pure ModelRequestObservationEnvelope <*> (o .: "request_id") <*> (o .: "provider") <*> (o .: "model") <*> ((o .:? "input_tokens") >>= traverse controlCount) <*> ((o .:? "cached_tokens") >>= traverse controlCount) <*> ((o .:? "output_tokens") >>= traverse controlCount) <*> ((o .:? "reasoning_tokens") >>= traverse controlCount) <*> ((o .: "duration_ms") >>= controlCount)
+
+data ModelReceiptEnvelope = ModelReceiptEnvelope Text Text [Text] [ModelRequestObservationEnvelope] Int ModelUsageEnvelope ModelUsageEnvelope ModelOutcomeEnvelope deriving (Show, Eq)
 instance ToJSON ModelReceiptEnvelope where
-  toJSON (ModelReceiptEnvelope f0 f1 f2 f3 f4 f5) = object ["invocation_id" .= f0, "parent_cell" .= f1, "requests" .= f2, "counts" .= f3, "cell_counts" .= f4, "outcome" .= f5]
+  toJSON (ModelReceiptEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["invocation_id" .= f0, "parent_cell" .= f1, "requests" .= f2, "request_observations" .= f3, "duration_ms" .= f4, "counts" .= f5, "cell_counts" .= f6, "outcome" .= f7]
 instance FromJSON ModelReceiptEnvelope where
-  parseJSON = controlObject ["invocation_id", "parent_cell", "requests", "counts", "cell_counts", "outcome"] $ \o -> pure ModelReceiptEnvelope <*> (o .: "invocation_id") <*> (o .: "parent_cell") <*> (o .: "requests") <*> (o .: "counts") <*> (o .: "cell_counts") <*> (o .: "outcome")
+  parseJSON = controlObject ["invocation_id", "parent_cell", "requests", "request_observations", "duration_ms", "counts", "cell_counts", "outcome"] $ \o -> pure ModelReceiptEnvelope <*> (o .: "invocation_id") <*> (o .: "parent_cell") <*> (o .: "requests") <*> (o .: "request_observations") <*> ((o .: "duration_ms") >>= controlCount) <*> (o .: "counts") <*> (o .: "cell_counts") <*> (o .: "outcome")
 
 data ModelControlStep = ModelCallback Text Text Text Value | ModelHook Text Text Text Value Text Int Value Text | ModelFinished ModelReceiptEnvelope deriving (Show, Eq)
 instance ToJSON ModelControlStep where
