@@ -923,10 +923,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     };
     let left_proof = proof(&left);
     let right_proof = proof(&right);
-    let dependency = |proof: &NativeOriginalRequirement, view: &ArtifactView| {
+    let dependency = |proof: &NativeOriginalRequirement, view: &ArtifactView, stage| {
         proof
             .issued_groups(view)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{stage}: {error}"))
             .into_iter()
             .find(|group| {
                 group.binding.artifact() == native_entry.descriptor.id
@@ -934,8 +934,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             })
             .unwrap()
     };
-    let left_group = dependency(&left_proof, &left);
-    let right_group = dependency(&right_proof, &right);
+    let left_group = dependency(&left_proof, &left, "left issuer");
+    let right_group = dependency(&right_proof, &right, "right issuer");
     assert_ne!(left_group, right_group);
     assert_eq!(
         left_proof.selection.graph_selection().namespace,
@@ -980,7 +980,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert!(retained.is_full());
     assert_eq!(retained.original(), native_entry.descriptor.id);
     assert_eq!(retained.proof(), Some(&left_proof));
-    assert_eq!(dependency(retained.proof().unwrap(), &view), left_group);
+    assert_eq!(
+        dependency(retained.proof().unwrap(), &view, "merged issuer custody"),
+        left_group
+    );
     let partial_views = [7, 9001].map(|ordinal| {
         make(
             &format!("PartialIssuance{ordinal}"),
@@ -1194,7 +1197,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .cloned()
             .unwrap();
         assert_eq!(
-            dependency(&issued, &input.artifacts),
+            dependency(&issued, &input.artifacts, "new complete consumer"),
             expected,
             "carried availability chooses the private dependency before selected-state fallback"
         );
@@ -1219,7 +1222,11 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .cloned()
             .unwrap();
         assert_eq!(
-            dependency(&retained, request.compiler_inputs().artifacts()),
+            dependency(
+                &retained,
+                request.compiler_inputs().artifacts(),
+                "final request consumer"
+            ),
             expected
         );
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
