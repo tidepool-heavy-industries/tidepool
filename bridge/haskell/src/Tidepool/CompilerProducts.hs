@@ -1058,11 +1058,12 @@ retainProgramProductsWithPublication
   :: Maybe (FilePath,BS.ByteString,FreshOutputSeals) -> FilePath -> PreparedPipelineResult
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
 retainProgramProductsWithPublication stagedCertificate directory prepared certified target initial = do
+  timing <- readTimingEnabled
   outputWrites <- newIORef []
   selected <- either fail pure (extendSourceSelectedOriginals
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
-  (cached,additions,pendingProducts,pendingLexical) <- foldM retainCached finalized (pprCandidateAdmissions prepared)
+  (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached timing) finalized (pprCandidateAdmissions prepared)
   admitted <- extendExactScopeGeneration cached additions (map CompilerOriginal pendingProducts) pendingLexical >>= either fail pure
   promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
@@ -1124,7 +1125,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
           , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
           , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions,stagedProducts,stagedLexical)
         _ -> fail "fresh finalization conflicts with an admitted original owner"
-    retainCached (scope,additions,stagedProducts,stagedLexical) admission = do
+    retainCached timing (scope,additions,stagedProducts,stagedLexical) admission = do
       let candidate = preparedCandidateOriginal admission
           proof = preparedCandidateProof admission
           unit = candidateUnit candidate
@@ -1150,6 +1151,10 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
                 (candidateProductPath candidate) groups
           -- Scope extension transfers the canonical proof's captured bodies.
           -- Their original paths remain locators, never fresh output claims.
+          emitCount timing "retained_cached_original.borrowed" 1
+          emitCount timing "retained_cached_original.interface_bytes" (fromIntegral (BS.length interfaceBytes))
+          emitCount timing "retained_cached_original.package_bytes" (fromIntegral (BS.length packageBytes))
+          emitCount timing "retained_cached_original.native_bytes" (fromIntegral (BS.length productBytes))
           pure (scope,additions ++ [((interface,candidatePackageImports candidate,
               candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence proof)],
             stagedProducts ++ [original],stagedLexical ++ [(key,lexicalRequirements)])

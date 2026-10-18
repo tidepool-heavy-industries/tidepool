@@ -1224,6 +1224,15 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     let finalProofs = length [() | line <- lines retentionDiagnostics
           , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
     unless (finalProofs == 1) (fail ("retention final proof count: " ++ show finalProofs))
+    when reuseCandidate $ do
+      unless (counterValues "retained_cached_original.borrowed" retentionDiagnostics == [1])
+        (fail "retention did not observe its actual borrowed cached-original branch")
+      unless (length candidateBytes == 4)
+        (fail "borrowed-output count control lost its one candidate's four captured parts")
+      forM_ (zip ["interface_bytes","package_bytes","native_bytes"] (take 3 candidateBytes)) $ \(part,bytes) ->
+        unless (counterValues ("retained_cached_original." ++ part) retentionDiagnostics
+            == [fromIntegral (BS.length bytes)])
+          (fail ("retention changed its observed captured " ++ part))
     hPutStrLn stderr ("completed retention final proofs=" ++ show finalProofs ++ " candidates=" ++ show reuseCandidate)
     let inheritedCandidateParcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates completed)
     when reuseCandidate $ bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
