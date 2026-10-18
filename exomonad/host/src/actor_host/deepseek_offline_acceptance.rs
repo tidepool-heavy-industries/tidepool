@@ -505,6 +505,9 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
     let (credential_file, credential_env) = match &contract.credential {
         CredentialReference::File { path } => (Some(path.clone()), None),
         CredentialReference::Env { name } => (None, Some(name.clone())),
+        CredentialReference::RunAccount { .. } => {
+            panic!("DeepSeek fixture requires a file or environment credential reference")
+        }
     };
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
         use crate::exomonad::model_catalog::{
