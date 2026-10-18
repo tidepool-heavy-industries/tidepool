@@ -26,8 +26,33 @@ fn restore_fixture_support_in_view(
     let recovered = recover_fixture_compiler_support(
         issued.compiler_input_projection().clone(),
         view.retain_custody(issued.artifact_view())?,
-        [],
+        issued
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .cloned(),
     )?;
+    assert!(
+        issued
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .all(|offer| {
+                offer
+                    .custody_snapshot()
+                    .scopes
+                    .iter()
+                    .all(|(selection, proof)| {
+                        recovered
+                            .artifacts()
+                            .selection_snapshot()
+                            .scopes
+                            .get(selection)
+                            == Some(proof)
+                    })
+            }),
+        "authenticated recovery retains each exact issued offer scope before snapshot restore"
+    );
     recovered.restore_snapshot_evidence(&issued.snapshot())
 }
 
