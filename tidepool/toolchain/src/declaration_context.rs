@@ -17982,6 +17982,116 @@ mod tests {
     }
 
     #[test]
+    fn exact_product_binding_preserves_lexical_evidence_and_request_identity() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let roots = [
+            directory.path().join("first"),
+            directory.path().join("second"),
+        ];
+        let first_request = ExactCompileContext::new(context.clone())
+            .prepare_compilation(&directory.path().join("first-request"), b"first producer")
+            .unwrap();
+        let second_request = ExactCompileContext::new(context)
+            .prepare_compilation(&directory.path().join("second-request"), b"second producer")
+            .unwrap();
+        let (first, source) = generated_source_admission_fixture(&roots[0], &first_request);
+        let (second, second_source) =
+            generated_source_admission_fixture(&roots[1], &second_request);
+        assert_eq!(source, second_source);
+        let input = roots[0].join("Consumer.hs");
+        let second_input = roots[1].join("Consumer.hs");
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_slice(first.evidence_bytes()).unwrap();
+        evidence.cache_safe = false;
+        evidence.selection_complete = false;
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        first
+            .match_product(&first_request, &input, &source, &bytes, &operation)
+            .unwrap();
+        assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 64);
+        let mut second_evidence: crate::cache::DependencyEvidence =
+            serde_json::from_slice(second.evidence_bytes()).unwrap();
+        second_evidence.cache_safe = false;
+        second_evidence.selection_complete = false;
+        let second_bytes = serde_json::to_vec(&second_evidence).unwrap();
+        second
+            .match_product(
+                &second_request,
+                &second_input,
+                &second_source,
+                &second_bytes,
+                &operation,
+            )
+            .unwrap();
+        assert!(first
+            .match_product(&second_request, &input, &source, &bytes, &operation)
+            .is_err());
+        assert!(first
+            .match_product(
+                &first_request,
+                &second_input,
+                &source,
+                &second_bytes,
+                &operation,
+            )
+            .is_err());
+        assert!(first
+            .match_product(&first_request, &input, &source, &second_bytes, &operation)
+            .is_err());
+
+        // JSON formatting is not source identity; lexical path spelling is.
+        let reordered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let pretty = serde_json::to_vec_pretty(&reordered).unwrap();
+        assert_ne!(pretty, bytes);
+        first
+            .match_product(&first_request, &input, &source, &pretty, &operation)
+            .unwrap();
+        for (cache_safe, selection_complete) in [(true, false), (false, true), (true, true)] {
+            let mut changed = evidence.clone();
+            changed.cache_safe = cache_safe;
+            changed.selection_complete = selection_complete;
+            let changed = serde_json::to_vec(&changed).unwrap();
+            assert!(first
+                .match_product(&first_request, &input, &source, &changed, &operation)
+                .is_err());
+        }
+        for alias in [
+            roots[0].join(".").join("Consumer.hs"),
+            PathBuf::from(format!("{}//Consumer.hs", roots[0].display())),
+        ] {
+            assert_eq!(alias, input);
+            assert_eq!(
+                std::fs::canonicalize(&alias).unwrap(),
+                std::fs::canonicalize(&input).unwrap()
+            );
+            let mut changed = evidence.clone();
+            changed.sources[0].path = alias.clone();
+            changed.modules[0].source = alias;
+            let changed = serde_json::to_vec(&changed).unwrap();
+            assert_ne!(changed, bytes);
+            let refusal = first
+                .match_product(&first_request, &input, &source, &changed, &operation)
+                .err()
+                .expect("lexically different evidence must not match the issued receipt");
+            assert!(matches!(refusal, CompileError::ExtractFailed(message)
+                if message == "source-cache-ineligible evidence differs from exact fresh proof"));
+        }
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: bytes.len() * 64 - 1,
+            ..Default::default()
+        });
+        assert!(matches!(
+            first.match_product(&first_request, &input, &source, &bytes, &restricted),
+            Err(CompileError::CompilerEvidence(_))
+        ));
+        assert_eq!(restricted.work_usage().unwrap().0, 0);
+    }
+
+    #[test]
     fn program_segment_preserves_physical_source_authority_across_item_outputs() {
         let directory = tempfile::tempdir().unwrap();
         let inventory =

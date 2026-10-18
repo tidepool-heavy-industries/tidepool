@@ -18480,6 +18480,37 @@ None,
         assert!(ParsedModuleProducts::decode(b"malformed product", b"").is_err());
         let mut accepted = receipt(&bytes, &evidence, source);
         accepted.dependency_witness_sha256 = sha(&raw_evidence);
+        let foreign_operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let foreign_source = crate::artifacts::admit_compiler_source(
+            &foreign_operation,
+            &raw_evidence,
+            &input,
+            source,
+        )
+        .unwrap();
+        assert!(matches!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    source_recipe: WorkerExecutionSource::Ordinary,
+                    finalization: fixture_finalization(
+                        Some(directory.path()),
+                        &vec![accepted.clone()]
+                    ),
+                    modules: vec![accepted.clone()],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new(),
+                },
+                &parsed,
+                &foreign_source,
+                input.parent().unwrap(),
+                b"producer",
+                &[],
+                None,
+            ),
+            Err(CertificationError::Mismatch("inventory accounting owner"))
+        ));
         let certified = certify_products(
             None,
             &CertifiedReceipt {
