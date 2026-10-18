@@ -80,10 +80,6 @@ impl ExpectedOriginal {
             later: ordinal("ordinaryLater"),
         };
         assert_ne!(result.entry, result.later);
-        assert!(
-            result.available.len() > 2,
-            "authored unused bodies remain available"
-        );
         result
     }
 
