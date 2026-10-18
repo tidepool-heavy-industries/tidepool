@@ -15233,17 +15233,32 @@ mod tests {
             );
             recovered
         };
+        let epoch_owner = identity("fixture", "Epoch");
+        let mut lexical = initial.lexical_graph().to_vec();
+        lexical.push(ExactLexicalNode {
+            owner: epoch_owner.clone(),
+            imports: Vec::new(),
+        });
         let old = initial
             .as_ref()
             .clone()
             .extend_checked_original_products(initial.owner.facts.producer, &[epoch(old_epoch)])
+            .unwrap()
+            .extend(&[], &[], lexical.clone())
             .unwrap();
         let child = initial
             .as_ref()
             .clone()
             .extend_checked_original_products(initial.owner.facts.producer, &[epoch(new_epoch)])
+            .unwrap()
+            .extend(&[], &[], lexical)
             .unwrap();
-        let epoch_owner = identity("fixture", "Epoch");
+        for context in [&old, &child] {
+            assert!(context
+                .lexical_graph()
+                .iter()
+                .any(|node| node.owner == epoch_owner && node.imports.is_empty()));
+        }
         let epoch_original = |context: &ExactDeclarationContext| {
             context.compiler_input_projection().snapshot_roles()[&epoch_owner]
                 .original()
@@ -15274,6 +15289,15 @@ mod tests {
         drop(selected);
         let value = old.artifact_view().select_roots(vec![root]).unwrap();
         let surface = old.retain_value_source_surface(&value, &[]).unwrap();
+        assert_eq!(
+            surface
+                .compiler_support
+                .projection()
+                .snapshot_roles()
+                .get(&epoch_owner)
+                .and_then(CompilerInputRole::original),
+            demands_epoch.then_some(old_original),
+        );
         assert!(surface
             .artifacts
             .descriptors()
@@ -15312,15 +15336,6 @@ mod tests {
             )),
             Err(error) => panic!("expected the compiler's typed original conflict: {error}"),
         }
-        assert_eq!(
-            surface
-                .compiler_support
-                .projection()
-                .snapshot_roles()
-                .get(&epoch_owner)
-                .and_then(CompilerInputRole::original),
-            demands_epoch.then_some(old_original),
-        );
         // Retiring the issuing source cannot revoke byte custody owned by the value.
         let old_ids = surface.artifacts.artifact_ids();
         drop(old);
