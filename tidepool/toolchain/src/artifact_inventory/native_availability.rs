@@ -20,25 +20,6 @@ impl<'a> NativeDependencyCatalog<'a> {
         Ok(Self(DependencyGrantSource::Source(source)))
     }
 
-    fn availability_rows(
-        &self,
-    ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
-        let source = match &self.0 {
-            DependencyGrantSource::Source(source) => Some(source.native_availability()),
-            DependencyGrantSource::Request(_) => None,
-        };
-        let request = match &self.0 {
-            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
-            DependencyGrantSource::Source(_) => None,
-        };
-        // Classification is derived by the receiving request. Every normalized
-        // row participates here, including a former compiler-role row and Empty.
-        source
-            .into_iter()
-            .flat_map(|rows| rows.rows())
-            .chain(request.into_iter().flatten())
-    }
-
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
         match &self.0 {
             DependencyGrantSource::Source(source) => source.input_decisions(),
@@ -117,12 +98,24 @@ impl<'a> NativeDependencyCatalog<'a> {
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
     ) -> Vec<(NativeGroupBinding, &IssuedNativeOffer)> {
         let mut supports = BTreeMap::new();
-        for row in self.availability_rows() {
-            if let Some(support) = row.dependency_support(key, owner) {
-                for group in support.groups() {
-                    if let Some(offer) = support.offer_for_group(group) {
-                        supports.entry(group).or_insert(offer);
-                    }
+        let source = match &self.0 {
+            DependencyGrantSource::Source(source) => {
+                source.native_availability().dependency_support(key, owner)
+            }
+            DependencyGrantSource::Request(_) => None,
+        };
+        let request = match &self.0 {
+            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
+            DependencyGrantSource::Source(_) => None,
+        };
+        let request = request
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row.dependency_support(key, owner));
+        for support in source.into_iter().chain(request) {
+            for group in support.groups() {
+                if let Some(offer) = support.offer_for_group(group) {
+                    supports.entry(group).or_insert(offer);
                 }
             }
         }
@@ -1915,6 +1908,37 @@ mod normalized_dependency_tests {
         ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
     };
 
+    fn exhaustive_group_supports<'a>(
+        rows: impl Iterator<Item = &'a Arc<crate::declaration_context::NativeTransportAvailability>>,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Vec<(NativeGroupBinding, &'a IssuedNativeOffer)> {
+        let mut expected = BTreeMap::new();
+        for row in rows {
+            if let Some(support) = row.dependency_support(key, owner) {
+                for group in support.groups() {
+                    if let Some(offer) = support.offer_for_group(group) {
+                        expected.entry(group).or_insert(offer);
+                    }
+                }
+            }
+        }
+        expected.into_iter().collect()
+    }
+
+    fn assert_same_supports(
+        actual: Vec<(NativeGroupBinding, &IssuedNativeOffer)>,
+        expected: Vec<(NativeGroupBinding, &IssuedNativeOffer)>,
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for ((actual_group, actual_offer), (expected_group, expected_offer)) in
+            actual.into_iter().zip(expected)
+        {
+            assert_eq!(actual_group, expected_group);
+            assert!(actual_offer.same_issuance(expected_offer));
+        }
+    }
+
     #[test]
     fn normalized_source_keeps_retained_root_dependencies_without_dependency_roles_or_siblings() {
         let producer_bytes = b"normalized-source-dependency-closure";
@@ -1993,6 +2017,73 @@ mod normalized_dependency_tests {
             .unwrap()
             .descriptor
             .id;
+        // Duplicate inputs pass through the real row issuer and collection
+        // merge; no test-only row or contribution authority is constructed.
+        let repeated_offers = complete
+            .native_offers()
+            .iter()
+            .chain(complete.native_offers())
+            .cloned()
+            .collect::<Vec<_>>();
+        let repeated = crate::declaration_context::RequestNativeAvailability::issue_checked(
+            complete.projection(),
+            complete.artifacts(),
+            &repeated_offers,
+        )
+        .unwrap();
+        let repeated = complete.retain_normalized_availability(&repeated).unwrap();
+        let empty = crate::declaration_context::RequestNativeAvailability::issue_checked(
+            complete.projection(),
+            complete.artifacts(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(empty.rows().count(), products.len());
+        assert!(
+            complete
+                .native_availability()
+                .rows()
+                .any(|row| row.offers().len() > 1),
+            "the fixture includes overlapping native contributions"
+        );
+        let originals = products
+            .iter()
+            .map(|product| {
+                ArtifactEntry::original(producer.sha256(), product.clone())
+                    .unwrap()
+                    .descriptor
+                    .id
+            })
+            .chain([ArtifactId([255; 32])])
+            .collect::<Vec<_>>();
+        for source in [&complete, &retained, &repeated] {
+            let catalog = NativeDependencyCatalog::from_source(source).unwrap();
+            for original in &originals {
+                for original_ordinal in [3, 7, 9, 11, u32::MAX] {
+                    let key = NativeGroupKey {
+                        artifact: *original,
+                        original_ordinal,
+                    };
+                    // Cross every exact owner, including mismatches for an
+                    // existing payload and a wholly absent payload key.
+                    for product in &products {
+                        assert_same_supports(
+                            catalog.group_supports(key, product.owner()),
+                            exhaustive_group_supports(
+                                source.native_availability().rows(),
+                                key,
+                                product.owner(),
+                            ),
+                        );
+                        assert!(empty.dependency_support(key, product.owner()).is_none());
+                        assert!(
+                            exhaustive_group_supports(empty.rows(), key, product.owner())
+                                .is_empty()
+                        );
+                    }
+                }
+            }
+        }
         let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
         assert!(!catalog
             .groups(
