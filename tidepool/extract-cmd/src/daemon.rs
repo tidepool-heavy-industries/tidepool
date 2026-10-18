@@ -629,7 +629,7 @@ enum TransactionEvent {
 }
 
 pub(crate) enum DaemonClose {
-    Clean,
+    Clean(crate::endpoint::DaemonEndAcknowledgement),
     Retired(crate::endpoint::DaemonCompilerRetirement),
 }
 
@@ -800,6 +800,13 @@ impl DaemonTransaction {
 #[cfg(test)]
 impl DaemonTransaction {
     pub(crate) fn for_test(stream: UnixStream) -> Self {
+        Self::for_test_with_cancellation(stream, None)
+    }
+
+    pub(crate) fn for_test_with_cancellation(
+        stream: UnixStream,
+        cancellation: Option<crate::CompilerTransactionCancellation>,
+    ) -> Self {
         Self {
             stream,
             epoch: DaemonEpoch([0; 32]),
@@ -809,7 +816,7 @@ impl DaemonTransaction {
             terminal: None,
             framing_known: true,
             end_sent: false,
-            cancellation: None,
+            cancellation,
         }
     }
 }
@@ -1318,7 +1325,12 @@ pub(crate) fn end_transaction(
         match transaction.read_event(Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT)? {
             TransactionEvent::Retired(terminal) => transaction.terminal = Some(terminal),
             TransactionEvent::EndAcknowledged if transaction.end_sent => {
-                return Ok(DaemonClose::Clean)
+                return Ok(DaemonClose::Clean(
+                    crate::endpoint::DaemonEndAcknowledgement {
+                        epoch: transaction.epoch.0,
+                        admission_id: transaction.admission_id.0,
+                    },
+                ))
             }
             _ => {
                 transaction.framing_known = false;
@@ -1654,8 +1666,14 @@ fn service_transaction(
                 orderly_end = true;
                 break;
             }
-            RequestStep::Disconnected | RequestStep::Malformed => {
+            RequestStep::Disconnected => {
                 transaction_failed = Some(FrontendError::WorkerClientDisconnected);
+                break;
+            }
+            RequestStep::Malformed => {
+                transaction_failed = Some(FrontendError::Daemon(
+                    "invalid accepted compiler request".into(),
+                ));
                 break;
             }
             RequestStep::Request(cwd, argv) => {

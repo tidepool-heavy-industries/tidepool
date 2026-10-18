@@ -247,13 +247,17 @@ impl CompilerTransactionClose {
     }
 
     fn retirement_observed(evidence: &CompilerTransactionCloseEvidence) -> bool {
-        matches!(
-            &evidence.retirement,
+        let confirmed = match &evidence.retirement {
             CompilerTransactionRetirement::DaemonObserved(DaemonCompilerRetirement {
                 worker: CompilerWorkerRetirement::Reaped(_),
                 ..
             })
-        ) && evidence.earlier.iter().all(Self::resources_retired)
+            | CompilerTransactionRetirement::DaemonEndAcknowledged(_) => true,
+            CompilerTransactionRetirement::DaemonObserved(_)
+            | CompilerTransactionRetirement::DaemonUnobserved { .. }
+            | CompilerTransactionRetirement::Direct(_) => false,
+        };
+        confirmed && evidence.earlier.iter().all(Self::resources_retired)
     }
 
     fn merge(self, incoming: Self) -> Self {
@@ -412,6 +416,16 @@ pub enum CompilerTransactionRetirement {
     },
     Direct(DirectCompilerRetirement),
     DaemonObserved(DaemonCompilerRetirement),
+    DaemonEndAcknowledged(DaemonEndAcknowledgement),
+}
+
+/// Issued only by the sole reader after this accepted transaction's END byte
+/// was sent and its acknowledgement decoded. Warm worker/slot custody remains
+/// with the daemon; acknowledgement grants no compiler-action success.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonEndAcknowledgement {
+    pub(crate) epoch: [u8; 32],
+    pub(crate) admission_id: u64,
 }
 
 /// The exact worker's retirement observation. When reaping is confirmed, its
@@ -2426,8 +2440,24 @@ impl CompilerTransaction {
                 // A failed action does not invalidate known response framing. The
                 // sole reader drains its retirement event without replaying work.
                 match daemon::end_transaction(&mut transaction) {
-                    Ok(daemon::DaemonClose::Clean) if prior.is_none() => {
-                        CompilerTransactionClose::Clean
+                    Ok(daemon::DaemonClose::Clean(acknowledgement)) => {
+                        let prior = prior.or_else(|| {
+                            self.cancellation
+                                .as_ref()
+                                .is_some_and(CompilerTransactionCancellation::is_cancelled)
+                                .then_some(CompilerTransactionCloseReason::Cancelled)
+                        });
+                        match prior {
+                            None => CompilerTransactionClose::Clean,
+                            Some(reason) => CompilerTransactionClose::Retired(
+                                CompilerTransactionCloseEvidence::new(
+                                    reason,
+                                    CompilerTransactionRetirement::DaemonEndAcknowledged(
+                                        acknowledgement,
+                                    ),
+                                ),
+                            ),
+                        }
                     }
                     Ok(daemon::DaemonClose::Retired(retirement)) => {
                         let confirmed =
@@ -2443,15 +2473,14 @@ impl CompilerTransaction {
                             CompilerTransactionClose::Unconfirmed(evidence)
                         }
                     }
-                    result => {
-                        let reason = prior.unwrap_or_else(|| match result {
-                            Err(error) => CompilerTransactionCloseReason::EndFailed(
+                    Err(error) => {
+                        let reason = prior.unwrap_or_else(|| {
+                            CompilerTransactionCloseReason::EndFailed(
                                 CompilerTransactionCloseFailure::new(
                                     CompilerTransactionClosePhase::DaemonEndAcknowledgement,
                                     io::Error::other(error),
                                 ),
-                            ),
-                            Ok(_) => CompilerTransactionCloseReason::FailedRequest,
+                            )
                         });
                         CompilerTransactionClose::Unconfirmed(
                             CompilerTransactionCloseEvidence::new(
@@ -2523,6 +2552,91 @@ mod tests {
         config.source_file = Some("tidepool/extract-cmd/src/endpoint.rs");
         config.test_name = Some(test_name);
         config
+    }
+
+    #[test]
+    fn acknowledged_end_preserves_abnormal_action_and_late_cancellation() {
+        for phase in 0..5 {
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            let cancellation = CompilerTransactionCancellation::new();
+            cancellation.arm_daemon(&stream).unwrap();
+            let server_cancel = cancellation.clone();
+            let server = std::thread::spawn(move || {
+                let mut command = [0];
+                let count = peer.read(&mut command).unwrap();
+                if phase == 4 {
+                    assert_eq!(
+                        count, 0,
+                        "early cancellation must half-close instead of sending END"
+                    );
+                } else {
+                    assert_eq!(count, 1);
+                    assert_eq!(command, [daemon::TRANSACTION_END]);
+                    if phase == 3 {
+                        server_cancel.cancel();
+                    }
+                }
+                peer.write_all(&[daemon::TRANSACTION_END_ACK]).unwrap();
+            });
+            let mut transaction = CompilerTransaction {
+                workload: CompileWorkload::Foreground,
+                identity: CompilerIdentity::direct([1; 32], [2; 32]),
+                transport: Some(TransactionTransport::Daemon {
+                    transaction: daemon::DaemonTransaction::for_test_with_cancellation(
+                        stream,
+                        Some(cancellation.clone()),
+                    ),
+                    socket: "/unused".into(),
+                }),
+                failed: phase == 2,
+                cancellation: Some(cancellation.clone()),
+            };
+            if phase == 4 {
+                cancellation.cancel();
+            }
+            let close = if phase == 1 {
+                transaction.abandon()
+            } else {
+                transaction.finish()
+            };
+            match (phase, close) {
+                (0, CompilerTransactionClose::Clean) => {}
+                (1..=3, CompilerTransactionClose::Retired(evidence)) => {
+                    assert_eq!(
+                        evidence.reason,
+                        match phase {
+                            1 => CompilerTransactionCloseReason::Abandoned,
+                            2 => CompilerTransactionCloseReason::FailedRequest,
+                            3 => CompilerTransactionCloseReason::Cancelled,
+                            _ => unreachable!(),
+                        }
+                    );
+                    assert!(matches!(
+                        &evidence.retirement,
+                        CompilerTransactionRetirement::DaemonEndAcknowledged(_)
+                    ));
+                    let close = CompilerTransactionClose::Retired(evidence);
+                    assert!(close.resources_retired());
+                    assert!(!close.is_clean());
+                    assert!(!close
+                        .clone()
+                        .merge(CompilerTransactionClose::Unconfirmed(
+                            CompilerTransactionCloseEvidence::new(
+                                CompilerTransactionCloseReason::FailedRequest,
+                                CompilerTransactionRetirement::DaemonUnobserved {
+                                    disconnect: None
+                                },
+                            )
+                        ))
+                        .resources_retired());
+                }
+                (4, CompilerTransactionClose::Unconfirmed(_)) => {}
+                (phase, close) => {
+                    panic!("wrong END/cancellation settlement at phase {phase}: {close:?}")
+                }
+            }
+            server.join().unwrap();
+        }
     }
 
     #[test]

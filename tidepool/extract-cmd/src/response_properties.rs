@@ -266,7 +266,8 @@ proptest! {
     fn accepted_partial_response_closes_without_replay_and_fresh_transaction_succeeds(
         failed in replies(), fresh in replies(), cut_selector in any::<usize>(),
     ) {
-        let wire = reply_bytes(&failed);
+        let mut wire = vec![TRANSACTION_OUTPUT];
+        wire.extend(reply_bytes(&failed));
         let cut = cut_selector % wire.len();
         let (client, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
@@ -293,6 +294,7 @@ proptest! {
 
         let (client, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        peer.write_all(&[TRANSACTION_OUTPUT]).unwrap();
         peer.write_all(&reply_bytes(&fresh)).unwrap();
         peer.shutdown(Shutdown::Write).unwrap();
         let mut transaction = DaemonTransaction::for_test(client);

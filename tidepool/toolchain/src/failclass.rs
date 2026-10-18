@@ -123,6 +123,7 @@ pub enum CompileFailureCause {
         failure: CompilerTransactionPublicationFailure,
     },
     CompilerCloseUnconfirmed,
+    CompilerActionRetired,
     ExtractorContract,
     InputRejected,
     SourceDiagnostics,
@@ -479,6 +480,8 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::CompilerPublication(_)
         | CompileError::CompilerCloseUnconfirmed(_)
         | CompileError::CompilerPreparationCloseUnconfirmed(_)
+        | CompileError::CompilerActionRetired(_)
+        | CompileError::CompilerPreparationRetired(_)
         | CompileError::EntryPreparationUnfinished { .. }
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => {
@@ -530,6 +533,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::CompilerCloseUnconfirmed(_)
         | CompileError::CompilerPreparationCloseUnconfirmed(_) => {
             CompileFailureCause::CompilerCloseUnconfirmed
+        }
+        CompileError::CompilerActionRetired(_) | CompileError::CompilerPreparationRetired(_) => {
+            CompileFailureCause::CompilerActionRetired
         }
         CompileError::SessionValueSelection(_) | CompileError::ExtractFailed(_) => {
             CompileFailureCause::ExtractorContract
