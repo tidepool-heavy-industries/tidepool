@@ -994,7 +994,7 @@ class NativeQualificationTests(unittest.TestCase):
     def test_result_delivery_preserves_failed_missing_and_unconfirmed_runner_receipts(self):
         """Synthetic receipts test qualification refusal, not runtime success."""
         selected = list(qualification.RESULT_DELIVERY_CASES)
-        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown',
+        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown', 'boolean',
                          'failed', 'nonzero_exit', 'missing_hosted_cleanup',
                          'failed_compiler_cleanup'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
@@ -1027,8 +1027,8 @@ class NativeQualificationTests(unittest.TestCase):
                             'compiler_cleanup_status': 'confirmed',
                         }
                         if index == len(names) - 1:
-                            if mutation in ('zero', 'unknown'):
-                                execution['executed_test_count'] = 0 if mutation == 'zero' else None
+                            if mutation in ('zero', 'unknown', 'boolean'):
+                                execution['executed_test_count'] = {'zero': 0, 'unknown': None, 'boolean': True}[mutation]
                             elif mutation == 'nonzero_exit':
                                 execution['exit_code'] = 101
                             elif mutation == 'missing_hosted_cleanup':
@@ -1049,9 +1049,14 @@ class NativeQualificationTests(unittest.TestCase):
                         '--output', str(output), '--jobs', '2'])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], 6)
                 self.assertEqual(report['runner_exit_code'], 0)
+                if mutation in ('missing', 'duplicate', 'unknown', 'boolean'):
+                    self.assertIsNone(report['executed_test_count'])
+                if mutation in ('missing', 'unknown', 'boolean'):
+                    self.assertEqual(report['unknown_execution_count'], 1)
+                    self.assertEqual(report['observed_executed_test_subtotal'], 5)
                 self.assertEqual(set(report['case_premises']), set(selected))
                 self.assertEqual(all(case['verified'] for case in report['case_premises'].values()),
                                  mutation == 'control')
@@ -1119,7 +1124,7 @@ class NativeQualificationTests(unittest.TestCase):
                     ])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], len(selected))
                 self.assertEqual(report['runner_exit_code'], 0)
 
@@ -1279,7 +1284,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                '--output', str(output)])
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
-                self.assertEqual(report['completed'], expected == 0)
+                self.assertEqual(report['behavior_selection_completed'], expected == 0)
                 self.assertEqual(report['expected_count'], len(qualification.PREPARED_CHILD_TESTS))
                 command = commands[0]
                 self.assertEqual(command[2], '/frozen/libtest')
@@ -1410,7 +1415,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                '--output', str(output), '--jobs', '1'])
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
-                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
                 self.assertEqual(report['expected_count'], 6)
                 if mutation == 'control':
                     crash = next(record for record in report['tests']
@@ -1503,7 +1508,7 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertTrue(compiler_allowance_selection_confirmed)
                     records = args[1]
                     paths = args[2]
-                    return {'status': 'partial' if records else 'refused', 'completed': False,
+                    return {'schema': 2, 'assessment': {'kind': 'frozen_workload_timing', 'status': 'insufficient_observations'},
                             'reporter': qualification.HARNESS_PERFORMANCE_REPORTER,
                             'runner_record': str(paths[0]) if paths else None,
                             'qualification': {'prerequisites': {
@@ -1517,15 +1522,206 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['behavioral_completed'], count == 1)
-                self.assertFalse(report['measurement']['completed'])
-                self.assertEqual(report['measurement']['status'], 'partial')
+                observed = qualification.read_measurement(output / 'report.json')
+                self.assertEqual(report['measurement']['assessment']['kind'], 'frozen_workload_timing')
+                self.assertEqual(report['measurement']['assessment']['status'], 'insufficient_observations')
                 self.assertEqual(report['measurement']['reporter'], qualification.HARNESS_PERFORMANCE_REPORTER)
                 self.assertEqual(report['scheduling']['trace_profile'], 'minimal')
                 if count:
                     analyze.assert_called_once()
-                    self.assertEqual(report['measurement']['runner_record'], str(output / 'tests/case.json'))
-                self.assertEqual(report['completed'], expected == 0)
+                    self.assertEqual(observed['runner_record'], str(output / 'tests/case.json'))
+                self.assertNotIn('qualification', report['measurement'])
+                self.assertEqual(report['behavior_selection_completed'], expected == 0)
                 self.assertTrue(report['tests'][0]['passed'])
+
+    def test_actual_report_entry_binds_claims_and_sidecar_without_promoting_behavior_exit(self):
+        from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
+
+        publication_faults = {
+            "publication-failed": "write", "failed-publication": "write",
+            "publication-stat-failed": "stat", "failed-publication-stat": "stat",
+            "publication-hash-failed": "hash", "failed-publication-hash": "hash",
+        }
+        scenarios = [("harness-eight-phase", mutation) for mutation in (
+            "control", "source-backed", "partial", "missing", "failed", "cleanup-failed",
+            *publication_faults, "historical", "missing-api")]
+        scenarios.extend((scope, mutation) for scope in ("persona-workbench", "notebook-a-a-b-a")
+                         for mutation in ("control", "wrong-route", "missing-summary", "failed-publication"))
+        for scope, mutation in scenarios:
+            cohort_name = {"harness-eight-phase": "harness-performance",
+                           "persona-workbench": "harness-performance-persona",
+                           "notebook-a-a-b-a": "harness-performance-notebook-reuse"}[scope]
+            with self.subTest(scope=scope, mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture = HarnessUsecasePerfReportTests()
+                fixture.root = root / "case"
+                fixture.root.mkdir()
+                runner_path = fixture.make_complete_case(scope, trace_profile="minimal")
+                fixture.add_owner_summaries()
+                phase_path = fixture.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(phase_path)
+                if scope in ("persona-workbench", "notebook-a-a-b-a"):
+                    phases[0]["workspace_route"] = "prepared-workspace"
+                    phases[0]["deployment"]["TIDEPOOL_PREPARED_BUILTIN_ENTRIES"] = "/fixture/builtins"
+                    activation = phases[1]
+                    activation.update(start_ns=10, end_ns=10 + activation["wall_ns"],
+                                      prepared_workspace_selection={"kind": "builtin_deployment_program",
+                                  "program": {"policy": "workbench", "manifest_blake3": "a" * 64}})
+                    activation.update(installation_verification_start_ns=activation["end_ns"] + 1,
+                                      installation_verification_end_ns=activation["end_ns"] + 11,
+                                      installation_verification_ns=10)
+                    cursor = activation["installation_verification_end_ns"] + 1
+                    for phase in phases[2:]:
+                        phase.update(start_ns=cursor, end_ns=cursor + phase["wall_ns"])
+                        cursor = phase["end_ns"] + 1
+                    phases.append({"schema": 1, "phase": "measurement-summary", "completed": True,
+                                   "start_ns": cursor, "end_ns": cursor + 10, "wall_ns": 10,
+                                   "case_wall_ns": cursor + 10, "logical_compiler_requests": 0})
+                    if mutation == "wrong-route":
+                        phases[0]["workspace_route"] = "unprepared-workspace"
+                    elif mutation == "missing-summary":
+                        phases.pop()
+                environment = dict(phases[0]["deployment"])
+                if mutation == "source-backed":
+                    phases[0]["prepared_root_entry_supplied"] = False
+                if mutation == "partial":
+                    phases.pop()
+                fixture.write_jsonl(phase_path, phases)
+                if mutation == "missing":
+                    phase_path.unlink()
+                payload = json.loads(runner_path.read_text())
+                payload["test"] = qualification.cohorts()[cohort_name]["tests"][0]
+                failed_body = mutation == "failed" or mutation.startswith("failed-publication")
+                if failed_body or mutation == "cleanup-failed":
+                    payload["passed"] = False
+                    if failed_body:
+                        payload["execution"]["exit_code"] = 101
+                    else:
+                        payload["execution"]["hosted_cleanup_status"] = "unconfirmed"
+                bundle = root / "bundle"
+                reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
+                reporter_path.parent.mkdir(parents=True)
+                shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                if mutation in ("historical", "missing-api"):
+                    schema = 1 if mutation == "historical" else 2
+                    reporter_path.write_text(f"def analyze(path):\n    return {{'schema': {schema}}}\n")
+                qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
+                descriptor_path = root / "qualification.json"
+                descriptor_path.write_text("report-composition fixture; not frozen authority")
+                descriptor = {
+                    "bundle_root": str(bundle), "cohorts": qualification.cohorts(),
+                    "programs": {"runner": "/fixture/runner", "libtest": "/fixture/libtest"},
+                    "external_inputs": {"runtime_tools": {"path": "/fixture/tools"}},
+                    "source_oid": "a" * 40, "harness_revision": "b" * 40,
+                    "profile": "fast-dev", "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
+                    "environment": environment,
+                }
+                output = root / "output"
+
+                def execute(command, **kwargs):
+                    qualification.write_json(output / "tests/case.json", payload)
+                    return subprocess.CompletedProcess(command, 101 if failed_body else 0)
+
+                real_write = qualification.write_json
+                real_stat = Path.stat
+                real_hash = qualification.sha256
+                fault = publication_faults.get(mutation)
+
+                def write(path, value):
+                    if fault == "write" and path.name == "harness-usecase-perf-report.json":
+                        raise OSError(errno.ENOSPC, "controlled sidecar publication failure")
+                    real_write(path, value)
+
+                def stat(path, *args, **kwargs):
+                    if fault == "stat" and path.name == "harness-usecase-perf-report.json":
+                        raise OSError(errno.EIO, "controlled sidecar stat failure")
+                    return real_stat(path, *args, **kwargs)
+
+                def digest(path):
+                    if fault == "hash" and path.name == "harness-usecase-perf-report.json":
+                        raise OSError(errno.EIO, "controlled sidecar hash failure")
+                    return real_hash(path)
+
+                def run_owned(*args, **kwargs):
+                    result, receipt = self.run_mocked_owned_runner(*args, **kwargs)
+                    path = output / "tests/case.json"
+                    actual = json.loads(path.read_text())
+                    # The legacy process adapter supplies its compiler-selection
+                    # fixture; retain this real reporter fixture's separate raw
+                    # scan observations rather than replacing them with it.
+                    actual["execution"]["diagnostic_summaries"].update(payload["execution"]["diagnostic_summaries"])
+                    real_write(path, actual)
+                    return result, receipt
+
+                with patch.object(qualification, "verify", return_value=descriptor), \
+                     patch.object(qualification.subprocess, "run", side_effect=execute) as launch, \
+                     patch.object(qualification, "run_owned_qualification_runner", side_effect=run_owned), \
+                     patch.object(qualification, "write_json", side_effect=write), \
+                     patch.object(Path, "stat", stat), \
+                     patch.object(qualification, "sha256", side_effect=digest), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    code = qualification.main(["run", str(descriptor_path), "--cohort", cohort_name,
+                                               "--output", str(output), "--jobs", "1"])
+                launch.assert_called_once()
+                self.assertEqual(json.loads((output / "tests/case.json").read_text())["execution"]["executed_test_count"], 1)
+                if fault:
+                    self.assertEqual(code, 101 if failed_body else 1)
+                    self.assertFalse((output / "report.json").exists())
+                    owner = json.loads((output / "run-owner.json").read_text())
+                    self.assertTrue(owner["runner_reaped"])
+                    self.assertEqual(owner["runner_exit_code"], 101 if failed_body else 0)
+                    self.assertEqual(owner["measurement_publication"]["operation"], fault)
+                    self.assertEqual(owner["measurement_publication"]["status"], "failed")
+                    self.assertEqual(owner["case_cleanup"][0]["executed_test_count"], 1)
+                    self.assertNotIn("report_path", owner)
+                    continue
+                report = json.loads((output / "report.json").read_text())
+                self.assertEqual(report["schema"], 2)
+                self.assertNotIn("completed", report)
+                self.assertEqual(code, 101 if mutation == "failed" else 1 if mutation == "cleanup-failed" else 0)
+                self.assertEqual(report["behavior_selection_completed"], mutation not in ("failed", "cleanup-failed"))
+                measurement = qualification.read_measurement(output / "report.json")
+                expected = ("qualified_frozen_timing" if mutation == "control" else
+                            "failed_workload_diagnostics" if mutation in ("failed", "cleanup-failed") else
+                            "unassessed" if mutation in ("historical", "missing-api") else
+                            "insufficient_observations")
+                self.assertEqual(measurement["assessment"]["status"], expected, measurement["assessment"])
+                if mutation == "source-backed":
+                    reporter.require_claim(measurement, "workload_timing", scope=scope)
+                    with self.assertRaises(ValueError):
+                        reporter.require_claim(measurement, "frozen_workload_timing", scope=scope)
+                if scope in ("persona-workbench", "notebook-a-a-b-a"):
+                    if mutation == "control":
+                        reporter.require_claim(measurement, "workload_timing", scope=scope)
+                        reporter.require_claim(measurement, "frozen_workload_timing", scope=scope)
+                    else:
+                        self.assertEqual(measurement["workload_assessment"]["status"], "insufficient_observations")
+                        for kind in ("workload_timing", "frozen_workload_timing"):
+                            with self.assertRaises(ValueError):
+                                reporter.require_claim(measurement, kind, scope=scope)
+                self.assertNotIn("phases", report["measurement"])
+                sidecar = output / report["measurement"]["observation_report"]["path"]
+                original = sidecar.read_bytes()
+                sidecar.write_bytes(original + b" ")
+                with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                    qualification.read_measurement(output / "report.json")
+                sidecar.write_bytes(original)
+                report["measurement"]["assessment"]["status"] = (
+                    "insufficient_observations" if expected == "unassessed" else "unassessed")
+                qualification.write_json(output / "report.json", report)
+                with self.assertRaisesRegex(ValueError, "assessment differs"):
+                    qualification.read_measurement(output / "report.json")
+                sidecar.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    qualification.read_measurement(output / "report.json")
+
+    def test_historical_cohort_measurement_is_unassessed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            qualification.write_json(path, {"schema": 1, "completed": True,
+                                            "measurement": {"completed": True}})
+            with self.assertRaisesRegex(ValueError, "historical cohort schema is unassessed"):
+                qualification.read_measurement(path)
 
     def test_harness_performance_refuses_unprepared_inputs_and_parallel_execution(self):
         mutations = (
@@ -1535,15 +1731,18 @@ class NativeQualificationTests(unittest.TestCase):
             ('missing-entry', {}, 'TIDEPOOL_PREPARED_ROOT_ENTRY', []),
             ('parallel', {}, None, ['--jobs', '2']),
         )
-        for label, changed, missing, options in mutations:
-            with self.subTest(input=label), tempfile.TemporaryDirectory() as directory:
+        for cohort, (label, changed, missing, options) in (
+                (cohort, mutation) for cohort in ("harness-performance", "harness-performance-persona",
+                                                  "harness-performance-notebook-reuse") for mutation in mutations):
+            with self.subTest(cohort=cohort, input=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 descriptor = {
                     'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
                     'cohorts': qualification.cohorts(), 'stdlib_mode': 'catalog-backed',
                     'startup_mode': 'prepared',
                     'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog.json',
-                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry'},
+                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry',
+                                    'TIDEPOOL_PREPARED_BUILTIN_ENTRIES': '/frozen/builtin-entries'},
                     **changed,
                 }
                 if missing is not None:
@@ -1553,7 +1752,7 @@ class NativeQualificationTests(unittest.TestCase):
                      patch.object(qualification.subprocess, 'run') as execute, \
                      contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(qualification.main([
-                        'run', str(root / 'qualification.json'), '--cohort', 'harness-performance',
+                        'run', str(root / 'qualification.json'), '--cohort', cohort,
                         '--output', str(output), *options]), 1)
                 execute.assert_not_called()
                 self.assertFalse(output.exists())
@@ -1618,10 +1817,10 @@ class NativeQualificationTests(unittest.TestCase):
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
                 True, descriptor_path, requested_trace_profile="full")
-            self.assertEqual(measured['status'], 'qualified')
-            self.assertTrue(measured['completed'])
-            self.assertTrue(measured['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
-            self.assertTrue(measured['qualification']['prerequisites']['startup_owner_complete'])
+            self.assertEqual(measured['assessment']['status'], 'qualified_frozen_timing')
+            reporter.require_claim(measured, reporter.ClaimKind.FROZEN_WORKLOAD_TIMING, scope="harness-eight-phase")
+            self.assertTrue(measured['assessment']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+            self.assertTrue(measured['assessment']['prerequisites']['startup_owner_complete'])
             self.assertTrue(measured['whole_physical_stream_reconciliation']['detailed_compiler_sample_records_truncated'])
 
             descriptor['environment']['TIDEPOOL_PREPARED_ROOT_ENTRY'] = '/different/root-entry'
@@ -1629,8 +1828,8 @@ class NativeQualificationTests(unittest.TestCase):
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
                 True, descriptor_path, requested_trace_profile="full")
-            self.assertEqual(refused_match['status'], 'partial')
-            self.assertFalse(refused_match['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+            self.assertEqual(refused_match['assessment']['status'], 'insufficient_observations')
+            self.assertFalse(refused_match['assessment']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
 
     def test_measurement_mutants_cannot_qualify_a_passing_frozen_case(self):
         from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
@@ -1730,11 +1929,81 @@ class NativeQualificationTests(unittest.TestCase):
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
                     True, descriptor_path, requested_trace_profile="minimal" if mutation == "wrong_requested_profile" else "full")
-                self.assertEqual(measured["completed"], mutation in ("control", "capacity_capped_grant"))
-                self.assertTrue(measured["qualification"]["prerequisites"]["counted_behavior_passed"])
+                self.assertEqual(measured["assessment"]["status"] == "qualified_frozen_timing", mutation in ("control", "capacity_capped_grant"))
+                self.assertTrue(measured["assessment"]["prerequisites"]["counted_behavior_passed"])
                 if refused_dimension:
-                    self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
-                    self.assertEqual(measured["status"], "partial")
+                    self.assertFalse(measured["assessment"]["prerequisites"][refused_dimension])
+                    self.assertEqual(measured["assessment"]["status"], "insufficient_observations")
+
+    def test_prepared_persona_measurement_requires_consumed_route_and_complete_phase_roster(self):
+        from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
+        for mutation in (None, "missing_route", "wrong_route", "missing_selection", "invalid_selection", "missing_phase", "missing_summary"):
+            with self.subTest(mutation=mutation):
+                fixture = HarnessUsecasePerfReportTests()
+                fixture.setUp()
+                self.addCleanup(fixture.tearDown)
+                runner_path = fixture.make_complete_case("persona-workbench")
+                phases_path = fixture.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(phases_path)
+                phases[0]["workspace_route"] = "prepared-workspace"
+                active = phases[1]
+                active.update(start_ns=10, end_ns=10 + active["wall_ns"],
+                              prepared_workspace_selection={"kind": "builtin_deployment_program",
+                                  "program": {"policy": "workbench", "manifest_blake3": "a" * 64}})
+                active.update(installation_verification_start_ns=active["end_ns"] + 1,
+                              installation_verification_end_ns=active["end_ns"] + 11,
+                              installation_verification_ns=10)
+                cursor = active["installation_verification_end_ns"] + 1
+                for phase in phases[2:]:
+                    phase.update(start_ns=cursor, end_ns=cursor + phase["wall_ns"])
+                    cursor = phase["end_ns"] + 1
+                phases.append({"schema": 1, "phase": "measurement-summary", "completed": True,
+                               "start_ns": cursor, "end_ns": cursor + 10, "wall_ns": 10,
+                               "case_wall_ns": cursor + 10, "logical_compiler_requests": 0})
+                if mutation == "missing_route":
+                    phases[0].pop("workspace_route")
+                elif mutation == "wrong_route":
+                    phases[0]["workspace_route"] = "unprepared-workspace"
+                elif mutation == "missing_selection":
+                    active.pop("prepared_workspace_selection")
+                elif mutation == "invalid_selection":
+                    active["prepared_workspace_selection"] = {"kind": "workspace_original", "recipe": "a" * 64, "original": "not-an-original"}
+                elif mutation == "missing_summary":
+                    phases.pop()
+                elif mutation == "missing_phase":
+                    phases.pop(2)
+                fixture.write_jsonl(phases_path, phases)
+                fixture.add_owner_summaries()
+                record = json.loads(runner_path.read_text())
+                bundle = fixture.root / "bundle"
+                reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
+                reporter_path.parent.mkdir(parents=True)
+                shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
+                descriptor_path = fixture.root / "qualification.json"
+                descriptor_path.write_text("verified by run_cohort")
+                descriptor = {"bundle_root": str(bundle), "source_oid": "a" * 40,
+                              "harness_revision": "b" * 40, "profile": "production",
+                              "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
+                              "environment": phases[0]["deployment"]}
+                measured = qualification.analyze_harness_performance(
+                    descriptor, [record], [runner_path], qualification.cohorts()["harness-performance-persona"],
+                    True, descriptor_path, requested_trace_profile="full")
+                self.assertEqual(measured["assessment"]["status"], "qualified_frozen_timing" if mutation is None
+                                 else "insufficient_observations", measured["assessment"])
+                if mutation is None:
+                    reporter.require_claim(measured, "workload_timing", scope="persona-workbench")
+                    reporter.require_claim(measured, "frozen_workload_timing", scope="persona-workbench")
+                else:
+                    for kind in ("workload_timing", "frozen_workload_timing"):
+                        with self.assertRaises(ValueError):
+                            reporter.require_claim(measured, kind, scope="persona-workbench")
+                if mutation in ("missing_route", "wrong_route", "missing_selection", "invalid_selection"):
+                    self.assertFalse(measured["assessment"]["prerequisites"]["selected_workspace_route_consumed"])
+                elif mutation == "missing_phase":
+                    self.assertFalse(measured["assessment"]["prerequisites"]["phase_coverage_complete"])
+                elif mutation == "missing_summary":
+                    self.assertFalse(measured["assessment"]["prerequisites"]["whole_case_wall_complete"])
 
     def test_offline_compiler_selection_is_exact_immutable_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1872,7 +2141,7 @@ class NativeQualificationTests(unittest.TestCase):
                         code = qualification.run_cohort(args)
                     report = json.loads((output / 'report.json').read_text())
                     self.assertEqual(code, expected)
-                    self.assertEqual(report['completed'], expected == 0)
+                    self.assertEqual(report['behavior_selection_completed'], expected == 0)
                     self.assertEqual(report['runner_exit_code'], 0)
                     self.assertEqual(report['executed_test_count'], 1)
                     self.assertTrue(report['tests'][0]['passed'])
@@ -2372,7 +2641,7 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertTrue(report['behavioral_completed'])
             self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0 or invalid_capture)
             self.assertEqual(report['trace_selection_confirmed'], not invalid_capture)
-            self.assertEqual(report['completed'], expected_code == 0)
+            self.assertEqual(report['behavior_selection_completed'], expected_code == 0)
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
         invalid = (['--foreground-jobs', '0'], ['--preparation-jobs', '-1'],

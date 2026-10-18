@@ -940,6 +940,36 @@ impl Drop for HostedTestRuntime {
     }
 }
 
+pub(super) enum PreparedWorkspaceInstallation {
+    BuiltinDeploymentProgram {
+        program: exomonad_actor::BuiltinDeploymentProgram,
+    },
+    WorkspaceOriginal {
+        recipe: String,
+        original: uuid::Uuid,
+        directory: std::path::PathBuf,
+        roots: Vec<std::path::PathBuf>,
+    },
+}
+
+impl PreparedWorkspaceInstallation {
+    pub(super) fn selection(&self) -> exomonad_actor::ToolsetProgramSelection {
+        match self {
+            Self::BuiltinDeploymentProgram { program } => {
+                exomonad_actor::ToolsetProgramSelection::BuiltinDeploymentProgram {
+                    program: program.clone(),
+                }
+            }
+            Self::WorkspaceOriginal {
+                recipe, original, ..
+            } => exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                recipe: recipe.clone(),
+                original: *original,
+            },
+        }
+    }
+}
+
 impl HostedTestRuntime {
     pub(super) fn preparation_elapsed_ns(&self) -> Option<u128> {
         self.preparation_elapsed.map(|elapsed| elapsed.as_nanos())
@@ -951,16 +981,12 @@ impl HostedTestRuntime {
 
     pub(super) async fn assert_prepared_workspace_installation(
         &self,
-    ) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    ) -> PreparedWorkspaceInstallation {
         let installation = self
             .context
             .observer
             .installation(self.context.actor.identity())
             .await;
-        assert!(matches!(
-            installation.acquisition.as_ref(),
-            Some(exomonad_actor::ToolsetAcquisition::FreshRunOriginal { .. })
-        ));
         let frozen = self
             .context
             .config
@@ -983,16 +1009,15 @@ impl HostedTestRuntime {
             .as_ref()
             .and_then(exomonad_actor::ToolsetAcquisition::selection)
             .expect("the issuing acquisition retains its exact original selection");
-        let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } =
-            &selection
-        else {
-            panic!("the shipped workspace must install its prepared workspace original");
-        };
         let ready = frozen
             .prepared_toolset
             .as_ref()
             .expect("immediate startup retains the preparation owner's ready toolset");
-        assert_eq!(completed.get(recipe), Some(original));
+        assert_eq!(ready.effects(), coverage[0].effective_effects);
+        assert_eq!(
+            installation.capabilities.effect_keys(),
+            coverage[0].requested_effects
+        );
         assert_eq!(selection, coverage[0].program);
         assert_eq!(ready.selection(), Some(selection.clone()));
         assert_eq!(
@@ -1040,21 +1065,75 @@ impl HostedTestRuntime {
             .expect("the selected deployment retains its physical owner")
             .path()
             .join("workspace/entries");
-        let directory = entries.join(recipe).join(original.to_string());
         assert_eq!(source["entries"]["kind"], "completed");
         assert_eq!(source["entries"]["directory"], entries.to_str().unwrap());
         assert_eq!(
             source["entries"]["selections"],
             serde_json::to_value(&completed).unwrap()
         );
-        assert_eq!(std::fs::canonicalize(&directory).unwrap(), directory);
-        (directory, roots)
+        match selection {
+            exomonad_actor::ToolsetProgramSelection::BuiltinDeploymentProgram { program } => {
+                assert!(
+                    completed.is_empty(),
+                    "a built-in installer has no workspace-original UUID"
+                );
+                let name = match program.policy {
+                    exomonad_actor::BuiltinToolsetPolicy::Workbench => "workbench",
+                    exomonad_actor::BuiltinToolsetPolicy::AsyncWorkbench => "async_workbench",
+                };
+                let builtin = std::path::PathBuf::from(
+                    std::env::var_os("TIDEPOOL_PREPARED_BUILTIN_ENTRIES")
+                        .expect("the selected built-in retains its frozen deployment"),
+                );
+                let manifest = std::fs::read(builtin.join(name).join("entry.json")).unwrap();
+                assert_eq!(
+                    blake3::hash(&manifest).to_hex().as_str(),
+                    program.manifest_blake3,
+                    "the installed built-in must be the exact selected frozen manifest"
+                );
+                assert_eq!(
+                    ready.source_revision(),
+                    program.manifest_blake3,
+                    "built-in readiness is bound to its exact deployment source"
+                );
+                PreparedWorkspaceInstallation::BuiltinDeploymentProgram { program }
+            }
+            exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } => {
+                assert_eq!(completed.get(&recipe), Some(&original));
+                let directory = entries.join(&recipe).join(original.to_string());
+                assert_eq!(std::fs::canonicalize(&directory).unwrap(), directory);
+                PreparedWorkspaceInstallation::WorkspaceOriginal {
+                    recipe,
+                    original,
+                    directory,
+                    roots,
+                }
+            }
+        }
     }
 
     pub(super) async fn assert_prepared_workspace_original_handoff(
         &self,
     ) -> tidepool_toolchain::artifacts::ProductionEntryOutput {
-        let (directory, roots) = self.assert_prepared_workspace_installation().await;
+        let observed = self.assert_prepared_workspace_installation().await;
+        let installation = self
+            .context
+            .observer
+            .installation(self.context.actor.identity())
+            .await;
+        assert!(
+            matches!(
+                installation.acquisition.as_ref(),
+                Some(exomonad_actor::ToolsetAcquisition::FreshRunOriginal { .. })
+            ),
+            "this cold-handoff control requires an independently authored fresh original"
+        );
+        let PreparedWorkspaceInstallation::WorkspaceOriginal {
+            directory, roots, ..
+        } = observed
+        else {
+            panic!("the authored cold-handoff control requires its workspace original");
+        };
         let frozen = self.context.config.workspace_inputs.as_ref().unwrap();
         let wrapper = directory.join("Expr.hs");
         let observed =
