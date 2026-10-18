@@ -4532,9 +4532,9 @@ mod tests {
                 "excluded": {"backend": "deepseek", "credential_env": "EXCLUDED_KEY"}
             },
             "models": {
-                "primary": {"provider": "present", "model": "deepseek-flash", "constructor": "Primary", "effort": "high"},
-                "other": {"provider": "absent", "model": "deepseek-pro", "constructor": "Other", "effort": "high"},
-                "excluded": {"provider": "excluded", "model": "deepseek-flash", "constructor": "Excluded", "effort": "high"}
+                "primary": {"provider": "present", "model": "deepseek-flash", "effort": "high"},
+                "other": {"provider": "absent", "model": "deepseek-pro", "effort": "high"},
+                "excluded": {"provider": "excluded", "model": "deepseek-flash", "effort": "high"}
             },
             "profiles": {"work": {"default": "primary", "allowed": ["primary", "other"]}}
         })).unwrap();
