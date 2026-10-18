@@ -6544,7 +6544,12 @@ impl ArtifactView {
             &self.metadata_snapshot(),
         )?;
         let lease = Arc::get_mut(&mut self.lease).expect("new demanded selection lease");
-        let mut fixed = lease.materialization.fixed.to_vec();
+        let mut fixed = lease
+            .materialization
+            .fixed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         fixed.push(Arc::clone(&custody));
         lease.materialization.fixed = fixed.into();
         Some(custody)
