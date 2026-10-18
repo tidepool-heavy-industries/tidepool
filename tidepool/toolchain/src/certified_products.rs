@@ -13124,6 +13124,62 @@ pub(crate) mod tests {
             assert!(selected
                 .native_original_requirements()
                 .any(|proof| proof == dependency_only.proof().unwrap()));
+            // A later physical product imports previously undemanded body
+            // groups through an InterfaceOnly role, before executing anything.
+            let fresh = recovered_witness_fixtures(&[fixture_native_declaration_product(
+                original_groups_fixture_in_unit_with_sites(
+                    "main",
+                    "Tidepool.Session.Lib.G6",
+                    vec![(6, vec![source(schema, 191), source(schema, 195)])],
+                    155,
+                    &BTreeMap::new(),
+                    b"fresh consumer canonical".to_vec(),
+                    &BTreeMap::new(),
+                    &[],
+                ),
+                producer.sha256(),
+                6,
+            )])
+            .remove(0)
+            .product;
+            let fresh_entry =
+                Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+            let mut fresh_selection = selected.clone();
+            fresh_selection
+                .admit_current(
+                    fresh.owner(),
+                    ProductOrigin::Fresh,
+                    fresh.module_interface().unwrap(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            let fresh_issuance = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut fresh_selection,
+                &inputs.artifacts,
+                vec![fresh_entry.clone()],
+            );
+            if carry_full {
+                fresh_issuance.expect(
+                    "a fresh physical body consumes the request's issued dependency availability",
+                );
+                assert!(fresh_selection
+                    .selected_original_owners()
+                    .all(|owner| owner.module != "DependencySchema"));
+                assert!(fresh_selection
+                    .issued_native_availability()
+                    .any(|availability| availability
+                        .offers()
+                        .iter()
+                        .any(|offer| offer.original() == fresh_entry.descriptor.id
+                            && offer.is_full())));
+            } else {
+                assert!(
+                    matches!(fresh_issuance, Err(crate::CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 191 | 195 }
+                        if artifact == schema_entry.descriptor.id)),
+                    "partial dependency availability must refuse the fresh body's extra imports"
+                );
+            }
             let closure = selected
                 .selected_original_closure(&inputs.artifacts)
                 .unwrap();

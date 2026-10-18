@@ -912,7 +912,9 @@ impl OriginalCompilerInputs {
             &artifacts,
             entries.clone(),
             &dependency_offers,
-            selected_source.map_or(&[], |source| source.native_offers()),
+            selected_source.map_or(dependency_offers.as_slice(), |source| {
+                source.native_offers()
+            }),
         )?;
         for entry in &entries {
             if entry.native_group_ordinals.is_empty() {
