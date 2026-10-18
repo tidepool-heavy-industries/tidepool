@@ -11,7 +11,7 @@ import System.IO (IOMode(ReadWriteMode), hClose, openTempFile, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (createLink, createNamedPipe, createSymbolicLink, ownerReadMode, ownerWriteMode, unionFileModes)
 import System.Timeout (timeout)
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), LookupNameInspection(..), LookupNameMode(..), workerArgv, workerRequestFromArgv)
 import Tidepool.HarnessSource (harnessProfilePragmaLine, spliceHarnessProfilePragma)
 
 harnessSourceChecks :: IO ()
@@ -46,6 +46,14 @@ harnessSourceChecks = withScratch $ \root -> do
   unless ("inspection-query-2" `notElem` directories) (fail "duplicate input created another copy")
   equal "batch copy stays separate" (Just (out </> "inspection-type-batch" </> "Input.hs")) (requestInspectTypeBatch inspectionCopies)
   equal "second basename contents" (harnessProfilePragmaLine ++ "\nmodule Input where\nvalue = 2\n") =<< readFile query1
+  hosted <- request [Input first, Input second, Input first, OutputDir out,
+    HostedLookup (HostedLookupBatch
+      [HostedLookupPrimary 2 "value" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly)),
+       HostedLookupPrimary 9 ":: Int" (HostedLookupTypeSearch "Int"),
+       HostedLookupPrimary 11 "value" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly))] Nothing)]
+  hostedCopies <- spliceHarnessProfilePragma hosted
+  equal "hosted metadata path retains sharing while wildcard source stays separate" [query0,query1,query0] (requestFiles hostedCopies)
+  equal "hosted copies retain the exact admitted operation identities" (requestHostedLookup hosted) (requestHostedLookup hostedCopies)
   -- Equivalent spellings deliberately remain separate raw request identities.
   aliases <- request [Input first, Input (root </> "first" </> "." </> "Input.hs"), OutputDir out, InspectInfo "value"]
   aliasCopies <- spliceHarnessProfilePragma aliases

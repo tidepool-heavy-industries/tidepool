@@ -64,7 +64,7 @@ import Tidepool.PreparedStg
   , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic
   , resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent )
 import Tidepool.ConstructorIdentity (issuedDataCon)
-import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts)
 import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.FatIface.Internal (issueOwnerInterfaceContext)
 import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts, mi_module)

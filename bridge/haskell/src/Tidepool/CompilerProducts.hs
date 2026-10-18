@@ -93,7 +93,7 @@ import Tidepool.ExecutionSource
   , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, captureFinalizedModuleArtifactsWithOutputs
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
   , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
   )
@@ -702,11 +702,12 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     timing <- readTimingEnabled
     let dependencies = preparedFreshDependencies prepared
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
-    (finalized,finalizedOutputs) <- case issued >>= preparedCurrentOriginalInventory of
-      Just inventory -> materializeFinalizedModuleArtifactsWithOutputs outDir (currentOriginalFinalized inventory)
+    capturedFinalization <- case issued >>= preparedCurrentOriginalInventory of
+      Just inventory -> pure (currentOriginalFinalized inventory)
       Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
-        captureFinalizedModuleArtifactsWithOutputs originalInterfaces hscEnv
+        captureFinalizedModuleArtifacts originalInterfaces hscEnv
           (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir
+    (finalized,finalizedOutputs) <- materializeFinalizedModuleArtifactsWithOutputs outDir capturedFinalization
     let inventory = issued >>= preparedCurrentOriginalInventory
         availability = maybe Map.empty currentOriginalAvailability inventory
         freshProducts = maybe [] currentOriginalProducts inventory

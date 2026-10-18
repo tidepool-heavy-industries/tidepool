@@ -2907,7 +2907,7 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 #[cfg(test)]
-pub(crate) use tests::{run_map_status_fixture, run_map_trace_fixture};
+pub(crate) use tests::{run_map_trace_fixture, run_status_fixture};
 
 #[cfg(test)]
 mod tests {
@@ -4037,17 +4037,19 @@ mod tests {
             .collect()
     }
 
-    pub(crate) fn run_map_status_fixture(workspace: &Path) -> RunStatus {
-        RunStatus::new(
-            "projection",
-            workspace,
-            "session",
-            test_agent_defaults(),
-            RunPhase::Ready {
-                root_actor: ActorRef::first(exomonad_actor::ActorId(3)),
-                root_thread: "thread-3".into(),
-            },
-        )
+    // Read-only status data: this does not admit an actor or launch a provider.
+    pub(crate) fn run_status_fixture(
+        run_id: &str,
+        workspace: &Path,
+        session: &str,
+        phase: RunPhase,
+    ) -> RunStatus {
+        let status = RunStatus::new(run_id, workspace, session, test_agent_defaults(), phase);
+        assert_eq!(
+            decode_run_status(&serde_json::to_vec(&status).unwrap()).unwrap(),
+            status,
+        );
+        status
     }
 
     // The real production formatter and scoped dispatcher supply run-map tests;
