@@ -1075,6 +1075,8 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
             effect_keys: exomonad_actor::ActorCapabilities::default()
                 .effect_keys()
                 .to_vec(),
+            model_permissions: Default::default(),
+            conversation_permission: None,
             descendant_depth: 8,
             descendant_active_children: None,
             model: None,

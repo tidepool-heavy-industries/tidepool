@@ -1537,6 +1537,8 @@ mod tests {
                 context_parent: None,
                 actor_path: None,
                 effect_keys: vec![],
+                model_permissions: Default::default(),
+                conversation_permission: None,
                 descendant_depth: 8,
                 descendant_active_children: None,
                 model: Some("executor".into()),

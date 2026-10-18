@@ -349,23 +349,21 @@ impl ResolvedCatalog {
         Ok(format!(
             r#"{{-# LANGUAGE OverloadedStrings #-}}
 module Exomonad.Models
-  ( PrimaryModelFamily
+  ( catalogIdentity
+  , PrimaryModelFamily
   , primaryModel
   , module Tidepool.Model.Selection
   ) where
 
+import Data.Text (Text)
 import Tidepool.Model.Selection
 
-{binding}"#
-        ))
-    }
+catalogIdentity :: Text
+catalogIdentity = {identity}
 
-    pub(crate) fn render_actor_model_binding(
-        &self,
-        key: &str,
-        reasoning: Reasoning,
-    ) -> Result<String, String> {
-        self.render_binding("CurrentModelFamily", "currentModel", key, reasoning)
+{binding}"#,
+            identity = haskell_literal(&self.identity)
+        ))
     }
 
     /// Render a binding from the exact catalog key; provider IDs never become model selectors.
@@ -589,27 +587,36 @@ mod tests {
     }
 
     #[test]
-    fn actor_model_renderer_uses_explicit_actor_family_and_effort() {
+    fn primary_model_renderer_uses_explicit_family_and_effort() {
         let mut config = fixture_config();
         config.models.get_mut("flash").unwrap().allowed_efforts = vec!["low".into(), "high".into()];
         let catalog = config.resolve().unwrap();
         let source = catalog
-            .render_actor_model_binding(
+            .render_binding(
+                "PrimaryModelFamily",
+                "primaryModel",
                 "flash",
                 Reasoning::for_backend(Backend::DeepSeek, "low").unwrap(),
             )
             .unwrap();
-        assert!(source.contains("type CurrentModelFamily = DeepSeek"));
-        assert!(source.contains("currentModel :: Model CurrentModelFamily"));
-        assert!(source.contains("currentModel = deepSeek"));
+        assert!(source.contains("type PrimaryModelFamily = DeepSeek"));
+        assert!(source.contains("primaryModel :: Model PrimaryModelFamily"));
+        assert!(source.contains("primaryModel = deepSeek"));
         assert!(source.contains("(DeepSeekOptions DeepSeekLow)"));
         assert!(!source.contains("data Model"));
         assert!(!source.contains("ModelChoice"));
         assert!(catalog
-            .render_actor_model_binding("unknown", catalog.models["flash"].reasoning)
+            .render_binding(
+                "PrimaryModelFamily",
+                "primaryModel",
+                "unknown",
+                catalog.models["flash"].reasoning
+            )
             .is_err());
         assert!(catalog
-            .render_actor_model_binding(
+            .render_binding(
+                "PrimaryModelFamily",
+                "primaryModel",
                 "flash",
                 Reasoning::for_backend(Backend::OpenAIPlan, "low").unwrap()
             )

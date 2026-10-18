@@ -3647,6 +3647,32 @@ fn compile_root(
         tracing::info_span!(target: "tidepool::actor_host::startup", "prepare_startup_entry")
             .in_scope(|| machine.prepare_startup_entry(compiled.code()))?;
     machine.seal_recovery_initialization_scope(lexical_scope)?;
+    let capabilities = config
+        .workspace_inputs
+        .as_ref()
+        .and_then(|workspace| workspace.model_catalog.as_ref())
+        .map(|catalog| {
+            catalog.root_capabilities(
+                exomonad_actor::ActorCapabilities::default()
+                    .effect_keys()
+                    .to_vec(),
+            )
+        })
+        .transpose()
+        .map_err(runtime_error)?
+        .unwrap_or_default();
+    let root_model = capabilities
+        .conversation_permission()
+        .map(|permission| permission.model().model().clone())
+        .unwrap_or_else(|| config.model.clone());
+    if capabilities
+        .conversation_permission()
+        .is_some_and(|permission| !permission.permits(permission.model(), config.reasoning))
+    {
+        return Err(runtime_error(
+            "root reasoning effort differs from its admitted conversation permission",
+        ));
+    }
     let mut descriptor = ActorDescriptor::new(
         "exomonad-root",
         ActorPlacement {
@@ -3657,7 +3683,9 @@ fn compile_root(
     )
     .with_actor_path(root_declaration_recovery::root_path())
     .with_persistence_policy(exomonad_actor::ActorPersistencePolicy::Durable)
-    .with_capabilities(exomonad_actor::ActorCapabilities::default());
+    .with_model(Some(root_model))
+    .with_reasoning(Some(config.reasoning))
+    .with_capabilities(capabilities);
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
             exomonad_actor::ActorSourceLayers::layer_include_for(layers.as_ref(), "run")
@@ -4203,7 +4231,7 @@ fn orient_launch_instructions(
         let effects = tool
             .effect_keys()
             .iter()
-            .map(|effect| effect.haskell_name())
+            .map(|effect| effect.haskell_row_entry())
             .collect::<Vec<_>>();
         instructions.push_str(&format!(
             "\nNotebook {} effects: {}.",
