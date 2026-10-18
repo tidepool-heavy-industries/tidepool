@@ -1293,6 +1293,7 @@ enum RequestStep {
 enum ConnectionOutcome {
     Continue,
     Retire,
+    Quarantine(WorkerAbortRetirement),
 }
 
 /// Owns the pinned-worker portion of one connection's lifecycle: begin the
@@ -1501,7 +1502,13 @@ fn service_transaction(
         }
         // The accepted request(s) stay indeterminate; diagnostic bytes cannot
         // acknowledge END. Retire this worker before reporting that distinction.
-        worker.abort();
+        let retirement = worker.abort();
+        if matches!(
+            &retirement.worker,
+            crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(_)
+        ) {
+            return Ok(ConnectionOutcome::Quarantine(retirement));
+        }
         if let Some((code, stdout, stderr, _, _)) = &one_shot_response {
             let delivered = write_unconfirmed_response(
                 &mut connection,
@@ -1969,15 +1976,50 @@ fn grant_worker_argv(
     Ok(request.worker_argv())
 }
 
+struct QuarantinedSlot {
+    worker: Worker,
+    retirement: WorkerAbortRetirement,
+    _resource_permit: ResourcePermit,
+    _admission_permit: Option<AdmissionPermit>,
+    prior: Option<Box<FrontendError>>,
+}
+
+/// Failed daemon shutdown retains every exact child/namespace/grant owner.
+/// Dropping this explicit outcome uses Worker's bounded retirement policy;
+/// neither disposal nor a failed observation is a cleanup acknowledgement.
+pub struct RetainedDaemonWorkers(Vec<QuarantinedSlot>);
+
+impl std::fmt::Debug for RetainedDaemonWorkers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|slot| (slot.worker.child.id(), &slot.retirement, &slot.prior)),
+            )
+            .finish()
+    }
+}
+
 struct ResidentSlot {
     resources: std::sync::Arc<ResourceAdmission>,
     slot: usize,
+    quarantined: bool,
+}
+
+impl ResidentSlot {
+    fn quarantine(&mut self) {
+        self.quarantined = true;
+        self.resources.alive[self.slot].store(false, Ordering::Release);
+    }
 }
 
 impl Drop for ResidentSlot {
     fn drop(&mut self) {
         self.resources.alive[self.slot].store(false, Ordering::Release);
-        self.resources.worker_rss[self.slot].store(0, Ordering::Release);
+        if !self.quarantined {
+            self.resources.worker_rss[self.slot].store(0, Ordering::Release);
+        }
     }
 }
 
@@ -2149,9 +2191,9 @@ fn serve_workers(
             let ready_tx = ready_tx.clone();
             let resources = std::sync::Arc::clone(&resources);
             let dispatch = dispatch.clone();
-            slots.push(scope.spawn(move || -> Result<(), FrontendError> {
+            slots.push(scope.spawn(move || -> Result<Option<QuarantinedSlot>, FrontendError> {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
-                let _resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot };
+                let mut resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot, quarantined: false };
                 let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
                     run_id,
@@ -2265,9 +2307,16 @@ fn serve_workers(
                         },
                     );
                     resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
-                    drop(resource_permit);
                     match outcome {
-                        Ok(ConnectionOutcome::Continue) => {}
+                        Ok(ConnectionOutcome::Continue) => { drop(resource_permit); }
+                        Ok(ConnectionOutcome::Quarantine(retirement)) => {
+                            resident.quarantine();
+                            drop(job_rx);
+                            return Ok(Some(QuarantinedSlot {
+                                worker, retirement, _resource_permit: resource_permit,
+                                _admission_permit: _permit, prior: None,
+                            }));
+                        }
                         Ok(ConnectionOutcome::Retire) => {
                             retire.store(true, Ordering::Release);
                             break;
@@ -2279,13 +2328,21 @@ fn serve_workers(
                             // daemon alive at reduced capacity rather than
                             // taking the whole endpoint down over one slot.
                             tracing::error!(run_id, slot, %error, "compiler worker slot failed and is retiring");
-                            worker.abort();
+                            let retirement = worker.abort();
+                            if matches!(&retirement.worker, crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(_)) {
+                                resident.quarantine();
+                                drop(job_rx);
+                                return Ok(Some(QuarantinedSlot {
+                                    worker, retirement, _resource_permit: resource_permit,
+                                    _admission_permit: _permit, prior: Some(Box::new(error)),
+                                }));
+                            }
                             return Err(error);
                         }
                     }
                 }
                 worker.shutdown();
-                Ok(())
+                Ok(None)
             }));
         }
         drop(ready_tx);
@@ -2502,29 +2559,46 @@ fn serve_workers(
 
         // Accepted jobs finish before the listener backlog is drained.
         drop(job_txs);
-        let mut first_error = outcome.err();
-        for slot in slots {
-            match slot.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+        collect_slot_retirement(outcome, slots.into_iter().map(|slot| slot.join()))
+    })
+}
+
+fn collect_slot_retirement(
+    outcome: Result<(), FrontendError>,
+    outcomes: impl IntoIterator<
+        Item = std::thread::Result<Result<Option<QuarantinedSlot>, FrontendError>>,
+    >,
+) -> Result<u8, FrontendError> {
+    let mut first_error = outcome.err();
+    let mut quarantined = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(owner))) => quarantined.push(owner),
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
-                Err(_) => {
-                    if first_error.is_none() {
-                        first_error = Some(FrontendError::Daemon(
-                            "compiler worker slot thread panicked".to_owned(),
-                        ));
-                    }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(FrontendError::Daemon(
+                        "compiler worker slot thread panicked".to_owned(),
+                    ));
                 }
             }
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(0),
-        }
-    })
+    }
+    if !quarantined.is_empty() {
+        return Err(FrontendError::UnconfirmedWorkers {
+            retained: RetainedDaemonWorkers(quarantined),
+            prior: first_error.map(Box::new),
+        });
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(0),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -4324,6 +4398,100 @@ mod tests {
         first.shutdown();
         second.shutdown();
         independent.shutdown();
+    }
+
+    #[test]
+    fn simultaneous_quarantines_retain_all_owners_and_release_only_queued_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let resources = ResourceAdmission::with_limits(3, 10 * WARM_WORKER_MB, 1, 1);
+        let capacity = admission_capacity(8, 10 * WARM_WORKER_MB);
+        let mut owners = Vec::new();
+        let mut busy = Vec::new();
+        for expected_slot in 0..2 {
+            let permit = resources
+                .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+                .unwrap();
+            assert_eq!(permit.slot, expected_slot);
+            let marker = std::sync::Arc::new(AtomicBool::new(true));
+            busy.push(std::sync::Arc::clone(&marker));
+            let worker = Worker::spawn_in_slot(&prepared, &[7; 32], expected_slot).unwrap();
+            owners.push(QuarantinedSlot {
+                worker,
+                retirement: WorkerAbortRetirement {
+                    termination: Ok(()),
+                    worker: crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(
+                        crate::endpoint::CompilerIoCause::from(&io::Error::from_raw_os_error(
+                            libc::ECHILD,
+                        )),
+                    ),
+                },
+                _resource_permit: permit,
+                _admission_permit: Some(AdmissionPermit(marker)),
+                prior: None,
+            });
+        }
+        let third = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(third.slot, 2);
+        let queued = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(queued.slot, 0);
+        let (client, server) = UnixStream::pair().unwrap();
+        let (_accepted, acceptance) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(PendingJob {
+            admission_id: AdmissionId(99),
+            queued_at: Instant::now(),
+            job: Job::Transaction(server),
+            accepted: acceptance,
+            permit: None,
+            resource_permit: queued,
+        })
+        .unwrap();
+        let mut guards = (0..2)
+            .map(|slot| ResidentSlot {
+                resources: std::sync::Arc::clone(&resources),
+                slot,
+                quarantined: false,
+            })
+            .collect::<Vec<_>>();
+        for guard in &mut guards {
+            guard.quarantine();
+        }
+        assert!(!resources.alive[0].load(Ordering::Acquire));
+        assert!(!resources.alive[1].load(Ordering::Acquire));
+        drop(rx); // Accepted queued work is never executed by an unavailable slot.
+        let mut client = client;
+        assert_eq!(client.read(&mut [0u8; 1]).unwrap(), 0);
+        assert_eq!(resources.usage.lock().unwrap().jobs, 3);
+        drop(third);
+        let failure = std::thread::scope(|scope| {
+            let handles = owners
+                .into_iter()
+                .map(|owner| scope.spawn(move || Ok(Some(owner))))
+                .collect::<Vec<_>>();
+            collect_slot_retirement(
+                Err(FrontendError::Daemon("earlier failure".into())),
+                handles.into_iter().map(|handle| handle.join()),
+            )
+            .unwrap_err()
+        });
+        assert_eq!(resources.usage.lock().unwrap().jobs, 2);
+        assert!(busy.iter().all(|owner| owner.load(Ordering::Acquire)));
+        let FrontendError::UnconfirmedWorkers { retained, prior } = &failure else {
+            panic!("all quarantined owners must survive the existing join path");
+        };
+        assert_eq!(retained.0.len(), 2);
+        assert!(prior.is_some());
+        assert!(retained.0.iter().all(|owner| owner.worker.stdin.is_some()));
+        drop(failure); // Explicit owner disposal; never a cleanup receipt.
+        assert_eq!(resources.usage.lock().unwrap().jobs, 0);
+        assert!(busy.iter().all(|owner| !owner.load(Ordering::Acquire)));
+        drop(guards);
+        drop(dir);
     }
 
     #[test]

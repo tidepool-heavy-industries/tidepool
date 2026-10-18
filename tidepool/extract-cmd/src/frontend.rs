@@ -990,6 +990,10 @@ pub enum FrontendError {
         failures: Vec<ScratchCleanupFailure>,
     },
     WorkerWait(io::Error),
+    UnconfirmedWorkers {
+        retained: crate::daemon::RetainedDaemonWorkers,
+        prior: Option<Box<FrontendError>>,
+    },
     WorkerClose {
         status: std::process::ExitStatus,
         scratch: Vec<ScratchCleanupFailure>,
@@ -1068,6 +1072,8 @@ impl std::fmt::Display for FrontendError {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
             Self::ScratchCleanup { status, failures } => write!(f, "compiler worker reaped with status {status}; scratch cleanup unconfirmed: {failures:?}"),
             Self::WorkerWait(error) => write!(f, "compiler worker wait unconfirmed: {error}"),
+            Self::UnconfirmedWorkers { retained, prior } => write!(f,
+                "compiler daemon retains unconfirmed worker retirement: {retained:?}; earlier: {prior:?}"),
             Self::WorkerClose { status, scratch } => write!(f, "compiler worker reaped with status {status}; scratch cleanup failures: {scratch:?}"),
             Self::WorkerClientDisconnected => {
                 f.write_str("compiler worker retired after client disconnected")
