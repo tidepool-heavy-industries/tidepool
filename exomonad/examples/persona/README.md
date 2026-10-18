@@ -39,9 +39,12 @@ explicit tool failures. No credentials are needed for the focused mock tests.
 The agent spec exposes direct `lookup`/`readLookup` discovery and file tools,
 and one synchronous Haskell notebook with forms, console,
 ordinary workspace files, Jev, lookup, reflection, active source inspection, and Web.
-Its synchronous notebook includes context editing, record actors, hosted agents,
-typed requests, watches, inspection and scoped cleanup. It omits commands and
-raw HTTP. `Persona.Spec.helperSpec` provides a starting helper profile that
+Its synchronous notebook includes commands, context editing, record actors, hosted agents,
+typed requests, watches, inspection and scoped cleanup. The standard shell tools
+(`bash`, `write_stdin`, `read_output`, `cancel_command`) expose bounded output
+and retain command jobs for observation, input and cancellation. Raw output remains
+with the command owner and can be paged without rerunning the command. The profile
+omits raw HTTP. `Persona.Spec.helperSpec` provides a starting helper profile that
 returns findings rather than writing shared memory or mounting human forms.
 The Fs handlers resolve file operations from the ordinary workspace root,
 including editable `.exomonad` sources. Memory stays at

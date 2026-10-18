@@ -6281,6 +6281,8 @@ def declare_haskell_components():
         "Tidepool/Agent/ToolEffects.hs": "lib/Tidepool/Agent/ToolEffects.hs",
         "Tidepool/Agent/Watch.hs": "lib/Tidepool/Agent/Watch.hs",
         "Tidepool/Agent/Watch/Internal.hs": "lib/Tidepool/Agent/Watch/Internal.hs",
+        "Tidepool/Command.hs": "lib/Tidepool/Command.hs",
+        "Tidepool/Command/Tools.hs": "lib/Tidepool/Command/Tools.hs",
         "Tidepool/Command/Types.hs": "lib/Tidepool/Command/Types.hs",
         "Tidepool/Data/Text.hs": "lib/Tidepool/Data/Text.hs",
         "Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
@@ -6310,6 +6312,7 @@ def declare_haskell_components():
         "Tidepool/Model.hs": "lib/Tidepool/Model.hs",
         "Tidepool/Patch.hs": "lib/Tidepool/Patch.hs",
         "Tidepool/Prelude.hs": "lib/Tidepool/Prelude.hs",
+        "Tidepool/QQ/Bash.hs": "lib/Tidepool/QQ/Bash.hs",
         "Tidepool/QQ/Fmt/Runtime.hs": "lib/Tidepool/QQ/Fmt/Runtime.hs",
         "Tidepool/Records.hs": "lib/Tidepool/Records.hs",
         "Tidepool/Records/Bridged.hs": "lib/Tidepool/Records/Bridged.hs",
@@ -6338,6 +6341,7 @@ def declare_haskell_components():
         "tasty",
         "tasty-hunit",
         "tasty-quickcheck",
+        "template-haskell",
         "text",
         "time",
         "witherable"
@@ -6364,6 +6368,7 @@ def declare_haskell_components():
         "tasty",
         "tasty-hunit",
         "tasty-quickcheck",
+        "template-haskell",
         "text",
         "time",
         "witherable"

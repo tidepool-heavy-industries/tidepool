@@ -65,7 +65,13 @@ produce explicit failures.
 
 The profile installs files, memory, active-source inspection, Web, Jev, reflection,
 forms, context editing, record actors, hosted requests and scoped cleanup.
-It omits shell commands and general HTTP. Helpers using `Persona.Spec.helperSpec`
+The standard `bash`, `write_stdin`, `read_output` and `cancel_command` tools
+run and observe commands under runtime authority. Replies identify the retained
+`Cmd.Job` binding and session identifier. Page retained stdout or stderr with
+`read_output` when a bounded reply omits evidence; continue or cancel the same job
+rather than rerunning it. The notebook also admits `Commands`, so command
+observations can remain bound as typed values. The profile omits general HTTP.
+Helpers using `Persona.Spec.helperSpec`
 read shared files and return findings; they do not write memory or mount forms.
 Use lookup availability and operation receipts for actual runtime admission;
 reference material describes a vocabulary, not a grant.

@@ -13,8 +13,9 @@ import Tidepool.Records (FsError)
 import qualified Tidepool.File as File
 import qualified Persona.FileTools as Files
 import qualified Tidepool.Lookup.Tools as LookupTools
+import qualified Tidepool.Command.Tools as CommandTools
 import Tidepool.Effects.Core
-  ( AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
+  ( AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
   , Actor, ActorContext, AgentLaunch, AgentInspection
   , AgentControl, Notifications, ResourceScopes, BoundWorktree )
 import Tidepool.Agent.Reply (Replies)
@@ -24,7 +25,7 @@ import qualified Persona.Orientation as Orientation
 -- These base rows are delegable. Sync supplies invocation-only context editing
 -- and reload; child grants retain only the effects listed here.
 type PersonaEffects =
-  '[AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
+  '[AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
    , Actor, ActorContext, AgentLaunch, AgentInspection
    , AgentControl, Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Helpers can explore, compose and curate their own context. Findings return
@@ -45,6 +46,7 @@ data PersonaTools mode = PersonaTools
   , write_file :: mode :- Sync (Call WriteFileInput (Either FsError File.CommitOutcome))
   , edit_file :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError File.CommitOutcome))
   , preview_edit :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError Files.PreviewReceipt))
+  , shell :: CommandTools.ShellTools mode
   , lookup :: LookupTools.LookupTools mode
   , haskell :: mode :- Sync (HaskellCell PersonaEffects)
   , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
@@ -58,7 +60,7 @@ data PersonaTools mode = PersonaTools
 -- A Jev/Reflect-using hook needs those effects in this signature's constraints.
 -- Save the implementation in a module, connect it here, then reload. You can
 -- add or replace the hook without adding a new registered tool.
-agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite, Lookup, Console] effects)
+agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[Commands, FsRead, FsWrite, Lookup, Console] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools
   { read_file = presentWith presentJson $ syncTool
@@ -73,6 +75,7 @@ agentSpec = defaultSpec { specTools = PersonaTools
   , preview_edit = presentWith presentJson $ syncTool
       "Preview exact replacements without writing. Use the file reference returned by read_file."
       Files.previewEditTool
+  , shell = CommandTools.tools
   , lookup = LookupTools.tools
   , haskell = haskellTool "Use the persistent Haskell notebook to recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Use the installed file tools for direct source reads and edits, including when a notebook cell will not compile. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections."
   , reload = standardReload }

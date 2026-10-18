@@ -109,17 +109,19 @@ personaSeedTests = testGroup "persona seed"
         Right selection -> assertEqual "context failure remains visible"
           "[recent conversation unavailable: ReflectUnbound]" (W.contextUsed selection)
         Left err -> fail (show err)
-  , testCase "companion and helper profiles enable composition without raw transport or commands" $ do
+  , testCase "companion enables commands while helper retains its investigation profile" $ do
       let companion = toolEffectNames (Proxy @(Contract.SyncEffects Spec.PersonaEffects))
           helper = toolEffectNames (Proxy @(Contract.SyncEffects Spec.HelperEffects))
           companionBase = toolEffectNames (Proxy @Spec.PersonaEffects)
           helperBase = toolEffectNames (Proxy @Spec.HelperEffects)
       mapM_ (\effect -> assertBool ("companion: " ++ show effect) (effect `elem` companion))
-        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser", "ModelCall"]
+        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser", "ModelCall", "Commands"]
       mapM_ (\effect -> assertBool ("helper: " ++ show effect) (effect `elem` helper))
         ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "Web", "Jev"]
       mapM_ (\effect -> assertBool ("excluded: " ++ show effect) (effect `notElem` companion && effect `notElem` helper))
-        ["Commands", "Http"]
+        ["Http"]
+      assertBool "shell authority belongs to the companion profile"
+        ("Commands" `elem` companionBase && "Commands" `notElem` helperBase)
       assertBool "default helper returns findings rather than writing shared memory or mounting human forms"
         ("FsWrite" `notElem` helper && "AskUser" `notElem` helper)
       assertBool "bounded model calls are enabled for the companion only"
@@ -139,7 +141,7 @@ personaSeedTests = testGroup "persona seed"
         Right prepared -> case field "tools" (Contract.preparedAgentSpecMetadata prepared) of
           Array tools -> do
             assertEqual "explicit ordinary tool order"
-              (map String ["read_file", "write_file", "edit_file", "preview_edit", "lookup", "read_lookup", "haskell", "reload"])
+              (map String ["read_file", "write_file", "edit_file", "preview_edit", "bash", "write_stdin", "read_output", "cancel_command", "lookup", "read_lookup", "haskell", "reload"])
               (map (field "name") tools)
             mapM_ (\tool -> assertEqual "hosted function input root" (String "object")
               (field "type" (field "inputSchema" tool)))
