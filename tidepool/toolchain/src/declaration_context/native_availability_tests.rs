@@ -2598,13 +2598,12 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             binder: binding.identity.clone(),
         }];
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                inputs,
-                &inputs.metadata,
-                &validation.inventory,
-            )
-            .unwrap();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
         let source = inputs.artifacts();
         let mut fixed = source
             .inventory()
@@ -2628,12 +2627,10 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             }]),
         );
         assert!(inputs.artifacts().selected_native_groups().is_empty());
-        let proof = NativeOriginalRequirement::from_selected_view(
-            entry.descriptor.id,
-            target.artifacts(),
-        )
-        .unwrap()
-        .unwrap();
+        let proof =
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, target.artifacts())
+                .unwrap()
+                .unwrap();
         IssuedNativeOffer::issue(entry.descriptor.id, target.artifacts(), Some(proof)).unwrap()
     };
     drop(completed);
