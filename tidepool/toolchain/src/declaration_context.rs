@@ -3190,6 +3190,36 @@ struct OwnedExecutionGraphFile {
     _directory: Arc<tempfile::TempDir>,
 }
 
+struct MaterializationFacts<'a> {
+    rows: BTreeMap<ArtifactId, &'a RetainedArtifactRow>,
+    groups: Vec<&'a PendingCertifiedGroup>,
+    graph_paths: BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile>,
+    complete: Option<Arc<RetainedArtifactMaterialization>>,
+}
+
+impl MaterializationFacts<'_> {
+    fn detach(self) -> Arc<RetainedArtifactMaterialization> {
+        Arc::new(RetainedArtifactMaterialization {
+            _directory: None,
+            _parents: Vec::new(),
+            rows: self
+                .rows
+                .into_iter()
+                .map(|(id, row)| (id, row.clone()))
+                .collect(),
+            groups: self.groups.into_iter().cloned().collect::<Vec<_>>().into(),
+            execution_scope: None,
+            graph_paths: self
+                .graph_paths
+                .into_iter()
+                .map(|(digest, file)| (digest, file.clone()))
+                .collect(),
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        })
+    }
+}
+
 impl RetainedArtifactMaterialization {
     /// Reuse a complete issued closure, or detach a narrower selection from
     /// historical delta owners. Each file retains its actual issuing directory.
@@ -3197,9 +3227,38 @@ impl RetainedArtifactMaterialization {
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Option<Arc<Self>> {
-        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata);
-        let selected_graphs = metadata
-            .artifacts
+        let selected = Self::select_custody_facts(
+            owners,
+            &metadata.artifacts,
+            &metadata.selected_native_groups,
+        )?;
+        if let Some(complete) = &selected.complete {
+            return Some(Arc::clone(complete));
+        }
+        Some(selected.detach())
+    }
+
+    /// Opaque availability retains physical files, not compilation cache history.
+    /// Checked available groups remain distinct from executable request roots.
+    pub(crate) fn capture_custody(
+        owners: &[Arc<Self>],
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        available_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Option<Arc<Self>> {
+        Some(Self::select_custody_facts(owners, artifacts, available_groups)?.detach())
+    }
+
+    fn select_custody_facts<'a>(
+        owners: &'a [Arc<Self>],
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        selected_native_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Option<MaterializationFacts<'a>> {
+        let groups = Self::selected_group_refs_in(
+            owners.iter().map(Arc::as_ref),
+            artifacts,
+            selected_native_groups,
+        );
+        let selected_graphs = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => {
@@ -3228,7 +3287,7 @@ impl RetainedArtifactMaterialization {
                     owner
                         .rows
                         .iter()
-                        .filter(|(id, _)| metadata.artifacts.contains_key(*id))
+                        .filter(|(id, _)| artifacts.contains_key(*id))
                         .map(|(id, row)| (*id, row)),
                 );
                 graph_paths.extend(
@@ -3246,6 +3305,7 @@ impl RetainedArtifactMaterialization {
         // A single actual source frontier owns these very borrowed facts.
         // Reuse only its entire closure, with no excluded or shadowed issuers.
         // Arc ancestry is operation-local ownership, never a digest/name match.
+        let mut complete = None;
         if row_count == rows.len()
             && group_count == groups.len()
             && graph_count == graph_paths.len()
@@ -3255,25 +3315,15 @@ impl RetainedArtifactMaterialization {
                 .filter(|owner| !ancestors.contains(&(Arc::as_ptr(owner) as usize)))
                 .collect::<Vec<_>>();
             if let [owner] = frontier.as_slice() {
-                return Some(Arc::clone(owner));
+                complete = Some(Arc::clone(owner));
             }
         }
-        Some(Arc::new(Self {
-            _directory: None,
-            _parents: Vec::new(),
-            rows: rows
-                .into_iter()
-                .map(|(id, row)| (id, row.clone()))
-                .collect(),
-            groups: groups.into_iter().cloned().collect::<Vec<_>>().into(),
-            execution_scope: None,
-            graph_paths: graph_paths
-                .into_iter()
-                .map(|(digest, file)| (digest, file.clone()))
-                .collect(),
-            #[cfg(test)]
-            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
-        }))
+        Some(MaterializationFacts {
+            rows,
+            groups,
+            graph_paths,
+            complete,
+        })
     }
 
     #[cfg(test)]
@@ -3325,8 +3375,19 @@ impl RetainedArtifactMaterialization {
         owners: impl IntoIterator<Item = &'a Self>,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Vec<&'a PendingCertifiedGroup> {
-        let available = metadata
-            .artifacts
+        Self::selected_group_refs_in(
+            owners,
+            &metadata.artifacts,
+            &metadata.selected_native_groups,
+        )
+    }
+
+    fn selected_group_refs_in<'a>(
+        owners: impl IntoIterator<Item = &'a Self>,
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        selected_native_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Vec<&'a PendingCertifiedGroup> {
+        let available = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
@@ -3347,9 +3408,8 @@ impl RetainedArtifactMaterialization {
                                 artifact: *artifact,
                                 original_ordinal: group.group().original_ordinal(),
                             };
-                            (**selected == *native
-                                && metadata.selected_native_groups.contains(&key))
-                            .then_some(key)
+                            (**selected == *native && selected_native_groups.contains(&key))
+                                .then_some(key)
                         })
                         .is_some_and(|key| seen.insert(key))
                     {
@@ -14308,6 +14368,23 @@ mod tests {
             support_product("Gamma"),
             ancestor.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&gamma),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), gamma.owner());
+        assert_eq!(recovered.interface_bytes(), gamma.interface_bytes());
+        assert_eq!(recovered.product_bytes(), gamma.product_bytes());
+        assert_eq!(recovered.certification_bytes(), gamma.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let gamma = recovered;
         let descendant = Arc::new(
             ancestor
                 .as_ref()
@@ -14327,6 +14404,23 @@ mod tests {
             support_product("Delta"),
             descendant.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&delta),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), delta.owner());
+        assert_eq!(recovered.interface_bytes(), delta.interface_bytes());
+        assert_eq!(recovered.product_bytes(), delta.product_bytes());
+        assert_eq!(recovered.certification_bytes(), delta.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let delta = recovered;
         let next = Arc::new(
             descendant
                 .as_ref()
@@ -14366,6 +14460,23 @@ mod tests {
             support_product("Gamma"),
             a.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&gamma),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), gamma.owner());
+        assert_eq!(recovered.interface_bytes(), gamma.interface_bytes());
+        assert_eq!(recovered.product_bytes(), gamma.product_bytes());
+        assert_eq!(recovered.certification_bytes(), gamma.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let gamma = recovered;
         let b = Arc::new(
             a.as_ref()
                 .clone()
@@ -14903,6 +15014,26 @@ mod tests {
                     support_product(&format!("Growing{index}")),
                     context.owner.facts.producer,
                 );
+                let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+                    std::slice::from_ref(&product),
+                )
+                .remove(0)
+                .product;
+                assert_eq!(recovered.owner(), product.owner());
+                assert_eq!(recovered.interface_bytes(), product.interface_bytes());
+                assert_eq!(recovered.product_bytes(), product.product_bytes());
+                assert_eq!(
+                    recovered.certification_bytes(),
+                    product.certification_bytes()
+                );
+                assert_eq!(
+                    crate::certified_products::original_available_groups(&recovered)
+                        .unwrap()
+                        .count(),
+                    0,
+                    "empty originals still need an authenticated availability census"
+                );
+                let product = recovered;
                 context = Arc::new(
                     context
                         .as_ref()
@@ -19364,6 +19495,42 @@ mod tests {
             type_only.compiler_input_roles(),
             dependent_context.compiler_input_roles()
         );
+        let required_support_ordinals =
+            crate::certified_products::original_available_groups(changed.product())
+                .unwrap()
+                .flat_map(|group| {
+                    crate::certified_products::original_native_group_imports(
+                        changed.product(),
+                        group.original_ordinal(),
+                    )
+                    .unwrap()
+                })
+                .filter_map(|import| match import {
+                    crate::certified_products::PendingImportOwner::Source {
+                        owner: required_owner,
+                        original_ordinal,
+                        binder,
+                    } if required_owner == configured_support[0].owner()
+                        && binder.occurrence == "selected" =>
+                    {
+                        assert!(
+                            crate::certified_products::authenticates_original_native_entry(
+                                &configured_support[0],
+                                *original_ordinal,
+                                binder
+                            )
+                        );
+                        Some(*original_ordinal)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+        assert_eq!(
+            required_support_ordinals.len(),
+            1,
+            "changed fixture must require one exact selected support group"
+        );
+        let required_support_ordinal = *required_support_ordinals.first().unwrap();
         let missing_support = OriginalCompilerInputs::from_native_availability(
             &type_only,
             producer,
@@ -19371,8 +19538,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(missing_support, CompileError::CompilerEvidence(cause)
-            if matches!(*cause, crate::certified_products::CertificationError::Mismatch("source binder/group closure")))
+            matches!(&missing_support, CompileError::ArtifactInventory(error)
+            if matches!(&error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal,
+            } if *artifact == support_entry.descriptor.id && *original_ordinal == required_support_ordinal)),
+            "unexpected absent-offer refusal: {missing_support:#?}"
         );
         let conflicting_support = OriginalCompilerInputs::from_selected_authored_declarations(
             &dependent_context,
