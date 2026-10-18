@@ -300,10 +300,40 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
         preamble,
         "qualified Tidepool.Agent.Ref.Internal as TidepoolAgentRef",
     );
-    format!(
+    let mut rendered = format!(
         "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
         context.actor.id.0, context.actor.incarnation.0
-    )
+    );
+    if let Some((identity, reasoning)) = &context.current_model {
+        let (family, constructor, options, prefix) = match identity.model().backend() {
+            crate::Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
+            crate::Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
+            crate::Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
+        };
+        let effort = match reasoning.value() {
+            "none" => "None",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "max" => "Max",
+            _ => unreachable!("Reasoning is a closed provider-qualified value"),
+        };
+        let literal = |text: &str| {
+            format!(
+                "\"{}\"",
+                tidepool_runtime::session::escape_workbench_haskell_string(text)
+            )
+        };
+        rendered = insert_preamble_imports(
+            &rendered,
+            "qualified Tidepool.Model.Selection as TidepoolModelSelection",
+        );
+        rendered.push_str(&format!(
+            "\ntype CurrentModelFamily = TidepoolModelSelection.{family}\n\ncurrentModel :: TidepoolModelSelection.Model CurrentModelFamily\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
+            literal(identity.catalog_identity()), literal(identity.key()),
+        ));
+    }
+    rendered
 }
 
 // This header belongs to the trusted generated template, never authored cell text.
@@ -14158,6 +14188,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         (
@@ -14379,6 +14410,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         (
@@ -15936,6 +15968,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: "'[]".into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         let projection = ActorContextProjection {

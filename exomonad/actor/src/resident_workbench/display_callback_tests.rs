@@ -79,6 +79,7 @@ async fn prepare_callback_fixture(
         live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         source_imports: crate::ActorSourceImports::default(),
         haskell_effects_alias: surface.row().into(),
+        current_model: None,
         source_layer: Vec::new().into(),
     };
     let public_context = context.clone();

@@ -464,6 +464,14 @@ impl ActorDescriptor {
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
             haskell_effects_alias: self.capabilities.haskell_effects_type().into(),
+            current_model: self
+                .capabilities
+                .conversation_permission()
+                .zip(self.reasoning)
+                .filter(|(permission, reasoning)| {
+                    permission.permits(permission.model(), *reasoning)
+                })
+                .map(|(permission, reasoning)| (permission.model().clone(), reasoning)),
             source_layer: crate::mount::ActorSourceRoots::Deployment(self.source_layer.clone()),
         }
     }
@@ -482,6 +490,40 @@ mod tests {
                 resource_scope: tidepool_codegen::suspension::RealmId(1),
             },
         )
+    }
+
+    #[test]
+    fn current_model_projection_uses_the_fixed_permission_and_explicit_effort() {
+        let model = crate::AdmittedModelIdentity::new(
+            "catalog".into(),
+            "child".into(),
+            "provider".into(),
+            crate::Model::DeepSeekFlash,
+        )
+        .unwrap();
+        let low = crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekLow);
+        let high = crate::Reasoning::DeepSeekReasoning(crate::DeepSeekReasoning::DeepSeekHigh);
+        let permission = crate::ConversationPermission::new(model.clone(), vec![low]).unwrap();
+        let descriptor = descriptor()
+            .with_model(Some(crate::Model::GeminiArgon))
+            .with_capabilities(
+                ActorCapabilities::default().with_conversation_permission(Some(permission)),
+            );
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        assert!(descriptor.session_context(actor).current_model.is_none());
+        assert!(descriptor
+            .clone()
+            .with_reasoning(Some(high))
+            .session_context(actor)
+            .current_model
+            .is_none());
+        assert_eq!(
+            descriptor
+                .with_reasoning(Some(low))
+                .session_context(actor)
+                .current_model,
+            Some((model, low))
+        );
     }
 
     #[test]

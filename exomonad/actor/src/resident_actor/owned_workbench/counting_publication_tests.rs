@@ -210,6 +210,7 @@ async fn counted_publication_history(preparation: crate::CompilerPreparationClie
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: Default::default(),
             haskell_effects_alias: surface.row().into(),
+            current_model: None,
             source_layer: Vec::new().into(),
         };
         let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();

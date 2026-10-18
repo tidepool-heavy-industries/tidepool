@@ -947,6 +947,8 @@ pub struct ActorSessionContext {
     pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
     pub haskell_effects_alias: tidepool_runtime::session::HaskellTypeSource,
+    /// Exact fixed conversation identity and explicitly selected admitted effort.
+    pub current_model: Option<(crate::AdmittedModelIdentity, crate::Reasoning)>,
     /// Helper include roots this actor alone compiles against, ahead of every
     /// shared root. Fixed
     /// when the actor is constructed; there is no setter, because an actor's
@@ -1196,6 +1198,7 @@ mod source_authority_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: ActorSourceImports::default(),
             haskell_effects_alias: "[]".into(),
+            current_model: None,
             source_layer: paths.into(),
         }
     }
