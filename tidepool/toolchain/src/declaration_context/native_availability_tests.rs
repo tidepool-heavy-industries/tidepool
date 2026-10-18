@@ -23,17 +23,15 @@ fn restore_fixture_support_in_view(
         .compiler_source_support()
         .native_availability()
         .validate_role_coverage(issued.compiler_input_projection())?;
-    let custody = view
-        .retain_custody(issued.artifact_view())?
-        .retain_issued_offer_custody(
-            issued
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )?;
-    let recovered =
-        recover_fixture_compiler_support(issued.compiler_input_projection().clone(), custody, [])?;
+    let recovered = recover_fixture_compiler_support(
+        issued.compiler_input_projection().clone(),
+        view.retain_custody(issued.artifact_view())?,
+        issued
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .cloned(),
+    )?;
     recovered.restore_snapshot_evidence(&issued.snapshot())
 }
 
