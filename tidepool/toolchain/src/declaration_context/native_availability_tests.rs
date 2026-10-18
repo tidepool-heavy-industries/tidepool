@@ -1626,6 +1626,39 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .unwrap(),
         namespace
     );
+    {
+        let continuation =
+            ContinuationNativeInputs::from_selection(&selected, inputs.projection()).unwrap();
+        let catalog =
+            crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
+        let a_interface = Arc::new(ArtifactEntry::canonical(
+            recovered[0].product.module_interface().unwrap().clone(),
+        ));
+        let receiver = full
+            .select_roots(vec![a_interface.descriptor.id, b_id])
+            .unwrap();
+        let effective =
+            CompilerInputProjection::from_issued_entries(&[a_interface, entries[1].clone()])
+                .unwrap();
+        assert!(receiver.selected_native_groups().is_empty());
+        assert!(
+            ancestor_offer
+                .qualified_private_availability(&effective, &receiver)
+                .is_some(),
+            "the retained Full would qualify without the actual physical row restriction"
+        );
+        let advertised = BTreeSet::from([NativeGroupKey {
+            artifact: a_id,
+            original_ordinal: 7,
+        }]);
+        assert!(
+            catalog
+                .qualified_availability(&effective, &receiver, &advertised)
+                .unwrap()
+                .is_empty(),
+            "B's IssuedGroups row must not turn its retained Full A proof into A permission"
+        );
+    }
     drop(inputs);
     drop(b_context);
     drop(dependency_offer);

@@ -51,7 +51,7 @@ impl<'a> NativeDependencyCatalog<'a> {
 
     /// Borrow historical qualifications only when this request's actual rows
     /// permit every exact binding. A retained Full offer alone grants nothing.
-    fn qualified_availability(
+    pub(crate) fn qualified_availability(
         &self,
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
