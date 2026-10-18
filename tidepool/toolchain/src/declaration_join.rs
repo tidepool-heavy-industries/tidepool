@@ -2663,6 +2663,7 @@ mod authored_tests {
         // Independent issuances can have the same GHC interface observation
         // while retaining different exact native carrier and Group bindings.
         let mut branch_groups = Vec::new();
+        let mut branch_joins = Vec::new();
         let mut interface_observation = None;
         for marker in ["JoinScopeLeft", "JoinScopeRight"] {
             let inventory = ArtifactInventory::default();
@@ -2767,7 +2768,12 @@ mod authored_tests {
             drop(branch);
             drop(view);
             drop(inventory);
+            let scratch_path = scratch.path().to_path_buf();
             drop(scratch);
+            assert!(
+                !scratch_path.try_exists().unwrap(),
+                "the actual branch request directory must be released"
+            );
             let retained = joined.context().artifact_view().capture_graph_selection();
             assert!(retained.namespace.contains(&carrier));
             assert_eq!(
@@ -2785,6 +2791,22 @@ mod authored_tests {
             );
             joined.native_binding_custody_requirements().unwrap();
             branch_groups.push((carrier, groups));
+            branch_joins.push(joined);
+        }
+        // Both accepted owners stay live: issuing the second cannot replace
+        // the first one's equal-payload carrier or exact native Group choices.
+        for (joined, (carrier, groups)) in branch_joins.iter().zip(&branch_groups) {
+            let retained = joined.context().artifact_view().capture_graph_selection();
+            assert!(retained.namespace.contains(carrier));
+            assert_eq!(
+                retained
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact() == carrier.artifact)
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                *groups
+            );
         }
         assert_ne!(
             branch_groups[0].0, branch_groups[1].0,
