@@ -8443,6 +8443,7 @@ pub(crate) fn certify_products_with_validation(
                 if sha(&interface) != accepted.skinny_iface_sha256 {
                     return Err(CertificationError::StaleEvidence);
                 }
+                drop(interface);
                 let sidecar = match metadata {
                     CandidateMetadataInput::Captured(original) => {
                         Cow::Borrowed(original.package_imports_bytes())
