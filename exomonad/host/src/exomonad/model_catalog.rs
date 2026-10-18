@@ -83,8 +83,8 @@ fn constructor_valid(name: &str) -> bool {
                 | "DeepSeekOptions"
                 | "OpenAIOptions"
                 | "EffortLow"
-                | "ArgonMedium"
-                | "ArgonHigh"
+                | "EffortMedium"
+                | "EffortHigh"
                 | "DeepSeekNone"
                 | "DeepSeekLow"
                 | "DeepSeekHigh"
@@ -627,6 +627,8 @@ mod tests {
             "DeepSeekOptions",
             "OpenAIOptions",
             "EffortLow",
+            "EffortMedium",
+            "EffortHigh",
             "ModelSelectionEnvelope",
         ] {
             let mut config = config();
