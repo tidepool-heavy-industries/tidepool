@@ -233,16 +233,18 @@ impl ScopedCompilerContext {
 /// This association has candidate-owned block custody. It cannot become a
 /// cloneable stored context before its own publication is installed.
 pub(crate) struct PreparedCompilerContext {
-    context: StoredCompilerContext,
+    exact: Arc<ExactDeclarationContext>,
+    materialized: Arc<MaterializedContext>,
+    origin: ContextStoreOrigin,
 }
 
 impl PreparedCompilerContext {
     pub(crate) fn root(&self) -> &ContextRoot {
-        self.context.materialized.root()
+        self.materialized.root()
     }
 
     pub(crate) fn exact(&self) -> &Arc<ExactDeclarationContext> {
-        &self.context.exact
+        &self.exact
     }
 }
 
@@ -274,7 +276,11 @@ impl CompilerContextInstallation {
     pub(crate) fn installed_blocking(self) -> Result<ScopedCompilerContext, StoreError> {
         self.installation.installed_blocking()?;
         Ok(ScopedCompilerContext::Stored(Arc::new(
-            self.context.context,
+            StoredCompilerContext {
+                exact: self.context.exact,
+                materialized: self.context.materialized,
+                origin: self.context.origin,
+            },
         )))
     }
 }
@@ -350,23 +356,27 @@ impl RecoveryGraph {
         }
     }
 
-    fn owns_context_receipt(&self, context: &StoredCompilerContext) -> bool {
-        if !self.store.shares_owner(&context.origin.store)
-            || self.domain != context.origin.domain
-            || self.lineage != context.origin.lineage
+    fn owns_context_receipt(
+        &self,
+        origin: &ContextStoreOrigin,
+        context: &Arc<MaterializedContext>,
+    ) -> bool {
+        if !self.store.shares_owner(&origin.store)
+            || self.domain != origin.domain
+            || self.lineage != origin.lineage
         {
             return false;
         }
-        let root = context.materialized.root();
+        let root = context.root();
         self.materialized_contexts
             .get(root)
-            .is_some_and(|owned| Arc::ptr_eq(owned, &context.materialized))
+            .is_some_and(|owned| Arc::ptr_eq(owned, context))
             || self
                 .acquired
                 .lock()
                 .contexts
                 .get(root)
-                .is_some_and(|owned| Arc::ptr_eq(owned, &context.materialized))
+                .is_some_and(|owned| Arc::ptr_eq(owned, context))
     }
 
     pub(crate) fn stage_compiler_context(
@@ -379,15 +389,13 @@ impl RecoveryGraph {
             .ensure_ready()
             .map_err(|error| crate::session::SessionError::RecoveryStore(Box::new(error)))?;
         if let ScopedCompilerContext::Stored(stored) = context {
-            if self.owns_context_receipt(stored) {
+            if self.owns_context_receipt(&stored.origin, &stored.materialized) {
                 return Ok((
                     self.clone(),
                     PreparedCompilerContext {
-                        context: StoredCompilerContext {
-                            exact: stored.exact.clone(),
-                            materialized: stored.materialized.clone(),
-                            origin: stored.origin.clone(),
-                        },
+                        exact: stored.exact.clone(),
+                        materialized: stored.materialized.clone(),
+                        origin: stored.origin.clone(),
                     },
                 ));
             }
@@ -412,11 +420,9 @@ impl RecoveryGraph {
                 .seal()
                 .map_err(|error| crate::session::recovery::graph_error(artifact_root, error))?,
             PreparedCompilerContext {
-                context: StoredCompilerContext {
-                    exact: context.exact().clone(),
-                    materialized,
-                    origin: self.context_origin(),
-                },
+                exact: context.exact().clone(),
+                materialized,
+                origin: self.context_origin(),
             },
         ))
     }
@@ -993,7 +999,10 @@ impl StagedRecoveryManifest {
         self,
         context: PreparedCompilerContext,
     ) -> Result<StagedCompilerContextPublication, RecoveryError> {
-        if !self.graph.owns_context_receipt(&context.context) {
+        if !self
+            .graph
+            .owns_context_receipt(&context.origin, &context.materialized)
+        {
             return Err(error(
                 "compiler context does not belong to this staged publication",
             ));
