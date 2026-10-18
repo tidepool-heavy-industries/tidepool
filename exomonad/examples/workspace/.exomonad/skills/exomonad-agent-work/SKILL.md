@@ -4,22 +4,34 @@ description: Compose hosted agents with typed requests, shared or forked workspa
 ---
 
 Hosted agents are ordinary typed resources. Create one with
-`spawnSubagent context workspace (defaultSpawnOptions actualSpec)`. Context is
-`ForkCtx checkpoint` for an explicit captured conversation or `FreshCtx prompt`
+`spawnSubagent context workspace (defaultSpawnOptions model actualSpec)`. Context is
+`ForkCtx captured` after `checkpoint model label` for an explicit captured conversation or `FreshCtx prompt`
 for an explicit prompt. The workspace is `SameDir`, an opaque run-granted
 `ExistingWorkspace`, or `ForkWorktree seed` for a selected committed source.
-Spawn options contain the actual typed `AgentSpec`, model and effort, instructions,
+A `Model family` carries its provider-specific options. `ForkCtx` requires
+`ForkAgent family`; `FreshCtx` requires `SpawnAgent family`. A captured checkpoint
+retains the same family as its fork. Spawn options contain the actual typed
+`AgentSpec`, explicit model, instructions,
 optional ordinary text label, lifetime, and limits. A label is descriptive; it
 does not identify an actor, workspace, or group.
 
+Children start with empty model permissions. Set `spawnPermissions` explicitly
+using `modelPermissions` with exact `allowModelCall`, `allowForkAgent`, and
+`allowSpawnAgent` selections for the operations the child needs. Its effect list
+expresses which family operations are available; permissions authorize the
+selected models. The notebook's `currentModel` is actor-local; generic modules
+take an ordinary `Model family` argument and `Member` constraints.
+
 A successful spawn returns an idle `AgentRef`. Spawn does not start inference.
-The first typed request or a human message activates it. The compiled workspace
-recipe in [agent-start.hs](../../checks/agent-start.hs) uses the actual
-`workspaceAgentSpec`, inherits the current parent model and reasoning, and issues two typed Text
-requests. After both requests are issued, the authored cell can continue with
-other work or end; [agent-settlement.hs](../../checks/agent-settlement.hs)
-joins their typed settlements applicatively and keeps each branch's
-`ResponseFailure` distinct from an `AwaitError`.
+The first typed request or a human message activates it. Here `worker` is an
+`AgentRef`, the `AgentSpec` installs the child's tools and effects, `@Text`
+selects the reply type, and `input :: Text` is raw request input:
+
+```haskell
+Right pending <- request @Text worker input defaultRequestOptions
+Right answer <- await (result pending)
+display answer
+```
 
 `requestWithProgress` uses independent progress and reply types when intermediate
 updates matter. A request carries raw typed input and request options; admission,
