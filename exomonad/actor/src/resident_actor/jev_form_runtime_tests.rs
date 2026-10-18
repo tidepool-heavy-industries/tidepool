@@ -191,25 +191,34 @@ impl JevBackend for Jev {
             serde_json::from_str(&request).expect("production Jev request encoder emits JSON");
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("jev_form_runtime_request.json")).unwrap();
-        if self.authored.is_some() {
+        let question_key = if self.authored.is_some() {
             assert_eq!(request["model"], "jev-latest");
             assert_eq!(
                 request["state"],
                 serde_json::json!({"criteria":"A delivery"})
             );
-            let criteria = request["questions"]["route"]["criteria"]
+            let questions = request["questions"]
                 .as_object()
-                .unwrap();
+                .expect("authored query emits a question map");
+            assert_eq!(questions.len(), 1, "one authored route observation");
+            let (key, question) = questions.iter().next().unwrap();
+            assert_eq!(key, "0.route", "query occurrence qualifies the route key");
+            assert_eq!(question["type"], "choice");
+            let criteria = question["criteria"]
+                .as_object()
+                .expect("route choice retains its semantic criteria");
             assert_eq!(
                 criteria.keys().map(String::as_str).collect::<Vec<_>>(),
                 ["economy", "express", "missing"]
             );
+            key.clone()
         } else {
             assert_eq!(
                 request, expected,
                 "prepared request preserves exact wire contract"
             );
-        }
+            "route".to_owned()
+        };
         self.requests.lock().push(request);
         let response = if self.failure {
             Err(JevCallFailure::JevCircuitOpen(503, 987))
@@ -233,7 +242,7 @@ impl JevBackend for Jev {
                     serde_json::json!({"express":0.1,"economy":0.1,"missing":0.8}),
                 ),
             };
-            Ok(serde_json::json!({"answers":{"route":{"type":"choice","choice":selected,"confidence":confidence,"probabilities":probabilities}},"model":"authored-fixture","usage":{"input_tokens":0,"output_tokens":0}}).to_string())
+            Ok(serde_json::json!({"answers":{question_key:{"type":"choice","choice":selected,"confidence":confidence,"probabilities":probabilities}},"model":"authored-fixture","usage":{"input_tokens":0,"output_tokens":0}}).to_string())
         } else {
             Ok(include_str!("jev_form_runtime_response.json").to_owned())
         };
