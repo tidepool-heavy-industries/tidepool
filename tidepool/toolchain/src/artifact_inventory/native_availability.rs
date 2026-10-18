@@ -73,19 +73,27 @@ impl<'a> NativeDependencyCatalog<'a> {
     }
 }
 
+/// One operation's chosen exact bindings and their inseparable acquisition.
+/// Payload and file custody are staged until the receiving admission succeeds.
+pub(super) struct CertifiedNativeDemandAcquisition {
+    pub(super) entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    pub(super) bindings: BTreeMap<NativeGroupKey, NativeGroupBinding>,
+    pub(super) offers: Vec<IssuedNativeOffer>,
+}
+
 /// Bind demanded input bodies through their original opaque owner. Carrier-only
 /// views do not become proof owners, and availability does not add demand roots.
 pub(super) fn bind_certified_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    mut incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
-    prebound: &mut BTreeMap<NativeGroupKey, NativeGroupBinding>,
-) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let namespace = parent.namespace();
     let mut retained_offers = Vec::new();
+    let mut prebound = BTreeMap::new();
     for key in demanded {
         let entry = incoming
             .get(&key.artifact)
@@ -308,7 +316,11 @@ pub(super) fn bind_certified_input_demand(
             retained_offers.push(offer.clone());
         }
     }
-    Ok(retained_offers)
+    Ok(CertifiedNativeDemandAcquisition {
+        entries: incoming,
+        bindings: prebound,
+        offers: retained_offers,
+    })
 }
 
 /// Fresh bodies can depend on an available group without selecting it for

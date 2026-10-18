@@ -2958,16 +2958,19 @@ impl ArtifactInventory {
             .filter(|key| !fixed.groups.contains_key(key))
             .copied()
             .collect();
-        let mut bound_inputs = BTreeMap::new();
-        let demanded_offers = native_availability::bind_certified_input_demand(
+        let acquisition = native_availability::bind_certified_input_demand(
             &mut state,
             &fixed.view,
             &fixed.entries,
-            &mut incoming,
+            incoming,
             &unbound,
             &fixed.native_source,
-            &mut bound_inputs,
         )?;
+        let native_availability::CertifiedNativeDemandAcquisition {
+            entries: incoming,
+            bindings: bound_inputs,
+            offers: demanded_offers,
+        } = acquisition;
         for (key, group) in &bound_inputs {
             if fixed
                 .groups
@@ -3897,19 +3900,23 @@ impl ArtifactInventory {
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut demanded_offers = Vec::new();
-        let mut incoming = BTreeMap::new();
         if let ArtifactRootIntent::Certified(selection) = root_intent {
-            demanded_offers = native_availability::bind_certified_input_demand(
+            let native_availability::CertifiedNativeDemandAcquisition {
+                entries: incoming,
+                bindings,
+                offers,
+            } = native_availability::bind_certified_input_demand(
                 &mut state,
                 parent,
                 &selected,
-                &mut incoming,
+                BTreeMap::new(),
                 &groups,
                 selection,
-                &mut prebound,
             )?;
+            selected.extend(incoming);
+            prebound.extend(bindings);
+            demanded_offers = offers;
         }
-        selected.extend(incoming);
         if let Some((roles, catalog)) = root_intent.input_constraints() {
             for (owner, role) in roles.snapshot_roles() {
                 let InputNativeDecision::IssuedChoices(choices) = catalog.decision(owner) else {
