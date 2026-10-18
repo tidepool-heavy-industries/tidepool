@@ -3191,17 +3191,13 @@ struct OwnedExecutionGraphFile {
 }
 
 impl RetainedArtifactMaterialization {
-    /// Detach exactly the selected immutable facts from historical delta owners.
-    /// Each file keeps its issuing directory; neither paths nor names discover
-    /// an owner, and selection cannot add native authority.
+    /// Reuse a complete issued closure, or detach a narrower selection from
+    /// historical delta owners. Each file retains its actual issuing directory.
     pub(crate) fn select_custody(
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Option<Arc<Self>> {
-        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata);
         let selected_graphs = metadata
             .artifacts
             .values()
@@ -3215,34 +3211,66 @@ impl RetainedArtifactMaterialization {
         let mut rows = BTreeMap::new();
         let mut graph_paths = BTreeMap::new();
         let mut visited = BTreeSet::new();
+        let mut ancestors = BTreeSet::new();
+        let (mut row_count, mut group_count, mut graph_count) = (0, 0, 0);
         for owner in owners {
             owner.visit_owners(&mut visited, &mut |owner| {
+                ancestors.extend(
+                    owner
+                        ._parents
+                        .iter()
+                        .map(|parent| Arc::as_ptr(parent) as usize),
+                );
+                row_count += owner.rows.len();
+                group_count += owner.groups.len();
+                graph_count += owner.graph_paths.len();
                 rows.extend(
                     owner
                         .rows
                         .iter()
                         .filter(|(id, _)| metadata.artifacts.contains_key(*id))
-                        .map(|(id, row)| (*id, row.clone())),
+                        .map(|(id, row)| (*id, row)),
                 );
                 graph_paths.extend(
                     owner
                         .graph_paths
                         .iter()
                         .filter(|(digest, _)| selected_graphs.contains(*digest))
-                        .map(|(digest, file)| (*digest, file.clone())),
+                        .map(|(digest, file)| (*digest, file)),
                 );
             });
         }
         if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
             return None;
         }
+        // A single actual source frontier owns these very borrowed facts.
+        // Reuse only its entire closure, with no excluded or shadowed issuers.
+        // Arc ancestry is operation-local ownership, never a digest/name match.
+        if row_count == rows.len()
+            && group_count == groups.len()
+            && graph_count == graph_paths.len()
+        {
+            let frontier = owners
+                .iter()
+                .filter(|owner| !ancestors.contains(&(Arc::as_ptr(owner) as usize)))
+                .collect::<Vec<_>>();
+            if let [owner] = frontier.as_slice() {
+                return Some(Arc::clone(owner));
+            }
+        }
         Some(Arc::new(Self {
             _directory: None,
             _parents: Vec::new(),
-            rows,
-            groups: groups.into(),
+            rows: rows
+                .into_iter()
+                .map(|(id, row)| (id, row.clone()))
+                .collect(),
+            groups: groups.into_iter().cloned().collect::<Vec<_>>().into(),
             execution_scope: None,
-            graph_paths,
+            graph_paths: graph_paths
+                .into_iter()
+                .map(|(digest, file)| (digest, file.clone()))
+                .collect(),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
         }))
