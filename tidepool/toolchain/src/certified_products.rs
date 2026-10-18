@@ -2414,6 +2414,17 @@ fn duplicate_source_binder(
 pub(crate) struct CertifiedSourceSelection {
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    // Input body availability is separate from this selection's namespace roles.
+    // These shared receipts come only from the authenticated physical request.
+    request_native_availability: Arc<
+        BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            (
+                CachedHomeOwner,
+                Arc<crate::declaration_context::NativeTransportAvailability>,
+            ),
+        >,
+    >,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -2577,6 +2588,12 @@ impl CertifiedSourceSelection {
     ) -> CertResult<Self> {
         let mut selected =
             Self::from_compiler_projection(&inputs.projection, &metadata.retained, operation)?;
+        selected.request_native_availability = Arc::new(
+            inputs
+                .native_availability_entries()
+                .map(|(id, owner, availability)| (id, (owner.clone(), Arc::clone(availability))))
+                .collect(),
+        );
         for role in inputs.projection.roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -2617,6 +2634,11 @@ impl CertifiedSourceSelection {
                 ReceiptNativeAvailability::Issued(issued) => Some(issued),
                 ReceiptNativeAvailability::NewProduct { .. } => None,
             })
+            .chain(
+                self.request_native_availability
+                    .values()
+                    .map(|(_, availability)| availability),
+            )
     }
 
     pub(crate) fn complete_native_products(
@@ -2659,6 +2681,16 @@ impl CertifiedSourceSelection {
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         self.native_selections()
             .flat_map(|native| native.availability.requirements())
+            .chain(
+                self.request_native_availability
+                    .values()
+                    .flat_map(|(_, availability)| {
+                        availability
+                            .offers()
+                            .iter()
+                            .filter_map(|offer| offer.proof())
+                    }),
+            )
     }
 
     fn visible_modules(
@@ -2990,6 +3022,10 @@ impl CertifiedSourceSelection {
             .find(|selected| &selected.owner == owner)
         {
             return selected.availability.permits(ordinal);
+        }
+        if let Some((issued_owner, availability)) = self.request_native_availability.get(&original)
+        {
+            return issued_owner == owner && availability.permits(ordinal);
         }
         self.native_original_requirements().any(|proof| {
             proof
@@ -12598,6 +12634,300 @@ pub(crate) mod tests {
         }
         assert_eq!(observed, 16);
         assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    }
+
+    #[test]
+    fn physical_full_native_offer_survives_dependency_only_projection() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactId, ArtifactInventory, CompilerInputProjection,
+            CompilerSourceSupport, NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+        };
+        let producer_bytes = b"physical-dependency-full-offer";
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_bytes,
+        );
+        let schema = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "DependencySchema",
+                vec![(191, vec![]), (195, vec![]), (197, vec![])],
+                151,
+                &BTreeMap::new(),
+                b"schema exact canonical".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let consumer = fixture_native_declaration_product(
+            original_groups_fixture_with_interface(
+                "Tidepool.Session.Lib.G5",
+                vec![(
+                    5,
+                    vec![PendingImportOwner::Source {
+                        owner: schema.owner().clone(),
+                        original_ordinal: 197,
+                        binder: testing::identity("DependencySchema", "entry_197"),
+                    }],
+                )],
+                152,
+                &BTreeMap::new(),
+                b"consumer exact canonical".to_vec(),
+            ),
+            producer.sha256(),
+            5,
+        );
+        let products = recovered_witness_fixtures(&[schema, consumer])
+            .into_iter()
+            .map(|row| row.product)
+            .collect::<Vec<_>>();
+        let schema = products
+            .iter()
+            .find(|product| product.owner().module == "DependencySchema")
+            .unwrap();
+        let entries = products
+            .iter()
+            .map(|product| {
+                Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let schema_entry = entries
+            .iter()
+            .find(|entry| entry.descriptor.owner.module == "DependencySchema")
+            .unwrap();
+        let consumer_entry = entries
+            .iter()
+            .find(|entry| entry.descriptor.owner.module == "Tidepool.Session.Lib.G5")
+            .unwrap();
+        let inventory = ArtifactInventory::default();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let mut physical = CertifiedSourceSelection::from_compiler_projection(
+            &CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+            &available.metadata_snapshot(),
+            &PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        // This is the production physical-output issuer, before later item/type
+        // projections. It supplies actual group bindings, not just a census.
+        OriginalCompilerInputs::issue_segment_native_availability(
+            &mut physical,
+            &inventory.empty_view(),
+            entries.clone(),
+        )
+        .unwrap();
+        let private = OriginalCompilerInputs::from_selection(&physical, &available).unwrap();
+        let support = CompilerSourceSupport::close_complete_output(&private).unwrap();
+        let source = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
+            let definitions = original_native_group_definitions(product, ordinal).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: binding.identity.clone(),
+            }
+        };
+        let consumer = products
+            .iter()
+            .find(|product| product.owner().module == "Tidepool.Session.Lib.G5")
+            .unwrap();
+        let historical = inventory
+            .admit_certified_with_demand(
+                support.artifacts(),
+                entries.clone(),
+                NativeArtifactDemand::CertifiedTargetImports(&[source(consumer, 5)]),
+                &physical,
+            )
+            .unwrap();
+        let private = OriginalCompilerInputs::from_selection(&physical, &historical).unwrap();
+        let full = CompilerSourceSupport::close_complete_output(&private)
+            .unwrap()
+            .for_source_owners(&BTreeSet::from([consumer_entry.descriptor.owner.clone()]))
+            .unwrap();
+        let roles = full.projection().clone();
+        assert!(roles.snapshot_roles()[&schema_entry.descriptor.owner]
+            .original()
+            .is_none());
+        let schema_offer = full
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == schema_entry.descriptor.id)
+            .unwrap();
+        assert!(schema_offer.is_full());
+        let consumer_offer = full
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .unwrap();
+        let historical_197 = consumer_offer
+            .issued_group_carriers()
+            .unwrap()
+            .into_keys()
+            .find(|group| {
+                group.binding.artifact() == schema_entry.descriptor.id
+                    && group.original_ordinal == 197
+            })
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for carry_full in [false, true] {
+            let support = if carry_full {
+                full.clone()
+            } else {
+                // The same broad physical custody remains, but this receipt
+                // carries only the Consumer's issued dependency group 197.
+                crate::declaration_context::recover_fixture_compiler_support(
+                    roles.clone(),
+                    full.artifacts().clone(),
+                    [consumer_offer.clone()],
+                )
+                .unwrap()
+            };
+            let before = support.artifacts().selected_native_groups();
+            assert!(before.contains(&NativeGroupKey {
+                artifact: schema_entry.descriptor.id,
+                original_ordinal: 197
+            }));
+            let context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap(),
+            );
+            let request = ExactCompileContext::new(context)
+                .prepare_compilation(
+                    &root.path().join(format!("full-{carry_full}")),
+                    producer_bytes,
+                )
+                .unwrap();
+            let inputs = request.compiler_inputs();
+            assert_eq!(inputs.projection, roles);
+            assert_eq!(inputs.artifacts.selected_native_groups(), before);
+            let wire: Value =
+                ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                    .unwrap();
+            let row = wire.as_array().unwrap()[6]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row.as_array().unwrap()[1].as_text() == Some("DependencySchema"))
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert!(row[6].as_array().unwrap().is_empty());
+            assert_eq!(row[9].as_text(), Some("dependency-carrier"));
+            assert_eq!(
+                row[8].as_array().unwrap()[0].as_text(),
+                Some(if carry_full {
+                    "full-carrier"
+                } else {
+                    "issued-groups"
+                })
+            );
+            let mut validation = PackageInterfaceValidation::default();
+            let selected = CertifiedSourceSelection::from_compiler_inputs(
+                inputs,
+                &inputs.metadata,
+                &validation.inventory,
+            )
+            .unwrap();
+            assert!(selected
+                .selected_original_owners()
+                .all(|owner| owner.module != "DependencySchema"));
+            assert_eq!(
+                selected.compiler_projection(&inputs.artifacts).unwrap(),
+                roles
+            );
+            assert!(selected.permits_native_group(schema_entry.descriptor.id, schema.owner(), 197));
+            assert!(!selected.permits_native_group(ArtifactId([255; 32]), schema.owner(), 197));
+            let mut wrong_owner = schema.owner().clone();
+            wrong_owner.module.push_str("Wrong");
+            assert!(!selected.permits_native_group(schema_entry.descriptor.id, &wrong_owner, 197));
+            assert!(selected.native_original_requirements().any(|proof| proof
+                .issued_group_carriers(&inputs.artifacts)
+                .unwrap()
+                .contains_key(&historical_197)));
+            let membership = inputs
+                .available_original_sources(std::slice::from_ref(schema), &validation.inventory)
+                .unwrap();
+            for ordinal in [191, 195] {
+                let PendingImportOwner::Source { binder, .. } = source(schema, ordinal) else {
+                    unreachable!()
+                };
+                let mut wire = testing::wire_program();
+                wire.globals = vec![GlobalDecl {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: None,
+                }];
+                let target = testing::prepare(wire).unwrap();
+                let accepted = vec![AcceptedGlobal {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    owner: ReceiptImportOwner::Source {
+                        unit: schema.owner().unit.clone(),
+                        module: schema.owner().module.clone(),
+                        module_version: Some(schema.owner().module_version.clone()),
+                        original_ordinal: ordinal,
+                        binder,
+                    },
+                }];
+                let admitted = certify_target_available_owners_from_membership_with_validation(
+                    &target,
+                    &accepted,
+                    &membership,
+                    &request.groups,
+                    &selected,
+                    &BTreeMap::new(),
+                    &mut validation,
+                );
+                if carry_full {
+                    let imports = admitted.expect(
+                        "the already-issued full dependency body admits a newly demanded binder",
+                    );
+                    let admitted = inventory
+                        .admit_certified_with_demand(
+                            &inputs.artifacts,
+                            entries.clone(),
+                            NativeArtifactDemand::CertifiedTargetImports(&imports),
+                            &selected,
+                        )
+                        .unwrap();
+                    assert!(admitted.selected_native_groups().contains(&NativeGroupKey {
+                        artifact: schema_entry.descriptor.id,
+                        original_ordinal: ordinal
+                    }));
+                    assert!(admitted.selected_native_groups().contains(&NativeGroupKey {
+                        artifact: schema_entry.descriptor.id,
+                        original_ordinal: 197
+                    }));
+                } else {
+                    assert!(
+                        matches!(admitted, Err(CertificationError::OriginalAvailability(refusal)) if refusal.original_ordinal == ordinal)
+                    );
+                }
+            }
+            let next =
+                OriginalCompilerInputs::from_selection(&selected, &inputs.artifacts).unwrap();
+            assert_eq!(next.role_projection(), &roles);
+            assert_eq!(
+                next.native_offers()
+                    .iter()
+                    .any(|offer| offer.original() == schema_entry.descriptor.id && offer.is_full()),
+                carry_full
+            );
+        }
     }
 
     #[test]

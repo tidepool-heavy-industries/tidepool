@@ -1212,6 +1212,18 @@ impl NativeCompilerTransport {
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
+        let offers = offers
+            .iter()
+            .map(|offer| {
+                if offer.is_full() && offer.has_matching_interface_role(roles) {
+                    offer
+                        .within_projection(roles, artifacts)
+                        .map(|offer| offer.expect("matching canonical role"))
+                } else {
+                    Ok(offer.clone())
+                }
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
         let mut metadata = CompilerArtifactMetadata {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
@@ -1225,10 +1237,18 @@ impl NativeCompilerTransport {
             availability.insert(entry.descriptor.id, BTreeSet::new());
         }
         let mut full = BTreeSet::new();
-        let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
+        let mut offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
+        // An issued complete body survives type-only namespace selection. Its
+        // exact canonical role authorizes transport, not replay/source roots.
+        for offer in &offers {
+            if offer.is_full() && offer.has_matching_interface_role(roles) {
+                offered_roots.insert(offer.original());
+                availability.entry(offer.original()).or_default();
+            }
+        }
         let mut issuance =
             BTreeMap::<ArtifactId, Vec<crate::artifact_inventory::IssuedNativeOffer>>::new();
-        for offer in offers {
+        for offer in &offers {
             let groups = if offered_roots.contains(&offer.original()) {
                 offer.issued_group_carriers()?
             } else {
@@ -1399,6 +1419,28 @@ impl RequestCompilerInputs {
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
         self.native_transport.availability.get(&original).cloned()
+    }
+
+    pub(crate) fn native_availability_entries(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            ArtifactId,
+            &tidepool_repr::execution_schema::CachedHomeOwner,
+            &Arc<NativeTransportAvailability>,
+        ),
+    > {
+        self.native_transport
+            .availability
+            .iter()
+            .map(|(id, availability)| {
+                let ArtifactPayload::Original(product) =
+                    &self.native_transport.metadata.retained.artifacts[id].payload
+                else {
+                    unreachable!("issued native availability has an authenticated original owner")
+                };
+                (*id, product.owner(), availability)
+            })
     }
 
     pub(crate) fn available_original_sources(

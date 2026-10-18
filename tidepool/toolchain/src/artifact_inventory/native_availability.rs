@@ -522,6 +522,19 @@ impl IssuedNativeOffer {
             .any(|group| originals.contains(&group.binding.artifact())))
     }
 
+    /// Match the selected canonical owner without issuing an original role.
+    pub(crate) fn has_matching_interface_role(&self, projection: &CompilerInputProjection) -> bool {
+        projection
+            .snapshot_roles()
+            .get(&self.0.owner)
+            .is_some_and(|role| {
+                role.interface() == self.0.interface
+                    && role
+                        .original()
+                        .is_none_or(|original| original == self.0.original)
+            })
+    }
+
     /// Current roles may stop offering an original, or stop qualifying its full
     /// census. Neither change authorizes an alternative ambient proof.
     #[track_caller]
@@ -544,23 +557,27 @@ impl IssuedNativeOffer {
                 .any(|group| originals.contains(&group.binding.artifact())))
         };
         let role = projection.snapshot_roles().get(&self.0.owner);
-        let Some(original) = role.and_then(CompilerInputRole::original) else {
-            return Ok(contributes()?.then(|| self.clone()));
-        };
-        let role = role.expect("native role");
-        if original != self.0.original || role.interface() != self.0.interface {
-            if contributes()? {
-                return Ok(Some(self.clone()));
+        if !role
+            .is_some_and(|role| role.original().is_none() && role.interface() == self.0.interface)
+        {
+            let Some(original) = role.and_then(CompilerInputRole::original) else {
+                return Ok(contributes()?.then(|| self.clone()));
+            };
+            let role = role.expect("native role");
+            if original != self.0.original || role.interface() != self.0.interface {
+                if contributes()? {
+                    return Ok(Some(self.clone()));
+                }
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeOfferSelectionConflict {
+                        owner: self.0.owner.clone(),
+                        offered_original: self.0.original,
+                        offered_interface: self.0.interface,
+                        selected_original: original,
+                        selected_interface: role.interface(),
+                    },
+                ));
             }
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeOfferSelectionConflict {
-                    owner: self.0.owner.clone(),
-                    offered_original: self.0.original,
-                    offered_interface: self.0.interface,
-                    selected_original: original,
-                    selected_interface: role.interface(),
-                },
-            ));
         }
         let NativeOfferBody::Full {
             proof,
