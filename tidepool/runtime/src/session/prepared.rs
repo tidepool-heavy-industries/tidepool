@@ -909,7 +909,7 @@ impl NativeImageBundle {
                 && definitions.globals().is_empty()
                 && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
             {
-                let image = CompiledProgram::prepare_group_code(
+                let image = CompiledProgram::prepare_source_group_code(
                     group,
                     &[],
                     &BTreeMap::new(),
@@ -952,7 +952,7 @@ impl NativeImageBundle {
         for (index, (group, imports)) in groups.iter().enumerate() {
             let image = match byte_images.remove(&index) {
                 Some(image) => image,
-                None => CompiledProgram::prepare_group_code(
+                None => CompiledProgram::prepare_source_group_code(
                     group,
                     &immutable_literal_owners(group.definitions().globals(), imports)?,
                     &packages,
@@ -1199,10 +1199,10 @@ impl NativeImageAcquisition<'_> {
     ) -> Result<DemandedImage, DemandError> {
         match self {
             Self::Compile(registry) => {
-                DemandedImage::compile_with_literals(group, registry, packages, sources)
+                DemandedImage::compile_source_with_literals(group, registry, packages, sources)
             }
             Self::Ready(bundle) => {
-                let image = DemandedImage::lookup_with_literals(
+                let image = DemandedImage::lookup_source_with_literals(
                     group,
                     &bundle.registry,
                     packages,

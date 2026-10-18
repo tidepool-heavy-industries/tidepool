@@ -434,6 +434,13 @@ unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMCon
 
 static NEXT_IMAGE_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Source definitions are invoked through Tail calls hosted by an entry-bearing target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HostEntries {
+    All,
+    DefinitionsOnly,
+}
+
 /// Pins generated entries, descriptors and immutable images together. Each run
 /// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
@@ -627,18 +634,20 @@ impl CompiledProgram {
         group: &CertifiedGroup,
         literals: &package_literals::GroupPackageLiterals,
     ) -> Result<Self, CompileError> {
-        Self::compile_group_code_with_literals(&group.code_identity(), literals)
+        Self::compile_group_code_with_literals(&group.code_identity(), literals, HostEntries::All)
     }
 
     fn compile_group_code_with_literals(
         group: &CertifiedGroupCode,
         literals: &package_literals::GroupPackageLiterals,
+        host_entries: HostEntries,
     ) -> Result<Self, CompileError> {
         let mut image = Self::compile_definitions_with_literals(
             group.definitions(),
             &mut DescriptorInterner::default(),
             &Arc::new(static_bytes::PinnedBytes::empty()),
             literals,
+            host_entries,
         )
         .map_err(|mut error| {
             if let CompileError::Unsupported(Unsupported::Global(refusal)) = &mut error {
@@ -660,14 +669,50 @@ impl CompiledProgram {
         sources: &BTreeMap<SourceBinder, SourceLiteral>,
         registry: &ImageRegistry,
     ) -> Result<Arc<Self>, CompileError> {
+        Self::prepare_group_code_with_entries(
+            group,
+            owners,
+            packages,
+            sources,
+            registry,
+            HostEntries::All,
+        )
+    }
+
+    /// Prepare source definitions for Tail calls, without arbitrary Rust host entries.
+    pub fn prepare_source_group_code(
+        group: &CertifiedGroupCode,
+        owners: &[Option<LiteralOwner>],
+        packages: &BTreeMap<tidepool_repr::execution_schema::SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        Self::prepare_group_code_with_entries(
+            group,
+            owners,
+            packages,
+            sources,
+            registry,
+            HostEntries::DefinitionsOnly,
+        )
+    }
+
+    fn prepare_group_code_with_entries(
+        group: &CertifiedGroupCode,
+        owners: &[Option<LiteralOwner>],
+        packages: &BTreeMap<tidepool_repr::execution_schema::SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+        host_entries: HostEntries,
+    ) -> Result<Arc<Self>, CompileError> {
         let literals = package_literals::GroupPackageLiterals::select_immutable(
             &group.definitions(),
             owners,
             packages,
             sources,
         )?;
-        registry.get_or_compile_literal_group(group, &literals, || {
-            Self::compile_group_code_with_literals(group, &literals).map(Arc::new)
+        registry.get_or_compile_literal_group(group, &literals, host_entries, || {
+            Self::compile_group_code_with_literals(group, &literals, host_entries).map(Arc::new)
         })
     }
 
@@ -744,6 +789,7 @@ impl CompiledProgram {
                 &mut DescriptorInterner::default(),
                 &Arc::new(static_bytes::PinnedBytes::empty()),
                 literals,
+                HostEntries::All,
             )
             .map(Arc::new)
         })
@@ -779,6 +825,7 @@ impl CompiledProgram {
             interner,
             existing_bytes,
             &package_literals::GroupPackageLiterals::default(),
+            HostEntries::All,
         )
     }
 
@@ -787,6 +834,7 @@ impl CompiledProgram {
         interner: &mut DescriptorInterner,
         existing_bytes: &Arc<static_bytes::PinnedBytes>,
         literals: &package_literals::GroupPackageLiterals,
+        host_entries: HostEntries,
     ) -> Result<Self, CompileError> {
         let target = &definitions.envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
@@ -1379,6 +1427,7 @@ impl CompiledProgram {
         let force_adapter =
             adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;
         let mut entries = BTreeMap::new();
+        let mut host_entry_adapters = 0;
         for (&id, &slot) in &plan.top_slots {
             let signature = &signatures[&id];
             if signature.results.is_caller_result() {
@@ -1388,6 +1437,9 @@ impl CompiledProgram {
             let abi = abis[&key].clone();
             if slot >= plan.root_words {
                 return Err(CompileError::MissingRepresentation(id));
+            }
+            if host_entries == HostEntries::DefinitionsOnly {
+                continue;
             }
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
@@ -1400,6 +1452,7 @@ impl CompiledProgram {
                 &abi,
                 slot,
             )?;
+            host_entry_adapters += 1;
             entries.insert(
                 id,
                 CompiledEntry {
@@ -1526,6 +1579,7 @@ impl CompiledProgram {
                 plan_functions: plan.functions.len(),
                 plan_thunks: plan.thunks.len(),
                 tops: plan.top_slots.len(),
+                host_entry_adapters,
                 constructors: plan.program.constructors().len(),
                 imports: plan.import_slots.len(),
                 functions_defined: pipeline.functions_defined(),

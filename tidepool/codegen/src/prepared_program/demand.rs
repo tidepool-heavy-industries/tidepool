@@ -762,12 +762,46 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        Self::compile_with_entries(group, registry, packages, sources, super::HostEntries::All)
+    }
+
+    /// Compile selected source definitions; Rust entry calls belong to the target.
+    pub fn compile_source_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        Self::compile_with_entries(
+            group,
+            registry,
+            packages,
+            sources,
+            super::HostEntries::DefinitionsOnly,
+        )
+    }
+
+    fn compile_with_entries(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        host_entries: super::HostEntries,
+    ) -> Result<Self, DemandError> {
         let literals = Self::select_literals(&group, packages, sources)?;
-        let image =
-            registry.get_or_compile_literal_group(&group.code_identity(), &literals, || {
-                CompiledProgram::compile_certified_group_with_literals(&group, &literals)
-                    .map(Arc::new)
-            })?;
+        let image = registry.get_or_compile_literal_group(
+            &group.code_identity(),
+            &literals,
+            host_entries,
+            || {
+                CompiledProgram::compile_group_code_with_literals(
+                    &group.code_identity(),
+                    &literals,
+                    host_entries,
+                )
+                .map(Arc::new)
+            },
+        )?;
         Ok(Self {
             group,
             image,
@@ -783,9 +817,35 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        Self::lookup_with_entries(group, registry, packages, sources, super::HostEntries::All)
+    }
+
+    /// Lookup only the exact definitions-only source image; never elect a producer.
+    pub fn lookup_source_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        Self::lookup_with_entries(
+            group,
+            registry,
+            packages,
+            sources,
+            super::HostEntries::DefinitionsOnly,
+        )
+    }
+
+    fn lookup_with_entries(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        host_entries: super::HostEntries,
+    ) -> Result<Self, DemandError> {
         let literals = Self::select_literals(&group, packages, sources)?;
         let image = registry
-            .lookup_literal_group(&group.code_identity(), &literals)
+            .lookup_literal_group(&group.code_identity(), &literals, host_entries)
             .ok_or(DemandError::MissingPreparedNativeImage)?;
         Ok(Self {
             group,
