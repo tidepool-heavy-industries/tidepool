@@ -82,6 +82,63 @@ fn captured_materialization_context(
     Arc::new(selected)
 }
 
+// Correlate a failed shape assumption without treating addresses as an oracle.
+// Only small identifiers and issuing paths are reported, never payload/graph bodies.
+fn observe_materialization_parent_roster(
+    owner: &RetainedArtifactMaterialization,
+    length: usize,
+    index: usize,
+    previous: &std::sync::Weak<RetainedArtifactMaterialization>,
+) {
+    let mut roster = Vec::new();
+    let mut row_sources = BTreeSet::new();
+    let mut owner_count = 0;
+    let mut row_handles = 0;
+    let mut group_handles = 0;
+    let mut graph_handles = 0;
+    owner.visit_owners(&mut BTreeSet::new(), &mut |ancestor| {
+        owner_count += 1;
+        let rows = ancestor.rows.iter().map(|(id, row)| {
+            let native = match &row.payload {
+                RetainedArtifactPayload::InterfaceOnly => None,
+                RetainedArtifactPayload::Native { product, certification_path, .. } => {
+                    Some((product.path.clone(), certification_path.clone()))
+                }
+            };
+            let source = (hex(&id.0), row._directory.path().to_path_buf(), row.interface.path.clone(), native);
+            row_sources.insert(source.clone());
+            source
+        }).collect::<Vec<_>>();
+        row_handles += rows.len();
+        group_handles += ancestor.groups.len();
+        graph_handles += ancestor.graph_paths.len();
+        if roster.len() < 32 {
+            roster.push(serde_json::json!({
+                "owner_correlation": ancestor as *const RetainedArtifactMaterialization as usize,
+                "parent_correlations": ancestor._parents.iter().map(|parent| Arc::as_ptr(parent) as usize).collect::<Vec<_>>(),
+                "writing_directory": ancestor._directory.as_ref().map(|directory| directory.path()),
+                "row_count": rows.len(), "row_sources": rows.iter().take(32).collect::<Vec<_>>(),
+                "row_directory_correlations": ancestor.rows.values().take(32).map(|row| Arc::as_ptr(&row._directory) as usize).collect::<Vec<_>>(),
+                "group_count": ancestor.groups.len(),
+                "group_keys": ancestor.groups.iter().take(32).map(|group| (group.owner(), group.group().original_ordinal())).collect::<Vec<_>>(),
+                "graph_count": ancestor.graph_paths.len(),
+                "graph_sources": ancestor.graph_paths.iter().take(32).map(|(digest, file)| (hex(digest), &file.path, file._directory.path())).collect::<Vec<_>>(),
+            }));
+        }
+    });
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "kind": "materialization_parent_roster", "history_length": length, "index": index,
+            "direct_parent_count": owner._parents.len(),
+            "previous_owner_correlation": previous.upgrade().map(|previous| Arc::as_ptr(&previous) as usize),
+            "transitive_row_handles": row_handles, "unique_row_source_tuples": row_sources.len(),
+            "transitive_group_handles": group_handles, "transitive_graph_handles": graph_handles,
+            "roster_limit": 32, "transitive_owner_count": owner_count, "owners": roster,
+        })
+    );
+}
+
 fn check_materialized_capture_history(length: usize, first: usize, second: usize, warm: bool) {
     let (mut context, producer) = metadata_fixture();
     let scratch = tempfile::tempdir().unwrap();
@@ -156,6 +213,9 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
             1,
             "growing contexts still store one new row"
         );
+        if owner._parents.len() != 1 {
+            observe_materialization_parent_roster(owner, length, index, owners.last().unwrap());
+        }
         assert_eq!(owner._parents.len(), 1, "full-context deltas remain shared");
         issued_row_counts.push(owner.rows.len());
         owners.push(Arc::downgrade(owner));
