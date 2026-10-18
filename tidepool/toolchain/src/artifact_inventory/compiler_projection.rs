@@ -3279,6 +3279,10 @@ mod tests {
                         )
                     })
                     .collect::<Vec<_>>();
+                assert!(
+                    !expected_edges.is_empty(),
+                    "incoming native carriers have actual interface edges"
+                );
                 let custody_oracle = support
                     .rebuild(
                         support.projection.clone(),
