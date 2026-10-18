@@ -244,26 +244,72 @@ fn same_request(fields: &Value, request: &Value) -> bool {
 }
 
 fn physical_key(fields: &Value) -> (String, u64, u64) {
-    let epoch = fields["daemon_epoch"].as_str().expect("daemon epoch");
-    let admission = fields["admission_id"].as_u64().expect("admission identity");
+    let epoch = fields["daemon_epoch"]
+        .as_str()
+        .expect("attribution UNKNOWN: daemon epoch");
+    let admission = fields["admission_id"]
+        .as_u64()
+        .expect("attribution UNKNOWN: admission identity");
     let ordinal = fields["request_ordinal"]
         .as_u64()
-        .expect("physical request ordinal");
+        .expect("attribution UNKNOWN: physical request ordinal");
     let logical = fields["compile_request"]
         .as_str()
-        .expect("logical request correlation");
-    assert!(admission > 0 && ordinal > 0);
+        .expect("attribution UNKNOWN: logical request correlation");
+    assert!(
+        admission > 0 && ordinal > 0,
+        "attribution UNKNOWN: invalid physical identity"
+    );
     for (value, length) in [(epoch, 64), (logical, 16)] {
-        assert!(value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "attribution UNKNOWN: malformed request identity"
+        );
     }
     (epoch.to_owned(), admission, ordinal)
 }
 
-fn daemon_work(rows: &[Value], requests: &[Value]) -> Vec<Value> {
+fn daemon_work(rows: &[Value], requests: &[Value], unrelated: &[Value]) -> Vec<Value> {
     let fields = rows.iter().map(flattened).collect::<Vec<_>>();
-    requests
+    let identified = requests
         .iter()
-        .map(|request| {
+        .map(|request| (request, true))
+        .chain(
+            unrelated
+                .iter()
+                .map(|row| (&row["physical_request"], false)),
+        )
+        .collect::<Vec<_>>();
+    let mut physical = BTreeMap::new();
+    for (request, _) in &identified {
+        assert!(
+            physical.insert(physical_key(request), *request).is_none(),
+            "attribution UNKNOWN: duplicate host request identification"
+        );
+    }
+    // The independent daemon census must not disappear merely because the
+    // corresponding host identification was lost from its retained slice.
+    for row in fields.iter().filter(|row| {
+        matches!(
+            row["message"].as_str(),
+            Some(
+                "compiler request started"
+                    | "compiler request finished"
+                    | "compiler diagnostics processed"
+            )
+        )
+    }) {
+        let request = physical
+            .get(&physical_key(row))
+            .expect("attribution UNKNOWN: daemon request lacks host identification");
+        assert!(
+            same_request(row, request),
+            "attribution UNKNOWN: conflicting physical request correlation"
+        );
+    }
+    identified
+        .iter()
+        .map(|(request, related)| {
             let observed = fields
                 .iter()
                 .filter(|row| same_request(row, request))
@@ -283,9 +329,13 @@ fn daemon_work(rows: &[Value], requests: &[Value]) -> Vec<Value> {
             assert_eq!(
                 (started.len(), finished.len(), processed),
                 (1, 1, 1),
-                "exact completed physical request and consumed worker diagnostics"
+                "attribution UNKNOWN: exact completed physical request and consumed worker diagnostics"
             );
-            assert_eq!(finished[0]["exit_code"], 0);
+            let exit_code = finished[0]["exit_code"].as_i64()
+                .expect("attribution UNKNOWN: physical terminal outcome");
+            if *related {
+                assert_eq!(exit_code, 0);
+            }
             let mode = started[0]["request_mode"]
                 .as_str()
                 .expect("typed physical request mode");
@@ -320,6 +370,7 @@ fn daemon_work(rows: &[Value], requests: &[Value]) -> Vec<Value> {
             // An absent group row is reported as such, never converted to zero
             // physical evaluation or a measured unused-body saving.
             json!({"physical_request":request, "mode":mode,
+            "attribution":if *related {"operation"} else {"explicit_unrelated"},
             "terminal":finished[0], "worker_timing_rows":worker_timing,
             "group_observation_status":if work.is_empty() {"not_emitted"} else {"observed"},
             "work":work, "encoding_counts_are_demands_not_evaluations":true})
@@ -533,9 +584,11 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
                 next_hosted_script_round(&mut requests, &mut pending, &root))
                 .await.expect("the exact ordinary cell succeeds and produces its successor request");
             round.assert_authored_value(&host.runtime.store(), &origin, &call, value);
+            let operation_elapsed_ns = started.elapsed().as_nanos();
+            let observation_started = std::time::Instant::now();
             let rows = trace_rows(&host_trace, offset);
             let (physical, images, unrelated) = observe_cell(&rows, &operation, &expected, ordinal);
-            let work = daemon_work(&trace_rows(&compiler_trace, compiler_offset), &physical);
+            let work = daemon_work(&trace_rows(&compiler_trace, compiler_offset), &physical, &unrelated);
             if label == "warm-repeat" {
                 for row in &rows {
                     let fields = &row["fields"];
@@ -552,7 +605,8 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
                 }
             }
             record_phase(&phases, json!({"phase":label, "operation":operation,
-                "elapsed_ns":started.elapsed().as_nanos(), "expected_value":value,
+                "elapsed_ns":operation_elapsed_ns,
+                "observer_elapsed_ns":observation_started.elapsed().as_nanos(), "expected_value":value,
                 "expected_original":expected, "demanded_ordinal":ordinal,
                 "compiler_requests":physical, "explicit_unrelated_issuers":unrelated, "observed_registry_keys":images.len(),
                 "worker_work":work,
@@ -578,7 +632,7 @@ fn compiler_request_without_its_execution_span_refuses_zero_work() {
 }
 
 #[test]
-fn completed_parser_without_group_rows_keeps_observation_absent() {
+fn completed_request_census_preserves_absent_groups_and_refuses_missing_identification() {
     let request = json!({"daemon_epoch":"a".repeat(64), "admission_id":1,
         "request_ordinal":1, "compile_request":"b".repeat(16)});
     let rows = [
@@ -590,8 +644,41 @@ fn completed_parser_without_group_rows_keeps_observation_absent() {
         json!({"span":request, "fields":{
             "message":message, "request_mode":"cell_plan", "exit_code":0}})
     });
-    let work = daemon_work(&rows, &[request]);
+    let work = daemon_work(&rows, std::slice::from_ref(&request), &[]);
     assert_eq!(work[0]["mode"], "cell_plan");
     assert_eq!(work[0]["group_observation_status"], "not_emitted");
     assert_eq!(work[0]["work"], json!([]));
+    assert!(daemon_work(&[], &[], &[]).is_empty());
+    assert!(std::panic::catch_unwind(|| daemon_work(&rows, &[], &[])).is_err());
+    assert!(std::panic::catch_unwind(|| daemon_work(
+        &rows[..2],
+        std::slice::from_ref(&request),
+        &[]
+    ))
+    .is_err());
+    assert!(std::panic::catch_unwind(|| daemon_work(
+        &rows,
+        &[request.clone(), request.clone()],
+        &[]
+    ))
+    .is_err());
+    let mut duplicate = rows.to_vec();
+    duplicate.push(rows[0].clone());
+    assert!(std::panic::catch_unwind(|| daemon_work(
+        &duplicate,
+        std::slice::from_ref(&request),
+        &[]
+    ))
+    .is_err());
+    let mut malformed = rows.to_vec();
+    malformed[0]["span"]["request_ordinal"] = Value::Null;
+    assert!(std::panic::catch_unwind(|| daemon_work(
+        &malformed,
+        std::slice::from_ref(&request),
+        &[]
+    ))
+    .is_err());
+    let unrelated = [json!({"physical_request":request, "issuer":{"context_call_id":"other"}})];
+    let work = daemon_work(&rows, &[], &unrelated);
+    assert_eq!(work[0]["attribution"], "explicit_unrelated");
 }
