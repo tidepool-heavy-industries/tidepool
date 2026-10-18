@@ -159,14 +159,12 @@ pub(crate) struct PreparedToolset {
     pub(crate) acquisition: ToolsetAcquisition,
     /// Retains the published source owner for the complete installer lifetime.
     _source: Option<crate::CheckpointSourceLayer>,
-    /// Nominal owners include producer and original canonical interface identity.
-    _nominal_artifacts: Vec<tidepool_toolchain::artifact_inventory::ArtifactDescriptor>,
 }
 
-fn nominal_artifacts(
+fn validate_nominal_artifacts(
     compiled: &CompiledTurn,
     effects: &[crate::ActorEffectKey],
-) -> Result<Vec<tidepool_toolchain::artifact_inventory::ArtifactDescriptor>, PreparationFailure> {
+) -> Result<(), PreparationFailure> {
     use tidepool_toolchain::artifact_inventory::ArtifactKind;
     let descriptors = compiled.source_artifacts();
     let mut modules = vec!["Tidepool.Effects.Core", "Tidepool.Agent.Contract"];
@@ -177,36 +175,30 @@ fn nominal_artifacts(
             }
         }
     }
-    modules
-        .into_iter()
-        .map(|module| {
-            let selected = descriptors
-                .iter()
-                .filter(|descriptor| {
-                    descriptor.owner.module == module
-                        && matches!(
-                            descriptor.kind,
-                            ArtifactKind::OriginalModule | ArtifactKind::CanonicalModuleInterface
-                        )
-                })
-                .collect::<Vec<_>>();
-            let Some(first) = selected.first() else {
-                return Err(PreparationFailure::Source(format!(
-                    "installer has no original nominal artifact for {module}",
-                )));
-            };
-            if selected.iter().any(|descriptor| {
-                descriptor.owner != first.owner
-                    || descriptor.producer_sha256 != first.producer_sha256
-                    || descriptor.interface_sha256 != first.interface_sha256
-            }) {
-                return Err(PreparationFailure::Source(format!(
-                    "installer selects conflicting nominal artifacts for {module}",
-                )));
-            }
-            Ok((**first).clone())
-        })
-        .collect()
+    for module in modules {
+        let mut selected = descriptors.iter().filter(|descriptor| {
+            descriptor.owner.module == module
+                && matches!(
+                    descriptor.kind,
+                    ArtifactKind::OriginalModule | ArtifactKind::CanonicalModuleInterface
+                )
+        });
+        let Some(first) = selected.next() else {
+            return Err(PreparationFailure::Source(format!(
+                "installer has no original nominal artifact for {module}",
+            )));
+        };
+        if selected.any(|descriptor| {
+            descriptor.owner != first.owner
+                || descriptor.producer_sha256 != first.producer_sha256
+                || descriptor.interface_sha256 != first.interface_sha256
+        }) {
+            return Err(PreparationFailure::Source(format!(
+                "installer selects conflicting nominal artifacts for {module}",
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1263,7 +1255,7 @@ fn compile_installer(
 ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
     if let Some(program) = &recipe.builtin {
         let compiled = load_builtin_installer(program)?;
-        let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+        validate_nominal_artifacts(&compiled, &recipe.effects)?;
         let entry = PreparedSourceEntry::prepare(Arc::new(compiled), registry)
             .map_err(|error| PreparationFailure::Native(error.to_string()))?;
         return Ok(Arc::new(PreparedToolset {
@@ -1275,7 +1267,6 @@ fn compile_installer(
                 program: program.clone(),
             },
             _source: None,
-            _nominal_artifacts: nominal_artifacts,
         }));
     }
     let installation = super::installation_expression(&recipe.entry, &recipe.effects);
@@ -1325,7 +1316,7 @@ fn compile_installer(
         )
     };
     let compiled: Arc<CompiledTurn> = Arc::new(compiled);
-    let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+    validate_nominal_artifacts(&compiled, &recipe.effects)?;
     let entry = PreparedSourceEntry::prepare(compiled, registry)
         .map_err(|error| PreparationFailure::Native(error.to_string()))?;
     Ok(Arc::new(PreparedToolset {
@@ -1335,7 +1326,6 @@ fn compile_installer(
         source_revision: recipe.source_revision,
         acquisition,
         _source: Some(source),
-        _nominal_artifacts: nominal_artifacts,
     }))
 }
 
@@ -1435,7 +1425,7 @@ fn restore_installer(
             CompiledTurn::from_production_entry(&loaded).map_err(preparation_auth_failure)?
         }
     };
-    let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+    validate_nominal_artifacts(&compiled, &recipe.effects)?;
     let entry = PreparedSourceEntry::prepare(Arc::new(compiled), registry)
         .map_err(|error| PreparationFailure::Native(error.to_string()))?;
     Ok(Arc::new(PreparedToolset {
@@ -1445,7 +1435,6 @@ fn restore_installer(
         source_revision: recipe.source_revision,
         acquisition,
         _source: Some(source),
-        _nominal_artifacts: nominal_artifacts,
     }))
 }
 
