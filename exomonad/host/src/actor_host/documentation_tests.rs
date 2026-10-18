@@ -1923,13 +1923,11 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                committed(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/fixtures/model_context.hs",
-                    ),
-                )
-                .await;
+                let source = tidepool_testing::fixture_source(
+                    "exomonad/host/src/actor_host/fixtures/model_context.hs",
+                );
+                let setup = committed(root.as_ref(), &source);
+                tokio::pin!(setup);
                 let mut children = Vec::new();
                 let mut bindings = Vec::new();
                 {
@@ -1938,11 +1936,16 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                         Ready,
                     }
                     let mut ready = 0;
-                    while ready != 2 {
-                        let arrival = campaign
-                            .next_deployment(
+                    let mut setup_finished = false;
+                    while !setup_finished || ready != 2 {
+                        let arrival = tokio::select! {
+                            _ = &mut setup, if !setup_finished => {
+                                setup_finished = true;
+                                continue;
+                            }
+                            arrival = campaign.next_deployment(
                                 "model-context child admission",
-                                Duration::from_secs(120),
+                                super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                                 |event| match event {
                                     LocalResidentDeployment::PolicyInstalled(child) => {
                                         Ok(Arrival::Child(child))
@@ -1952,10 +1955,11 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                                     }
                                     other => Err(other),
                                 },
-                            )
-                            .await;
+                            ) => arrival,
+                        };
                         match arrival {
                             Arrival::Child(child) => {
+                                campaign.acknowledge_native_spawn(&child);
                                 bindings.push(open_test_workspace(campaign, &child));
                                 children.push(child);
                             }
@@ -1963,6 +1967,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                         }
                     }
                 }
+                assert_eq!(children.len(), 2);
                 for child in &children {
                     assert_eq!(
                         child.model,
