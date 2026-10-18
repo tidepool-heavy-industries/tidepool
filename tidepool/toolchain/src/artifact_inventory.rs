@@ -8042,6 +8042,21 @@ mod tests {
             native.descriptor.id
         );
         assert_eq!(selected.first().unwrap().original_ordinal, 7);
+        let mut wrong_imports = imports.to_vec();
+        let crate::certified_products::PendingImportOwner::Source { binder, .. } =
+            &mut wrong_imports[0]
+        else {
+            unreachable!("fixture source import")
+        };
+        binder.occurrence.push_str("_different");
+        assert!(
+            admitted
+                .clone()
+                .bind_target(None, wrong_imports)
+                .resolve()
+                .is_err(),
+            "final imports must still authenticate against the issued exact target"
+        );
         assert!(admitted
             .clone()
             .bind_target(None, (&[]).to_vec())
@@ -8058,6 +8073,24 @@ mod tests {
                 resolved.ensure_original_execution_custody(&empty)
             })
             .is_err());
+        let empty_target = inventory
+            .admit_product_artifacts(
+                &inventory.empty_view(),
+                vec![native],
+                NativeArtifactDemand::CertifiedTargetImports(&[]),
+                None,
+            )
+            .unwrap()
+            .into_target()
+            .unwrap()
+            .bind_target(None, vec![]);
+        let before = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        let empty = empty_target.resolve().unwrap();
+        assert!(empty.groups().is_empty());
+        assert_eq!(empty.native_sites().unwrap().ids().count(), 0);
+        assert!(empty.requirements_for_entry().is_err());
+        let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
+        assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
     }
 
     #[test]
