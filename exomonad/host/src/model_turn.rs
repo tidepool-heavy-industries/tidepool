@@ -1,4 +1,5 @@
 //! Host-bound, per-cell adapter for the Engine's bounded invocation profile.
+use exomonad_tool::ModelFamily;
 use harness::{
     engine::{EngineConfig, ResponsesTransport},
     invocation::{
@@ -30,19 +31,10 @@ pub type SelectedTransport<C> = dyn Fn(&tidepool_bridge_effects::ModelSelectionE
     + Send
     + Sync;
 
-pub type ModelResolver =
-    dyn Fn(&tidepool_bridge_effects::Model) -> Result<String, String> + Send + Sync;
-
-/// Choices admitted by the host; authored requests can only select these models
-/// and efforts, and can only narrow the shared allowance.
-/// Narrower limits apply to this invocation; nested calls have their own limits
-/// and share the cell allowance. Any exhausted scope latches the cell breaker.
+/// Shared invocation allowance. Model authority is held by the required
+/// actor-bound selected transport resolver.
 #[derive(Clone)]
 pub struct ModelPolicy {
-    pub inherit_selection: Arc<dyn Fn() -> Result<(String, Effort), String> + Send + Sync>,
-    pub resolve_model: Arc<ModelResolver>,
-    pub resolve_reasoning:
-        Arc<dyn Fn(&tidepool_bridge_effects::Reasoning) -> Result<Effort, String> + Send + Sync>,
     pub limits: Limits,
 }
 use tidepool_bridge_effects::{ModelAnnotationEnvelope, ModelControlStep, ModelRequestEnvelope};
@@ -51,6 +43,7 @@ enum Pending {
     Hook { hook: Hook, handle: String },
 }
 struct Entry {
+    family: ModelFamily,
     invocation: Invocation,
     pending: Option<Pending>,
     calls: HashMap<OperationId, (String, Value)>,
@@ -105,8 +98,7 @@ pub struct CellModelService<A, C> {
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
     policy: ModelPolicy,
-    transport: Arc<dyn Fn() -> C + Send + Sync>,
-    selection: Option<Arc<SelectedTransport<C>>>,
+    selection: Arc<SelectedTransport<C>>,
     budget: OnceLock<CellBudget>,
     accepting: AtomicBool,
     registry: Mutex<HashMap<String, Registered>>,
@@ -163,7 +155,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
         store: Arc<Store>,
         scheduler: Arc<JobScheduler>,
         policy: ModelPolicy,
-        transport: Arc<dyn Fn() -> C + Send + Sync>,
+        selection: Arc<SelectedTransport<C>>,
     ) -> Self {
         Self {
             runtime,
@@ -172,17 +164,12 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             store,
             scheduler,
             policy,
-            transport,
-            selection: None,
+            selection,
             budget: OnceLock::new(),
             accepting: AtomicBool::new(true),
             registry: Mutex::new(HashMap::new()),
             auth: PhantomData,
         }
-    }
-    pub fn with_selection(mut self, resolver: Option<Arc<SelectedTransport<C>>>) -> Self {
-        self.selection = resolver;
-        self
     }
     /// Called by the admitted execution owner on cancellation or disposal.
     /// Stops admission and signals every invocation without waiting for callbacks.
@@ -258,6 +245,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
         &self,
         caller: PrincipalId,
         token: &str,
+        family: ModelFamily,
     ) -> Result<Arc<Mutex<Entry>>, ModelBoundaryError> {
         self.authorize(caller)?;
         self.registry
@@ -265,7 +253,8 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             .unwrap()
             .get(token)
             .map(|registered| registered.entry.clone())
-            .ok_or_else(|| rejected("unknown or finished model invocation"))
+            .filter(|entry| entry.lock().unwrap().family == family)
+            .ok_or_else(|| rejected("unknown, finished or foreign-family model invocation"))
     }
     fn next(&self, token: &str, entry: &mut Entry) -> Result<Value, ModelBoundaryError> {
         match self.runtime.block_on(entry.invocation.next()) {
@@ -362,38 +351,24 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
     }
 }
 impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellModelService<A, C> {
-    fn start(&self, caller: PrincipalId, request: Value) -> Result<Value, ModelBoundaryError> {
+    fn start(
+        &self,
+        caller: PrincipalId,
+        family: ModelFamily,
+        request: Value,
+    ) -> Result<Value, ModelBoundaryError> {
         self.authorize(caller)?;
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
-        let (transport, model, effort) = match &request.selection {
-            Some(selection) => {
-                if request.model.is_some() || request.reasoning.is_some() {
-                    return Err(rejected("select coupled model options once"));
-                }
-                self.selection
-                    .as_ref()
-                    .ok_or_else(|| rejected("no frozen model catalog is admitted"))?(
-                    selection
-                )
-                .map_err(rejected)?
-            }
-            None => {
-                let (inherited_model, inherited_effort) =
-                    (self.policy.inherit_selection)().map_err(rejected)?;
-                let model = match &request.model {
-                    Some(selection) => (self.policy.resolve_model)(selection).map_err(rejected)?,
-                    None => inherited_model,
-                };
-                let effort = match &request.reasoning {
-                    Some(selection) => {
-                        (self.policy.resolve_reasoning)(selection).map_err(rejected)?
-                    }
-                    None => inherited_effort,
-                };
-                ((self.transport)(), model, effort)
-            }
+        let selected_family = match request.selection.reasoning.backend() {
+            tidepool_bridge_effects::Backend::OpenAIPlan => ModelFamily::OpenAI,
+            tidepool_bridge_effects::Backend::GeminiInteractions => ModelFamily::Argon,
+            tidepool_bridge_effects::Backend::DeepSeek => ModelFamily::DeepSeek,
         };
+        if selected_family != family {
+            return Err(rejected("model selection differs from the effect family"));
+        }
+        let (transport, model, effort) = (self.selection)(&request.selection).map_err(rejected)?;
         let limits = Limits {
             requests: request
                 .limits
@@ -450,6 +425,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         let close = invocation.close_handle();
         let closing = Arc::new(AtomicBool::new(false));
         let entry = Arc::new(Mutex::new(Entry {
+            family,
             invocation,
             pending: None,
             calls: HashMap::new(),
@@ -470,11 +446,12 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
     fn resume(
         &self,
         caller: PrincipalId,
+        family: ModelFamily,
         token: &str,
         call_id: &str,
         answer: Value,
     ) -> Result<Value, ModelBoundaryError> {
-        let entry = self.entry(caller, token)?;
+        let entry = self.entry(caller, token, family)?;
         let mut entry = entry.lock().unwrap();
         let operation: OperationId =
             serde_json::from_str(call_id).map_err(|error| rejected(error.to_string()))?;
@@ -511,11 +488,12 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
     fn annotate(
         &self,
         caller: PrincipalId,
+        family: ModelFamily,
         token: &str,
         operation: &str,
         annotation: Value,
     ) -> Result<Value, ModelBoundaryError> {
-        let entry = self.entry(caller, token)?;
+        let entry = self.entry(caller, token, family)?;
         let mut entry = entry.lock().unwrap();
         let Some(Pending::Hook { hook, handle }) = &entry.pending else {
             return Err(rejected("no pending after-tool hook"));
@@ -550,12 +528,22 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
             .map_err(|_| transport_error("hook continuation closed"))?;
         self.next(token, &mut entry)
     }
-    fn close(&self, caller: PrincipalId, token: &str) -> Result<(), ModelBoundaryError> {
+    fn close(
+        &self,
+        caller: PrincipalId,
+        family: ModelFamily,
+        token: &str,
+    ) -> Result<(), ModelBoundaryError> {
         self.authorize(caller)?;
         let registry = self.registry.lock().unwrap();
         let registered = registry
             .get(token)
             .ok_or_else(|| rejected("unknown or finished model invocation"))?;
+        if registered.entry.lock().unwrap().family != family {
+            return Err(rejected(
+                "model invocation belongs to another effect family",
+            ));
+        }
         registered.closing.store(true, Ordering::Release);
         registered.close.close();
         let entry = registered.entry.clone();
@@ -656,7 +644,10 @@ mod tests {
         json!({"status":"success","output":output})
     }
     fn request(hook: bool) -> Value {
-        json!({"instructions":"offline","input":"run","model":null,"reasoning":null,"limits":{"requests":null,"tools":null,"reported_tokens":null,"seconds":null},"tools":[{"name":"echo","description":"echo","kind":"call","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":null}],"result_schema":null,"after_tool":hook})
+        json!({"instructions":"offline","input":"run","selection":{
+            "catalog_identity":"fixture", "key":"offline",
+            "reasoning": tidepool_bridge_effects::Reasoning::OpenAIReasoning(tidepool_bridge_effects::OpenAIReasoning::OpenAILow)
+        },"limits":{"requests":null,"tools":null,"reported_tokens":null,"seconds":null},"tools":[{"name":"echo","description":"echo","kind":"call","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":null}],"result_schema":null,"after_tool":hook})
     }
     fn service(
         runtime: &tokio::runtime::Runtime,
@@ -670,48 +661,39 @@ mod tests {
             "retained-cell".into(),
             Arc::new(Store::memory().unwrap()),
             Arc::new(JobScheduler::new(1).unwrap()),
-            ModelPolicy {
-                inherit_selection: Arc::new(|| Ok(("offline".into(), Effort::Low))),
-                resolve_model: Arc::new(|selection| match selection {
-                    tidepool_bridge_effects::Model::CustomModel(
-                        tidepool_bridge_effects::Backend::OpenAIPlan,
-                        model,
-                    ) => Ok(model.clone()),
-                    _ => Err("no frozen workspace models in this fixture".into()),
-                }),
-                resolve_reasoning: Arc::new(|reasoning| match reasoning {
-                    tidepool_bridge_effects::Reasoning::OpenAIReasoning(
-                        tidepool_bridge_effects::OpenAIReasoning::OpenAILow,
-                    ) => Ok(Effort::Low),
-                    _ => Err("outside fixture policy".into()),
-                }),
-                limits,
-            },
-            Arc::new(move || {
-                Script(Mutex::new(
-                    scripts.lock().unwrap().pop_front().unwrap().into(),
+            ModelPolicy { limits },
+            Arc::new(move |selection| {
+                if selection.catalog_identity != "fixture" || selection.key != "offline" {
+                    return Err("outside fixture catalog".into());
+                }
+                Ok((
+                    Script(Mutex::new(
+                        scripts.lock().unwrap().pop_front().unwrap().into(),
+                    )),
+                    "offline".into(),
+                    Effort::Low,
                 ))
             }),
         )
     }
     #[test]
-    fn explicit_catalog_selection_does_not_read_inherited_policy() {
+    fn explicit_catalog_selection_uses_the_selected_transport() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut service = service(&runtime, vec![], Limits::default());
-        service.policy.inherit_selection = Arc::new(|| Err("unavailable inherited context".into()));
-        service.transport = Arc::new(|| panic!("explicit selection used inherited transport"));
-        service.selection = Some(Arc::new(|selection| {
+        service.selection = Arc::new(|selection| {
             assert_eq!(selection.key, "argon");
             Ok((
                 Script(Mutex::new(vec![final_turn()].into())),
                 "selected-actual-model".into(),
                 Effort::High,
             ))
-        }));
+        });
         let mut selected = request(false);
         selected["selection"] = json!({"catalog_identity":"frozen", "key":"argon",
             "reasoning": tidepool_bridge_effects::Reasoning::ArgonReasoning(tidepool_bridge_effects::ArgonEffort::EffortHigh)});
-        let result = service.start(PrincipalId::new(1, 2), selected).unwrap();
+        let result = service
+            .start(PrincipalId::new(1, 2), ModelFamily::Argon, selected)
+            .unwrap();
         assert_eq!(result["receipt"]["outcome"]["value"], "done");
         assert_eq!(
             result["receipt"]["request_observations"][0]["model"],
@@ -736,11 +718,12 @@ mod tests {
         typed["result_schema"] = json!({"type":"object", "properties":{"answer":{"type":"integer"}},
             "required":["answer"], "additionalProperties":false});
         let caller = PrincipalId::new(1, 2);
-        let callback = service.start(caller, typed).unwrap();
+        let callback = service.start(caller, ModelFamily::OpenAI, typed).unwrap();
         let raw = json!({"pages": ["full helper evidence".repeat(100)]});
         let hook = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 callback["invocation"].as_str().unwrap(),
                 callback["call_id"].as_str().unwrap(),
                 callback_reply(raw.clone()),
@@ -750,6 +733,7 @@ mod tests {
         let finished = service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 hook["invocation"].as_str().unwrap(),
                 hook["operation"].as_str().unwrap(),
                 json!({"kind":"none"}),
@@ -787,7 +771,9 @@ mod tests {
         ));
         let retained = owner.clone();
         let caller = PrincipalId::new(1, 2);
-        let first = owner.start(caller, request(false)).unwrap();
+        let first = owner
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let operation: OperationId =
             serde_json::from_str(first["call_id"].as_str().unwrap()).unwrap();
         owner.cancel();
@@ -799,7 +785,11 @@ mod tests {
             .all(|event| event.kind != "model_invocation_receipt"));
         assert!(matches!(
             owner
-                .entry(caller, first["invocation"].as_str().unwrap())
+                .entry(
+                    caller,
+                    first["invocation"].as_str().unwrap(),
+                    ModelFamily::OpenAI
+                )
                 .unwrap()
                 .lock()
                 .unwrap()
@@ -826,7 +816,9 @@ mod tests {
             .replay_tool_output_operation(&operation)
             .unwrap()
             .is_some());
-        assert!(retained.start(caller, request(false)).is_err());
+        assert!(retained
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .is_err());
         retained.settle().unwrap();
         assert_eq!(
             retained
@@ -844,12 +836,15 @@ mod tests {
             vec![vec![callback(), final_turn()]],
             Limits::default(),
         );
-        let first = completed.start(caller, request(false)).unwrap();
+        let first = completed
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let operation: OperationId =
             serde_json::from_str(first["call_id"].as_str().unwrap()).unwrap();
         completed
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 first["invocation"].as_str().unwrap(),
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("actual completed result")),
@@ -880,7 +875,9 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(false)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let call = first["call_id"].as_str().unwrap();
         for invalid in [
@@ -891,12 +888,12 @@ mod tests {
             json!({"status":"refused","kind":"unknown_tool","error":"bad","tool":"foreign"}),
         ] {
             assert!(matches!(
-                service.resume(caller, token, call, invalid),
+                service.resume(caller, ModelFamily::OpenAI, token, call, invalid),
                 Err(ModelBoundaryError::ModelRejected(_))
             ));
             assert!(matches!(
                 service
-                    .entry(caller, token)
+                    .entry(caller, token, ModelFamily::OpenAI)
                     .unwrap()
                     .lock()
                     .unwrap()
@@ -906,7 +903,13 @@ mod tests {
         }
         let authored = json!({"error":"ordinary authored output","status":"refused"});
         let finished = service
-            .resume(caller, token, call, callback_reply(authored.clone()))
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                call,
+                callback_reply(authored.clone()),
+            )
             .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
         let operation: OperationId = serde_json::from_str(call).unwrap();
@@ -934,11 +937,14 @@ mod tests {
                 Limits::default(),
             );
             let caller = PrincipalId::new(1, 2);
-            let first = service.start(caller, request(false)).unwrap();
+            let first = service
+                .start(caller, ModelFamily::OpenAI, request(false))
+                .unwrap();
             let call = first["call_id"].as_str().unwrap();
             let finished = service
                 .resume(
                     caller,
+                    ModelFamily::OpenAI,
                     first["invocation"].as_str().unwrap(),
                     call,
                     refusal.clone(),
@@ -975,19 +981,21 @@ mod tests {
         let caller = PrincipalId::new(1, 2);
         let mut invalid = request(false);
         invalid["model"] = json!({"tag":"ProviderModel","contents":"foreign-model"});
-        assert!(service.start(caller, invalid).is_err());
+        assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
         let mut invalid = request(false);
         invalid["effort"] = json!("high");
-        assert!(service.start(caller, invalid).is_err());
+        assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
         let mut invalid = request(false);
         invalid["limits"]["requests"] = json!(-1);
-        assert!(service.start(caller, invalid).is_err());
+        assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
         assert!(service.budget.get().is_none());
         assert!(service.registry.lock().unwrap().is_empty());
         let mut invalid = request(false);
         for kind in ["raw", "update", "finish"] {
             invalid["tools"][0]["kind"] = json!(kind);
-            assert!(service.start(caller, invalid.clone()).is_err());
+            assert!(service
+                .start(caller, ModelFamily::OpenAI, invalid.clone())
+                .is_err());
         }
         for (field, value) in [
             ("implementation", json!("haskell_cell")),
@@ -997,13 +1005,13 @@ mod tests {
             let mut invalid = request(false);
             invalid["tools"][0][field] = value;
             assert!(matches!(
-                service.start(caller, invalid),
+                service.start(caller, ModelFamily::OpenAI, invalid),
                 Err(ModelBoundaryError::ModelRejected(_))
             ));
         }
         let mut invalid = request(false);
         invalid["tools"][0]["inputSchema"] = json!({"type":"string"});
-        assert!(service.start(caller, invalid).is_err());
+        assert!(service.start(caller, ModelFamily::OpenAI, invalid).is_err());
         assert!(service.budget.get().is_none());
     }
     #[test]
@@ -1019,26 +1027,38 @@ mod tests {
         );
         let caller = PrincipalId::new(1, 2);
         assert!(service
-            .start(PrincipalId::new(1, 3), request(false))
+            .start(PrincipalId::new(1, 3), ModelFamily::OpenAI, request(false))
             .is_err());
-        let first = service.start(caller, request(false)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         assert!(service
-            .resume(caller, token, "wrong", callback_reply(json!("result")))
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                "wrong",
+                callback_reply(json!("result"))
+            )
             .is_err());
         assert!(service
             .resume(
                 PrincipalId::SYSTEM,
+                ModelFamily::OpenAI,
                 token,
                 "call-1",
                 callback_reply(json!("result"))
             )
             .is_err());
-        let nested = service.start(caller, request(false)).unwrap();
+        let nested = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         assert_eq!(nested["receipt"]["outcome"]["kind"], "text");
         let finished = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("nested result")),
@@ -1050,6 +1070,7 @@ mod tests {
         assert!(service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("duplicate"))
@@ -1065,15 +1086,24 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(true)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(true))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let first_id = first["call_id"].as_str().unwrap();
         let first_hook = service
-            .resume(caller, token, first_id, callback_reply(json!("first")))
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                first_id,
+                callback_reply(json!("first")),
+            )
             .unwrap();
         let second = service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first_hook["operation"].as_str().unwrap(),
                 json!({"kind":"none"}),
@@ -1088,6 +1118,7 @@ mod tests {
         assert!(service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first_id,
                 callback_reply(json!("late duplicate"))
@@ -1096,18 +1127,26 @@ mod tests {
         assert!(service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 "call-1",
                 callback_reply(json!("unqualified"))
             )
             .is_err());
         let second_hook = service
-            .resume(caller, token, second_id, callback_reply(json!("second")))
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                second_id,
+                callback_reply(json!("second")),
+            )
             .unwrap();
         assert_eq!(second_hook["operation"], second["call_id"]);
         let finished = service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 second_hook["operation"].as_str().unwrap(),
                 json!({"kind":"none"}),
@@ -1124,12 +1163,15 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(true)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(true))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let semantic = json!({"answer":42,"error":"ordinary authored output","status":"refused"});
         let hook = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(semantic.clone()),
@@ -1154,6 +1196,7 @@ mod tests {
         assert!(service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 hook["operation"].as_str().unwrap(),
                 json!({"kind": "none", "foreign": true}),
@@ -1162,6 +1205,7 @@ mod tests {
         let final_step = service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 hook["operation"].as_str().unwrap(),
                 serde_json::to_value(ModelAnnotationEnvelope::ModelNoAnnotation {}).unwrap(),
@@ -1178,11 +1222,14 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(true)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(true))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("original")),
@@ -1192,11 +1239,18 @@ mod tests {
         assert_eq!(hook["value"], json!("original"));
         let operation = hook["operation"].as_str().unwrap();
         assert!(service
-            .annotate(caller, token, "wrong", json!({"kind":"none"}))
+            .annotate(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                "wrong",
+                json!({"kind":"none"})
+            )
             .is_err());
         assert!(service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 operation,
                 json!({"kind":"pruned","handle":"foreign","text":"short"})
@@ -1205,6 +1259,7 @@ mod tests {
         let final_step = service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 operation,
                 json!({"kind":"pruned","handle":hook["handle"],"text":"short"}),
@@ -1229,13 +1284,18 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(false)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         service.cancel();
-        assert!(service.start(caller, request(false)).is_err());
+        assert!(service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .is_err());
         let finished = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("completed after close")),
@@ -1252,11 +1312,14 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(true)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(true))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("result")),
@@ -1265,6 +1328,7 @@ mod tests {
         service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 hook["operation"].as_str().unwrap(),
                 json!({"kind":"abstained","reason":"insufficient evidence"}),
@@ -1289,11 +1353,14 @@ mod tests {
             Limits::default(),
         );
         let caller = PrincipalId::new(1, 2);
-        let first = service.start(caller, request(true)).unwrap();
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(true))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
             .resume(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("original")),
@@ -1302,13 +1369,14 @@ mod tests {
         assert!(service
             .annotate(
                 caller,
+                ModelFamily::OpenAI,
                 token,
                 hook["operation"].as_str().unwrap(),
                 json!({"kind":"pruned","handle":"foreign","text":"short"})
             )
             .is_err());
-        service.close(caller, token).unwrap();
-        let entry = service.entry(caller, token).unwrap();
+        service.close(caller, ModelFamily::OpenAI, token).unwrap();
+        let entry = service.entry(caller, token, ModelFamily::OpenAI).unwrap();
         let mut entry = entry.lock().unwrap();
         let finished = runtime.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(2), entry.invocation.next()).await
@@ -1331,21 +1399,35 @@ mod tests {
         );
         let foreign = service(&runtime, vec![], Limits::default());
         let caller = PrincipalId::new(1, 2);
-        let first = owner.start(caller, request(false)).unwrap();
+        let first = owner
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
         let token = first["invocation"].as_str().unwrap();
         let operation = first["call_id"].as_str().unwrap();
         assert!(matches!(
-            foreign.resume(caller, token, operation, callback_reply(json!("foreign"))),
+            foreign.resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                operation,
+                callback_reply(json!("foreign"))
+            ),
             Err(ModelBoundaryError::ModelRejected(_))
         ));
         assert!(matches!(
-            foreign.close(caller, token),
+            foreign.close(caller, ModelFamily::OpenAI, token),
             Err(ModelBoundaryError::ModelRejected(_))
         ));
         assert!(foreign.registry.lock().unwrap().is_empty());
         assert!(foreign.budget.get().is_none());
         let finished = owner
-            .resume(caller, token, operation, callback_reply(json!("original")))
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                operation,
+                callback_reply(json!("original")),
+            )
             .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
     }

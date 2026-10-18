@@ -132,6 +132,40 @@ impl EmbeddedHarnessRuntime {
             .get()
             .expect("run inference configured before model admission")
     }
+    pub(super) fn conversation_auth(
+        &self,
+        permission: &exomonad_actor::ConversationPermission,
+    ) -> Result<super::run_auth::RunAuth, String> {
+        let config = self
+            .context_models
+            .get()
+            .ok_or("no admitted model catalog")?;
+        let catalog = config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|workspace| workspace.model_catalog.as_ref())
+            .ok_or("no admitted model catalog")?;
+        let identity = permission.model();
+        let selected = catalog
+            .models
+            .get(identity.key())
+            .ok_or("conversation model is unavailable")?;
+        if identity.catalog_identity() != catalog.identity
+            || identity.provider() != selected.provider
+            || identity.model() != &selected.model
+        {
+            return Err("conversation permission differs from the frozen catalog".into());
+        }
+        let auth = self
+            .inference_providers()
+            .and_then(|providers| providers.get(identity.provider()))
+            .ok_or("conversation provider is unavailable")?;
+        if auth.backend() != identity.model().backend() {
+            return Err("conversation transport differs from the admitted model family".into());
+        }
+        Ok(auth.clone())
+    }
+
     pub(super) fn account_auth(
         &self,
     ) -> Option<&harness::transport::auth::chatgpt::RunAccountAuth> {
@@ -271,8 +305,7 @@ impl EmbeddedHarnessRuntime {
             wakes,
             round_control.clone(),
         )
-        .await?
-        .with_context_models(self.context_models.clone());
+        .await?;
         #[cfg(test)]
         let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
         let host = Arc::new(host);
@@ -378,8 +411,7 @@ impl EmbeddedHarnessRuntime {
             wakes,
             round_control.clone(),
         )
-        .await?
-        .with_context_models(self.context_models.clone());
+        .await?;
         #[cfg(test)]
         let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
         let host = Arc::new(host);
@@ -845,7 +877,6 @@ pub(super) struct EmbeddedHostActor {
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
-    context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
     #[cfg(test)]
     admission_test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -854,11 +885,6 @@ impl EmbeddedHostActor {
     #[cfg(test)]
     fn with_admission_test_hooks(mut self, hooks: Option<Arc<EmbeddedAdmissionTestHooks>>) -> Self {
         self.admission_test_hooks = hooks;
-        self
-    }
-
-    fn with_context_models(mut self, models: Arc<OnceLock<Arc<super::ActorHostConfig>>>) -> Self {
-        self.context_models = models;
         self
     }
 
@@ -894,7 +920,6 @@ impl EmbeddedHostActor {
             wakes,
             round_control,
             next_surface: AtomicU64::new(1),
-            context_models: Arc::new(OnceLock::new()),
             #[cfg(test)]
             admission_test_hooks: None,
         })
@@ -988,8 +1013,8 @@ impl HostActor for EmbeddedHostActor {
             attachment: self.attachment.clone(),
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
-            context_models: self.context_models.clone(),
             inference_defaults: self.installation.inference_defaults(),
+            conversation_permission: self.installation.conversation_permission().cloned(),
             snapshot,
             store: self.store.clone(),
         });
@@ -1047,13 +1072,13 @@ struct EmbeddedCancellationOwner {
 
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
-    context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
     inference_defaults: (
         Option<exomonad_actor::Model>,
         Option<exomonad_actor::Reasoning>,
     ),
     identity: HostIdentity,
     issuer: ActorRef,
+    conversation_permission: Option<exomonad_actor::ConversationPermission>,
     snapshot: Arc<EmbeddedPolicySnapshot>,
     store: Arc<Store>,
 }
@@ -1785,43 +1810,61 @@ impl Provider for EmbeddedDispatcher {
                         )));
                     }
                 };
-                let model_policy = self.context_models.get().cloned();
-                let reasoning_policy = model_policy.clone();
-                let observed_policy = model_policy.clone();
+                let fixed = self.conversation_permission.clone();
+                let model_permission = fixed.clone();
                 let resolver: ModelResolver = Arc::new(move |model| {
-                    super::resolve_model(
-                        model_policy
-                            .as_deref()
-                            .ok_or("model selection requires admitted run policy")?,
-                        model,
-                    )
+                    let permission = model_permission
+                        .as_ref()
+                        .ok_or("actor has no conversation permission")?;
+                    if model != permission.model().model() {
+                        return Err("the actor conversation model is fixed".into());
+                    }
+                    Ok(model.value().to_owned())
                 });
+                let reasoning_permission = fixed.clone();
                 let reasoning: ReasoningResolver = Arc::new(move |reasoning| {
-                    super::resolve_reasoning(
-                        reasoning_policy
-                            .as_deref()
-                            .ok_or("reasoning selection requires admitted run policy")?,
-                        reasoning,
-                    )
+                    let permission = reasoning_permission
+                        .as_ref()
+                        .ok_or("actor has no conversation permission")?;
+                    if !permission.permits(permission.model(), *reasoning) {
+                        return Err(
+                            "reasoning effort is not permitted for this actor conversation".into(),
+                        );
+                    }
+                    Ok(super::reasoning_effort(reasoning))
                 });
                 let observing_store = self.store.clone();
                 let observing_identity = snapshot.operation.origin.clone();
-                let (initial_model, initial_reasoning) = self.inference_defaults.clone();
+                let initial_reasoning = self.inference_defaults.1;
                 let inference_selection: InferenceSelectionObserver = Arc::new(move || {
-                    let config = observed_policy
-                        .as_deref()
-                        .ok_or("effective selection requires admitted run policy")?;
-                    let model = initial_model.as_ref().unwrap_or(&config.model);
-                    let reasoning = initial_reasoning.unwrap_or(config.reasoning);
-                    super::resolve_model(config, model)?;
-                    let effort = super::resolve_reasoning(config, &reasoning)?;
+                    let permission = fixed
+                        .as_ref()
+                        .ok_or("actor has no conversation permission")?;
+                    let model = permission.model().model();
+                    let reasoning =
+                        initial_reasoning.ok_or("actor has no admitted conversation effort")?;
+                    if !permission.permits(permission.model(), reasoning) {
+                        return Err(
+                            "initial effort differs from the conversation permission".into()
+                        );
+                    }
                     let selected = observing_store
-                        .effective_inference_selection(&observing_identity, model.value(), effort)
+                        .effective_inference_selection(
+                            &observing_identity,
+                            model.value(),
+                            super::reasoning_effort(&reasoning),
+                        )
                         .map_err(|error| error.to_string())?;
-                    Ok((
-                        exomonad_actor::Model::for_backend(config.model.backend(), &selected.model),
-                        super::reasoning_from_effort(config.model.backend(), selected.effort)?,
-                    ))
+                    let effort = super::reasoning_from_effort(model.backend(), selected.effort)?;
+                    if selected.model != model.value()
+                        || !permission.permits(permission.model(), effort)
+                    {
+                        return Err(
+                            "retained inference differs from the actor conversation permission"
+                                .into(),
+                        );
+                    }
+                    Ok((model.clone(), effort))
                 });
                 let observed_initial_context =
                     match self.attachment.initial_context_wire_observation().await {

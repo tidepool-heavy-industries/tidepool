@@ -2,6 +2,7 @@ use super::super::test_campaign::{
     commit_workspace, committed_display_text, dispatch_haskell_script, TestCampaign,
 };
 use super::*;
+use exomonad_actor::{Model, Reasoning};
 use harness::{
     item::Item,
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
@@ -130,6 +131,7 @@ fn fixture_catalog() -> crate::exomonad::model_catalog::InferenceConfig {
                 model: "test-model".into(),
                 constructor: "Primary".into(),
                 effort: "low".into(),
+                allowed_efforts: Vec::new(),
             },
         )]),
         profiles: BTreeMap::from([(
@@ -188,25 +190,28 @@ impl CellModelFactory for HoldingFactory {
 async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding) {
     let store = Arc::new(Store::memory().unwrap());
     let script = Arc::new(ScriptState::default());
-    let transport = script.clone();
     let retained = Arc::new(Mutex::new(None));
     let catalog = fixture_catalog().resolve().unwrap();
     let selected_transport = script.clone();
     let mut inner = EmbeddedCellModelFactory::<Offline, _>::new(
         store.clone(),
         Arc::new(JobScheduler::new(4).unwrap()),
-        Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "test-model"),
-        Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
-        Arc::new(move || Script(transport.clone())),
+        Arc::new(move |choice| {
+            let selected = catalog_model(&catalog, choice)?;
+            Ok((
+                Script(selected_transport.clone()),
+                selected.model.value().to_owned(),
+                super::super::reasoning_effort(&choice.reasoning),
+            ))
+        }),
     );
-    inner.selection = Some(Arc::new(move |choice| {
-        let selected = catalog_model(&catalog, choice)?;
-        Ok((
-            Script(selected_transport.clone()),
-            selected.model.value().to_owned(),
-            super::super::reasoning_effort(&choice.reasoning),
-        ))
-    }));
+    let (_storage, mut factory_config) = policy_config();
+    factory_config
+        .workspace_inputs
+        .as_mut()
+        .unwrap()
+        .model_catalog = Some(fixture_catalog().resolve().unwrap());
+    inner.launch_config = Some(Arc::new(factory_config));
     let factory = Arc::new(HoldingFactory {
         inner,
         retained: retained.clone(),
@@ -546,94 +551,36 @@ fn policy_config() -> (tempfile::TempDir, ActorHostConfig) {
 }
 
 #[tokio::test]
-async fn cell_model_policy_resolves_only_the_fixed_backend_before_provider_work() {
-    use exomonad_actor::{ActorPlacement, Backend, DeepSeekReasoning, OpenAIReasoning};
-    let (_storage, config) = policy_config();
-    let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
-        Arc::new(Store::memory().unwrap()),
-        Arc::new(JobScheduler::new(1).unwrap()),
-        config.model.clone(),
-        config.reasoning,
-        Arc::new(|| panic!("policy does not start provider work")),
-    )
-    .with_launch_config(&config);
-    let descriptor = ActorDescriptor::new(
-        "policy-cell",
-        ActorPlacement {
-            session: tidepool_repr::SessionId(1),
-            resource_scope: tidepool_codegen::suspension::RealmId(1),
-            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
-        },
-    )
-    .with_model(Some(Model::for_backend(
-        Backend::OpenAIPlan,
-        "admitted-model",
-    )));
-    let policy = factory.policy(&descriptor, None).unwrap();
-    assert_eq!(
-        (policy.inherit_selection)().unwrap(),
-        ("admitted-model".into(), Effort::Medium)
-    );
-    assert_eq!(
-        (policy.resolve_model)(&Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Luna)).unwrap(),
-        "gpt-6-luna"
-    );
-    assert!((policy.resolve_model)(&Model::DeepSeekFlash).is_err());
-    assert!((policy.resolve_reasoning)(&Reasoning::DeepSeekReasoning(
-        DeepSeekReasoning::DeepSeekHigh
-    ))
-    .is_err());
-    let binding = factory.bind(
-        &WorkbenchExecutionId::from_digest([1; 16]),
-        PrincipalId::new(1, 1),
-        &descriptor,
-        None,
-    );
-    binding.cancel();
-    binding.cancel();
-    let override_policy = factory
-        .policy(
-            &descriptor
-                .clone()
-                .with_reasoning(Some(Reasoning::OpenAIReasoning(
-                    OpenAIReasoning::OpenAIHigh,
-                ))),
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        (override_policy.inherit_selection)().unwrap().1,
-        Effort::High
-    );
-    assert_eq!(
-        (
-            policy.limits.requests,
-            policy.limits.tools,
-            policy.limits.reported_tokens,
-            policy.limits.seconds
-        ),
-        (16, 64, 128_000, 300)
-    );
-    assert!(factory
-        .policy(&descriptor.with_model(Some(Model::DeepSeekFlash)), None)
-        .is_err());
-}
-
-#[tokio::test]
-async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work() {
-    use exomonad_actor::ActorPlacement;
+async fn typed_cell_model_selection_checks_actor_grants_before_provider_work() {
+    use exomonad_actor::{ActorCapabilities, ActorPlacement, ModelGrant, ModelPermissions};
+    use exomonad_tool::{ModelFamily, ModelOperation, ModelPermission};
     let (_storage, mut config) = policy_config();
-    let script = Arc::new(ScriptState::default());
-    let transport = script.clone();
-    let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
-        Arc::new(Store::memory().unwrap()),
-        Arc::new(JobScheduler::new(1).unwrap()),
-        config.model.clone(),
-        config.reasoning,
-        Arc::new(move || Script(transport.clone())),
+    let catalog = fixture_catalog().resolve().unwrap();
+    config.workspace_inputs.as_mut().unwrap().model_catalog = Some(catalog.clone());
+    let choice = tidepool_bridge_effects::ModelSelectionEnvelope {
+        catalog_identity: catalog.identity.clone(),
+        key: catalog.primary.clone(),
+        reasoning: catalog.models[&catalog.primary].reasoning,
+    };
+    let selected = &catalog.models[&catalog.primary];
+    let identity = AdmittedModelIdentity::new(
+        catalog.identity.clone(),
+        catalog.primary.clone(),
+        selected.provider.clone(),
+        selected.model.clone(),
     )
-    .with_launch_config(&config);
-    config.model = Model::DeepSeekFlash;
+    .unwrap();
+    let permission = ModelPermission {
+        operation: ModelOperation::ModelCall,
+        family: ModelFamily::OpenAI,
+    };
+    let permissions = ModelPermissions::new(vec![ModelGrant::new(
+        permission,
+        identity,
+        vec![choice.reasoning],
+    )
+    .unwrap()])
+    .unwrap();
     let descriptor = ActorDescriptor::new(
         "selected-cell",
         ActorPlacement {
@@ -642,89 +589,78 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
         },
     )
-    .with_model(Some(Model::for_backend(
-        exomonad_actor::Backend::OpenAIPlan,
-        "admitted-model",
-    )));
-    let policy = factory.policy(&descriptor, None).unwrap();
-    let service = Arc::new(CellModelService::<Offline, Script>::new(
-        tokio::runtime::Handle::current(),
-        PrincipalId::new(1, 1),
-        "selected-cell".into(),
-        factory.store.clone(),
-        factory.scheduler.clone(),
-        policy,
-        factory.transport.clone(),
-    ));
-    let worker = service.clone();
+    .with_capabilities(ActorCapabilities::default().with_model_permissions(permissions));
+    let script = Arc::new(ScriptState::default());
+    let transport = script.clone();
+    let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
+        Arc::new(Store::memory().unwrap()),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        Arc::new(move |choice| {
+            Ok((
+                Script(transport.clone()),
+                "test-model".into(),
+                super::super::reasoning_effort(&choice.reasoning),
+            ))
+        }),
+    )
+    .with_launch_config(&config);
+    let selection = factory.selected_transport(&descriptor).unwrap();
+    let denied = factory
+        .selected_transport(
+            &descriptor
+                .clone()
+                .with_capabilities(ActorCapabilities::default()),
+        )
+        .unwrap();
+    let store = factory.store.clone();
+    let requests = script.clone();
     tokio::task::spawn_blocking(move || {
-        let request = |selection: Option<Model>| {
-            json!({"instructions":"budget","input":"explicit input","model":selection,
-                "reasoning":null,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
+        let caller = PrincipalId::new(1, 1);
+        let service = CellModelService::<Offline, Script>::new(
+            tokio::runtime::Handle::current(),
+            caller,
+            "selected-cell".into(),
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            ModelPolicy {
+                limits: Limits::default(),
+            },
+            selection,
+        );
+        let request = |selection: serde_json::Value| {
+            json!({"instructions":"budget","input":"explicit input",
+            "selection":selection,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
         };
-        for selection in [
-            None,
-            Some(Model::for_backend(
-                exomonad_actor::Backend::OpenAIPlan,
-                "admitted-model",
-            )),
-            Some(Model::for_backend(
-                exomonad_actor::Backend::OpenAIPlan,
-                "configured-sol",
-            )),
-            Some(Model::for_backend(
-                exomonad_actor::Backend::OpenAIPlan,
-                "configured-luna",
-            )),
-            Some(Model::for_backend(
-                exomonad_actor::Backend::OpenAIPlan,
-                "configured-sol",
-            )),
-            Some(Model::for_backend(
-                exomonad_actor::Backend::OpenAIPlan,
-                "configured-sol",
-            )),
-        ] {
-            let result = worker
-                .start(PrincipalId::new(1, 1), request(selection))
-                .unwrap();
-            assert_eq!(result["receipt"]["outcome"]["kind"], "text");
-            assert_eq!(result["receipt"]["outcome"]["value"], "allowed");
-            assert_eq!(result["receipt"]["counts"]["requests"], 1);
+        for invalid in [serde_json::Value::Null, json!({}), {
+            let mut stale = json!(choice);
+            stale["catalog_identity"] = json!("stale");
+            stale
+        }] {
+            assert!(service
+                .start(caller, ModelFamily::OpenAI, request(invalid))
+                .is_err());
         }
-        for selection in [
-            Model::DeepSeekFlash,
-            Model::DeepSeekPro,
-            Model::CustomModel(exomonad_actor::Backend::DeepSeek, "admitted-model".into()),
-        ] {
-            assert!(matches!(
-                worker.start(PrincipalId::new(1, 1), request(Some(selection))),
-                Err(tidepool_handlers::handlers::model::ModelBoundaryError::ModelRejected(_))
-            ));
-        }
+        let mut extra_effort = choice.clone();
+        extra_effort.reasoning =
+            Reasoning::for_backend(exomonad_actor::Backend::OpenAIPlan, "high").unwrap();
+        assert!(service
+            .start(caller, ModelFamily::OpenAI, request(json!(extra_effort)))
+            .is_err());
+        assert!(denied(&choice).is_err());
+        assert!(requests.requests.lock().unwrap().is_empty());
+        assert!(store.events(None).unwrap().is_empty());
+        let receipt = service
+            .start(caller, ModelFamily::OpenAI, request(json!(choice)))
+            .unwrap();
+        assert_eq!(receipt["receipt"]["outcome"]["value"], "allowed");
+        assert_eq!(receipt["receipt"]["counts"]["requests"], 1);
     })
     .await
     .unwrap();
     let requests = script.requests.lock().unwrap();
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.model.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "admitted-model",
-            "admitted-model",
-            "configured-sol",
-            "configured-luna",
-            "configured-sol",
-            "configured-sol"
-        ]
-    );
-    assert!(requests
-        .iter()
-        .all(|request| request.pinned_effort == Effort::Medium));
-    assert!(requests.iter().all(|request| request.tools.is_empty()
-        && request.input[0].0 == json!({"type":"message","role":"user","content":[{"type":"input_text","text":"explicit input"}]})));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model, "test-model");
+    assert_eq!(requests[0].pinned_effort, Effort::Low);
     assert_eq!(
         factory
             .store
@@ -733,7 +669,7 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             .iter()
             .filter(|event| event.kind == "model_invocation_receipt")
             .count(),
-        6
+        1
     );
 }
 
@@ -777,6 +713,9 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
                     constructor: "Flash".into(),
                     model: Model::DeepSeekFlash,
                     reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+                    allowed_efforts: vec![Reasoning::DeepSeekReasoning(
+                        DeepSeekReasoning::DeepSeekLow,
+                    )],
                 },
             ),
             (
@@ -786,6 +725,10 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
                     constructor: "Argon".into(),
                     model: Model::GeminiArgon,
                     reasoning: Reasoning::ArgonReasoning(ArgonEffort::EffortLow),
+                    allowed_efforts: vec![
+                        Reasoning::ArgonReasoning(ArgonEffort::EffortLow),
+                        Reasoning::ArgonReasoning(ArgonEffort::EffortHigh),
+                    ],
                 },
             ),
         ]),
@@ -809,6 +752,7 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
     let flash = ModelSelectionEnvelope {
         key: "flash".into(),
         reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+        allowed_efforts: vec![Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)],
         ..choice.clone()
     };
     assert_eq!(

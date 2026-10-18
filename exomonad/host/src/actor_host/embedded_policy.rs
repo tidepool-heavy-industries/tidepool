@@ -18,6 +18,7 @@ pub(super) struct EmbeddedPolicyInstallation {
     observation: exomonad_actor::ActorRuntimeObservationHandle,
     model: Option<exomonad_actor::Model>,
     reasoning: Option<exomonad_actor::Reasoning>,
+    conversation_permission: Option<exomonad_actor::ConversationPermission>,
 }
 
 impl EmbeddedPolicyInstallation {
@@ -29,6 +30,8 @@ impl EmbeddedPolicyInstallation {
         );
         policy.model = installation.model.clone();
         policy.reasoning = installation.reasoning;
+        policy.conversation_permission =
+            installation.capabilities.conversation_permission().cloned();
         policy
     }
 
@@ -49,6 +52,7 @@ impl EmbeddedPolicyInstallation {
             observation,
             model: None,
             reasoning: None,
+            conversation_permission: None,
         }
     }
 
@@ -59,6 +63,12 @@ impl EmbeddedPolicyInstallation {
         Option<exomonad_actor::Reasoning>,
     ) {
         (self.model.clone(), self.reasoning)
+    }
+
+    pub(super) fn conversation_permission(
+        &self,
+    ) -> Option<&exomonad_actor::ConversationPermission> {
+        self.conversation_permission.as_ref()
     }
 
     pub(super) fn observation(&self) -> exomonad_actor::ActorRuntimeObservationHandle {

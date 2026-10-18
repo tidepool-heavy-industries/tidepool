@@ -36,6 +36,8 @@ pub(crate) struct ModelConfig {
     pub model: String,
     pub constructor: String,
     pub effort: String,
+    #[serde(default)]
+    pub allowed_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,7 @@ pub(crate) struct ResolvedModel {
     pub constructor: String,
     pub model: Model,
     pub reasoning: Reasoning,
+    pub allowed_efforts: Vec<Reasoning>,
 }
 
 fn constructor_valid(name: &str) -> bool {
@@ -165,6 +168,30 @@ impl InferenceConfig {
                     constructor: model.constructor.clone(),
                     model: Model::for_backend(provider.backend, &model.model),
                     reasoning: Reasoning::for_backend(provider.backend, &model.effort)?,
+                    allowed_efforts: {
+                        let initial = Reasoning::for_backend(provider.backend, &model.effort)?;
+                        let mut efforts = if model.allowed_efforts.is_empty() {
+                            vec![initial]
+                        } else {
+                            model
+                                .allowed_efforts
+                                .iter()
+                                .map(|effort| Reasoning::for_backend(provider.backend, effort))
+                                .collect::<Result<Vec<_>, _>>()?
+                        };
+                        if !efforts.contains(&initial) {
+                            return Err(format!(
+                                "model {name}: configured effort must be permitted"
+                            ));
+                        }
+                        let mut unique = Vec::new();
+                        for effort in efforts.drain(..) {
+                            if !unique.contains(&effort) {
+                                unique.push(effort);
+                            }
+                        }
+                        unique
+                    },
                 },
             );
         }
@@ -232,6 +259,7 @@ impl InferenceConfig {
                 model: defaults.model.value().into(),
                 constructor: "Primary".into(),
                 effort: defaults.reasoning.value().into(),
+                allowed_efforts: Vec::new(),
             },
         );
         for (alias, model) in aliases {
@@ -256,6 +284,7 @@ impl InferenceConfig {
                         model: model.value().into(),
                         constructor,
                         effort: defaults.reasoning.value().into(),
+                        allowed_efforts: Vec::new(),
                     },
                 )
                 .is_some()
@@ -299,135 +328,136 @@ impl InferenceConfig {
 }
 
 impl ResolvedCatalog {
-    /// Emit the workspace's closed choices from its admitted catalog, never disk inventory.
-    pub(crate) fn render_haskell_models(&self) -> Result<String, String> {
+    pub(crate) fn root_capabilities(
+        &self,
+        mut ordinary: Vec<exomonad_tool::ActorEffectKey>,
+    ) -> Result<exomonad_actor::ActorCapabilities, String> {
+        use exomonad_actor::{
+            ActorCapabilities, AdmittedModelIdentity, ConversationPermission, ModelGrant,
+            ModelPermissions,
+        };
+        use exomonad_tool::{ModelOperation, ModelPermission};
         let primary = self
             .models
             .get(&self.primary)
-            .ok_or_else(|| "catalog primary model is missing".to_string())?;
-        let mut declarations = Vec::new();
-        let mut cases = Vec::new();
-        let mut allowed = Vec::new();
-        let mut constructors = BTreeSet::new();
-        for (key, model) in &self.models {
-            if !constructor_valid(&model.constructor) || !constructors.insert(&model.constructor) {
-                return Err(format!(
-                    "invalid or colliding model constructor {}",
-                    model.constructor
-                ));
+            .ok_or("catalog primary model is missing")?;
+        let mut grants = Vec::new();
+        let mut own = None;
+        for (key, selected) in &self.models {
+            let identity = AdmittedModelIdentity::new(
+                self.identity.clone(),
+                key.clone(),
+                selected.provider.clone(),
+                selected.model.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+            if key == &self.primary {
+                own = Some(
+                    ConversationPermission::new(identity.clone(), selected.allowed_efforts.clone())
+                        .map_err(|error| error.to_string())?,
+                );
             }
-            if model.model.backend() != model.reasoning.backend() {
-                return Err(format!("model {key}: model and reasoning backends differ"));
+            for operation in [
+                ModelOperation::SpawnAgent,
+                ModelOperation::ForkAgent,
+                ModelOperation::ModelCall,
+            ] {
+                if operation == ModelOperation::ForkAgent
+                    && (selected.provider != primary.provider
+                        || selected.model.backend() != primary.model.backend())
+                {
+                    continue;
+                }
+                grants.push(
+                    ModelGrant::new(
+                        ModelPermission {
+                            operation,
+                            family: identity.family(),
+                        },
+                        identity.clone(),
+                        selected.allowed_efforts.clone(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
             }
-            let shape = option_shape(model.model.backend());
-            declarations.push(format!("{} {}", model.constructor, shape.options));
-            cases.push(format!(
-                "  modelSelection ({} options) = ModelSelectionEnvelope {} {} (Core.{} ({} options))",
-                model.constructor,
-                haskell_literal(&self.identity),
-                haskell_literal(key),
-                shape.reasoning,
-                shape.field,
-            ));
-            allowed.push(format!(
-                "({}, {})",
-                haskell_literal(key),
-                default_choice(model)?
-            ));
         }
-        let shape = option_shape(primary.model.backend());
-        Ok(format!(
-            r#"{{-# LANGUAGE FlexibleContexts #-}}
-{{-# LANGUAGE OverloadedStrings #-}}
+        let permissions = ModelPermissions::new(grants).map_err(|error| error.to_string())?;
+        ordinary.retain(|key| key.model_permission().is_none());
+        ordinary.extend(permissions.effect_keys());
+        ActorCapabilities::admit(ordinary, permissions, own).map_err(|error| error.to_string())
+    }
 
+    pub(crate) fn render_haskell_models(&self) -> Result<String, String> {
+        let selected = self
+            .models
+            .get(&self.primary)
+            .ok_or("catalog primary model is missing")?;
+        let binding = self.render_binding(
+            "PrimaryModelFamily",
+            "primaryModel",
+            &self.primary,
+            selected.reasoning,
+        )?;
+        Ok(format!(
+            r#"{{-# LANGUAGE OverloadedStrings #-}}
 module Exomonad.Models
-  ( Model (..)
+  ( PrimaryModelFamily
   , primaryModel
-  , allowedModels
-  , setNextEffort
   , module Tidepool.Model.Selection
   ) where
 
-import Prelude
-import Control.Monad.Freer (Eff, Member)
-import Data.Text (Text)
-import qualified Tidepool.Agent.Context as Context
-import qualified Tidepool.Effects.Core as Core
 import Tidepool.Model.Selection
 
-data Model = {}
-  deriving (Eq, Show)
-
-instance ModelChoice Model where
-{}
-
-primaryModel :: Model
-primaryModel = {}
-
-allowedModels :: [(Text, Model)]
-allowedModels = [{}]
-
-setNextEffort :: Member Core.ContextReadWrite effects => {} -> Eff effects ()
-setNextEffort = Context.setNextReasoning . Core.{}
-"#,
-            declarations.join(" | "),
-            cases.join("\n"),
-            default_choice(primary)?,
-            allowed.join(", "),
-            shape.effort,
-            shape.reasoning,
+{binding}"#
         ))
     }
-}
 
-struct OptionShape {
-    options: &'static str,
-    effort: &'static str,
-    field: &'static str,
-    reasoning: &'static str,
-    prefix: &'static str,
-}
-
-fn option_shape(backend: Backend) -> OptionShape {
-    match backend {
-        Backend::GeminiInteractions => OptionShape {
-            options: "ArgonOptions",
-            effort: "ArgonEffort",
-            field: "argonEffort",
-            reasoning: "ArgonReasoning",
-            prefix: "Effort",
-        },
-        Backend::DeepSeek => OptionShape {
-            options: "DeepSeekOptions",
-            effort: "DeepSeekReasoning",
-            field: "deepSeekEffort",
-            reasoning: "DeepSeekReasoning",
-            prefix: "DeepSeek",
-        },
-        Backend::OpenAIPlan => OptionShape {
-            options: "OpenAIOptions",
-            effort: "OpenAIReasoning",
-            field: "openAIEffort",
-            reasoning: "OpenAIReasoning",
-            prefix: "OpenAI",
-        },
+    pub(crate) fn render_actor_model_binding(
+        &self,
+        key: &str,
+        reasoning: Reasoning,
+    ) -> Result<String, String> {
+        self.render_binding("CurrentModelFamily", "currentModel", key, reasoning)
     }
-}
 
-fn default_choice(model: &ResolvedModel) -> Result<String, String> {
-    let shape = option_shape(model.model.backend());
-    let effort = match model.reasoning.value() {
-        "none" => "None",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "max" => "Max",
-        effort => return Err(format!("unsupported reasoning setting {effort}")),
-    };
-    Ok(format!(
-        "{} ({} {}{})",
-        model.constructor, shape.options, shape.prefix, effort
-    ))
+    /// Render a binding from the exact catalog key; provider IDs never become model selectors.
+    fn render_binding(
+        &self,
+        alias: &str,
+        name: &str,
+        key: &str,
+        reasoning: Reasoning,
+    ) -> Result<String, String> {
+        let selected = self
+            .models
+            .get(key)
+            .ok_or("actor model is not in the admitted catalog")?;
+        if !selected.allowed_efforts.contains(&reasoning) {
+            return Err("actor reasoning is not in the admitted model efforts".into());
+        }
+        let (family, constructor, options, prefix) = match selected.model.backend() {
+            Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
+            Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
+            Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
+        };
+        let effort = match reasoning.value() {
+            "none" => "None",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "max" => "Max",
+            effort => return Err(format!("unsupported reasoning setting {effort}")),
+        };
+        Ok(format!(
+            r#"type {alias} = {family}
+
+{name} :: Model {alias}
+{name} = {constructor} {identity} {key} ({options} {prefix}{effort})
+"#,
+            identity = haskell_literal(&self.identity),
+            key = haskell_literal(key)
+        ))
+    }
 }
 
 fn haskell_literal(value: &str) -> String {
@@ -461,6 +491,7 @@ mod tests {
                     model: "deepseek-flash".into(),
                     constructor: "Flash".into(),
                     effort: "high".into(),
+                    allowed_efforts: Vec::new(),
                 },
             )]),
             profiles: BTreeMap::from([(
@@ -557,54 +588,31 @@ mod tests {
     }
 
     #[test]
-    fn renderer_emits_provider_specific_closed_choices() {
+    fn actor_model_renderer_uses_explicit_actor_family_and_effort() {
         let mut config = fixture_config();
-        for (key, backend, model, constructor, effort) in [
-            (
-                "argon",
-                Backend::GeminiInteractions,
-                "gemini-4-argon",
-                "Argon",
-                "medium",
-            ),
-            ("openai", Backend::OpenAIPlan, "gpt-6.1-sol", "Sol", "low"),
-        ] {
-            let mut provider = config.providers["deepseek"].clone();
-            provider.backend = backend;
-            config.providers.insert(key.into(), provider);
-            config.models.insert(
-                key.into(),
-                ModelConfig {
-                    provider: key.into(),
-                    model: model.into(),
-                    constructor: constructor.into(),
-                    effort: effort.into(),
-                },
-            );
-            config
-                .profiles
-                .get_mut("work")
-                .unwrap()
-                .allowed
-                .push(key.into());
-        }
+        config.models.get_mut("flash").unwrap().allowed_efforts = vec!["low".into(), "high".into()];
         let catalog = config.resolve().unwrap();
-        let source = catalog.render_haskell_models().unwrap();
-        assert!(source.contains(
-            "data Model = Argon ArgonOptions | Flash DeepSeekOptions | Sol OpenAIOptions"
-        ));
-        assert!(source.contains("modelSelection (Argon options) = ModelSelection"));
-        assert!(source.contains("(Core.ArgonReasoning (argonEffort options))"));
-        assert!(source.contains("(Core.DeepSeekReasoning (deepSeekEffort options))"));
-        assert!(source.contains("(Core.OpenAIReasoning (openAIEffort options))"));
-        assert!(source.contains("primaryModel = Flash (DeepSeekOptions DeepSeekHigh)"));
-        assert!(source.contains("(\"argon\", Argon (ArgonOptions EffortMedium))"));
-        assert!(source.contains("(\"openai\", Sol (OpenAIOptions OpenAILow))"));
-        assert!(source.contains(&format!(
-            "ModelSelectionEnvelope \"{}\" \"argon\"",
-            catalog.identity
-        )));
-        assert!(source.contains("setNextEffort :: Member Core.ContextReadWrite effects => DeepSeekReasoning -> Eff effects ()"));
+        let source = catalog
+            .render_actor_model_binding(
+                "flash",
+                Reasoning::for_backend(Backend::DeepSeek, "low").unwrap(),
+            )
+            .unwrap();
+        assert!(source.contains("type CurrentModelFamily = DeepSeek"));
+        assert!(source.contains("currentModel :: Model CurrentModelFamily"));
+        assert!(source.contains("currentModel = deepSeek"));
+        assert!(source.contains("(DeepSeekOptions DeepSeekLow)"));
+        assert!(!source.contains("data Model"));
+        assert!(!source.contains("ModelChoice"));
+        assert!(catalog
+            .render_actor_model_binding("unknown", catalog.models["flash"].reasoning)
+            .is_err());
+        assert!(catalog
+            .render_actor_model_binding(
+                "flash",
+                Reasoning::for_backend(Backend::OpenAIPlan, "low").unwrap()
+            )
+            .is_err());
     }
 
     #[test]
@@ -618,26 +626,6 @@ mod tests {
         assert!(source.contains(&haskell_literal(&catalog.identity)));
         assert!(source.contains(&haskell_literal(&catalog.primary)));
         assert!(!source.contains("identity\"\n"));
-    }
-
-    #[test]
-    fn renderer_rejects_option_constructor_collisions() {
-        for constructor in [
-            "ArgonOptions",
-            "DeepSeekOptions",
-            "OpenAIOptions",
-            "EffortLow",
-            "EffortMedium",
-            "EffortHigh",
-            "ModelSelectionEnvelope",
-        ] {
-            let mut config = fixture_config();
-            config.models.get_mut("flash").unwrap().constructor = constructor.into();
-            assert!(config.resolve().is_err(), "{constructor}");
-        }
-        let mut catalog = fixture_config().resolve().unwrap();
-        catalog.models.get_mut("flash").unwrap().constructor = "ArgonOptions".into();
-        assert!(catalog.render_haskell_models().is_err());
     }
 
     #[test]
@@ -704,11 +692,9 @@ mod tests {
         assert_eq!(catalog.models["flash"].model, Model::DeepSeekFlash);
         assert_eq!(catalog.models["pro"].model, Model::DeepSeekPro);
         let source = catalog.render_haskell_models().unwrap();
-        assert!(source.contains(
-            "data Model = Argon ArgonOptions | Flash DeepSeekOptions | Pro DeepSeekOptions"
-        ));
-        assert!(source.contains("primaryModel = Argon (ArgonOptions EffortHigh)"));
-        assert!(source.contains("setNextEffort :: Member Core.ContextReadWrite effects => ArgonEffort -> Eff effects ()"));
+        assert!(source.contains("type PrimaryModelFamily = Argon"));
+        assert!(source.contains("primaryModel :: Model PrimaryModelFamily"));
+        assert!(source.contains("(ArgonOptions EffortHigh)"));
         assert_eq!(
             catalog.models["flash"].reasoning,
             Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
@@ -717,12 +703,7 @@ mod tests {
             catalog.models["pro"].reasoning,
             Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
         );
-        for key in ["argon", "flash", "pro"] {
-            assert!(source.contains(&format!(
-                "ModelSelectionEnvelope \"{}\" \"{key}\"",
-                catalog.identity
-            )));
-        }
+        assert!(source.contains(&haskell_literal(&catalog.primary)));
     }
 
     #[test]
