@@ -3707,12 +3707,12 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
     );
     // A separately issued configured offer remains legitimate. Full custody
     // and a session-like module name cannot issue that offer implicitly.
-    assert!(OriginalCompilerInputs::from_native_availability(
+    OriginalCompilerInputs::from_native_availability(
         &context,
         producer,
         std::slice::from_ref(&native),
     )
-    .is_ok());
+    .expect("the configured native offer remains issued");
 }
 
 #[test]
@@ -3912,12 +3912,12 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .unwrap();
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
     )
-    .is_ok());
+    .expect("the selected original remains available beside historical custody");
     assert!(OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -6068,7 +6068,9 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             );
             let admitted = admitted.map(|_| ());
             if ordinal == Some(demanded) {
-                assert!(admitted.is_ok());
+                admitted
+                    .as_ref()
+                    .expect("the request's issued ordinal remains available");
             } else {
                 assert!(
                     matches!(&admitted, Err(CompileError::ArtifactInventory(error))
@@ -8595,7 +8597,8 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         assert_eq!(
             continued.is_ok(),
             expected,
-            "request-owned exact group3 is required independently of physical census"
+            "request-owned exact group3 is required independently of physical census; actual_error={:?}",
+            continued.as_ref().err()
         );
         if let Ok(continued) = continued {
             assert!(continued
@@ -8612,7 +8615,8 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         assert_eq!(
             result.is_ok(),
             expected,
-            "only an exact issued group3 can support this dependency"
+            "only an exact issued group3 can support this dependency; actual_error={:?}",
+            result.as_ref().err()
         );
         if expected {
             let inputs = result

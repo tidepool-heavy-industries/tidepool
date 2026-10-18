@@ -12562,14 +12562,14 @@ pub(crate) mod tests {
                 "ambiguous source original identity"
             ))
         ));
-        assert!(resolve_receipt_owner_with_validation(
+        resolve_receipt_owner_with_validation(
             receipt(Some(old.owner().module_version.clone()), 3, binder),
             &conflict_sources,
             Some(&old_selection),
             &BTreeMap::new(),
-            &mut validation
+            &mut validation,
         )
-        .is_ok());
+        .expect("the exact old selection disambiguates the original owner");
     }
 
     #[test]
