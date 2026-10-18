@@ -15417,6 +15417,7 @@ mod tests {
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
         let weak = Arc::downgrade(private_owner);
+        let directory = Arc::downgrade(private_owner._directory.as_ref().unwrap());
         let value_entry = context
             .artifact_view()
             .entries_for_owners(std::iter::once(identity("fixture", "Value")))
@@ -15523,6 +15524,7 @@ mod tests {
         .unwrap()
         .retain_custody(&retained)
         .unwrap();
+        drop(inventory);
         let mut next = context.as_ref().clone();
         next = next.rebuild(|facts| {
             facts.compiler_support = support;
@@ -15579,7 +15581,11 @@ mod tests {
         drop(request);
         drop(next);
         assert!(weak.upgrade().is_none());
-        assert!(!private_root.exists());
+        assert!(directory.upgrade().is_some());
+        assert!(private_root.is_dir());
+        drop(retained);
+        assert!(directory.upgrade().is_none());
+        assert!(!private_root.try_exists().unwrap());
     }
 
     #[test]
