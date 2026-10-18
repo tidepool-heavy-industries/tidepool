@@ -6781,8 +6781,8 @@ impl ArtifactView {
         ),
         CompileError,
     > {
-        let incoming =
-            interfaces.support_for_owners(interfaces.entries().keys().cloned().collect())?;
+        let incoming = interfaces
+            .support_for_owners(interfaces.iter().map(|(owner, _)| owner.clone()).collect())?;
         self.merge_compiler_inputs_with_demand(
             projection,
             incoming.artifacts(),

@@ -284,7 +284,10 @@ belongs only to the absence of a supplied or selected proof.
 `CompilerSourceSupport` carries issued roles, graph custody and immutable native
 offers together through context publication and retained values. Its fields and
 constructor are private; domain operations carry selected issuer bindings rather
-than accepting independently reconstructed projections and views.
+than accepting independently reconstructed projections and views. Selected
+interface queries borrow admitted canonical rows and their derived home-unit
+classification. A restricted support derives classification from its own rows;
+changing only original reuse policy preserves the same canonical facts.
 `OriginalCompilerInputs` is a separate baseline-dependent private contribution:
 authenticate its own scoped role associations at issuance, then close its type
 dependencies against the receiving context and protected requirements at request

@@ -562,7 +562,6 @@ impl OriginalCompilerInputs {
     ) -> Result<Option<Self>, CompileError> {
         let interfaces = context.owner.facts.compiler_support.selected_interfaces()?;
         let authored = interfaces
-            .entries()
             .values()
             .filter_map(|entry| {
                 let ArtifactPayload::Canonical(interface) = &entry.payload else {
@@ -3847,7 +3846,6 @@ impl RetainedTemplateImports {
     ) -> Result<Option<Arc<Self>>, CompileError> {
         let interfaces = original.compiler_source_support().selected_interfaces()?;
         let canonical = interfaces
-            .entries()
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Canonical(interface)
@@ -5857,11 +5855,7 @@ impl ExactCompilationRequest {
                 None => context.compiler_source_support().clone(),
             };
             let selected_interfaces = source_support.selected_interfaces()?;
-            let entries = selected_interfaces
-                .entries()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
+            let entries = selected_interfaces.values().cloned().collect::<Vec<_>>();
             let canonical = entries
                 .iter()
                 .filter_map(|entry| canonical_source_interface(entry))
@@ -6945,16 +6939,6 @@ impl ExactDeclarationContext {
             return Err(failure("original type context lacks its compiler producer"));
         }
         let selected = support.selected_interfaces()?;
-        let entries = selected.entries();
-        let home_units = entries
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Canonical(interface) => Some(interface.home_units()),
-                _ => None,
-            })
-            .flatten()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
         let mut owners = BTreeSet::new();
         for witness in witnesses {
             for (unit, module, seal) in witness.interface_seals() {
@@ -6962,7 +6946,7 @@ impl ExactDeclarationContext {
                     unit: unit.to_owned(),
                     module: module.to_owned(),
                 };
-                match entries.get(&owner) {
+                match selected.get(&owner) {
                     Some(entry) => {
                         if entry.descriptor.producer_sha256 != producer
                             || hex(&entry.descriptor.interface_sha256) != seal
@@ -6973,7 +6957,7 @@ impl ExactDeclarationContext {
                         }
                         owners.insert(owner);
                     }
-                    None if unit == "main" || home_units.contains(unit) => {
+                    None if unit == "main" || selected.is_home_unit(unit) => {
                         return Err(failure("original input lacks its certified home interface"));
                     }
                     None => {}
@@ -6990,7 +6974,7 @@ impl ExactDeclarationContext {
                 unit: name.unit().to_owned(),
                 module: name.module().to_owned(),
             };
-            match entries.get(&owner) {
+            match selected.get(&owner) {
                 Some(entry) => {
                     if entry.descriptor.producer_sha256 != producer {
                         return Err(failure(
@@ -6999,7 +6983,7 @@ impl ExactDeclarationContext {
                     }
                     owners.insert(owner);
                 }
-                None if name.unit() == "main" || home_units.contains(name.unit()) => {
+                None if name.unit() == "main" || selected.is_home_unit(name.unit()) => {
                     return Err(failure(
                         "original native signature lacks its certified Name owner",
                     ));
