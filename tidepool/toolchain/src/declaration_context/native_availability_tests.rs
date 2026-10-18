@@ -1177,6 +1177,50 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         });
         ProtectedScaffoldRequirements::default().compiler_inputs(&source_context, None)
     };
+    let scoped_execution_roots = |view: &ArtifactView| {
+        view.capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let opaque_dependency = |offer: &crate::artifact_inventory::IssuedNativeOffer,
+                             proof: &NativeOriginalRequirement| {
+        assert_eq!(offer.original(), consumer_entry.descriptor.id);
+        assert!(offer.is_full());
+        assert_eq!(offer.proof(), Some(proof));
+        let groups = offer.issued_group_carriers().unwrap();
+        let dependency = *groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == native_entry.descriptor.id
+                    && group.original_ordinal == 7
+            })
+            .unwrap();
+        let consumer = *groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == consumer_entry.descriptor.id
+                    && group.original_ordinal == 7
+            })
+            .unwrap();
+        assert!(offer
+            .custody_snapshot()
+            .binding_dependencies()
+            .unwrap()
+            .contains(&(
+                ArtifactBindingNode::Group(consumer),
+                ArtifactBindingNode::Group(dependency),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 7,
+                },
+            )));
+        dependency
+    };
     for (index, supplied, expected) in [
         (0, vec![left_proof.clone()], left_group),
         (1, vec![left_proof.clone(), left_proof.clone()], left_group),
@@ -1184,20 +1228,34 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     ] {
         let source =
             close_source(if supplied.is_empty() { &right } else { &left }, &supplied).unwrap();
+        let expected_roots =
+            scoped_execution_roots(if supplied.is_empty() { &right } else { &left });
+        assert_eq!(scoped_execution_roots(source.artifacts()), expected_roots);
         let input = OriginalCompilerInputs::from_checked_support_products(
             source.compiler_source_support(),
             producer.sha256(),
             std::slice::from_ref(consumer),
         )
         .unwrap();
+        assert_eq!(
+            scoped_execution_roots(input.issued_artifacts()),
+            expected_roots,
+            "private complete issuance preserves the caller's exact chosen execution roots"
+        );
         let issued = input
             .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .cloned()
             .unwrap();
+        let consumer_offer = input
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .unwrap()
+            .clone();
         assert_eq!(
-            dependency(&issued, &input.artifacts, "new complete consumer"),
+            opaque_dependency(&consumer_offer, &issued),
             expected,
             "carried availability chooses the private dependency before selected-state fallback"
         );
@@ -1221,14 +1279,15 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .cloned()
             .unwrap();
-        assert_eq!(
-            dependency(
-                &retained,
-                request.compiler_inputs().artifacts(),
-                "final request consumer"
-            ),
-            expected
-        );
+        let retained_offer = request
+            .compiler_inputs()
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .unwrap();
+        assert!(retained_offer.same_issuance(&consumer_offer));
+        assert_eq!(opaque_dependency(retained_offer, &retained), expected);
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
         assert_eq!(wire_mode(&request, "CarriedDependency"), issued_mode(&[7]));
     }
