@@ -1782,6 +1782,26 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["A", "B"])
         );
+        assert_eq!(
+            interfaces,
+            vec![
+                ExactInterfaceOwner {
+                    owner: owner.clone(),
+                    requirements: vec![ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "B".into(),
+                    }],
+                },
+                ExactInterfaceOwner {
+                    owner: ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "B".into(),
+                    },
+                    requirements: vec![],
+                },
+            ],
+            "the authored A receipt requires B independently of physical projection"
+        );
         let (observation, (_, physical_copied)) =
             crate::recovery_artifacts::observe_native_materialization(|| admit(&products));
         let observation = observation.unwrap();
