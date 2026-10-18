@@ -1070,7 +1070,7 @@ impl<'a> ContinuationNativeInputs<'a> {
         projection: &CompilerInputProjection,
     ) -> Result<Self, CompileError> {
         Ok(Self {
-            selection: selection,
+            selection,
             projection: projection.clone(),
             rows: selection.issued_native_availability().cloned().collect(),
             decisions:
