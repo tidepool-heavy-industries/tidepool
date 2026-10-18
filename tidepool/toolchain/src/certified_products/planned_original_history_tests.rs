@@ -571,7 +571,6 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             &current.certified.source_selection,
             &exact,
             &include,
-            None,
             &serde_json::to_vec(&inventory).unwrap(),
         )
         .unwrap();
@@ -588,7 +587,6 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
                 &current.certified.source_selection,
                 &exact,
                 &include,
-                None,
                 &serde_json::to_vec(&inventory).unwrap(),
             )
             .is_err()
@@ -728,7 +726,6 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                 &selected_issue.certified.source_selection,
                 &exact,
                 &include,
-                None,
                 &serde_json::to_vec(&inventory).unwrap(),
             );
             prop_assert!(joined.is_ok());
@@ -743,7 +740,6 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                     &selected_issue.certified.source_selection,
                     &exact,
                     &include,
-                    None,
                     &serde_json::to_vec(&inventory).unwrap(),
                 )
                 .is_err()

@@ -2922,11 +2922,6 @@ impl SelectedModuleCandidateOffer {
         if string(&fields[5])? != digest || original.interface_bytes() != iface {
             return Err(fail());
         }
-        let baseline = exact.context();
-        let empty = baseline.recovery_products().is_empty()
-            && baseline.joined_interfaces().is_empty()
-            && baseline.lexical_graph().is_empty()
-            && baseline.interface_owners().is_empty();
         let certificate = crate::declaration_join::certify_same_offer_planned_declaration(
             module,
             source,
@@ -2939,7 +2934,6 @@ impl SelectedModuleCandidateOffer {
                 source: &admission,
             },
             &self.include,
-            (!empty).then_some(baseline),
             string(&fields[6])?.as_bytes(),
         )?;
         let inventory: serde_json::Value = serde_json::from_str(string(&fields[6])?)

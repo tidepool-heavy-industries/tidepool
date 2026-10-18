@@ -18088,7 +18088,6 @@ None,
             &planned.certified.source_selection,
             &exact,
             &include,
-            Some(&baseline),
             &serde_json::to_vec(&inventory).unwrap(),
         )
         .unwrap();

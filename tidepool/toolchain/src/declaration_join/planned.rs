@@ -652,7 +652,6 @@ pub(crate) fn certify_same_offer_planned_declaration(
     source_selection: &crate::certified_products::CertifiedSourceSelection,
     admission: &ExactProductAdmission<'_>,
     includes: &[PathBuf],
-    baseline: Option<&Arc<ExactDeclarationContext>>,
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     let source_admission = admission.source;
@@ -678,8 +677,9 @@ pub(crate) fn certify_same_offer_planned_declaration(
             producer_identity,
         )
         .sha256();
-    if baseline
-        .is_some_and(|context| context.toolchain_identity_sha256() != toolchain_identity_sha256)
+    let baseline = admission.request.context();
+    if baseline.toolchain_identity_sha256() != [0; 32]
+        && baseline.toolchain_identity_sha256() != toolchain_identity_sha256
     {
         return Err(contract(
             "planned original producer differs from retained context",
@@ -734,23 +734,11 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original sealed product has a different declaration origin",
         ));
     }
-    let mut published_baseline = match baseline {
-        Some(context) => context.as_ref().clone(),
-        None => ExactDeclarationContext::new(&[], &[], vec![])?,
-    };
-    for selection in admission
-        .request
-        .context()
-        .published_source_original_selections()?
-    {
-        published_baseline = published_baseline.with_published_source_originals(&selection)?;
-    }
-    let published_baseline = Arc::new(published_baseline);
     let issued = source_selection
         .compiler_support_projection(sealed_artifacts, std::slice::from_ref(source_admission))
         .map_err(|error| contract(format!("planned compiler source selection: {error}")))?;
     let artifact_context = authored_interface_context(
-        Some(&published_baseline),
+        Some(baseline),
         sealed_artifacts,
         &issued,
         products.iter().map(|product| ExactModuleIdentity {
