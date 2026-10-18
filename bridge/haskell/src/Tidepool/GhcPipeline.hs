@@ -257,21 +257,21 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
-  , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
+  , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
-  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
+  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, readCandidateManifestWithOwner, readCandidateInterfacesWithOwner, validateExactScopeRequest
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin, normalizeInterfaceEvidence )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(ModuleInterfaceAdmission), scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
-  , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, revalidateCanonicalProofInputs
+  , validateCandidateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProofWithOwner, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBody, revalidateCanonicalProofInputs
   , canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
   , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
@@ -288,7 +288,6 @@ import Tidepool.PackageWitness
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest
-  , readCapturedModuleCandidatesWithGraphs, readModuleCandidatesWithGraphs
   , candidateExecutionSources, candidateOriginalIdentity )
 import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
 
@@ -1627,7 +1626,8 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection StandaloneCycle context Nothing timing requestIdentity sessionT0 setupResources variant path
+    originalInputs <- liftIO newExactInputOwner
+    runCompileCycle originalInputs selection StandaloneCycle context Nothing timing requestIdentity sessionT0 setupResources variant path
 
 -- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
@@ -2119,9 +2119,9 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- recompilation fingerprint and the prepared memo's module validity check.
 
 runCompileCycle
-  :: PipelineSelection result -> CycleState
+  :: ExactInputOwner -> PipelineSelection result -> CycleState
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
+runCompileCycle originalInputs selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
     completionRecoveryRef <- liftIO (newIORef Nothing)
     packageFinder <- case cycleState of
       StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
@@ -2603,7 +2603,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
              , iface <- scopeValueInterfaces scope])
     normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
+      Just manifest -> certifyModuleCandidates originalInputs requestIdentity (forkExactContextWithPackageFacts packageFinder)
         (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw targetName
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
@@ -2808,11 +2808,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
           selectedPath resolvedPath fingerprint directDeps digestHex selection
     let bodyTier = nativeBodyTier (pvPurpose variant)
-    -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
-    -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
-    -- includes its session bootstrap because 'runCompile' captures
-    -- 'sessionT0' first. A resident request starts after the shared bootstrap.
-    -- This phase is flat and non-overlapping with 'ghc_load'.
+    -- Setup includes target discovery, current source/candidate admission,
+    -- memo selection and recovery activation. Standalone setup also includes
+    -- bootstrap; resident setup starts after the shared bootstrap. Load is
+    -- a separate, non-overlapping phase.
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
@@ -4207,9 +4206,9 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: Word64 -> (HscEnv -> IO HscEnv) -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
+  :: ExactInputOwner -> Word64 -> (HscEnv -> IO HscEnv) -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
+certifyModuleCandidates originalInputs requestIdentity forkContext expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let boundedDetail detail = case splitAt 192 detail of
@@ -4220,9 +4219,13 @@ certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope 
       record owner reason detail = liftIO (recordIO owner reason detail)
       recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
   decoded <- liftIO $ case captured of
-    Nothing -> readModuleCandidatesWithGraphs (maybe [] scopeExecutionGraphs exactScope) manifest
+    Nothing -> do
+      capturedManifest <- captureCandidateManifest manifest
+      case capturedManifest of
+        Left failure -> pure (Left failure)
+        Right body -> readCandidateManifestWithOwner originalInputs (maybe [] scopeExecutionGraphs exactScope) body
     Just (Left failure) -> pure (Left failure)
-    Just (Right capturedManifest) -> readCapturedModuleCandidatesWithGraphs
+    Just (Right capturedManifest) -> readCandidateManifestWithOwner originalInputs
       (maybe [] scopeExecutionGraphs exactScope) capturedManifest
   result <- case decoded of
     Left reason -> do
@@ -4522,7 +4525,7 @@ certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope 
             Just producer -> liftIO $ fmap (fmap Map.fromList . sequence) $
               forM (Map.toAscList admitted) $ \(name,(candidate,_,_,_)) ->
                 fmap (fmap (\proof -> (name,proof)))
-                  (validateCandidateCanonicalInterfaceProof producer canonicalRows candidate)
+                  (validateCandidateCanonicalInterfaceProofWithOwner originalInputs producer canonicalRows candidate)
           case proofsResult of
             Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
             Right descriptors -> do
@@ -4531,11 +4534,11 @@ certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope 
                     then ExecutableInterfaceUse else MetadataInterfaceUse)
                 | (name,(_,summary,_,_)) <- Map.toAscList admitted])
               let proofs = Map.fromList (zip (Map.keys admitted) promoted)
-              captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValuesReader
+              captured <- liftIO $ readCandidateInterfacesWithOwner originalInputs
                 (\artifact -> case exactScope of
-                  Just scope | artifact `elem` (originals ++ values) -> scopeInterfaceBytes scope artifact
+                  Just scope | artifact `elem` (originals ++ values) -> scopeInterfaceToken scope artifact
                   _ -> case Map.lookup (mkModuleName (exactModule artifact)) proofs of
-                    Just proof | artifact `elem` candidates' -> canonicalProofInterfaceBytes proof artifact
+                    Just proof | artifact `elem` candidates' -> canonicalProofInterfaceBody proof artifact
                     _ -> fail "candidate hydration leaves its captured interface closure") env
                 (candidates' ++ originals) values
               let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
@@ -5118,7 +5121,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
         writeIORef active (Just (ActiveCompilerAttempt attempt))
         pure caches
   setSession (hscUpdateFlags flags attempt {hsc_targets=[]})
-  result <- runCompileCycle selection
+  result <- runCompileCycle (universeOriginalInputs universe) selection
     (TransactionCycle cache memo candidates
       (universeSourceVersions universe)
       activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
