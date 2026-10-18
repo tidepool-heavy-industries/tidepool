@@ -1426,6 +1426,220 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
 }
 
 #[test]
+fn bound_private_demand_retains_hidden_exact_children_after_owner_drop_and_recovery() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
+    let (admitted, imports, denied, expected, graph, edges, payloads) = {
+        let dependency = product("BoundHiddenDependency", 211);
+        let consumer = dependent_product(
+            "BoundHiddenConsumer",
+            212,
+            vec![(7, vec![source_import(&dependency, 7)]), (9001, vec![])],
+        );
+        let recovered = recovered_witness_fixtures(&[consumer, dependency]);
+        let entries = recovered
+            .iter()
+            .map(|row| {
+                Arc::new(
+                    ArtifactEntry::original(
+                        CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+                        row.product.clone(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let full = inventory.admit_shared(&base, entries.clone()).unwrap();
+        let canonical =
+            ArtifactEntry::canonical(recovered[0].product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
+        let proof = NativeOriginalRequirement::from_issued_group_custody(
+            entries[0].descriptor.id,
+            canonical,
+            &full,
+        )
+        .unwrap()
+        .unwrap();
+        let carriers = proof.issued_group_carriers(&full).unwrap();
+        let expected = carriers
+            .keys()
+            .copied()
+            .filter(|group| group.original_ordinal == 7)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            expected
+                .iter()
+                .any(|group| group.binding.selection() != carriers[group].selection),
+            "a Group issuer may inherit a different artifact carrier scope"
+        );
+        assert_eq!(
+            expected.len(),
+            2,
+            "consumer7 closes over the hidden dependency7"
+        );
+        let full_offer =
+            IssuedNativeOffer::issue(entries[0].descriptor.id, &full, Some(proof)).unwrap();
+        let empty = IssuedNativeOffer::issue(entries[1].descriptor.id, &base, None).unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries)
+            .unwrap()
+            .interface_only()
+            .merge(&CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap())
+            .unwrap();
+        let dependency_canonical =
+            ArtifactEntry::canonical(recovered[1].product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
+        let selected = base
+            .select_roots(vec![entries[0].descriptor.id, dependency_canonical])
+            .unwrap();
+        assert!(!selected.namespace().contains_key(&entries[1].descriptor.id));
+        assert!(selected.selected_native_groups().is_empty());
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            compiler_support: recover_fixture_compiler_support(
+                projection,
+                selected,
+                [full_offer, empty],
+            )
+            .unwrap(),
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        let inputs = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&context, None)
+            .unwrap();
+        let source =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(&inputs)
+                .unwrap();
+        let imports = vec![source_import(&recovered[0].product, 7)];
+        let denied = vec![source_import(&recovered[1].product, 9001)];
+        let parent = inputs.artifacts();
+        let mut fixed = parent
+            .inventory()
+            .bind_segment(parent, vec![], &source)
+            .unwrap();
+        let before = parent.capture_graph_selection();
+        assert!(parent
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                parent,
+                NativeArtifactDemand::CertifiedTargetImports(&denied),
+                vec![],
+                &source
+            )
+            .is_err());
+        assert_eq!(
+            parent.capture_graph_selection(),
+            before,
+            "refused sibling demand publishes no cursor change"
+        );
+        let target = parent
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                parent,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &source,
+            )
+            .unwrap();
+        assert_eq!(
+            target
+                .selection
+                .groups_for_target(&target.artifacts, None, &imports)
+                .unwrap(),
+            expected
+        );
+        let mut clean = parent
+            .inventory()
+            .bind_segment(parent, vec![], &source)
+            .unwrap();
+        let clean_target = parent
+            .inventory()
+            .admit_bound_target(
+                &mut clean,
+                parent,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &source,
+            )
+            .unwrap();
+        assert_eq!(
+            clean_target
+                .selection
+                .groups_for_target(&clean_target.artifacts, None, &imports)
+                .unwrap(),
+            expected,
+            "refusal then retry preserves the clean exact decision"
+        );
+        let repeated = parent
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                &target.artifacts,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &source,
+            )
+            .unwrap();
+        assert_eq!(
+            repeated
+                .selection
+                .groups_for_target(&repeated.artifacts, None, &imports)
+                .unwrap(),
+            expected,
+            "an already fixed exact binding is not re-decided"
+        );
+        assert!(!target
+            .artifacts
+            .namespace()
+            .contains_key(&entries[1].descriptor.id));
+        let graph = target.artifacts.capture_graph_selection();
+        let edges = target.artifacts.binding_dependencies();
+        let payloads = target.artifacts.entries();
+        (target, imports, denied, expected, graph, edges, payloads)
+    };
+    // All old request, source, fixed selection and opaque offer owners are gone.
+    assert_eq!(
+        admitted
+            .selection
+            .groups_for_target(&admitted.artifacts, None, &imports)
+            .unwrap(),
+        expected
+    );
+    let recovery = ArtifactInventory::default();
+    let reopened = recovery
+        .recover_selection(&recovery.empty_view(), payloads, &graph, &edges)
+        .unwrap();
+    let target_selection = admitted.selection;
+    drop(admitted.artifacts);
+    assert_eq!(
+        target_selection
+            .groups_for_target(&reopened, None, &imports)
+            .unwrap(),
+        expected
+    );
+    assert!(
+        target_selection
+            .groups_for_target(&reopened, None, &denied)
+            .is_err(),
+        "retained dependency custody cannot select an undemanded sibling"
+    );
+}
+
+#[test]
 fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     use crate::artifact_inventory::{
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement, NativeRequirementRoot,

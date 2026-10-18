@@ -327,6 +327,10 @@ Full with no demand, and divergent carried availability and selected demand.
 Check exact scoped execution and refusal of unqualified ambiguous demand,
 unavailable dependencies and conflicting selected products or interfaces. Run
 the owning toolchain target and a real actor/compiler consumer on the join.
+Histories assert demanded identities and edges, physical work, and lifetime
+through the real owner operation; internal parent counts or diagnostic rendering
+are observations, not the behavioral contract. Investigate a failing oracle
+against that producer-to-consumer contract before changing its expectation.
 
 Fixture imports read exact binder identities from authenticated original-group
 definitions. Ordinals and naming patterns do not issue binder identity.

@@ -76,20 +76,25 @@ impl<'a> NativeDependencyCatalog<'a> {
 /// Bind demanded input bodies through their original opaque owner. Carrier-only
 /// views do not become proof owners, and availability does not add demand roots.
 pub(super) fn bind_certified_input_demand(
-    state: &InventoryState,
+    state: &mut InventoryState,
     parent: &ArtifactView,
-    entries: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
     prebound: &mut BTreeMap<NativeGroupKey, NativeGroupBinding>,
-) -> Result<(), CompileError> {
+) -> Result<Vec<IssuedNativeOffer>, CompileError> {
     let namespace = parent.namespace();
+    let mut retained_offers = Vec::new();
     for key in demanded {
-        let entry = entries.get(&key.artifact).ok_or_else(|| {
-            admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
-                artifact: key.artifact,
-            })
-        })?;
+        let entry = incoming
+            .get(&key.artifact)
+            .or_else(|| entries.get(&key.artifact))
+            .ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: key.artifact,
+                })
+            })?;
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(failure("native demand lacks original payload"));
         };
@@ -130,7 +135,7 @@ pub(super) fn bind_certified_input_demand(
                 ));
             };
             let node = InventoryNodeKey::Group(group);
-            let (owned, payloads) = match support {
+            let (owned, payloads, retained_offer) = match support {
                 crate::certified_products::CertifiedNativeGroupSupport::Issued(offer) => {
                     if !offer.contains_checked_group(group) {
                         return Err(failure("issued native contribution lacks demanded group"));
@@ -141,6 +146,7 @@ pub(super) fn bind_certified_input_demand(
                             .nodes_from_seeds([node])
                             .map_err(|_| failure("issued native dependency closure missing"))?,
                         &offer.custody_lease().payloads,
+                        Some(offer),
                     )
                 }
                 crate::certified_products::CertifiedNativeGroupSupport::NewProductDependency(
@@ -157,28 +163,41 @@ pub(super) fn bind_certified_input_demand(
                             .copied()
                             .collect(),
                         &parent.lease.payloads,
+                        None,
                     )
                 }
             };
-            if !state.contains_node(&node)
-                || admitted_closure(state, [node].into_iter())
-                    .iter()
-                    .copied()
-                    .collect::<BTreeSet<_>>()
-                    != owned
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootOutsideView {
-                        artifact: key.artifact,
-                    },
-                ));
-            }
-            let carriers = state
-                .outgoing(node)
+            // Candidate compatibility is read from its issuing snapshot. A
+            // receiving inventory need not yet know these exact historical scopes.
+            let outgoing = |source: InventoryNodeKey| {
+                if let Some(offer) = retained_offer {
+                    let snapshot = offer.custody_snapshot();
+                    let proof = snapshot
+                        .scopes
+                        .get(&source.selection())
+                        .expect("checked closure retains each scope")
+                        .proof();
+                    let start = proof
+                        .dependencies
+                        .partition_point(|(from, _, _)| *from < source);
+                    proof.dependencies[start..]
+                        .iter()
+                        .take_while(|(from, _, _)| *from == source)
+                        .map(|(_, target, edge)| (*target, edge.clone()))
+                        .collect::<Vec<_>>()
+                } else {
+                    state
+                        .outgoing(source)
+                        .map(|(target, edge)| (target, edge.clone()))
+                        .collect()
+                }
+            };
+            let carriers = outgoing(node)
+                .into_iter()
                 .filter_map(|(target, edge)| match target {
                     InventoryNodeKey::Artifact(carrier)
                         if carrier.artifact == key.artifact
-                            && *edge == ArtifactDependency::Interface =>
+                            && edge == ArtifactDependency::Interface =>
                     {
                         Some(carrier)
                     }
@@ -199,16 +218,16 @@ pub(super) fn bind_certified_input_demand(
             {
                 continue;
             }
-            if state
-                .outgoing(InventoryNodeKey::Artifact(carrier))
+            if outgoing(InventoryNodeKey::Artifact(carrier))
+                .into_iter()
                 .any(|(target, edge)| {
                     matches!(target, InventoryNodeKey::Artifact(binding)
                     if binding.artifact == canonical
                     && namespace.get(&canonical).is_none_or(|selected| *selected == binding))
-                        && *edge == ArtifactDependency::Interface
+                        && edge == ArtifactDependency::Interface
                 })
             {
-                compatible.push((group, payloads, owned));
+                compatible.push((group, payloads, owned, retained_offer));
             }
         }
         if compatible.len() > 1 {
@@ -218,7 +237,7 @@ pub(super) fn bind_certified_input_demand(
                 },
             ));
         }
-        let Some((group, payloads, owned)) = compatible.pop() else {
+        let Some((group, payloads, owned, retained_offer)) = compatible.pop() else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeGroupUnavailable {
                     artifact: key.artifact,
@@ -226,6 +245,45 @@ pub(super) fn bind_certified_input_demand(
                 },
             ));
         };
+        if let Some(offer) = retained_offer {
+            let snapshot = offer.custody_snapshot();
+            let mut pending = owned
+                .iter()
+                .map(|node| node.selection())
+                .collect::<Vec<_>>();
+            let mut scopes = BTreeMap::new();
+            while let Some(scope) = pending.pop() {
+                if scopes.contains_key(&scope) {
+                    continue;
+                }
+                let proof = snapshot
+                    .scopes
+                    .get(&scope)
+                    .ok_or_else(|| failure("demanded closure lacks issued scope"))?
+                    .proof();
+                pending.extend(proof.scope_dependencies());
+                scopes.insert(scope, Arc::clone(proof));
+            }
+            // Atomic scope facts can include unselected sibling rows. Import
+            // only the chosen closure's required scopes, never competing offers.
+            // These authenticated facts remain memoized for this inventory even
+            // if later admission refuses; they publish no selection or payload rights.
+            let prepared = scope_proof::prepare_install(state, scopes.into_values())?;
+            scope_proof::install(state, prepared);
+        }
+        if !state.contains_node(&InventoryNodeKey::Group(group))
+            || admitted_closure(state, [InventoryNodeKey::Group(group)].into_iter())
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                != owned
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: key.artifact,
+                },
+            ));
+        }
         // Retain just this demanded immutable closure. The offer remains the
         // authority for membership; no sibling proof roots enter selection.
         for node in owned {
@@ -233,18 +291,24 @@ pub(super) fn bind_certified_input_demand(
                 let payload = payloads
                     .get(&binding.artifact)
                     .ok_or_else(|| failure("issued native dependency payload missing"))?;
-                let retained = match entries.get(&binding.artifact) {
+                let retained = match incoming
+                    .get(&binding.artifact)
+                    .or_else(|| entries.get(&binding.artifact))
+                {
                     Some(previous) => {
                         ArtifactEntry::merge_catalog_input_custody(previous, payload)?
                     }
                     None => Arc::clone(payload),
                 };
-                entries.insert(binding.artifact, retained);
+                incoming.insert(binding.artifact, retained);
             }
         }
         prebound.insert(*key, group);
+        if let Some(offer) = retained_offer {
+            retained_offers.push(offer.clone());
+        }
     }
-    Ok(())
+    Ok(retained_offers)
 }
 
 /// Fresh bodies can depend on an available group without selecting it for
