@@ -142,7 +142,7 @@ fn hydrate_context_roots(
                 .binding_dependencies()
                 .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?,
         );
-        receipts.push(receipt);
+        receipts.push((root, receipt));
     }
     let artifacts = bindings
         .iter()
@@ -188,9 +188,9 @@ fn hydrate_context_roots(
         )
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let mut restored = Vec::new();
-    for receipt in receipts {
-        let context = graph.recover_compiler_context(&inventory, receipt.root())?;
-        restored.push((receipt.root().clone(), context));
+    for (root, receipt) in receipts {
+        let context = graph.recover_compiler_context(&inventory, &root, receipt)?;
+        restored.push((root, context));
     }
     owner.validate_owner()?;
     graph
@@ -875,21 +875,8 @@ mod lazy_tests {
         )
         .unwrap();
         let context =
-            tidepool_toolchain::declaration_join::RecoveredArtifactInventory::capture_bound(
-                &artifact_root,
-                &[],
-                &[],
-                &[],
-                &[],
-                &[],
-                &[],
-                &[],
-            )
-            .unwrap()
-            .context_with_snapshot(
-                &tidepool_toolchain::exact_context::ExactContextSnapshot::empty(),
-            )
-            .unwrap();
+            tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap();
         let (candidate, context) = graph
             .stage_compiler_context(
                 &artifact_root,
@@ -1101,6 +1088,71 @@ mod lazy_tests {
             .unwrap()
             .exact()
             .clone();
+        {
+            let expected = state.graph.acquire_context(&old_root).unwrap();
+            let other = state.graph.acquire_context(&current_root).unwrap();
+            let selection = expected.snapshot().graph_selection().unwrap();
+            let descriptors = older.artifact_view().descriptors();
+            assert!(!descriptors.is_empty());
+            let mut products = Vec::new();
+            let mut interfaces = Vec::new();
+            let mut joins = Vec::new();
+            let mut values = Vec::new();
+            for descriptor in &descriptors {
+                let artifact = state.graph.artifact(descriptor.id).unwrap().unwrap();
+                match artifact.as_ref() {
+                    recovery::RecoveryArtifactClosure::Home(reference) => {
+                        products.push(reference.clone())
+                    }
+                    recovery::RecoveryArtifactClosure::ModuleInterface(reference) => {
+                        interfaces.push(reference.clone())
+                    }
+                    recovery::RecoveryArtifactClosure::Join(reference) => {
+                        joins.push(reference.clone())
+                    }
+                    recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
+                        values.push(reference.clone())
+                    }
+                }
+            }
+            let mut stage = retained
+                .hydration
+                .lock()
+                .acquisition
+                .stage_inputs(&products, &interfaces, &joins, &values)
+                .unwrap();
+            let inventory = stage
+                .capture_bound(
+                    &products,
+                    &interfaces,
+                    &joins,
+                    &values,
+                    &descriptors,
+                    &selection.bindings,
+                    &expected.snapshot().binding_dependencies().unwrap(),
+                )
+                .unwrap();
+            let work = stage.work();
+            assert_eq!(
+                (work.read_bytes, work.hash_bytes, work.decoded_bytes),
+                (0, 0, 0)
+            );
+            let matching = inventory
+                .context_for_expected_snapshot(&old_root, &expected)
+                .unwrap();
+            assert_eq!(
+                matching.artifact_view().capture_graph_selection(),
+                old_selection
+            );
+            let error = inventory
+                .context_for_expected_snapshot(&old_root, &other)
+                .unwrap_err();
+            assert!(matches!(error,
+            tidepool_toolchain::CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(
+                "acquired compiler snapshot root differs from expected context"
+            ))));
+        }
         let shared = older
             .artifact_view()
             .artifact_ids()
