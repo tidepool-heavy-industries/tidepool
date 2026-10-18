@@ -165,7 +165,7 @@ instance Display LookupBatch where
   displayTree batch = Constructor "LookupBatch"
     [("batch", displayTree (lookupIdentity batch)), ("view", displayTree (lookupView batch)),
      ("searchReceipt", TextLeaf (Text.pack (show (lookupSearchReceipt batch)))),
-     ("index", TextLeaf (renderLookupIndex batch)),
+     ("index", lookupIndexTree batch),
      ("hits", Sequence "[" "]" [Constructor (hitQuery hit)
         (case hitEntry hit of
           Nothing -> [("outcome", displayTree (selectLookup batch (LookupSelection (LookupAddress (hitResult hit) 1 Signature) Nothing)))]

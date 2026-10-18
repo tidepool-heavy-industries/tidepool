@@ -453,7 +453,7 @@ async fn retained_lookup_selection_with_compiler_owner(
 ) {
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nqualified Data.Text.Lazy as LazyText\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
 
     let fixture = prepare_callback_fixture(
         source.clone(),

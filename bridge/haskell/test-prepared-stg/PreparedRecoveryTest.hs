@@ -29,7 +29,7 @@ import GHC.Data.Maybe qualified as MaybeErr
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt)
 import Tidepool.ConstructorIdentity (captureIdentityResolver, resolveTypeIdentity, issueConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId)
-import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModule (newFinalizedModule)
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel, targetProfile)
 import GHC.Core.DataCon (promoteDataCon, dataConName, dataConTyCon, dataConOrigArgTys)
@@ -287,8 +287,7 @@ preparedIdentityResolverCaptureRegression = bracket scratch removePathForcibly $
           , occNameString (nameOccName (dataConName constructor)) == "Priv0"] of
       [constructor] -> pure constructor
       _ -> fail "first declaration-identity source lacks Priv0"
-    firstTask <- liftIO (acquirePreparedModule firstEnv (ms_location firstSummary) mempty
-      (FinalizedModule firstHome firstGuts))
+    firstTask <- liftIO (newFinalizedModule firstEnv firstHome firstGuts >>= acquirePreparedModule firstEnv (ms_location firstSummary) mempty)
     liftIO (copyFile "test-prepared-stg/declaration-abi/IdentityProbeArity.hs" source)
     setTargets [target]
     secondLoad <- load LoadAllTargets
@@ -309,8 +308,7 @@ preparedIdentityResolverCaptureRegression = bracket scratch removePathForcibly $
           , occNameString (nameOccName (dataConName constructor)) == "Priv0"] of
       [constructor] -> pure constructor
       _ -> fail "changed declaration-identity source lacks Priv0"
-    secondPrepared <- liftIO (prepareModule secondEnv (ms_location secondSummary) mempty
-      (FinalizedModule secondHome secondGuts))
+    secondPrepared <- liftIO (newFinalizedModule secondEnv secondHome secondGuts >>= prepareModule secondEnv (ms_location secondSummary) mempty)
     firstPrepared <- liftIO (runPreparedModuleTask firstTask)
     let issue resolver constructor = either (fail . show) pure (issueConstructor resolver constructor)
     firstIssued <- issue (pmIdentityResolver firstPrepared) firstConstructor
@@ -365,7 +363,7 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
       (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
       home <- maybe (fail "homonymous original lacks compiler interface") pure
         (lookupHpt (hsc_HPT env) (mkModuleName "Homonymous"))
-      prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+      prepared <- liftIO $ newFinalizedModule env home guts >>= prepareModule env (ms_location summary) mempty
       let constructors = concatMap tyConDataCons (typeEnvTyCons (md_types (hm_details home)))
           tickets = [con | con <- constructors, occNameString (nameOccName (dataConName con)) == "Ticket"]
       issuedTickets <- either (fail . show) pure (traverse (issueConstructor (pmIdentityResolver prepared)) tickets)
@@ -606,7 +604,7 @@ seedIndexProperty = bracket scratch removePathForcibly $ \directory -> do
     (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
     original <- maybe (fail "seed fixture lacks original interface") pure
       (lookupHpt (hsc_HPT env) (mkModuleName "SeedHome"))
-    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule original guts)
+    prepared <- liftIO $ newFinalizedModule env original guts >>= prepareModule env (ms_location summary) mempty
     let home = [prepared]
         identities = either (error . show) id (preparedTopIdentities home)
         entry = head identities
@@ -1288,8 +1286,7 @@ scenario = do
       (guts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
       home <- maybe (fail "loaded module has no finalized home interface") pure
         (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
-      liftIO $ prepareModule hsc (ms_location summary) mempty
-        (FinalizedModule home guts)
+      liftIO $ newFinalizedModule hsc home guts >>= prepareModule hsc (ms_location summary) mempty
 
     trim = reverse . dropWhile (== '\n') . reverse
 

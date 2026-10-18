@@ -143,7 +143,8 @@ library tidepool-extract-internal
     Tidepool.TypedSegment
     Tidepool.TypedSegment.Source
     Tidepool.TurnSource
-  other-modules:   Tidepool.LocalNativeDeclaration
+  other-modules:   Tidepool.FinalizedModule.Internal
+                   Tidepool.LocalNativeDeclaration
                    Tidepool.ResumePackage
                    Tidepool.TypedSegment.Types
                    Tidepool.OwnedInputTransport

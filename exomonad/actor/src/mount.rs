@@ -105,6 +105,11 @@ pub trait RetainedSourceLayer: Send + Sync {
     fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
         None
     }
+
+    /// Borrowed identity of this immutable source revision, not source authority.
+    fn source_revision_identity(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Retained storage selected by the source owner. A recipe key is only a
@@ -222,6 +227,12 @@ impl CheckpointSourceLayer {
     #[must_use]
     pub fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
         self.retained.as_ref()?._owner.generation_evidence()
+    }
+
+    /// Observe the retained revision; the configured source owner still admits use.
+    #[must_use]
+    pub fn source_revision_identity(&self) -> Option<&str> {
+        self.retained.as_ref()?._owner.source_revision_identity()
     }
 
     #[must_use]
