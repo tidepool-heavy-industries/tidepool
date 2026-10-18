@@ -2909,18 +2909,55 @@ mod tests {
             let joined = winner
                 .merge(&historical)
                 .expect("a losing historical issuer does not replace the selected input choice");
+            let (kernel, kernel_projection, kernel_decisions) = winner
+                .artifacts
+                .merge_compiler_inputs_with_demand(
+                    &winner.projection,
+                    &historical.artifacts,
+                    &historical.projection,
+                    CompilerNativeDemand::SourceSelections {
+                        left: Some(&winner.input_decisions),
+                        right: Some(&historical.input_decisions),
+                    },
+                    CompilerInputValidation::Closed,
+                )
+                .unwrap();
             let prior_constructor = crate::artifact_inventory::tests::reference_compiler_selection(
                 &winner.artifacts,
                 &historical.artifacts,
-                &joined.artifacts.namespace(),
-                joined.artifacts.roots(),
+                &kernel.namespace(),
+                kernel.roots(),
             );
             assert_eq!(
+                kernel.capture_graph_selection(),
+                prior_constructor.capture_graph_selection()
+            );
+            let mut prior_support = winner
+                .rebuild(
+                    kernel_projection,
+                    prior_constructor,
+                    winner
+                        .native_offers
+                        .iter()
+                        .chain(historical.native_offers.iter())
+                        .cloned(),
+                )
+                .unwrap()
+                .retain_normalized_availability(historical.native_availability())
+                .unwrap();
+            prior_support.input_decisions = kernel_decisions;
+            assert_eq!(
                 joined.artifacts.capture_graph_selection(),
-                prior_constructor.capture_graph_selection(),
+                prior_support.artifacts.capture_graph_selection(),
+            );
+            assert_eq!(joined.projection, prior_support.projection);
+            assert_eq!(joined.input_decisions, prior_support.input_decisions);
+            assert_eq!(
+                joined.native_availability,
+                prior_support.native_availability
             );
             let current_metadata = joined.artifacts.metadata_snapshot();
-            let prior_metadata = prior_constructor.metadata_snapshot();
+            let prior_metadata = prior_support.artifacts.metadata_snapshot();
             assert_eq!(current_metadata.entries, prior_metadata.entries);
             assert_eq!(current_metadata.artifacts, prior_metadata.artifacts);
             assert_eq!(
@@ -2931,7 +2968,8 @@ mod tests {
                 current_metadata.ambiguous_native_owners,
                 prior_metadata.ambiguous_native_owners
             );
-            drop(prior_constructor);
+            drop(prior_support);
+            drop(kernel);
             assert_eq!(pair(&joined), pair(&winner));
             assert_eq!(joined.input_decisions.facts[owner].groups, winner_choices);
             let selected_groups = joined.artifacts.capture_graph_selection().native_groups;

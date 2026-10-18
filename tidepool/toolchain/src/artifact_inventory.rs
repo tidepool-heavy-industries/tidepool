@@ -5234,6 +5234,38 @@ impl ViewLease {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static MATERIALIZATION_WAIT_OBSERVER: std::cell::RefCell<Option<(MaterializationCacheId, std::sync::mpsc::Sender<()>)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct MaterializationWaitObserver {
+    previous: Option<(MaterializationCacheId, std::sync::mpsc::Sender<()>)>,
+}
+
+#[cfg(test)]
+impl MaterializationWaitObserver {
+    fn install(cache: &Arc<MaterializationCache>, sender: std::sync::mpsc::Sender<()>) -> Self {
+        let previous = MATERIALIZATION_WAIT_OBSERVER.with(|observer| {
+            observer.replace(Some((
+                MaterializationCacheId(Arc::as_ptr(cache) as usize),
+                sender,
+            )))
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for MaterializationWaitObserver {
+    fn drop(&mut self) {
+        MATERIALIZATION_WAIT_OBSERVER.with(|observer| {
+            observer.replace(self.previous.take());
+        });
+    }
+}
+
 fn lock_materialization_cache(
     cache: &MaterializationCache,
 ) -> std::io::Result<
@@ -5247,6 +5279,16 @@ fn lock_materialization_cache(
         match cache.try_lock() {
             Ok(retained) => return Ok(retained),
             Err(std::sync::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                MATERIALIZATION_WAIT_OBSERVER.with(|observer| {
+                    let mut observer = observer.borrow_mut();
+                    if observer.as_ref().is_some_and(|(expected, _)| {
+                        expected.0 == cache as *const MaterializationCache as usize
+                    }) {
+                        let (_, sender) = observer.take().expect("observed waiter");
+                        let _ = sender.send(());
+                    }
+                });
                 std::thread::sleep(std::time::Duration::from_millis(2))
             }
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
@@ -9246,10 +9288,12 @@ mod tests {
             let (finished, received) = std::sync::mpsc::channel();
             std::thread::scope(|scope| {
                 let worker_cancellation = cancellation.clone();
+                let watched_cache = Arc::clone(&producer.lease.materialization.cache);
                 let receiver = &receiver;
                 let metadata = &metadata;
                 scope.spawn(move || {
-                    entered.send(()).unwrap();
+                    let _observation =
+                        MaterializationWaitObserver::install(&watched_cache, entered);
                     let result = with_compiler_transaction_cancellable(
                         worker_cancellation,
                         |_| {},
@@ -9273,30 +9317,32 @@ mod tests {
                     );
                     finished.send(result).unwrap();
                 });
-                observed
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-                if inherited {
-                    // Acquiring the receiver's cache precedes waiting for the
-                    // inherited producer. Prove that boundary was reached.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                    loop {
-                        match receiver.lease.materialization.cache.try_lock() {
-                            Err(std::sync::TryLockError::WouldBlock) => break,
-                            Ok(_) if std::time::Instant::now() < deadline => {
-                                std::thread::sleep(std::time::Duration::from_millis(2));
-                            }
-                            _ => panic!("waiter did not reach inherited cache"),
-                        }
-                    }
-                }
+                let boundary = observed.recv_timeout(std::time::Duration::from_secs(5));
+                let receiver_locked = !inherited
+                    || compiler_merge
+                    || matches!(
+                        receiver.lease.materialization.cache.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    );
                 cancellation.cancel();
                 let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
-                assert!(held.is_empty());
+                let producer_unchanged = held.is_empty();
                 drop(held);
-                let result = outcome.unwrap();
+                let result = outcome
+                    .or_else(|_| received.recv_timeout(std::time::Duration::from_secs(5)))
+                    .expect("cancelled waiter must settle after producer release");
+                assert!(boundary.is_ok(), "inherited={inherited} compiler_merge={compiler_merge}: producer wait not observed; action={:?} close={:?}", result.action, result.close);
                 assert!(
-                    matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+                    receiver_locked,
+                    "retain_materialization must hold its receiver before the inherited producer"
+                );
+                assert!(
+                    producer_unchanged,
+                    "inherited={inherited} compiler_merge={compiler_merge}"
+                );
+                assert!(
+                    matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted),
+                    "inherited={inherited} compiler_merge={compiler_merge}"
                 );
                 assert_eq!(result.close, CompilerTransactionClose::NotStarted);
                 if inherited {
