@@ -5,8 +5,10 @@ use crate::session::{
     PublicationPhase, RecoveryDomainId, RunRecoveryStore, SessionId,
 };
 
+#[track_caller]
 fn owner(name: &str) -> RecoveryPublicOwner {
-    RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(name).unwrap(), 1).unwrap()
+    let path = tidepool_repr::ActorPath::parse(name).expect("parse recovery public owner actor path");
+    RecoveryPublicOwner::new(&path, 1).expect("issue recovery public owner")
 }
 
 #[test]
