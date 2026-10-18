@@ -2388,6 +2388,17 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .clone()
     };
     assert_eq!(mode(&module), Value::Array(vec![text("full-carrier")]));
+    let role = |module: &str| {
+        native
+            .iter()
+            .find(|row| row.as_array().unwrap()[1] == text(module))
+            .unwrap()
+            .as_array()
+            .unwrap()[9]
+            .clone()
+    };
+    assert_eq!(role(&module), text("namespace-original"));
+    assert_eq!(role("TypeOnlyHelper"), text("dependency-carrier"));
     assert_eq!(
         mode("TypeOnlyHelper"),
         Value::Array(vec![

@@ -68,7 +68,8 @@ import Tidepool.ExactScope
   , scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, CanonicalInterfaceAdmission, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
-  , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
+  , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactScopeGenerationWithNativeRoles
+  , scopeNamespaceOriginalProducts, NativeInputRole(..), extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
@@ -930,7 +931,7 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
-              retained = map originalIdentity (scopeProducts scope)
+              retained = map originalIdentity (scopeNamespaceOriginalProducts scope)
                 ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
                     (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
                     (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
@@ -1202,7 +1203,9 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       writeFresh outputWrites productPath productBytes
-      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+      let role = if Map.member key (certifiedRetainedOriginals certified)
+            then DependencyCarrier else NamespaceOriginal
+      extendExactScopeGenerationWithNativeRoles scope [] [(role,original)] [] >>= either fail pure
     writeFresh outputWrites path bytes = do
       BS.writeFile path bytes
       modifyIORef' outputWrites (++ [(path,bytes)])

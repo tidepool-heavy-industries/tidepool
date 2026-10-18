@@ -222,7 +222,9 @@ import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), Sessi
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
-  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeNamespaceOriginalProducts, scopeOriginalBytes
+  , extendExactScopeInputs, extendExactScopeGeneration, extendExactScopeGenerationWithNativeRoles, NativeInputRole(..)
+  , ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
@@ -3238,11 +3240,11 @@ originalNativeAvailabilityChecks environment scope emitted = do
             _ -> field
           else field | (index,field) <- zip [0::Int ..] fields])
       replaceRow selected availability entry = case entry of
-        TList [TString unit,TString name,_,_,_,_,_,descriptor,issued]
+        TList [TString unit,TString name,_,_,_,_,_,descriptor,issued,role]
           | (T.unpack unit,T.unpack name) == owner -> TList
             [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
             ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
-            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor,maybe issued id availability]
+            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor,maybe issued id availability,role]
         _ -> entry
       text = TString . T.pack
       requireInvalid action = action >>= \case
@@ -3268,6 +3270,32 @@ originalNativeAvailabilityChecks environment scope emitted = do
       fail "selection changed the old native payload, version or full census"
   unless (map originalGroups (filter ((== owner) . productOwner) (scopeProducts zeroScope)) == [[]]) $
     fail "zero selected groups acquired an executable root"
+  unless (owner `elem` map productOwner (scopeNamespaceOriginalProducts zeroScope)) $
+    fail "zero selected groups discarded an issued original namespace role"
+  mixedScope <- readScopeVariant zeroScope (\fields ->
+    [if index == 6 then case field of
+        TList rows -> TList [case entry of
+          TList [unit@(TString unitName),name@(TString moduleName'),version,iface,productSha,path,groups,descriptor,availability,_]
+            | (T.unpack unitName,T.unpack moduleName') == owner ->
+              TList [unit,name,version,iface,productSha,path,groups,descriptor,availability,text "dependency-carrier"]
+          _ -> entry | entry <- rows]
+        _ -> field
+      else field | (index,field) <- zip [0::Int ..] fields]) >>= either fail pure
+  extendedMixed <- extendExactScopeInputs mixedScope [] >>= either fail pure
+  generationMixed <- extendExactScopeGeneration mixedScope [] [] [] >>= either fail pure
+  rereadMixed <- readExactScope (scopeManifestPath mixedScope) >>= either fail pure
+  forM_ [mixedScope,extendedMixed,generationMixed,rereadMixed] $ \mixed -> do
+    unless (scopeProducts mixed == scopeProducts zeroScope
+        && scopeAvailableOriginalProducts mixed == available
+        && map productOwner (scopeNamespaceOriginalProducts mixed)
+          == filter (/= owner) (map productOwner (scopeNamespaceOriginalProducts zeroScope))) $
+      fail "dependency carrier lost its exact custody or acquired a namespace role from full availability"
+    revalidateExactScope environment mixed >>= either fail pure
+  forM_ [(zeroScope,DependencyCarrier),(mixedScope,NamespaceOriginal)] $ \(originalScope,role) ->
+    requireInvalid (extendExactScopeGenerationWithNativeRoles originalScope []
+      [(role,snapshot {originalGroups=[]})] [])
+  requireInvalid (extendExactScopeGenerationWithNativeRoles zeroScope []
+    [(NamespaceOriginal,snapshot {originalGroups=[]}),(DependencyCarrier,snapshot {originalGroups=[]})] [])
   -- Narrow only the request projection of an actual Rust-issued full census.
   -- Available groups never become executable selection, and continuation must
   -- retain this bound rather than reconstructing fullness from the census.
@@ -3363,7 +3391,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
   unless (unrecoveredExactProducts retry == unrecoveredExactProducts disjoint) $
     fail "refused native replacement changed a pristine retry"
 
--- Reuse the Rust issuer's complete HOME v5 bytes and schema 15 scope. Selected
+-- Reuse the Rust issuer's complete HOME v5 bytes and schema 16 scope. Selected
 -- groups and availability may narrow; the admitted census has no test constructor.
 originalNativeCensusRoundTripChecks
   :: HscEnv -> ExactScope -> (String,String) -> [ExactProduct] -> IO ()
@@ -3396,7 +3424,7 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
       [values | (6,TList rows) <- zip [0::Int ..] fields
         , TList values@(TString unit:TString name:_) <- rows
         , (T.unpack unit,T.unpack name) == owner] of
-    [[_,_,_,_,_,_,_,TList [TString path,TString sha],TList [TString "full-carrier"]]] -> pure (T.unpack path,T.unpack sha)
+    [[_,_,_,_,_,_,_,TList [TString path,TString sha],TList [TString "full-carrier"],TString "namespace-original"]] -> pure (T.unpack path,T.unpack sha)
     _ -> fail "genuine native owner lacks its unique full-carrier descriptor"
   nativeBytes <- BS.readFile descriptorPath
   nativeTerm <- decode nativeBytes
@@ -3425,18 +3453,22 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
         ]
   unless (isSuccess property) (fail "authenticated native census ordinal projection property failed")
   zero <- readAltered "zero-selection" (\case
-      [unit,name,version,iface,productSha,path,_,descriptor,availability] ->
-        pure [unit,name,version,iface,productSha,path,TList [],descriptor,availability]
+      [unit,name,version,iface,productSha,path,_,descriptor,availability,role] ->
+        pure [unit,name,version,iface,productSha,path,TList [],descriptor,availability,role]
       _ -> fail "genuine native row has another layout") fields >>= either fail pure
   unless (scopeAvailableOriginalProducts zero == available
       && [originalGroups value | value <- scopeProducts zero
         , (originalUnit value,originalModule value) == owner] == [[]]) $
     fail "real selected-zero scope lost full availability or promoted native roots"
   refused "descriptor-sha" (\case
-      [unit,name,version,iface,productSha,path,groups,TList [certificate,_],availability] ->
-        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")],availability]
+      [unit,name,version,iface,productSha,path,groups,TList [certificate,_],availability,role] ->
+        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")],availability,role]
       _ -> fail "genuine native descriptor has another layout") fields
-  let legacy = [if index == 1 then TString "14" else field | (index,field) <- zip [0::Int ..] fields]
+  refused "namespace-role" (\case
+      [unit,name,version,iface,productSha,path,groups,descriptor,availability,_] ->
+        pure [unit,name,version,iface,productSha,path,groups,descriptor,availability,TString "unknown"]
+      _ -> fail "genuine native row has another layout") fields
+  let legacy = [if index == 1 then TString "15" else field | (index,field) <- zip [0::Int ..] fields]
       legacyPath = directory </> "native-census-legacy.scope.cbor"
   BS.writeFile legacyPath (encode (TList legacy))
   readExactScope legacyPath >>= \case
@@ -3452,9 +3484,9 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
             certificateBytes = encode certificate
         BS.writeFile certificateCopy certificateBytes
         refused label (\case
-            [unit,name,version,iface,productSha,path,groups,_,availability] -> pure
+            [unit,name,version,iface,productSha,path,groups,_,availability,role] -> pure
               [unit,name,version,iface,productSha,path,groups,
-                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))],availability]
+                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))],availability,role]
             _ -> fail "genuine native row has another layout") fields
   rejectCertificate "certificate-version" legacyCertificate
   changedCanonical <- case nativeTerm of

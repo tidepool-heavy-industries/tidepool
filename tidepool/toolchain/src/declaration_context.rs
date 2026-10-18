@@ -1675,7 +1675,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "15";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "16";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -8653,6 +8653,11 @@ impl ExactDeclarationContext {
                                 .id]
                                 .native_certification()?,
                             mode,
+                            text(if independent {
+                                "namespace-original"
+                            } else {
+                                "dependency-carrier"
+                            }),
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -14001,9 +14006,10 @@ mod tests {
                 .find(|row| row.as_array().unwrap()[1] == text("Native"))
                 .unwrap();
             let fields = row.as_array().unwrap();
-            assert_eq!(fields.len(), 9);
+            assert_eq!(fields.len(), 10);
             assert_eq!(fields[6].as_array().unwrap().len(), 1);
             assert_eq!(fields[8], Value::Array(vec![text("full-carrier")]));
+            assert_eq!(fields[9], text("namespace-original"));
             let descriptor = fields[7].as_array().unwrap();
             let Value::Text(path) = &descriptor[0] else {
                 unreachable!()
@@ -19299,6 +19305,7 @@ mod tests {
                         text(hex(&[1; 32])),
                     ]),
                     Value::Array(vec![text("full-carrier")]),
+                    text("namespace-original"),
                 ])
             })
             .collect();
