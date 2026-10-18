@@ -189,7 +189,9 @@ noToolsExample = do
 
 -- This is the installed Persona notebook row, including its invocation-only
 -- effects. A helper fixed to SyncEffects '[ModelCall DeepSeek] cannot inhabit this cell.
-personaNotebook :: Eff (SyncEffects Persona.PersonaEffects)
+type ModelPersonaEffects = ModelCall DeepSeek ': Persona.PersonaEffects
+
+personaNotebook :: Eff (SyncEffects ModelPersonaEffects)
   (ModelResult Text, ModelResult Text, (Int, Int, Int), (Int, Int, Int))
 personaNotebook = do
   say "before model calls"
@@ -210,10 +212,10 @@ data NotebookEvent
 
 -- Handle the two effects this real-row program is expected to request. Reject
 -- every other Persona effect instead of changing the program to a sparse row.
-runPersonaNotebook :: Eff (SyncEffects Persona.PersonaEffects) a -> (a, [NotebookEvent])
+runPersonaNotebook :: Eff (SyncEffects ModelPersonaEffects) a -> (a, [NotebookEvent])
 runPersonaNotebook = go 1
   where
-    go :: Int -> Eff (SyncEffects Persona.PersonaEffects) b -> (b, [NotebookEvent])
+    go :: Int -> Eff (SyncEffects ModelPersonaEffects) b -> (b, [NotebookEvent])
     go _ (Val value) = (value, [])
     go next (E effect continuation) = case prj @(ModelCall DeepSeek) effect of
       Just request -> let (answer, event) = modelStep request

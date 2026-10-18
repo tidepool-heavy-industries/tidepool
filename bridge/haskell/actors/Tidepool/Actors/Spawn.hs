@@ -65,7 +65,7 @@ import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import Prelude
 import Tidepool.Agent.Contract
-  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec
+  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, SyncEffects, installSpec
   , PreparedAgentSpec, prepareAgentSpec, preparedAgentSpecMetadata, installPreparedSpec
   , renderToolCompileError )
 import Tidepool.Agent.Launch hiding (workspaceWire)
@@ -258,7 +258,7 @@ spawnSubagent context workspace options = do
       pure $ case admitted of
         Left failure -> Left (spawnError failure)
         Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
-    entry :: PreparedAgentSpec tools childEffects -> Int -> Eff childEffects ()
+    entry :: PreparedAgentSpec tools childEffects -> Int -> Eff (Core.AgentTools ': SyncEffects childEffects) ()
     entry prepared _ = do
       installPreparedSpec prepared
       installRequestReceiver
