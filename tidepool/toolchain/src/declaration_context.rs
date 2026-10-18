@@ -14842,7 +14842,7 @@ mod tests {
             let module = expected.owner().module.as_str();
             let inputs = request.compiler_inputs();
             assert!(inputs.artifacts().selected_native_groups().is_empty());
-            let id = ArtifactEntry::original(producer, expected.clone())
+            let id = ArtifactEntry::original(request.producer_sha256, expected.clone())
                 .unwrap()
                 .descriptor
                 .id;
