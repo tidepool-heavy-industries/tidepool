@@ -76,9 +76,7 @@ fn exact_join_with_settlement(
                     vec![("main".into(), "Common".into())]
                 },
             },
-            product: Some(
-                ModuleSnapshot::capture(module.into(), root.join(format!("{module}.o"))).unwrap(),
-            ),
+            product: None,
         });
         std::fs::rename(
             root.join(format!("{module}.hs")),

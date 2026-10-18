@@ -658,7 +658,9 @@ validateDeclarationJoin operations input = runExactInterfaceOperation operations
         ++ map writeModule (declarationWrites input)
       anchorPresent anchor = any (\iface -> snapshotModule anchor == exactModule iface
           && snapshotPath anchor == exactPath iface && snapshotSha256 anchor == exactSha256 iface) exacts
-  if not (all anchorPresent anchors)
+  if any (isJust . artifactProduct) artifacts
+    then reject ArtifactChanged "declaration joins consume interface observations only"
+    else if not (all anchorPresent anchors)
     then reject ArtifactChanged "a provenance anchor is absent from the exact interface closure"
     else do
       unchanged <- measureJoin timing "revalidate_before" rnf (artifactsUnchanged artifacts)
