@@ -1750,6 +1750,7 @@ pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
     let authored = config.workspace.join(".exomonad");
     if !authored.join("config.toml").exists() {
         crate::exomonad::write_fixture_project_config(&authored, config.model.value(), |project| {
+            project.launch.embedded = config.embedded.clone();
             project.defaults.model = config.model.clone();
             project.defaults.reasoning = config.reasoning;
         });
@@ -1766,6 +1767,78 @@ pub(super) fn configure_scripted_model_catalog(config: &mut ActorHostConfig) {
         )
         .expect("freeze the scripted model catalog before root admission"),
     );
+}
+
+#[test]
+fn scripted_catalog_creation_carries_host_settings_into_frozen_inputs() {
+    for hosted in [true, false] {
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "source\n", "seed")
+            .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let settings = hosted_test_settings(&files, 1);
+        let credential = settings.credential_file.clone();
+        let mut config = ActorHostConfig {
+            run_id: "catalog-fixture".into(),
+            systemd_slice: None,
+            source_exclude: Vec::new(),
+            source_import: Default::default(),
+            command_resources: None,
+            exomonad_executable: std::env::current_exe().unwrap(),
+            workspace_inputs: None,
+            haskell_root: crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            workspace: repository.path().to_path_buf(),
+            run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+                .unwrap(),
+            root_binding_path: files.path().join("root-binding.json"),
+            embedded: hosted.then_some(settings),
+            inference_auth: None,
+            tmux_session: String::new(),
+            model: exomonad_actor::Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "test-model",
+            ),
+            reasoning: Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
+            pane_environment: BTreeMap::new(),
+            jev: None,
+        };
+        configure_scripted_model_catalog(&mut config);
+        let frozen = config.workspace_inputs.as_ref().unwrap();
+        let catalog = frozen.model_catalog.as_ref().unwrap();
+        let provider = &catalog.providers[&catalog.models[&catalog.primary].provider];
+        if hosted {
+            assert_eq!(provider.credential_file.as_ref(), Some(&credential));
+            assert!(provider.credential_env.is_none());
+            assert_eq!(
+                frozen
+                    .config()
+                    .unwrap()
+                    .launch
+                    .embedded
+                    .unwrap()
+                    .credential_file,
+                credential
+            );
+        } else {
+            assert!(provider.credential_file.is_none());
+            assert_eq!(
+                provider.credential_env.as_deref(),
+                Some("TIDEPOOL_SCRIPTED_PROVIDER_CREDENTIAL")
+            );
+        }
+        assert_eq!(std::fs::read(&credential).unwrap(), b"{}");
+        let identity = frozen.identity().to_owned();
+        let path = repository.path().join(".exomonad/config.toml");
+        let bytes = std::fs::read(&path).unwrap();
+        configure_scripted_model_catalog(&mut config);
+        assert_eq!(
+            config.workspace_inputs.as_ref().unwrap().identity(),
+            identity
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }
 
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
