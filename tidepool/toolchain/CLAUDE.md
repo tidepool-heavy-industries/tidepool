@@ -307,15 +307,16 @@ construction. A missing baseline role cannot be supplied by private custody.
 Activation reuses carried offers unchanged; fresh complete issuance belongs to
 checked candidates or certified physical outputs. Narrowing type
 or execution selection does not reissue body availability. Requests consume
-carried offers; they do not census broader context custody. Context snapshot v3
-records exact offer selections and Empty/Partial/Full mode. Reopening authenticates
+carried offers; they do not census broader context custody. Context snapshots
+record exact offer selections and Empty/Partial/Full mode. Reopening authenticates
 those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Context snapshots use version 4 and persist the input issuer's per-original
-decision domain alongside compact exact Group references. An explicitly empty
-decision differs from no issued choice; neither grants native availability or
+Context snapshots use version 5 and persist normalized native availability and
+the input issuer's per-original decision domain alongside compact exact Group
+references. An explicitly empty decision differs from no issued choice; neither
+grants native availability or
 executes a group. Older context versions require regeneration and are refused.
 Custody attachment preserves these decisions, narrowing withdraws removed
 choices, and only the checked publication endorsement can rebind a decision to
@@ -329,7 +330,11 @@ subsets cannot create Full. The inventory owns execution selection through exact
 root and carrier choices, and refuses any remaining demand ambiguity.
 An interface-only role may consume an existing Full body's exact canonical and
 carrier qualification without selecting an Original role or executable roots.
-Transport refuses different Original payloads competing for one compiler owner.
+Transport retains dependency rows by exact certified artifact identity. Its
+direct compiler advertisement selects only rows matching the current original
+or canonical binding, and refuses distinct qualifying payloads for that one
+compiler owner. Historical dependency custody does not compete merely because
+the module or cached native owner is equal.
 Multiple qualified histories for the same payload remain available; a demanded
 execution binding requires an exact choice among their carrier and group issuers.
 Target admission uses exact offered graph candidates before explicit execution
