@@ -1168,7 +1168,7 @@ mod tests {
         value_offset: u32,
     ) -> (CachedHomeOwner, ProjectedGroup, Vec<ImportOwner>) {
         use tidepool_repr::execution_schema::{
-            parse_projected_group, DecodeLimits, ProgramRequirements,
+            parse_projected_group, DecodeLimits, HeapRhs, ProgramRequirements,
         };
         let mut wire = testing::wire_program();
         let Group::NonRecursive(template) = &wire.bindings[0] else {
@@ -1178,6 +1178,10 @@ mod tests {
             .map(|index| {
                 let mut top = template.clone();
                 top.binding.id = ValueId(index as u32 + value_offset);
+                let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+                    unreachable!()
+                };
+                *body = index;
                 top.identity = if index < helpers {
                     testing::identity("Helpers", &format!("helper{index}"))
                 } else {
@@ -1192,6 +1196,9 @@ mod tests {
                 top
             })
             .collect::<Vec<_>>();
+        wire.expressions.nodes = (0..tops.len())
+            .map(|_| wire.expressions.nodes[0].clone())
+            .collect();
         wire.bindings = if split_last && tops.len() > 1 {
             vec![
                 Group::Recursive(tops[..tops.len() - 1].to_vec()),
