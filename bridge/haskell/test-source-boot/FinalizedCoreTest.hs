@@ -75,7 +75,7 @@ import Tidepool.ExactScope
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
@@ -87,6 +87,7 @@ import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateCapturedAdmittedCore, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.ModuleCandidates (candidateModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
@@ -252,7 +253,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let heldDirectory = work </> "capture-before-materialization"
   createDirectory heldDirectory
   heldInterfaces <- newPreparedOriginalInterfaceArtifacts prepared heldDirectory
-  ((_, issuedOutputs), publicationCounts) <- withTiming $ captureDiagnostics $ do
+  ((held, issuedOutputs), publicationCounts) <- withTiming $ captureDiagnostics $ do
     held <- captureFinalizedModuleArtifacts heldInterfaces env (pprFinalizedModules prepared)
       (pprPackageImports prepared) (preparedFreshDependencies prepared) heldDirectory
     capturedFiles <- listDirectory heldDirectory
@@ -262,6 +263,36 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   assert (not (null issuedOutputs) && length packetFiles == length issuedOutputs
       && captureCount "finalized_payload_materializations" publicationCounts == fromIntegral (length packetFiles))
     "first publication materialized a finalized packet payload more than once"
+  let admissions = finalizedLocalAdmissions held
+      packageMap = pprPackageImports prepared
+      packageBytes = sum (map (BS.length . artifactBytes . localFinalizedPackageBody) (Map.elems admissions))
+  assert (captureCount "finalized_package_encoding_attempts" publicationCounts == fromIntegral (Map.size admissions)
+      && captureCount "finalized_package_encoding_completions" publicationCounts == fromIntegral (Map.size admissions)
+      && captureCount "finalized_package_encoded_bytes" publicationCounts == fromIntegral packageBytes)
+    "finalized package capture did not report its actual original encodings"
+  forM_ (Map.toAscList (pprFinalizedModules prepared)) $ \(moduleName', original) -> do
+    let module' = mi_module (hm_iface (finalizedHomeModInfo original))
+        key = (unitString (moduleUnit module'),moduleNameString moduleName')
+    admission <- maybe (fail "package control lacks its genuine finalized admission") pure
+      (Map.lookup key admissions)
+    packages <- maybe (fail "package control lacks its compiler package facts") pure
+      (Map.lookup moduleName' packageMap)
+    let (iface,_,_) = localFinalizedInterface admission
+        body = localFinalizedPackageBody admission
+    assert (artifactBytes body == encodePackageImports iface packages
+        && localFinalizedPackageEvidence admission == packages)
+      "issued package body differs from the original codec and compiler facts"
+    valid <- matchesCapturedFinalization admission original packages
+    assert valid "genuine same-owner package facts did not match their capture"
+    let change facts = facts {packageInterfaces = case packageInterfaces facts of
+          [] -> []
+          root:rest -> root {packagePath = packagePath root ++ ".changed"}:rest}
+        changedMap = Map.adjust change moduleName' packageMap
+    changed <- maybe (fail "changed-map control lost its original module key") pure
+      (Map.lookup moduleName' changedMap)
+    assert (changed /= packages) "package-map refusal control did not change a real selected package"
+    refused <- matchesCapturedFinalization admission original changed
+    assert (not refused) "same finalized object accepted a changed current package map"
   capture <- captureCompilerFixture (FixtureCompilerInput work source [work]) prepared
   scopePath <- writeGenuineMetadataScope work ["FinalizedCoreFixture"] capture
   scope <- requireRight =<< readExactScope scopePath
@@ -1070,6 +1101,11 @@ mixedCandidateLoads = withTiming $ withScratch $ \work -> do
     ("mixed graph did not admit both certified candidate kinds: " ++ diagnostics)
   assert ("tidepool-count name=candidate_executable_required count=1 " `isInfixOf` diagnostics)
     ("mixed graph did not require exactly its helper executable: " ++ diagnostics)
+  forM_ ["candidate_compiler_view_attempt", "candidate_compiler_view_complete"] $ \counter ->
+    assert (length [() | line <- lines diagnostics
+        , ("tidepool-count name=" ++ counter ++ " count=1 ") `isInfixOf` line] == length selected
+      && any (("tidepool-count name=" ++ counter ++ " count=0 ") `isInfixOf`) (lines diagnostics))
+      ("mixed graph did not stage every actual candidate make view: " ++ diagnostics)
   forM_ selected $ \name -> assert (not (any (\phase ->
       ("tidepool-canonical-" ++ phase ++ " module=" ++ name) `elem` lines diagnostics)
       ["frontend","finalization"])) "mixed graph replayed a certified candidate frontend"

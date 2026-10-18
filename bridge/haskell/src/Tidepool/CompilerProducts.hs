@@ -51,6 +51,7 @@ import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
+import Tidepool.ArtifactBytes (artifactBytes)
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProducts
   , encodeCertifiedItemProducts, sourceProductSha256 )
@@ -97,6 +98,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
   , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
+  , localFinalizedPackageBody, localFinalizedPackageEvidence
   )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
@@ -106,7 +108,7 @@ import Tidepool.GhcPipeline
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
-import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces)
 import Tidepool.PreparedTime (resolveTimeAuthority)
@@ -755,7 +757,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
       Just compilation -> issueFreshExecutionSource includes prepared freshDependencies
         [product | product <- freshProducts, let (unit,name,_,_) = moduleProductInput product
           , Map.notMember (T.unpack unit,T.unpack name) retainedProofs]
-        (compilationScope compilation)
+        productPackages (compilationScope compilation)
     executionOutput <- case sourceRecipe of
       ExactExecutionSourceAvailable graph -> do
         let bytes = executionGraphBytes graph
@@ -881,8 +883,14 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
             Nothing -> ioError (userError
               ("resolved direct package import inventory missing for " ++ moduleNameString name))
             Just selected -> pure selected
-          let iface = ExactIfaceArtifact (fst key) (snd key) "" (shaHex bytes) []
-          pure (encodePackageImports iface roots)
+          original <- maybe (fail "fresh original product lacks its captured finalization") pure
+            (Map.lookup key finalized)
+          let (iface,_,_) = localFinalizedInterface original
+          unless ((exactUnit iface,exactModule iface) == key
+              && exactSha256 iface == shaHex bytes
+              && localFinalizedPackageEvidence original == roots)
+            (fail "fresh original package evidence differs from its captured finalization")
+          pure (artifactBytes (localFinalizedPackageBody original))
       when (BS.length sidecar > 4 * 1024 * 1024) $
         ioError (userError "direct package import witness exceeds four MiB")
       let encoded = prepareModuleProductEncodingFromGroups
@@ -926,8 +934,8 @@ writeProductInventory outDir products packageBundles = do
 -- rather than waiting for the frontend's postworker item certification.
 issueFreshExecutionSource
   :: [FilePath] -> PreparedPipelineResult -> DependencyEvidence -> [ModuleProductEncoding]
-  -> ExactScope -> IO WorkerExecutionSource
-issueFreshExecutionSource includes prepared evidence fullProducts scope
+  -> Map.Map (String,String) BS.ByteString -> ExactScope -> IO WorkerExecutionSource
+issueFreshExecutionSource includes prepared evidence fullProducts productPackages scope
   | null fullProducts = pure (ExactExecutionSourceUnavailable NoFreshOriginals)
   | not (dependencyCacheSafe evidence && dependencySelectionComplete evidence) =
       pure (ExactExecutionSourceUnavailable IncompleteSourceEvidence)
@@ -1005,11 +1013,9 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
           , dependencySourcePath source == dependencyModuleSource node] of
         [sha] -> pure sha
         _ -> fail "fresh execution original lacks one consumed source witness"
-      packages <- maybe (fail "fresh execution original lacks package witness") pure
-        (Map.lookup (mkModuleName owner) (pprPackageImports prepared))
-      let interface = ExactIfaceArtifact unit owner "" (shaHex interfaceBytes) []
-          nativeBytes = moduleProductBytes product'
-          packageBytes = encodePackageImports interface packages
+      packageBytes <- maybe (fail "fresh execution original lacks issued package bytes") pure
+        (Map.lookup (unit,owner) productPackages)
+      let nativeBytes = moduleProductBytes product'
           expected = ExecutionSourceIdentity unit owner
             (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes nativeBytes packageBytes)
             (shaHex interfaceBytes) (shaHex nativeBytes)

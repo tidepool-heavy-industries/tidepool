@@ -204,7 +204,7 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
   , matchesCapturedFinalization )
 import Tidepool.HomeProducts
-  ( hydrateCandidateHomeProductsWithOriginalsUsing, materializeCandidateCompilerView, admittedCompilerInterface
+  ( hydrateCandidateHomeProductsWithOriginalsUsing, validateCandidateCompilerViewProfile, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -283,7 +283,8 @@ import Tidepool.ExecutionSource
   , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
-  , validatePackageImportRoot, encodePackageImports )
+  , validatePackageImportRoot
+  , withPackageRootObservations, packageImportRootWithin, validatePackageImportRootWithin )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest
@@ -544,7 +545,7 @@ retainProgramSourceImports previous prepared captured retained = do
           either fail pure =<< validateExactScopeEnvironment env retained
           let freshNodes = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
                 | node <- dependencyModules fresh, not (dependencyModuleBoot node)]
-              sourceMatches key originalRow@(ProgramImportOriginal row@(iface,_,packageSha) evidence lexical) =
+              sourceMatches key originalRow@(ProgramImportOriginal row evidence lexical) =
                 case (Map.lookup key freshNodes, evidence) of
                   (Nothing, _) -> pure (programImportOriginal admitted key == Just originalRow
                     && key `Set.notMember` scopeSourceSelectedOwners admitted)
@@ -566,9 +567,8 @@ retainProgramSourceImports previous prepared captured retained = do
                     , sort lexical == sort (nub [(unit,name) | (_,name,False,Just unit) <- imports])
                     , [canonicalSourceSha256 canonical] ==
                         [dependencySourceSha256 source | source <- dependencySources fresh
-                          , dependencySourcePath source == dependencyModuleSource node]
-                    , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) ->
-                        matchesCapturedFinalization finalized original
+                          , dependencySourcePath source == dependencyModuleSource node] ->
+                        matchesCapturedFinalization finalized original packages
                   (Just node, ModuleInterfaceEvidence canonical)
                     | [candidate] <- [candidate | candidate <- pprAcceptedCandidates prepared
                         , (candidateUnit candidate,candidateModule candidate) == key]
@@ -2604,7 +2604,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
-        compilerViewDirectory (compilerProducerFor variant) selectedExact
+        (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw targetName
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
         exactCanonicalInterfaces = maybe Map.empty scopeCanonicalInterfaces selectedExact
@@ -2827,7 +2827,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
           (Map.elems acceptedCandidates)
-        candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateView candidate))
+        candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateSummary candidate))
           | candidate <- Map.elems acceptedCandidates]
         deferred = if loadRequired then Set.empty else
           reverseDependencyClosure (sourceLoadDependencyGraph modGraphRaw) candidateKeys
@@ -2879,13 +2879,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- 'load'' needs those to provision splice bytecode. The bytecode choice is
     -- still session-wide in 'canonicalizeDFlags'
     -- (Opt_UseBytecodeRatherThanObjects).
-    let canonicalizeLoadSummary summary =
-          let original = ms_hspp_opts summary
-              selected = maybe summary admittedCandidateView
-                (Map.lookup (ms_mod_name summary) acceptedCandidates)
-              flags = (canonicalizeDFlags original)
-                { backend = backend original, ghcLink = ghcLink original }
-          in forceFreshSource selected { ms_hspp_opts = flags }
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
           CheckOnly ->
@@ -2909,6 +2902,39 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (mkModule (toUnitId (moduleUnit targetOwner)) targetName))
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
+    -- Only the closed final make graph needs disposable physical interfaces.
+    -- Interface-only peers still need views when another candidate needs make.
+    liftIO (emitCount timing "candidate_compiler_view_attempt" 0)
+    liftIO (emitCount timing "candidate_compiler_view_complete" 0)
+    let loadedCandidateOwners = Set.fromList
+          [ms_mod summary | ModuleNode _ summary <- mgModSummaries' loadGraph
+            , ms_hsc_src summary == HsSrcFile]
+    candidateViews <- fmap Map.fromList $ forM
+      [(index,candidate) | (index,(_,candidate)) <- zip [0..] (Map.toAscList acceptedCandidates)
+        , ms_mod (admittedCandidateSummary candidate) `Set.member` loadedCandidateOwners] $ \(index,candidate) -> do
+          let summary = admittedCandidateSummary candidate
+              originalFlags = ms_hspp_opts summary
+              canonicalSummary = summary {ms_hspp_opts =
+                (canonicalizeDFlags originalFlags)
+                  {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
+          liftIO (emitCount timing "candidate_compiler_view_attempt" 1)
+          view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
+            index certifiedEnv (admittedCandidateProof candidate) canonicalSummary
+          liftIO (emitCount timing "candidate_compiler_view_complete" 1)
+          when (admittedCandidateLoading candidate == CandidateLoadForExecution) $ liftIO $
+            emitCount timing "candidate_finalized_core_make_view" 1
+          pure (ms_mod summary,view)
+    let canonicalizeLoadSummary summary =
+          let original = ms_hspp_opts summary
+              selected
+                | ms_hsc_src summary == HsSrcFile
+                , Just candidate <- Map.lookup (ms_mod_name summary) acceptedCandidates
+                , ms_mod summary == ms_mod (admittedCandidateSummary candidate) =
+                    candidateViews Map.! ms_mod summary
+                | otherwise = summary
+              flags = (canonicalizeDFlags original)
+                { backend = backend original, ghcLink = ghcLink original }
+          in forceFreshSource selected { ms_hspp_opts = flags }
     targetLoadFailure <- liftIO (newIORef Nothing)
     targetInstanceFailure <- liftIO (newIORef Nothing)
     canonicalFailureRef <- liftIO (newIORef Nothing)
@@ -3159,7 +3185,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- interfaces may enter Make through its cache; an unowned disk interface
     -- cannot stand in for a fresh canonical finalization.
     let candidateOwners = Set.fromList
-          [ms_mod (admittedCandidateView candidate) | candidate <- Map.elems acceptedCandidates]
+          [ms_mod (admittedCandidateSummary candidate) | candidate <- Map.elems acceptedCandidates]
         currentMemoInterfaces = Map.map (hm_iface . finalizedHomeModInfo .
           loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo
         sourceSummaries = Map.fromList [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
@@ -4157,7 +4183,7 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
   , admittedCandidateRoots :: PackageImportEvidence
   , admittedCandidateLoading :: CandidateLoading
   , admittedCandidateProof :: CanonicalInterfaceProof
-  , admittedCandidateView :: ModSummary
+  , admittedCandidateSummary :: ModSummary
   }
 
 data CandidateAdmissionReason
@@ -4181,16 +4207,17 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
+  :: Word64 -> (HscEnv -> IO HscEnv) -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
+certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let boundedDetail detail = case splitAt 192 detail of
         (prefix, []) -> prefix
         (prefix, _) -> take 176 prefix ++ "...[truncated]"
-      record owner reason detail = when timing $ liftIO $
+      recordIO owner reason detail = when timing $
         modifyIORef' observations (Map.insert owner (reason, fmap boundedDetail detail))
+      record owner reason detail = liftIO (recordIO owner reason detail)
       recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
   decoded <- liftIO $ case captured of
     Nothing -> readModuleCandidatesWithGraphs (maybe [] scopeExecutionGraphs exactScope) manifest
@@ -4359,85 +4386,89 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
           candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified
           candidateDependencyQualifier (CandidateThisUnit unit) = DependencyThisUnit unit
           candidateDependencyQualifier (CandidateOtherUnit unit) = DependencyOtherUnit unit
-      preflight <- fmap catMaybes $ forM candidates $ \candidate ->
-        case (Map.lookup (mkModuleName (candidateModule candidate)) summaries,
-              Map.lookup (candidateModule candidate) currentModules) of
-          (Just summary, Just node) -> case
-              [reason | (rejected, reason) <-
-                [ (ms_mod_name summary == targetName, CandidateTarget)
-                , (not (candidateExecutionMatches candidate), CandidateExecutionProof)
-                , (ms_mod_name summary `Set.member` protectedRoots, CandidateExactOwner)
-                , (candidateUnit candidate /= unitString (moduleUnit (ms_mod summary)), CandidateUnit)
-                , (not (candidateImportsMatch candidate node), CandidateImportTuple)
-                , (hasUntrackedCompileTimeExecution (ms_hspp_opts summary), CandidateUntrackedExecution)
-                , (backendGeneratesCode (backend (ms_hspp_opts summary))
-                    && (Map.member (ms_mod_name summary) bootSummaries
-                      || any candidateImportBoot (candidateImports candidate)), CandidateExecutionBoot)
-                , (gopt Opt_Pp (ms_hspp_opts summary), CandidatePreprocessor) ]
-              , rejected] of
-              reason : _ -> recordCandidate candidate reason (admissionDetail candidate reason) >> pure Nothing
-              [] -> do
-                source <- liftIO $ traverse canonicalizePath
-                  (ml_hs_file (ms_location summary))
-                if source /= Just (candidateSource candidate)
-                  then recordCandidate candidate CandidateSourcePath
-                    (Just ("historical=" ++ show (candidateSource candidate) ++ ";current=" ++ show source))
-                    >> pure Nothing
-                  else do
-                    inspected <- liftIO (try (sourceEvidenceWithFingerprint
-                      (candidateSource candidate))
-                      :: IO (Either IOException (DependencySource, Fingerprint)))
-                    packageCapture <- liftIO (try (candidateInputBody candidate
-                      (candidatePackageImports candidate) (candidatePackageImportsSha256 candidate) (4 * 1024 * 1024))
-                      :: IO (Either IOException ArtifactBytes))
-                    let packageWitness = case packageCapture of
-                          Left failure -> Left (show failure)
-                          Right body | artifactSha256 body /= candidatePackageImportsSha256 candidate ->
-                            Left "candidate package sidecar differs from its seal"
-                          Right body -> decodeCapturedPackageImports
-                            (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
-                              (candidateInterface candidate) (candidateInterfaceSha256 candidate) []) (artifactBytes body)
-                    originalProduct <- liftIO (try (candidateInputBody candidate
-                      (candidateProductPath candidate) (candidateProductSha256 candidate) (64 * 1024 * 1024))
-                      :: IO (Either IOException ArtifactBytes))
-                    packageSelected <- liftIO $ case packageWitness of
-                      Left _ -> pure False
-                      Right roots -> do
-                        recorded <- and <$> mapM (fmap (either (const False) (const True))
-                          . validatePackageImportRoot env) (packageInterfaces roots)
-                        selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
-                          let exact = exactImportKey candidate (dependencyQualifier qualifier)
-                                (moduleNameString (unLoc name))
-                          resolved <- case exact >>= (`Map.lookup` provenOriginals candidate) of
-                            Just _ -> pure Nothing
-                            Nothing -> Just <$> findImportedModule env (unLoc name) qualifier
-                          case resolved of
-                            Nothing -> pure (Right Nothing)
-                            Just (Found _ owner)
-                              | isHomeUnit (hsc_home_unit env) (moduleUnit owner)
-                                || owner == gHC_PRIM ->
-                                  pure (Right Nothing)
-                              | otherwise -> fmap Just <$> packageImportRoot env owner
-                            _ -> pure (Left "direct import does not resolve")
-                        pure $ recorded && case sequence selectedImports of
-                          Left _ -> False
-                          Right selected -> all (`elem` packageInterfaces roots) (catMaybes selected)
-                    case (inspected, packageWitness, originalProduct) of
-                      (Right (evidence, fingerprint), Right roots, Right productBytes)
-                        | dependencySourceSha256 evidence /= candidateSourceSha256 candidate ->
-                            recordCandidate candidate CandidateSourceSha Nothing >> pure Nothing
-                        | fingerprint /= ms_hs_hash summary ->
-                            recordCandidate candidate CandidateSummaryHash Nothing >> pure Nothing
-                        | artifactSha256 productBytes /= candidateProductSha256 candidate ->
-                            recordCandidate candidate CandidateNativeSha Nothing >> pure Nothing
-                        | not packageSelected ->
-                            recordCandidate candidate CandidatePackageSelection Nothing >> pure Nothing
-                        | otherwise -> pure (Just (ms_mod_name summary, (candidate, summary, node, roots)))
-                      (Left _, _, _) -> recordCandidate candidate CandidateSourceRead Nothing >> pure Nothing
-                      (_, Left reason, _) -> recordCandidate candidate CandidatePackageRead (Just reason) >> pure Nothing
-                      (_, _, Left _) -> recordCandidate candidate CandidateNativeRead Nothing >> pure Nothing
-          (Nothing, _) -> recordCandidate candidate CandidateMissingSummary Nothing >> pure Nothing
-          (_, Nothing) -> recordCandidate candidate CandidateMissingNode Nothing >> pure Nothing
+      let recordCandidateIO candidate = recordIO (candidateUnit candidate, candidateModule candidate)
+      -- This scope contains reads and resolution only. No observation is carried
+      -- into hydration, compiler work or the later publication proof.
+      preflight <- liftIO $ withPackageRootObservations env $ \packageObservations ->
+        fmap catMaybes $ forM candidates $ \candidate ->
+          case (Map.lookup (mkModuleName (candidateModule candidate)) summaries,
+                Map.lookup (candidateModule candidate) currentModules) of
+            (Just summary, Just node) -> case
+                [reason | (rejected, reason) <-
+                  [ (ms_mod_name summary == targetName, CandidateTarget)
+                  , (not (candidateExecutionMatches candidate), CandidateExecutionProof)
+                  , (ms_mod_name summary `Set.member` protectedRoots, CandidateExactOwner)
+                  , (candidateUnit candidate /= unitString (moduleUnit (ms_mod summary)), CandidateUnit)
+                  , (not (candidateImportsMatch candidate node), CandidateImportTuple)
+                  , (hasUntrackedCompileTimeExecution (ms_hspp_opts summary), CandidateUntrackedExecution)
+                  , (backendGeneratesCode (backend (ms_hspp_opts summary))
+                      && (Map.member (ms_mod_name summary) bootSummaries
+                        || any candidateImportBoot (candidateImports candidate)), CandidateExecutionBoot)
+                  , (gopt Opt_Pp (ms_hspp_opts summary), CandidatePreprocessor) ]
+                , rejected] of
+                reason : _ -> recordCandidateIO candidate reason (admissionDetail candidate reason) >> pure Nothing
+                [] -> do
+                  source <- traverse canonicalizePath
+                    (ml_hs_file (ms_location summary))
+                  if source /= Just (candidateSource candidate)
+                    then recordCandidateIO candidate CandidateSourcePath
+                      (Just ("historical=" ++ show (candidateSource candidate) ++ ";current=" ++ show source))
+                      >> pure Nothing
+                    else do
+                      inspected <- (try (sourceEvidenceWithFingerprint
+                        (candidateSource candidate))
+                        :: IO (Either IOException (DependencySource, Fingerprint)))
+                      packageCapture <- (try (candidateInputBody candidate
+                        (candidatePackageImports candidate) (candidatePackageImportsSha256 candidate) (4 * 1024 * 1024))
+                        :: IO (Either IOException ArtifactBytes))
+                      let packageWitness = case packageCapture of
+                            Left failure -> Left (show failure)
+                            Right body | artifactSha256 body /= candidatePackageImportsSha256 candidate ->
+                              Left "candidate package sidecar differs from its seal"
+                            Right body -> decodeCapturedPackageImports
+                              (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+                                (candidateInterface candidate) (candidateInterfaceSha256 candidate) []) (artifactBytes body)
+                      originalProduct <- (try (candidateInputBody candidate
+                        (candidateProductPath candidate) (candidateProductSha256 candidate) (64 * 1024 * 1024))
+                        :: IO (Either IOException ArtifactBytes))
+                      packageSelected <- case packageWitness of
+                        Left _ -> pure False
+                        Right roots -> do
+                          recorded <- and <$> mapM (fmap (either (const False) (const True))
+                            . validatePackageImportRootWithin packageObservations) (packageInterfaces roots)
+                          selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
+                            let exact = exactImportKey candidate (dependencyQualifier qualifier)
+                                  (moduleNameString (unLoc name))
+                            resolved <- case exact >>= (`Map.lookup` provenOriginals candidate) of
+                              Just _ -> pure Nothing
+                              Nothing -> Just <$> findImportedModule env (unLoc name) qualifier
+                            case resolved of
+                              Nothing -> pure (Right Nothing)
+                              Just (Found _ owner)
+                                | isHomeUnit (hsc_home_unit env) (moduleUnit owner)
+                                  || owner == gHC_PRIM ->
+                                    pure (Right Nothing)
+                                | otherwise -> fmap Just <$> packageImportRootWithin packageObservations owner
+                              _ -> pure (Left "direct import does not resolve")
+                          pure $ recorded && case sequence selectedImports of
+                            Left _ -> False
+                            Right selected -> all (`elem` packageInterfaces roots) (catMaybes selected)
+                      case (inspected, packageWitness, originalProduct) of
+                        (Right (evidence, fingerprint), Right roots, Right productBytes)
+                          | dependencySourceSha256 evidence /= candidateSourceSha256 candidate ->
+                              recordCandidateIO candidate CandidateSourceSha Nothing >> pure Nothing
+                          | fingerprint /= ms_hs_hash summary ->
+                              recordCandidateIO candidate CandidateSummaryHash Nothing >> pure Nothing
+                          | artifactSha256 productBytes /= candidateProductSha256 candidate ->
+                              recordCandidateIO candidate CandidateNativeSha Nothing >> pure Nothing
+                          | not packageSelected ->
+                              recordCandidateIO candidate CandidatePackageSelection Nothing >> pure Nothing
+                          | otherwise -> pure (Just (ms_mod_name summary, (candidate, summary, node, roots)))
+                        (Left _, _, _) -> recordCandidateIO candidate CandidateSourceRead Nothing >> pure Nothing
+                        (_, Left reason, _) -> recordCandidateIO candidate CandidatePackageRead (Just reason) >> pure Nothing
+                        (_, _, Left _) -> recordCandidateIO candidate CandidateNativeRead Nothing >> pure Nothing
+            (Nothing, _) -> recordCandidateIO candidate CandidateMissingSummary Nothing >> pure Nothing
+            (_, Nothing) -> recordCandidateIO candidate CandidateMissingNode Nothing >> pure Nothing
       let initial = Map.fromList preflight
           requiredHome node =
             [ mkModuleName (dependencyImportName imported)
@@ -4550,24 +4581,13 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                         Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
                         Right hydrated -> do
                           setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
-                          views <- fmap Map.fromList $ forM
-                            (zip [0..] (Map.toAscList admitted)) $ \(index,(name,(_,summary,_,_))) -> do
-                              currentEnvironment <- getSession
-                              let originalFlags = ms_hspp_opts summary
-                                  executable = backendGeneratesCode (backend originalFlags)
-                                  canonicalSummary' = summary {ms_hspp_opts =
-                                    (canonicalizeDFlags originalFlags)
-                                      {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
-                              view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
-                                index currentEnvironment (proofs Map.! name) canonicalSummary'
-                              when executable $ liftIO $
-                                emitCount timing "candidate_finalized_core_make_view" 1
-                              pure (name,view)
+                          liftIO $ forM_ (Map.elems admitted) $ \(_,summary,_,_) ->
+                            validateCandidateCompilerViewProfile summary
                           recordAdmitted CandidateAccepted Nothing
                           pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
                             candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
                               then CandidateLoadForExecution else CandidateInterfaceOnly)
-                            (proofs Map.! name) (views Map.! name)) admitted)
+                            (proofs Map.! name) summary) admitted)
   when timing $ liftIO $ do
     observed <- readIORef observations
     let counts = Map.fromListWith (+)
