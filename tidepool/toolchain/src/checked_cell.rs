@@ -5215,31 +5215,44 @@ mod tests {
 
     #[test]
     fn checked_value_capture_preserves_selected_child_over_relevant_historical_offer() {
-        checked_value_custody_histories(|captured, _, expected_native| {
-            let receiving = Arc::new(
-                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
-                    .unwrap()
-                    .extend_retained_value_artifacts(&[captured.clone()])
-                    .map_err(|error| error.to_string())?,
-            );
-            let scratch = tempfile::tempdir().unwrap();
-            let request = receiving
-                .prepare_compilation(&scratch.path().join("next"), VALUE_CUSTODY_PRODUCER)
-                .map_err(|error| error.to_string())?;
-            let epoch = request
-                .artifacts
-                .iter()
-                .find(|artifact| {
-                    artifact.interface.unit == "fixture" && artifact.interface.module == "Epoch"
-                })
-                .expect("next compiler request owns its required original");
-            let body = epoch
-                .product
-                .as_ref()
-                .expect("required original has native bytes");
-            assert_eq!(std::fs::read(&body.path).unwrap(), expected_native);
-            Ok(())
-        });
+        checked_value_custody_histories(|_, _, _| Ok(()));
+    }
+
+    #[test]
+    fn checked_value_support_materializes_with_one_survivor_after_issuer_drop() {
+        let mut histories = capture_value_custody_histories();
+        // The final matrix case has the changed child and retained template.
+        // Sibling captures must not supply the survivor's physical byte custody.
+        let (captured, expected_native, expected_child) = histories.pop().unwrap();
+        assert!(captured.template_imports().is_some());
+        drop(histories);
+        let receiving = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_retained_value_artifacts(&[captured.clone()])
+                .unwrap(),
+        );
+        assert!(receiving
+            .artifact_view()
+            .capture_graph_selection()
+            .namespace
+            .contains(&expected_child));
+        let scratch = tempfile::tempdir().unwrap();
+        let request = receiving
+            .prepare_compilation(&scratch.path().join("next"), VALUE_CUSTODY_PRODUCER)
+            .unwrap();
+        let epoch = request
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.interface.unit == "fixture" && artifact.interface.module == "Epoch"
+            })
+            .expect("next compiler request owns its required original");
+        let body = epoch
+            .product
+            .as_ref()
+            .expect("required original has native bytes");
+        assert_eq!(std::fs::read(&body.path).unwrap(), expected_native);
     }
 
     #[test]
