@@ -7208,7 +7208,7 @@ impl ArtifactView {
         timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
         timing.advance("merge_namespace");
-        let joined = self.merge_validated_namespace(other, namespace.clone())?;
+        let issuing_payloads = self.merge_payload_custody(other, &namespace)?;
         timing.advance("select_roots_and_custody");
         let roots = if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
             let previous = self.namespace();
@@ -7230,23 +7230,31 @@ impl ArtifactView {
                 .chain(groups.values().copied().map(InventoryNodeKey::Group))
                 .collect::<BTreeSet<_>>()
         };
-        let custody = joined
+        let custody = self
             .roots()
             .iter()
+            .chain(self.custody_roots())
+            .chain(other.roots())
+            .chain(other.custody_roots())
             .copied()
-            .chain(joined.custody_roots().iter().copied())
             .filter(|node| !roots.contains(node))
             .collect::<BTreeSet<_>>();
         timing.advance("retain_selection");
-        let retained = joined.inventory().retain(
+        let mut retained = self.retain_merged_selection(
+            other,
+            &namespace,
             roots.into_iter().collect(),
             custody.into_iter().collect(),
-            Vec::new(),
-            Vec::new(),
-        );
+            issuing_payloads,
+        )?;
         timing.advance("retain_materializations_and_namespace");
-        let mut retained = joined.retain_projected_materializations(retained)?;
-        retained.replace_namespace(&namespace);
+        if retained.has_retained_nodes() {
+            let mut materializations = Vec::new();
+            let mut visited = BTreeSet::new();
+            self.collect_materializations(&mut materializations, &mut visited)?;
+            other.collect_materializations(&mut materializations, &mut visited)?;
+            retained.attach_projected_materializations(&materializations);
+        }
         timing.finish(true);
         Ok((retained, selected, input_decisions))
     }
@@ -7331,6 +7339,29 @@ impl ArtifactView {
         other: &Self,
         namespace: BTreeMap<ArtifactId, ArtifactBinding>,
     ) -> Result<Self, CompileError> {
+        let issuing_payloads = self.merge_payload_custody(other, &namespace)?;
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        drop(state);
+        Ok(ArtifactView::new(ViewDraft {
+            roots: vec![],
+            selection,
+            inventory: self.lease.inventory.clone(),
+            parents,
+            issuing_payloads,
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    /// Merge actual acquisitions before checking the selected namespace. Equal
+    /// payload IDs can carry independent file owners, including in hidden custody.
+    fn merge_payload_custody(
+        &self,
+        other: &Self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+    ) -> Result<BTreeMap<ArtifactId, Arc<ArtifactEntry>>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let mut issuing_payloads = BTreeMap::new();
         for (id, incoming) in &other.lease.payloads {
@@ -7357,20 +7388,65 @@ impl ArtifactView {
             })
             .collect();
         SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
-        let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
-        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        Ok(issuing_payloads)
+    }
+
+    /// Publish the final compiler selection directly from its issued operands.
+    /// Physical materializations are projected separately, in operand order.
+    fn retain_merged_selection(
+        &self,
+        other: &Self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        roots: Vec<InventoryNodeKey>,
+        custody: Vec<ArtifactBindingNode>,
+        issuing_payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<Self, CompileError> {
+        let mut state = self.lease.inventory.0.lock().expect("inventory lock");
+        if !Arc::ptr_eq(&self.lease.inventory.0, &other.lease.inventory.0) {
+            let proofs = scope_proof::prepare_install(
+                &state,
+                other
+                    .lease
+                    .selection
+                    .scopes
+                    .iter()
+                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
+                    .map(|(_, proof)| Arc::clone(proof.proof())),
+            )?;
+            scope_proof::install(&mut state, proofs);
+        }
+        let selection = selection_snapshot_for_lease(&state, namespace, &roots, &custody, &[]);
+        let ids = selection
+            .retained_nodes()
+            .expect("issued merged selection")
+            .into_iter()
+            .map(InventoryNodeKey::artifact)
+            .collect::<BTreeSet<_>>();
         drop(state);
-        Ok(ArtifactView::new(ViewDraft {
-            roots: vec![],
-            selection,
-
-            inventory: self.lease.inventory.clone(),
-
-            parents,
-            issuing_payloads,
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        }))
+        let payloads = ids
+            .iter()
+            .map(|id| {
+                let entry = issuing_payloads
+                    .get(id)
+                    .or_else(|| self.lease.payloads.get(id))
+                    .or_else(|| other.lease.payloads.get(id))
+                    .expect("selected payload owner");
+                (*id, Arc::clone(entry))
+            })
+            .collect();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection,
+                inventory: self.lease.inventory.clone(),
+                parents: vec![],
+                issuing_payloads: payloads,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            ids,
+        );
+        Ok(Self::from_custody(lease))
     }
 
     /// Retain issued private offers in order. A validated prefix can defer a
