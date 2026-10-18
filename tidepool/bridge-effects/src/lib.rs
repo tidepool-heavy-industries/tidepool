@@ -26,6 +26,7 @@ impl Backend {
         match self {
             Self::DeepSeek => "deepseek",
             Self::OpenAIPlan => "chatgpt_plan",
+            Self::GeminiInteractions => "gemini_interactions",
         }
     }
 
@@ -33,12 +34,13 @@ impl Backend {
         match name {
             "deepseek" => Ok(Self::DeepSeek),
             "chatgpt_plan" => Ok(Self::OpenAIPlan),
+            "gemini_interactions" => Ok(Self::GeminiInteractions),
             "codex" => Err(
-                "private Codex credential bridge has been retired; select deepseek or chatgpt_plan"
+                "private Codex credential bridge has been retired; select deepseek, chatgpt_plan or gemini_interactions"
                     .into(),
             ),
             _ => Err(format!(
-                "unknown inference backend {name:?}; select deepseek or chatgpt_plan"
+                "unknown inference backend {name:?}; select deepseek, chatgpt_plan or gemini_interactions"
             )),
         }
     }
@@ -72,6 +74,7 @@ impl Model {
     pub fn for_backend(backend: Backend, id: &str) -> Self {
         match (&backend, id) {
             (Backend::DeepSeek, "deepseek-flash") => Self::DeepSeekFlash,
+            (Backend::GeminiInteractions, "gemini-4-argon") => Self::GeminiArgon,
             (Backend::DeepSeek, "deepseek-v4-pro") => Self::DeepSeekPro,
             (Backend::OpenAIPlan, "gpt-6.1-sol") => Self::OpenAIModel(OpenAIModel::Gpt61Sol),
             (Backend::OpenAIPlan, "gpt-6-sol") => Self::OpenAIModel(OpenAIModel::Gpt6Sol),
@@ -88,6 +91,7 @@ impl Model {
         match self {
             Self::DeepSeekFlash | Self::DeepSeekPro => Backend::DeepSeek,
             Self::OpenAIModel(_) => Backend::OpenAIPlan,
+            Self::GeminiArgon => Backend::GeminiInteractions,
             Self::CustomModel(backend, _) => backend.clone(),
         }
     }
@@ -96,6 +100,7 @@ impl Model {
     pub fn value(&self) -> &str {
         match self {
             Self::DeepSeekFlash => "deepseek-flash",
+            Self::GeminiArgon => "gemini-4-argon",
             Self::DeepSeekPro => "deepseek-v4-pro",
             Self::OpenAIModel(model) => model.value(),
             Self::CustomModel(_, model) => model,
@@ -136,6 +141,15 @@ impl Reasoning {
                 Ok(Self::OpenAIReasoning(OpenAIReasoning::OpenAIMedium))
             }
             (Backend::OpenAIPlan, "high") => Ok(Self::OpenAIReasoning(OpenAIReasoning::OpenAIHigh)),
+            (Backend::GeminiInteractions, "low") => {
+                Ok(Self::ArgonReasoning(ArgonEffort::EffortLow))
+            }
+            (Backend::GeminiInteractions, "medium") => {
+                Ok(Self::ArgonReasoning(ArgonEffort::EffortMedium))
+            }
+            (Backend::GeminiInteractions, "high") => {
+                Ok(Self::ArgonReasoning(ArgonEffort::EffortHigh))
+            }
             _ => Err("reasoning setting is not supported by the selected backend".into()),
         }
     }
@@ -145,10 +159,13 @@ impl Reasoning {
         match self {
             Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekNone) => "none",
             Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)
-            | Self::OpenAIReasoning(OpenAIReasoning::OpenAILow) => "low",
-            Self::OpenAIReasoning(OpenAIReasoning::OpenAIMedium) => "medium",
+            | Self::OpenAIReasoning(OpenAIReasoning::OpenAILow)
+            | Self::ArgonReasoning(ArgonEffort::EffortLow) => "low",
+            Self::OpenAIReasoning(OpenAIReasoning::OpenAIMedium)
+            | Self::ArgonReasoning(ArgonEffort::EffortMedium) => "medium",
             Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
-            | Self::OpenAIReasoning(OpenAIReasoning::OpenAIHigh) => "high",
+            | Self::OpenAIReasoning(OpenAIReasoning::OpenAIHigh)
+            | Self::ArgonReasoning(ArgonEffort::EffortHigh) => "high",
             Self::DeepSeekReasoning(DeepSeekReasoning::DeepSeekMax) => "max",
         }
     }
@@ -158,6 +175,7 @@ impl Reasoning {
         match self {
             Self::DeepSeekReasoning(_) => Backend::DeepSeek,
             Self::OpenAIReasoning(_) => Backend::OpenAIPlan,
+            Self::ArgonReasoning(_) => Backend::GeminiInteractions,
         }
     }
 }
@@ -344,7 +362,10 @@ mod model_control_tests;
 
 #[cfg(test)]
 mod context_constructor_tests {
-    use super::{Backend, ContextBlock, ContextNativeKind, ContextRole, Model, OpenAIModel};
+    use super::{
+        ArgonEffort, Backend, ContextBlock, ContextNativeKind, ContextRole, Model, OpenAIModel,
+        Reasoning,
+    };
     use tidepool_bridge::{FromHaskell, HaskellValue, ToHaskell};
     use tidepool_repr::{DataCon, DataConId, DataConTable};
 
@@ -455,11 +476,19 @@ mod context_constructor_tests {
                 row(7, "Tidepool.Effects.Core", "Gpt61Sol", 0),
                 row(8, "Data.Text", "Text", 3),
                 row(9, "User", "DeepSeekFlash", 0),
+                row(10, "Tidepool.Effects.Core", "GeminiArgon", 0),
+                row(11, "Tidepool.Effects.Core", "GeminiInteractions", 0),
+                row(12, "Tidepool.Effects.Core", "ArgonReasoning", 1),
+                row(13, "Tidepool.Effects.Core", "EffortLow", 0),
+                row(14, "Tidepool.Effects.Core", "EffortMedium", 0),
+                row(15, "Tidepool.Effects.Core", "EffortHigh", 0),
             ])
             .unwrap();
         for model in [
             Model::DeepSeekFlash,
             Model::DeepSeekPro,
+            Model::GeminiArgon,
+            Model::CustomModel(Backend::GeminiInteractions, "custom".into()),
             Model::OpenAIModel(OpenAIModel::Gpt61Sol),
             Model::CustomModel(Backend::DeepSeek, "custom".into()),
             Model::CustomModel(Backend::OpenAIPlan, "custom".into()),
@@ -467,6 +496,16 @@ mod context_constructor_tests {
             let encoded = model.to_value(&table).unwrap();
             assert_eq!(Model::from_value(&encoded, &table).unwrap(), model);
         }
+        for effort in [
+            ArgonEffort::EffortLow,
+            ArgonEffort::EffortMedium,
+            ArgonEffort::EffortHigh,
+        ] {
+            let reasoning = Reasoning::ArgonReasoning(effort);
+            let encoded = reasoning.to_value(&table).unwrap();
+            assert_eq!(Reasoning::from_value(&encoded, &table).unwrap(), reasoning);
+        }
+        assert!(Reasoning::from_value(&HaskellValue::Con(DataConId(12), vec![]), &table).is_err());
         assert!(Model::from_value(&HaskellValue::Con(DataConId(9), vec![]), &table).is_err());
         assert_ne!(
             Model::CustomModel(Backend::DeepSeek, "same".into()).backend(),
@@ -477,6 +516,77 @@ mod context_constructor_tests {
             &table
         )
         .is_err());
+    }
+
+    #[test]
+    fn argon_selectors_require_backend_and_strict_effort() {
+        let backend = Backend::GeminiInteractions;
+        assert_eq!(
+            Backend::from_config_name("gemini_interactions").unwrap(),
+            backend
+        );
+        assert_eq!(backend.config_name(), "gemini_interactions");
+        assert_eq!(
+            Model::for_backend(backend, "gemini-4-argon"),
+            Model::GeminiArgon
+        );
+        assert_eq!(Model::GeminiArgon.value(), "gemini-4-argon");
+        assert_eq!(Model::GeminiArgon.backend(), backend);
+        assert_eq!(
+            Model::GeminiArgon.to_string(),
+            "gemini_interactions/gemini-4-argon"
+        );
+        for other in [Backend::DeepSeek, Backend::OpenAIPlan] {
+            assert_eq!(
+                Model::for_backend(other, "gemini-4-argon"),
+                Model::CustomModel(other, "gemini-4-argon".into())
+            );
+        }
+        assert_eq!(
+            Model::for_backend(backend, "future-model"),
+            Model::CustomModel(backend, "future-model".into())
+        );
+        for (effort, typed, wire) in [
+            ("low", ArgonEffort::EffortLow, "EffortLow"),
+            ("medium", ArgonEffort::EffortMedium, "EffortMedium"),
+            ("high", ArgonEffort::EffortHigh, "EffortHigh"),
+        ] {
+            let reasoning = Reasoning::for_backend(backend, effort).unwrap();
+            assert_eq!(reasoning, Reasoning::ArgonReasoning(typed));
+            assert_eq!(reasoning.value(), effort);
+            assert_eq!(reasoning.backend(), backend);
+            let encoded = serde_json::to_value(reasoning).unwrap();
+            assert_eq!(
+                encoded,
+                serde_json::json!({"tag":"ArgonReasoning", "contents": wire})
+            );
+            assert_eq!(
+                serde_json::from_value::<Reasoning>(encoded).unwrap(),
+                reasoning
+            );
+        }
+        for invalid in ["none", "max", "ultra", "LOW", "", "1024"] {
+            assert!(Reasoning::for_backend(backend, invalid).is_err());
+            assert!(serde_json::from_value::<Reasoning>(
+                serde_json::json!({"tag":"ArgonReasoning", "contents":invalid})
+            )
+            .is_err());
+        }
+        for invalid in [
+            serde_json::json!({"tag":"ArgonReasoning", "contents":1024}),
+            serde_json::json!({"tag":"ArgonReasoning", "contents":"EffortLow", "budget":1024}),
+        ] {
+            assert!(serde_json::from_value::<Reasoning>(invalid).is_err());
+        }
+        for model in [
+            Model::GeminiArgon,
+            Model::CustomModel(backend, "gemini-4-argon".into()),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<Model>(serde_json::to_value(&model).unwrap()).unwrap(),
+                model
+            );
+        }
     }
 
     #[test]

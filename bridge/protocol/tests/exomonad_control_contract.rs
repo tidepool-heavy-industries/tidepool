@@ -346,6 +346,13 @@ fn agent_launch_generates_shared_model_without_actor_owned_live_types() {
         .unwrap();
     for name in [
         "Backend",
+        "GeminiInteractions",
+        "GeminiArgon",
+        "ArgonEffort",
+        "ArgonReasoning",
+        "EffortLow",
+        "EffortMedium",
+        "EffortHigh",
         "DeepSeekFlash",
         "DeepSeekPro",
         "OpenAIModel",
@@ -398,13 +405,18 @@ fn inference_model_and_reasoning_wire_shapes_are_provider_qualified() {
         vec![
             ("DeepSeekFlash", vec![]),
             ("DeepSeekPro", vec![]),
+            ("GeminiArgon", vec![]),
             ("OpenAIModel", vec![HsType::Named("OpenAIModel")]),
             ("CustomModel", vec![HsType::Named("Backend"), HsType::Text]),
         ]
     );
     assert_eq!(
         shape("Backend"),
-        vec![("DeepSeek", vec![]), ("OpenAIPlan", vec![])]
+        vec![
+            ("DeepSeek", vec![]),
+            ("OpenAIPlan", vec![]),
+            ("GeminiInteractions", vec![])
+        ]
     );
     assert_eq!(
         shape("Reasoning"),
@@ -414,6 +426,7 @@ fn inference_model_and_reasoning_wire_shapes_are_provider_qualified() {
                 vec![HsType::Named("DeepSeekReasoning")]
             ),
             ("OpenAIReasoning", vec![HsType::Named("OpenAIReasoning")]),
+            ("ArgonReasoning", vec![HsType::Named("ArgonEffort")]),
         ]
     );
     assert_eq!(
@@ -423,6 +436,14 @@ fn inference_model_and_reasoning_wire_shapes_are_provider_qualified() {
             ("DeepSeekLow", vec![]),
             ("DeepSeekHigh", vec![]),
             ("DeepSeekMax", vec![]),
+        ]
+    );
+    assert_eq!(
+        shape("ArgonEffort"),
+        vec![
+            ("EffortLow", vec![]),
+            ("EffortMedium", vec![]),
+            ("EffortHigh", vec![])
         ]
     );
     assert_eq!(

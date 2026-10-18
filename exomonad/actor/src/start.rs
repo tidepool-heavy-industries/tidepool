@@ -16,7 +16,7 @@ use tidepool_runtime::session::{MaterializedFacade, OutputSink, ResidentHole, Re
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
 pub use tidepool_bridge_effects::{
-    Backend, DeepSeekReasoning, Model, OpenAIModel, OpenAIReasoning, Reasoning,
+    ArgonEffort, Backend, DeepSeekReasoning, Model, OpenAIModel, OpenAIReasoning, Reasoning,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]

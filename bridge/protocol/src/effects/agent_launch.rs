@@ -419,13 +419,13 @@ fn inference_type(name: &'static str, variants: Vec<(&'static str, Vec<HsType>)>
 
 fn context_types() -> Vec<TypeDef> {
     vec![
-        inference_type("Backend", vec![("DeepSeek", vec![]), ("OpenAIPlan", vec![])]),
+        inference_type("Backend", vec![("DeepSeek", vec![]), ("OpenAIPlan", vec![]), ("GeminiInteractions", vec![])]),
         inference_type("OpenAIModel", vec![
             ("Gpt61Sol", vec![]), ("Gpt6Sol", vec![]), ("Gpt6Astra", vec![]),
             ("Gpt6Luna", vec![]), ("Gpt56Sol", vec![]),
         ]),
         inference_type("Model", vec![
-            ("DeepSeekFlash", vec![]), ("DeepSeekPro", vec![]),
+            ("DeepSeekFlash", vec![]), ("DeepSeekPro", vec![]), ("GeminiArgon", vec![]),
             ("OpenAIModel", vec![HsType::Named("OpenAIModel")]),
             ("CustomModel", vec![HsType::Named("Backend"), HsType::Text]),
         ]),
@@ -436,9 +436,13 @@ fn context_types() -> Vec<TypeDef> {
         inference_type("OpenAIReasoning", vec![
             ("OpenAILow", vec![]), ("OpenAIMedium", vec![]), ("OpenAIHigh", vec![]),
         ]),
+        inference_type("ArgonEffort", vec![
+            ("EffortLow", vec![]), ("EffortMedium", vec![]), ("EffortHigh", vec![]),
+        ]),
         inference_type("Reasoning", vec![
             ("DeepSeekReasoning", vec![HsType::Named("DeepSeekReasoning")]),
             ("OpenAIReasoning", vec![HsType::Named("OpenAIReasoning")]),
+            ("ArgonReasoning", vec![HsType::Named("ArgonEffort")]),
         ]),
         TypeDef {
             name: "WorkerLifetime",
