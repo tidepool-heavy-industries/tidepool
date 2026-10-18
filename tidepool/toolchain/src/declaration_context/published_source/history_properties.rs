@@ -461,8 +461,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     }), "the issued output requires a previously permitted Root group with its exact carrier edge");
                     if outputs.insert(ordinal, output.descriptor.id).is_none() {
                         expected_roles.extend(output_role);
-                        expected_artifacts.insert(output.descriptor.id);
-                        expected_artifacts.insert(canonical.descriptor.id);
+                        expected_artifacts.extend([output.descriptor.id, canonical.descriptor.id]);
+                        expected_artifacts.sort_unstable();
                     }
                     let imports = [import];
                     let target = context.artifact_view().inventory()
