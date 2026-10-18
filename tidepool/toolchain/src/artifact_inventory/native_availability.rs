@@ -535,6 +535,27 @@ impl IssuedNativeOffer {
             })
     }
 
+    /// Matching complete body availability is independent of native namespace
+    /// roles. Other offers contribute only exact groups of projected originals.
+    pub(crate) fn is_admissible_to_projection(
+        &self,
+        projection: &CompilerInputProjection,
+    ) -> Result<bool, CompileError> {
+        if self.is_full() && self.has_matching_interface_role(projection) {
+            return Ok(true);
+        }
+        let originals = projection
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        Ok(originals.contains(&self.original())
+            || self
+                .issued_group_carriers()?
+                .keys()
+                .any(|group| originals.contains(&group.binding.artifact())))
+    }
+
     /// Current roles may stop offering an original, or stop qualifying its full
     /// census. Neither change authorizes an alternative ambient proof.
     #[track_caller]

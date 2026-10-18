@@ -2694,13 +2694,10 @@ impl CertifiedSourceSelection {
                 self.request_native_availability
                     .values()
                     .flat_map(|issued| {
-                        // Dependency-only partial offers need not bind their own
-                        // original. Preserve them as availability, not root intent.
                         issued
                             .availability
                             .offers()
                             .iter()
-                            .filter(|offer| offer.is_full())
                             .filter_map(|offer| offer.proof())
                     }),
             )
@@ -12896,6 +12893,69 @@ pub(crate) mod tests {
                     && group.original_ordinal == 197
             })
             .unwrap();
+        // Both production admission paths retain a complete body whose
+        // exact canonical is selected only for types.
+        for complete in [false, true] {
+            let admitted = if complete {
+                roles.admit_complete_native_products(
+                    full.artifacts(),
+                    vec![],
+                    &[schema_offer.clone()],
+                )
+            } else {
+                roles.admit_interfaces_with_native_offers(
+                    full.artifacts(),
+                    vec![],
+                    &[schema_offer.clone()],
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                admitted.capture_graph_selection().namespace,
+                full.artifacts().capture_graph_selection().namespace
+            );
+            assert_eq!(
+                admitted.selected_native_groups(),
+                full.artifacts().selected_native_groups()
+            );
+        }
+        let competing = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_in_unit_with_sites(
+                "main",
+                "DependencySchema",
+                vec![(191, vec![]), (195, vec![]), (197, vec![])],
+                154,
+                &BTreeMap::new(),
+                b"competing schema canonical".to_vec(),
+                &BTreeMap::new(),
+                &[],
+            ),
+            producer.sha256(),
+        )])
+        .remove(0)
+        .product;
+        let competing = Arc::new(ArtifactEntry::original(producer.sha256(), competing).unwrap());
+        let competing_roles =
+            CompilerInputProjection::from_issued_entries(&[competing.clone()]).unwrap();
+        for complete in [false, true] {
+            let refused = if complete {
+                competing_roles.admit_complete_native_products(
+                    full.artifacts(),
+                    vec![competing.clone()],
+                    &[schema_offer.clone()],
+                )
+            } else {
+                competing_roles.admit_interfaces_with_native_offers(
+                    full.artifacts(),
+                    vec![competing.clone()],
+                    &[schema_offer.clone()],
+                )
+            };
+            assert!(
+                matches!(refused, Err(crate::CompileError::ArtifactInventory(error))
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }))
+            );
+        }
         let root = tempfile::tempdir().unwrap();
         for carry_full in [false, true] {
             let mut offers = vec![consumer_offer.clone(), dependency_only.clone()];
@@ -12978,13 +13038,47 @@ pub(crate) mod tests {
                 .any(|availability| availability.offers().contains(&dependency_only)));
             assert!(selected
                 .native_original_requirements()
-                .all(|proof| proof.original != dependency_entry.descriptor.id));
+                .any(|proof| proof == dependency_only.proof().unwrap()));
             let closure = selected
                 .selected_original_closure(&inputs.artifacts)
                 .unwrap();
             assert!(closure.contains_original(consumer_entry.descriptor.id));
             assert!(!closure.contains_original(schema_entry.descriptor.id));
             assert!(!closure.contains_original(dependency_entry.descriptor.id));
+            // The same missing-own-root proof cannot satisfy a selected native
+            // original. Only dependency support may omit that nominal binding.
+            let mut rooted = selected.clone();
+            let crate::artifact_inventory::ArtifactPayload::Original(dependency_product) =
+                &dependency_entry.payload
+            else {
+                unreachable!()
+            };
+            Arc::make_mut(&mut rooted.modules).insert(
+                (
+                    dependency_product.owner().unit.clone(),
+                    dependency_product.owner().module.clone(),
+                ),
+                ReceiptSourceSelection::Native {
+                    interface: crate::artifact_inventory::ArtifactEntry::canonical(
+                        dependency_product.module_interface().unwrap().clone(),
+                    )
+                    .descriptor
+                    .id,
+                    native: ReceiptNativeSelection {
+                        owner: dependency_product.owner().clone(),
+                        version: ReceiptSourceVersion::Original,
+                        availability: ReceiptNativeAvailability::NewProduct {
+                            dependencies: vec![dependency_only.proof().unwrap().clone()],
+                        },
+                    },
+                },
+            );
+            assert!(
+                matches!(inputs.artifacts.inventory().admit_certified_with_demand(
+                &inputs.artifacts, entries.clone(), NativeArtifactDemand::ScopeInterfaces, &rooted,
+            ), Err(crate::CompileError::ArtifactInventory(error))
+                if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView { artifact: dependency_entry.descriptor.id })
+            );
             let membership = inputs
                 .available_original_sources(&products, &validation.inventory)
                 .unwrap();
@@ -13106,7 +13200,9 @@ pub(crate) mod tests {
                     let imports = admitted.expect(
                         "the already-issued full dependency body admits a newly demanded binder",
                     );
-                    let admitted = inventory
+                    let admitted = inputs
+                        .artifacts
+                        .inventory()
                         .admit_certified_with_demand(
                             &inputs.artifacts,
                             entries.clone(),

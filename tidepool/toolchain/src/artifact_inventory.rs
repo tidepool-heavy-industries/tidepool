@@ -3347,18 +3347,8 @@ impl ArtifactInventory {
         projection: &CompilerInputProjection,
         offers: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        let offered = projection
-            .roles()
-            .iter()
-            .filter_map(CompilerInputRole::original)
-            .collect::<BTreeSet<_>>();
         for offer in offers {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
+            if !offer.is_admissible_to_projection(projection)? {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: offer.original(),
@@ -3384,18 +3374,8 @@ impl ArtifactInventory {
         availability: &[IssuedNativeOffer],
         dependencies: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        let offered = projection
-            .roles()
-            .iter()
-            .filter_map(CompilerInputRole::original)
-            .collect::<BTreeSet<_>>();
         for offer in availability {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
+            if !offer.is_admissible_to_projection(projection)? {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: offer.original(),
@@ -3624,17 +3604,6 @@ impl ArtifactInventory {
         {
             let graph = selection.graph_selection();
             validate_issued_selection(&state, parent_nodes, graph)?;
-            if !graph
-                .bindings
-                .iter()
-                .any(|binding| binding.artifact == *original)
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootOutsideView {
-                        artifact: *original,
-                    },
-                ));
-            }
             // An unprojected issuer supplies authenticated support, not root
             // intent. Keep its proof intact, but consume only the closure of
             // groups belonging to current compiler roles. A backedge to the
@@ -3647,6 +3616,18 @@ impl ArtifactInventory {
             ) && namespace_ids
                 .as_ref()
                 .is_some_and(|ids| !ids.contains(original));
+            if !support_only
+                && !graph
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.artifact == *original)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: *original,
+                    },
+                ));
+            }
             let support_closure = support_only.then(|| {
                 admitted_closure(
                     &state,
