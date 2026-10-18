@@ -91,7 +91,7 @@ impl SealedOriginalCompileInput {
 
     /// Validate the complete compiler output before lending its requested type source.
     #[allow(clippy::too_many_arguments)]
-    pub fn original_source(
+    pub fn validated_original_source(
         &self,
         prepared: &PreparedProgram,
         groups: &[PendingCertifiedGroup],
@@ -130,7 +130,7 @@ impl SealedOriginalCompileInput {
         yield_sites: &[YieldSite],
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
         Ok(self
-            .original_source(
+            .validated_original_source(
                 prepared,
                 groups,
                 target_owners,
@@ -910,7 +910,7 @@ mod tests {
         proof: &SealedOriginalCompileInput,
     ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
         proof
-            .original_source(
+            .validated_original_source(
                 &proof.target,
                 &proof.groups,
                 &proof.target_owners,
@@ -1006,7 +1006,7 @@ mod tests {
         ] {
             let proof = package_context_proof(producer);
             let source = proof
-                .original_source(
+                .validated_original_source(
                     &proof.target,
                     &proof.groups,
                     &proof.target_owners,
@@ -1096,7 +1096,7 @@ mod tests {
             });
         let changed = tidepool_repr::execution_schema::testing::prepare(changed).unwrap();
         assert!(first_proof
-            .original_source(
+            .validated_original_source(
                 &changed,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1126,7 +1126,7 @@ mod tests {
             })
             .expect("valid fixture metadata");
         assert!(first_proof
-            .original_source(
+            .validated_original_source(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1148,7 +1148,7 @@ mod tests {
             request_type_signatures: None,
         }];
         assert!(first_proof
-            .original_source(
+            .validated_original_source(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,

@@ -16440,7 +16440,7 @@ mod tests {
     }
 
     #[test]
-    fn original_custody_keeps_nonlexical_originals_and_projected_file_custody() {
+    fn retained_custody_keeps_nonlexical_originals_and_projected_file_custody() {
         let (initial, producer) = metadata_fixture();
         let native = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_witness_fixture(
@@ -16566,10 +16566,7 @@ mod tests {
                 value_entry[&identity("fixture", "Value")].descriptor.id,
             ])
             .unwrap();
-        let retained = context
-            .artifact_view()
-            .retain_original_custody(&value)
-            .unwrap();
+        let retained = value.retain_custody(context.artifact_view()).unwrap();
         let lexical = context
             .retain_value_source_surface(&value, &[])
             .unwrap()
@@ -16602,16 +16599,12 @@ mod tests {
             .iter()
             .all(|descriptor| descriptor.kind
                 != crate::artifact_inventory::ArtifactKind::OriginalModule));
-        assert!(retained
-            .descriptors()
-            .iter()
-            .all(|descriptor| descriptor.owner.module != "Joined"));
         assert!(
             matches!(recover_fixture_compiler_support(
             context.compiler_input_projection().clone(), retained.clone(), [],
         ), Err(CompileError::ExtractFailed(detail))
             if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
-            "the former Joined compiler role cannot outlive its retained interface"
+            "retained custody cannot restore the unselected Joined compiler role"
         );
         let hidden_original = retained
             .descriptors()

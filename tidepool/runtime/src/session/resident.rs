@@ -120,7 +120,7 @@ impl CompiledProvenancePlan {
                 }
                 TurnPurpose::Ordinary => {
                     certification.original_compile_input.as_ref().map(|proof| {
-                        proof.original_source(
+                        proof.validated_original_source(
                             code.prepared(),
                             &certification.groups,
                             &certification.target_owners,

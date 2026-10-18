@@ -13796,10 +13796,17 @@ pub(crate) mod tests {
                 let custody = if broaden {
                     // A separately issued complete carrier is legitimate new custody;
                     // it cannot rewrite this earlier request's availability choice.
-                    inventory
-                        .admit_shared(request.compiler_inputs().artifacts(), vec![entry.clone()])
-                        .unwrap()
-                        .retain_original_custody(request.compiler_inputs().artifacts())
+                    request
+                        .compiler_inputs()
+                        .artifacts()
+                        .retain_custody(
+                            &inventory
+                                .admit_shared(
+                                    request.compiler_inputs().artifacts(),
+                                    vec![entry.clone()],
+                                )
+                                .unwrap(),
+                        )
                         .unwrap()
                 } else {
                     request.compiler_inputs().artifacts().clone()
