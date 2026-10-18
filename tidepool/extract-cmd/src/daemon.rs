@@ -6302,6 +6302,33 @@ tidepool-reuse-error: witness failed\n";
         std::fs::remove_file(socket).ok();
     }
 
+    #[test]
+    fn transaction_v4_cannot_cross_a_legacy_daemon_acceptance_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("legacy.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let magic = read_exact_or_crash(&mut connection, 8).unwrap();
+            // The predecessor owns a different grammar and never accepts this
+            // connection. No response frame can be decoded as a v4 event.
+            assert_ne!(magic, b"TPDTR003");
+            drop(connection);
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        });
+        let error = begin_transaction(&socket, &[0; 32]).unwrap_err();
+        assert!(!error.was_accepted());
+        assert!(
+            !error.permits_rebind(),
+            "lost acceptance evidence cannot authorize a replay"
+        );
+        server.join().unwrap();
+    }
+
     fn retirement_fixture(parsed: u64, emitted: u64) -> DaemonTerminal {
         DaemonTerminal {
             epoch: [0; 32],
@@ -7231,6 +7258,18 @@ tidepool-reuse-error: witness failed\n";
                 )]
                 std::thread::sleep(Duration::from_millis(10));
             };
+            let mut legacy = UnixStream::connect(&socket).unwrap();
+            legacy
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            legacy.write_all(b"TPDTR003").unwrap();
+            let mut refused = [0];
+            assert_eq!(
+                legacy.read(&mut refused).unwrap(),
+                0,
+                "old transaction grammar must close before acceptance"
+            );
+            drop(legacy);
             let cancellation = crate::CompilerTransactionCancellation::new();
             let mut transaction =
                 begin_transaction_with_cancellation(&socket, &binding.epoch, Some(&cancellation))
