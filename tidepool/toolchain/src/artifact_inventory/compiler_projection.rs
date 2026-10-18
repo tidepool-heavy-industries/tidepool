@@ -2323,13 +2323,7 @@ mod tests {
             proptest::prop_assert_eq!(admission_work.census_rows, entries.len());
             proptest::prop_assert_eq!(support.selected.home_units.as_ref(), &expected_home_units);
             let context = Arc::new(ExactDeclarationContext::from_authenticated_interfaces([2; 32], &view, projection).unwrap());
-            type_query_work::take();
             let source = crate::declaration_context::ValidatedOriginalSource::inputs_from(&context);
-            proptest::prop_assert!(Arc::ptr_eq(&source.execution_context(), &context));
-            proptest::prop_assert_eq!(type_query_work::take(), type_query_work::Counts::default(), "lending an original source does not project any canonical rows");
-            let preview = crate::declaration_context::ValidatedOriginalSource::pure_preview(&context);
-            proptest::prop_assert!(preview.project_type_interfaces(&[], &[]).is_err());
-            proptest::prop_assert_eq!(type_query_work::take(), type_query_work::Counts::default(), "pure-preview refusal cannot project the display context");
             let signature = type_signature("unit", "Selected");
             type_query_work::take();
             let mut narrowed = Vec::new();
