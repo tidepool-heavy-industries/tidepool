@@ -18100,25 +18100,22 @@ pub(crate) mod request_tests {
         let observation = cleanup.wait_for_settlement(Duration::from_secs(5)).await;
         assert!(observation.admission_closed, "{observation:?}");
         assert!(
-            !observation.is_confirmed(),
-            "disconnect cannot acknowledge END"
+            observation.is_confirmed(),
+            "the exact daemon worker must report retirement after cancellation"
         );
         let mut cancelled_receipts = 0;
         for receipt in &observation.work {
             match receipt {
                 crate::termination::CompilerWorkClose::Settled(
-                    tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence),
+                    tidepool_runtime::CompilerTransactionClose::Retired(evidence),
                 ) => {
                     assert_eq!(
                         evidence.reason,
                         tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
                     );
-                    assert_eq!(
-                        evidence.retirement,
-                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
-                            disconnect: Some(Ok(())),
-                        },
-                    );
+                    assert!(matches!(&evidence.retirement,
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonObserved(_)),
+                        "cancellation requires the daemon's issued worker-retirement receipt: {evidence:?}");
                     assert!(evidence.earlier.is_empty(), "{evidence:?}");
                     cancelled_receipts += 1;
                 }
@@ -18129,7 +18126,7 @@ pub(crate) mod request_tests {
         assert_eq!(
             cleanup.observation(),
             observation,
-            "successful recovery cannot confirm the earlier disconnected request"
+            "recovery preserves the earlier exact retirement observation instead of replacing its cancelled action"
         );
     }
 

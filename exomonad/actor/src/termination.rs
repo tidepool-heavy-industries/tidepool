@@ -1850,7 +1850,7 @@ mod tests {
             (&cancelled, crate::CellExitCause::Cancelled),
         ] {
             let exit = crate::CellExit::from_reply(
-                execution,
+                execution.clone(),
                 reply,
                 owner.cleanup().unwrap().is_confirmed(),
                 false,
