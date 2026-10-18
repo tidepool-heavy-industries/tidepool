@@ -83,12 +83,28 @@
 
 use std::time::{Duration, Instant};
 
-/// Disjoint child intervals of one synchronous compile invocation. The enclosing
-/// tracing span carries its output scope and the endpoint's physical request
-/// identification. Nested invocations still have separate inclusive scopes.
-pub(crate) struct InvocationTiming(Option<InvocationInterval>);
+/// Sequential diagnostic intervals within one synchronous owning scope.
+/// Parent and child sequences are inclusive and must not be summed together.
+/// Existing tracing spans retain the output/cell/request correlation.
+#[doc(hidden)]
+pub struct InvocationTiming {
+    current: Option<InvocationInterval>,
+    summary: Option<InvocationSummary>,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+struct InvocationSummary {
+    sequence: &'static str,
+    wall: Instant,
+    monotonic_ns: Option<u64>,
+    thread_cpu_ns: Option<u64>,
+    phase_count: u64,
+    phase_wall_ns: u64,
+    phase_thread_cpu_ns: Option<u64>,
+}
 
 struct InvocationInterval {
+    sequence: &'static str,
     phase: &'static str,
     wall: Instant,
     monotonic_ns: Option<u64>,
@@ -97,13 +113,30 @@ struct InvocationInterval {
 
 impl InvocationTiming {
     pub(crate) fn start(phase: &'static str) -> Self {
-        Self(
-            tracing::enabled!(target: "exomonad_harness::timing", tracing::Level::DEBUG)
-                .then(|| InvocationInterval::start(phase)),
-        )
+        Self::start_scoped("compile.invocation", phase)
     }
 
-    pub(crate) fn advance(&mut self, phase: &'static str) {
+    #[doc(hidden)]
+    pub fn start_scoped(sequence: &'static str, phase: &'static str) -> Self {
+        let current = tracing::enabled!(target: "exomonad_harness::timing", tracing::Level::DEBUG)
+            .then(|| InvocationInterval::start(sequence, phase));
+        let summary = current.as_ref().map(|interval| InvocationSummary {
+            sequence,
+            wall: interval.wall,
+            monotonic_ns: interval.monotonic_ns,
+            thread_cpu_ns: interval.thread_cpu_ns,
+            phase_count: 0,
+            phase_wall_ns: 0,
+            phase_thread_cpu_ns: Some(0),
+        });
+        Self {
+            current,
+            summary,
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+
+    pub fn advance(&mut self, phase: &'static str) {
         self.transition(phase, "complete");
     }
 
@@ -112,34 +145,74 @@ impl InvocationTiming {
     }
 
     fn transition(&mut self, phase: &'static str, outcome: &'static str) {
-        if let Some(interval) = self.0.take() {
-            interval.emit(outcome);
-            self.0 = Some(InvocationInterval::start(phase));
+        if let Some(interval) = self.current.take() {
+            let sequence = interval.sequence;
+            self.record(interval.emit(outcome));
+            self.current = Some(InvocationInterval::start(sequence, phase));
         }
     }
 
-    pub(crate) fn finish(mut self, success: bool) {
-        if let Some(interval) = self.0.take() {
-            interval.emit(if success { "complete" } else { "error" });
+    fn record(&mut self, (wall_ns, thread_cpu_ns): (u64, Option<u64>)) {
+        if let Some(summary) = &mut self.summary {
+            summary.phase_count += 1;
+            summary.phase_wall_ns = summary.phase_wall_ns.saturating_add(wall_ns);
+            summary.phase_thread_cpu_ns = summary
+                .phase_thread_cpu_ns
+                .zip(thread_cpu_ns)
+                .and_then(|(sum, value)| sum.checked_add(value));
         }
+    }
+
+    fn close(&mut self, outcome: &'static str) {
+        if let Some(interval) = self.current.take() {
+            self.record(interval.emit(outcome));
+        }
+        if let Some(summary) = self.summary.take() {
+            let end_ns = observed_clock_ns(libc::CLOCK_MONOTONIC);
+            let wall_ns = summary
+                .monotonic_ns
+                .zip(end_ns)
+                .and_then(|(start, end)| end.checked_sub(start))
+                .unwrap_or_else(|| summary.wall.elapsed().as_nanos() as u64);
+            let thread_cpu_ns = summary
+                .thread_cpu_ns
+                .zip(observed_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID))
+                .and_then(|(start, end)| end.checked_sub(start));
+            tracing::debug!(target: "exomonad_harness::timing",
+                schema = 1, sequence = summary.sequence, outcome,
+                clock_domain = "CLOCK_MONOTONIC", inclusive = true,
+                coverage = "sequential_phase_intervals",
+                start_ns = summary.monotonic_ns, end_ns, wall_ns,
+                phase_count = summary.phase_count,
+                phase_wall_ns = summary.phase_wall_ns,
+                unaccounted_wall_ns = wall_ns.checked_sub(summary.phase_wall_ns),
+                cpu_scope = "current_thread", thread_cpu_ns,
+                phase_thread_cpu_ns = summary.phase_thread_cpu_ns,
+                unaccounted_thread_cpu_ns = thread_cpu_ns.zip(summary.phase_thread_cpu_ns)
+                    .and_then(|(total, phases)| total.checked_sub(phases)),
+                "compile phase sequence");
+        }
+    }
+
+    pub fn finish(mut self, success: bool) {
+        self.close(if success { "complete" } else { "error" });
     }
 }
 
 impl Drop for InvocationTiming {
     fn drop(&mut self) {
-        if let Some(interval) = self.0.take() {
-            interval.emit(if std::thread::panicking() {
-                "panic"
-            } else {
-                "error"
-            });
-        }
+        self.close(if std::thread::panicking() {
+            "panic"
+        } else {
+            "early_exit"
+        });
     }
 }
 
 impl InvocationInterval {
-    fn start(phase: &'static str) -> Self {
+    fn start(sequence: &'static str, phase: &'static str) -> Self {
         Self {
+            sequence,
             phase,
             wall: Instant::now(),
             monotonic_ns: observed_clock_ns(libc::CLOCK_MONOTONIC),
@@ -147,7 +220,7 @@ impl InvocationInterval {
         }
     }
 
-    fn emit(self, outcome: &'static str) {
+    fn emit(self, outcome: &'static str) -> (u64, Option<u64>) {
         let end_ns = observed_clock_ns(libc::CLOCK_MONOTONIC);
         let wall_ns = self
             .monotonic_ns
@@ -159,13 +232,15 @@ impl InvocationInterval {
             .zip(observed_clock_ns(libc::CLOCK_THREAD_CPUTIME_ID))
             .and_then(|(start, end)| end.checked_sub(start));
         tracing::debug!(target: "exomonad_harness::timing",
-            schema = 1, phase = self.phase, outcome,
+            schema = 1, sequence = self.sequence, phase = self.phase, outcome,
             clock_domain = "CLOCK_MONOTONIC", inclusive = true,
-            sequential_within_invocation = true,
+            sequential_within_sequence = true,
+            sequential_within_invocation = self.sequence == "compile.invocation",
             start_ns = self.monotonic_ns, end_ns,
             wall_ns,
             cpu_scope = "current_thread", thread_cpu_ns,
             "compile invocation phase");
+        (wall_ns, thread_cpu_ns)
     }
 }
 
@@ -771,10 +846,13 @@ mod tests {
             let mut retry = InvocationTiming::start("first_attempt");
             retry.retry("second_attempt");
             retry.finish(true);
+            let scoped = InvocationTiming::start_scoped("cell_program.admit", "diagnostics");
+            scoped.finish(true);
         });
         let rows = rows.lock().unwrap();
         let outcomes: Vec<_> = rows
             .iter()
+            .filter(|row| row["message"] == "compile invocation phase")
             .map(|row| (row["phase"].as_str(), row["outcome"].as_str()))
             .collect();
         assert_eq!(
@@ -782,20 +860,55 @@ mod tests {
             [
                 ("\"prepare\"", "\"complete\""),
                 ("\"execute\"", "\"complete\""),
-                ("\"refusal\"", "\"error\""),
+                ("\"refusal\"", "\"early_exit\""),
                 ("\"unwind\"", "\"panic\""),
                 ("\"first_attempt\"", "\"error\""),
                 ("\"second_attempt\"", "\"complete\""),
+                ("\"diagnostics\"", "\"complete\""),
             ]
         );
         for row in rows.iter() {
             assert_eq!(row["inclusive"], "true");
-            assert_eq!(row["sequential_within_invocation"], "true");
             let start: u64 = row["start_ns"].parse().unwrap();
             let end: u64 = row["end_ns"].parse().unwrap();
             assert_eq!(row["wall_ns"].parse::<u64>().unwrap(), end - start);
             assert_eq!(row["cpu_scope"], "\"current_thread\"");
+            if row["message"] == "compile invocation phase" {
+                assert_eq!(row["sequential_within_sequence"], "true");
+                assert_eq!(
+                    row["sequential_within_invocation"],
+                    if row["sequence"] == "\"compile.invocation\"" {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                );
+            } else {
+                let phases: u64 = row["phase_wall_ns"].parse().unwrap();
+                let remainder: u64 = row["unaccounted_wall_ns"].parse().unwrap();
+                assert_eq!(phases + remainder, end - start);
+            }
         }
+        let summaries: Vec<_> = rows
+            .iter()
+            .filter(|row| row["message"] == "compile phase sequence")
+            .map(|row| (row["phase_count"].as_str(), row["outcome"].as_str()))
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                ("2", "\"complete\""),
+                ("1", "\"early_exit\""),
+                ("1", "\"panic\""),
+                ("2", "\"complete\""),
+                ("1", "\"complete\"")
+            ]
+        );
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            let disabled = InvocationTiming::start_scoped("disabled", "unobserved");
+            assert!(disabled.current.is_none());
+            assert!(disabled.summary.is_none());
+        });
     }
 
     #[test]

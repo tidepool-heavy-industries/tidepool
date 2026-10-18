@@ -214,6 +214,11 @@ impl CompilerDiagnosticCapture {
         command: &ExtractCmd,
         stage: DiagnosticStage<'_>,
     ) -> io::Result<()> {
+        let _span = tracing::debug_span!(target: "exomonad_harness::timing", "compiler.diagnostic_capture", inclusive = true, output_dir = %directory.display(), diagnostic_stage = stage.phase()).entered();
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "compiler.diagnostic_capture",
+            "write_request_and_cwd",
+        );
         std::fs::write(
             directory.join("compiler-request.bin"),
             command.request_bytes(),
@@ -222,6 +227,7 @@ impl CompilerDiagnosticCapture {
             directory.join("compiler-cwd.bin"),
             std::env::current_dir()?.as_os_str().as_encoded_bytes(),
         )?;
+        timing.advance("output_tree_snapshot_read_hash");
         let mut snapshot = Snapshot {
             remaining: BYTE_LIMIT,
             entries: ENTRY_LIMIT,
@@ -232,6 +238,7 @@ impl CompilerDiagnosticCapture {
             snapshot.issues.push(error.to_string());
         }
         if let DiagnosticStage::Completed { stderr, .. } = &stage {
+            timing.advance("retain_stderr");
             let limit = 4 << 20;
             std::fs::write(
                 directory.join("compiler.stderr"),
@@ -242,12 +249,18 @@ impl CompilerDiagnosticCapture {
                     .issues
                     .push("compiler stderr exceeds 4 MiB diagnostic bound".into());
             }
+            timing.advance("consumed_source_retention");
             if let Err(error) = super::failure_sources::retain(directory, snapshot.issues.clone()) {
                 snapshot
                     .issues
                     .push(format!("consumed source diagnostics: {error}"));
             }
         }
+        timing.advance("construct_transaction_report");
+        tracing::debug!(target: "exomonad_harness::timing",
+            artifact_bytes = BYTE_LIMIT - snapshot.remaining,
+            artifact_files = snapshot.files.len(),
+            "diagnostic snapshot counts");
         let report = serde_json::json!({
             "schema": 1, "kind": "compiler-execution-diagnostics", "authority": false,
             "original_directory": source, "phase": stage.phase(),
@@ -258,9 +271,15 @@ impl CompilerDiagnosticCapture {
             "artifact_bytes": BYTE_LIMIT - snapshot.remaining, "files": snapshot.files,
             "issues": snapshot.issues,
         });
+        timing.advance("encode_and_write_transaction_report");
         let pending = directory.join("transaction.json.pending");
         std::fs::write(&pending, serde_json::to_vec_pretty(&report)?)?;
-        std::fs::rename(pending, directory.join("transaction.json"))
+        std::fs::rename(pending, directory.join("transaction.json"))?;
+        timing.advance("temporary_report_and_snapshot_drop");
+        drop(report);
+        drop(snapshot);
+        timing.finish(true);
+        Ok(())
     }
 }
 

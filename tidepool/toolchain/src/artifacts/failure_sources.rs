@@ -119,6 +119,11 @@ impl Retention {
         if self.sources.len() >= ENTRY_LIMIT {
             return Err(io::Error::other("declared source inventory exceeds 4096"));
         }
+        let _span = tracing::debug_span!(target: "exomonad_harness::timing", "diagnostics.source_capture", inclusive = true, source = %source.path.display()).entered();
+        let capture_timing = crate::timing::InvocationTiming::start_scoped(
+            "diagnostics.source_capture",
+            "read_hash_copy_and_capture_row",
+        );
         let capture = if !source.path.is_absolute() {
             Capture::Unavailable {
                 reason: "declared source path is not absolute".into(),
@@ -126,6 +131,7 @@ impl Retention {
         } else {
             match self.read(&source.path, BYTE_LIMIT) {
                 Ok(bytes) => {
+                    tracing::debug!(target: "exomonad_harness::timing", bytes = bytes.len(), "diagnostic source bytes read");
                     let observed_sha256 = crate::checked_cell::hash(&bytes);
                     if observed_sha256 != source.sha256 {
                         Capture::Drift { observed_sha256 }
@@ -158,6 +164,7 @@ impl Retention {
                 capture,
             },
         );
+        capture_timing.finish(true);
         Ok(())
     }
 
@@ -180,6 +187,11 @@ impl Retention {
             return Ok(());
         }
         self.inventories_discovered += 1;
+        let _span = tracing::debug_span!(target: "exomonad_harness::timing", "diagnostics.source_inventory", inclusive = true, relative = %relative.display(), graph).entered();
+        let mut inventory_timing = crate::timing::InvocationTiming::start_scoped(
+            "diagnostics.source_inventory",
+            "read_and_decode_inventory",
+        );
         let limit = if graph {
             crate::execution_source::GRAPH_BYTES_LIMIT as u64
         } else {
@@ -200,6 +212,7 @@ impl Retention {
         });
         match sources {
             Ok(sources) => {
+                inventory_timing.advance("capture_consumed_sources");
                 self.inventories_decoded += 1;
                 for source in sources {
                     self.capture(root, relative, source)?;
@@ -207,6 +220,7 @@ impl Retention {
             }
             Err(error) => self.issues.push(format!("{}: {error}", relative.display())),
         }
+        inventory_timing.finish(true);
         Ok(())
     }
 
@@ -244,6 +258,10 @@ pub(super) fn retain(root: &Path, prior_issues: Vec<String>) -> io::Result<()> {
 }
 
 fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) -> io::Result<()> {
+    let mut retention_timing = crate::timing::InvocationTiming::start_scoped(
+        "diagnostics.consumed_sources",
+        "second_tree_walk_and_retention",
+    );
     fs::create_dir(root.join("consumed-sources"))?;
     let mut retention = Retention {
         remaining: byte_limit,
@@ -262,6 +280,7 @@ fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) ->
             .issues
             .push("no declared source inventory discovered".into());
     }
+    retention_timing.advance("construct_consumed_source_manifest");
     let complete = retention.issues.is_empty()
         && retention
             .sources
@@ -277,6 +296,7 @@ fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) ->
         issues: retention.issues,
         sources: retention.sources.into_values().collect(),
     };
+    tracing::debug!(target: "exomonad_harness::timing", bytes_read = manifest.bytes_read, inventories_discovered = manifest.inventories_discovered, inventories_decoded = manifest.inventories_decoded, captured_sources = manifest.sources.len(), "diagnostic consumed source counts");
     struct BoundedWriter {
         file: fs::File,
         remaining: usize,
@@ -296,6 +316,7 @@ fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) ->
             io::Write::flush(&mut self.file)
         }
     }
+    retention_timing.advance("encode_and_write_consumed_source_manifest");
     let path = root.join("consumed-sources.json");
     let writer = BoundedWriter {
         file: fs::File::create(&path)?,
@@ -304,7 +325,8 @@ fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) ->
     if let Err(error) = serde_json::to_writer_pretty(writer, &manifest) {
         // Keep a valid explicit partial report even if metadata itself exceeds
         // its bound; the original retained inventory files remain unchanged.
-        return serde_json::to_writer(
+        retention_timing.advance("write_partial_consumed_source_manifest");
+        let result = serde_json::to_writer(
             fs::File::create(path)?,
             &serde_json::json!({
                 "scope": manifest.scope,
@@ -318,7 +340,14 @@ fn retain_with_limit(root: &Path, byte_limit: u64, prior_issues: Vec<String>) ->
             }),
         )
         .map_err(io::Error::other);
+        retention_timing.advance("temporary_consumed_manifest_drop");
+        drop(manifest);
+        retention_timing.finish(result.is_ok());
+        return result;
     }
+    retention_timing.advance("temporary_consumed_manifest_drop");
+    drop(manifest);
+    retention_timing.finish(true);
     Ok(())
 }
 

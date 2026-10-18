@@ -938,6 +938,11 @@ impl ItemAdmission<'_> {
         generation: u64,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
+        let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.item", inclusive = true, ordinal = self.ordinal).entered();
+        let mut timing = timing::InvocationTiming::start_scoped(
+            "products.cell_program.item",
+            "read_and_seal_output",
+        );
         let produced = self.segment.produced_types.for_item(self.ordinal)?;
         let directory = root.join(format!("item-{}", self.ordinal));
         let output = self.segment.offer.read_program_output(
@@ -955,6 +960,7 @@ impl ItemAdmission<'_> {
             },
             validation,
         )?;
+        timing.advance("support_context_continuation");
         let mut request = self.cursor.request.clone();
         let next_context = self.segment.offer.admit_program_support(
             &mut request,
@@ -963,18 +969,21 @@ impl ItemAdmission<'_> {
             &self.segment.source,
             Some(&produced),
         )?;
+        timing.advance("value_context_extension");
         let next_context = self.segment.offer.admit_program_value(
             next_context,
             generation,
             &output.turn,
             &produced,
         )?;
+        timing.advance("cursor_advance");
         // All fallible admission work precedes the single prefix/demand advance.
         let products = output.products.as_ref().expect("program output was sealed");
         self.cursor.native_prefix = SegmentNativePrefix::Advanced(Arc::clone(products));
         self.cursor.request = request;
         self.cursor.context = next_context;
         self.cursor.next += 1;
+        timing.finish(true);
         Ok(output)
     }
 }
@@ -2215,6 +2224,10 @@ impl SelectedModuleCandidateOffer {
     ) -> Result<PreparedCellProgram, CompileError> {
         use crate::cell_plan::ParsedCellPlanKind;
         use crate::checked_cell::{self, CheckedPlannedCellSlot};
+        let mut preparation_timing = timing::InvocationTiming::start_scoped(
+            "products.cell_program.prepare",
+            "input_owners_and_typed_segments",
+        );
         let specification = self.checked_cell.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("program has no source specification".into())
         })?;
@@ -2239,12 +2252,14 @@ impl SelectedModuleCandidateOffer {
         // One host admission observes package bytes once across all original
         // outputs. The next admission starts a fresh filesystem observation.
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        preparation_timing.advance("capture_produced_types");
         let produced_outputs = values.capture_produced_types(
             initial.producer_sha256,
             planned,
             0..planned.slots.len(),
             &mut validation,
         )?;
+        preparation_timing.advance("planned_item_admissions");
         let mut declarations = BTreeMap::new();
         let mut pending_segments = Vec::new();
         let mut outputs = BTreeMap::new();
@@ -2258,6 +2273,11 @@ impl SelectedModuleCandidateOffer {
             );
             let segment_root = root.join(format!("segment-{segment}"));
             if declaration {
+                let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.declaration", inclusive = true, ordinal = index, segment).entered();
+                let mut declaration_timing = timing::InvocationTiming::start_scoped(
+                    "products.cell_program.declaration",
+                    "context_and_source_specification",
+                );
                 let generation = match planned.slots[index] {
                     CheckedPlannedCellSlot::Prologue { declaration }
                     | CheckedPlannedCellSlot::Declaration { declaration } => declaration,
@@ -2277,6 +2297,7 @@ impl SelectedModuleCandidateOffer {
                             .module_name(),
                     ];
                 let produced_types = produced_outputs.for_segment(index..index)?;
+                declaration_timing.advance("admit_and_seal_planned_declaration");
                 let original = effective
                     .admit_planned_declaration(
                         &segment_root,
@@ -2290,6 +2311,7 @@ impl SelectedModuleCandidateOffer {
                             "program original declaration output is absent".into(),
                         )
                     })?;
+                declaration_timing.advance("source_lexical_and_context_extension");
                 let mut lexical = context
                     .lexical_graph()
                     .iter()
@@ -2361,6 +2383,7 @@ impl SelectedModuleCandidateOffer {
                             .collect(),
                     )?,
                 );
+                declaration_timing.advance("private_input_context_continuation");
                 program_request = program_request.in_program_context_with_private_input(
                     &root.join("program-inputs"),
                     context.clone(),
@@ -2368,7 +2391,13 @@ impl SelectedModuleCandidateOffer {
                 )?;
                 declarations.insert(index, original);
                 index += 1;
+                declaration_timing.finish(true);
             } else {
+                let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.segment_setup", inclusive = true, first_ordinal = index, segment).entered();
+                let mut segment_timing = timing::InvocationTiming::start_scoped(
+                    "products.cell_program.segment_setup",
+                    "context_and_source_receipts",
+                );
                 let end = planned.parsed_plan.items()[index..]
                     .iter()
                     .position(|item| {
@@ -2383,12 +2412,14 @@ impl SelectedModuleCandidateOffer {
                 let mut source_segment = segment_input.admit_program_segment(&segment_root)?;
                 let produced_types = produced_outputs.for_segment(index..end)?;
                 let segment_offer = self.program_offer(segment_input);
+                segment_timing.advance("certify_segment_original_products");
                 segment_offer.admit_segment_original_products(
                     &segment_root,
                     &mut source_segment,
                     &produced_types,
                     &mut validation,
                 )?;
+                segment_timing.advance("bind_segment_custody");
                 let physical = segment_offer.exact.as_ref().expect("exact segment");
                 let artifacts =
                     crate::declaration_context::bind_certified_segment_artifacts_with_validation(
@@ -2396,6 +2427,7 @@ impl SelectedModuleCandidateOffer {
                         physical.compiler_inputs().artifacts(),
                         &mut validation,
                     )?;
+                segment_timing.advance("initialize_segment_cursor");
                 let mut bound = BoundSegment {
                     artifacts,
                     offer: segment_offer,
@@ -2411,6 +2443,8 @@ impl SelectedModuleCandidateOffer {
                     request: bound.offer.exact.as_ref().expect("exact segment").clone(),
                     context,
                 };
+                segment_timing.finish(true);
+                drop(_span);
                 while index < end {
                     let generation = match &planned.slots[index] {
                         CheckedPlannedCellSlot::Bind { value } => *value,
@@ -2438,6 +2472,7 @@ impl SelectedModuleCandidateOffer {
             }
             segment += 1;
         }
+        preparation_timing.advance("final_checked_cell_admission");
         let cell = checked_cell::admit_checked_cell(
             root,
             &self.producer,
@@ -2455,6 +2490,7 @@ impl SelectedModuleCandidateOffer {
             declarations,
             Some(planned),
         )?;
+        preparation_timing.advance("capture_prepared_items");
         let mut prepared_items = BTreeMap::new();
         for (&index, output) in &outputs {
             let (generation, observation) = match &planned.slots[index] {
@@ -2488,7 +2524,8 @@ impl SelectedModuleCandidateOffer {
             )?;
             prepared_items.insert(index, prepared);
         }
-        Ok(PreparedCellProgram {
+        preparation_timing.advance("assemble_prepared_owner");
+        let prepared = PreparedCellProgram {
             root_owner: None,
             checked: cell,
             planned: planned.clone(),
@@ -2499,7 +2536,12 @@ impl SelectedModuleCandidateOffer {
             prepared_items,
             pending_segments,
             validation,
-        })
+        };
+        preparation_timing.advance("temporary_request_and_segments_drop");
+        drop(program_request);
+        drop(typed_segments);
+        preparation_timing.finish(true);
+        Ok(prepared)
     }
 
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
@@ -2703,6 +2745,10 @@ impl SelectedModuleCandidateOffer {
         source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+        let mut support_timing = timing::InvocationTiming::start_scoped(
+            "products.cell_program.support",
+            "source_owner_and_support_projection",
+        );
         let generated =
             crate::declaration_context::ExactSourceAdmission::matching_generated_source_owner(
                 source_segment.admissions(),
@@ -2717,14 +2763,17 @@ impl SelectedModuleCandidateOffer {
             &generated,
         )?;
         let sealed = output.products.as_ref().expect("program output was sealed");
+        support_timing.advance("compiler_input_continuation");
         let private = sealed
             .original_compiler_inputs()?
             .for_program_continuation(&support, source_segment.admissions(), &output.source)?;
+        support_timing.advance("private_input_context");
         let mut continued = request.in_program_context_with_private_input(
             &output.directory.join("private-compiler-inputs"),
             context.clone(),
             &private,
         )?;
+        support_timing.advance("publish_segment_support_context");
         let published = continued.admit_program_segment_support_with_selection(
             context,
             &support,
@@ -2736,7 +2785,9 @@ impl SelectedModuleCandidateOffer {
                 .expect("program output was sealed")
                 .source_selection,
         )?;
+        support_timing.advance("replace_previous_request");
         *request = continued;
+        support_timing.finish(true);
         Ok(published)
     }
 

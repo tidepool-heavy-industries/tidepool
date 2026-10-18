@@ -3229,13 +3229,26 @@ fn prepare_cell_program_admitted_inner(
         .in_scope(|| endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))).map_err(|error| {
         offer.retain_execution_failure(scratch.path(), &command, error)
     })?;
-    let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true).entered();
+    let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true, output_dir = %scratch.path().display(), stdout_bytes = run.output.stdout.len(), stderr_bytes = run.output.stderr.len()).entered();
+    let mut admission_timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
+        "cell_program.admit",
+        "diagnostics_completed",
+    );
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
-    let report =
-        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .map_err(|error| {
-            offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
-        })?;
+    admission_timing.advance("decode_extract_result");
+    let report = match crate::diag::decode_extract_result(
+        run.success(),
+        &run.output.stdout,
+        &run.output.stderr,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            admission_timing.advance("retain_decode_failure");
+            return Err(offer
+                .retain_failure(scratch.path(), &command, &run.output.stderr, error)
+                .into());
+        }
+    };
     #[cfg(test)]
     if let CellProgramAudit::PublicationRefusal(cache) = audit {
         audit_compiler_publication_refusal(&offer, &scratch, cache);
@@ -3253,10 +3266,18 @@ fn prepare_cell_program_admitted_inner(
         ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
+    admission_timing.advance("prepare_cell_program");
     let result = offer.prepare_cell_program(scratch.clone());
-    let program = result.map_err(|error| {
-        offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
-    })?;
+    let program = match result {
+        Ok(program) => program,
+        Err(error) => {
+            admission_timing.advance("retain_preparation_failure");
+            return Err(offer
+                .retain_failure(scratch.path(), &command, &run.output.stderr, error)
+                .into());
+        }
+    };
+    admission_timing.advance("decode_cell_out");
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
         &recipe.cell_source,
@@ -3264,6 +3285,7 @@ fn prepare_cell_program_admitted_inner(
         "",
     )?;
     checked.warnings = report.diagnostics;
+    admission_timing.finish(true);
     drop(admission_span);
     tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
         .in_scope(|| admission.prepare_declaration_projections(program.checked_cell(), settlement))

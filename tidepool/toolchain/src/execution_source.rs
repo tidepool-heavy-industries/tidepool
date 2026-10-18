@@ -2053,15 +2053,27 @@ struct GraphWire {
 pub(crate) fn diagnostic_source_inventory(
     bytes: &[u8],
 ) -> Result<Vec<SourceEvidence>, CompileError> {
+    let _span = tracing::debug_span!(target: "exomonad_harness::timing", "diagnostics.source_graph", inclusive = true, graph_bytes = bytes.len()).entered();
+    let mut timing = crate::timing::InvocationTiming::start_scoped(
+        "diagnostics.source_graph",
+        "decode_graph_wire",
+    );
     if bytes.len() > GRAPH_BYTES_LIMIT {
         return Err(failure("diagnostic graph exceeds its byte bound"));
     }
-    let wire = GraphWire::decode(bytes)?;
+    let mut wire = GraphWire::decode(bytes)?;
+    timing.advance("validate_graph_wire");
     wire.validate()?;
+    timing.advance("canonical_reencode_and_compare");
     if wire.encode()? != bytes {
         return Err(failure("noncanonical diagnostic graph encoding"));
     }
-    Ok(wire.evidence.sources)
+    timing.advance("extract_sources_and_drop_graph");
+    let sources = std::mem::take(&mut wire.evidence.sources);
+    tracing::debug!(target: "exomonad_harness::timing", sources = sources.len(), "diagnostic graph source count");
+    drop(wire);
+    timing.finish(true);
+    Ok(sources)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
