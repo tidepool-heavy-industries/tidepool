@@ -960,9 +960,8 @@ impl OriginalCompilerInputs {
             )?,
         };
         artifacts = artifacts.retain_issued_offer_custody(validated.offers().iter().cloned())?;
-        let native_availability =
-            RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, &validated)?;
-        let native_offers = validated.into_offers();
+        let (native_availability, native_offers) =
+            RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, validated)?;
         Ok(Self {
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
@@ -1649,19 +1648,17 @@ impl RequestNativeAvailability {
     fn issue_checked_fragment(
         namespace: &CompilerInputProjection,
         artifacts: &ArtifactView,
-        validated: &crate::artifact_inventory::ValidatedFreshNativeAvailability,
-    ) -> Result<Self, CompileError> {
+        validated: crate::artifact_inventory::ValidatedFreshNativeAvailability,
+    ) -> Result<(Self, Vec<crate::artifact_inventory::IssuedNativeOffer>), CompileError> {
         let metadata = namespace.project_metadata(artifacts.metadata_snapshot())?;
-        Ok(Self(
-            NativeCompilerTransport::issue_checked_with_roots(
-                namespace,
-                &metadata,
-                artifacts,
-                validated.offers(),
-                validated.roots(),
-            )?
-            .availability,
-        ))
+        let normalized = NativeCompilerTransport::normalize_issued_contributions(
+            namespace,
+            &metadata,
+            artifacts,
+            validated.offers(),
+            validated.roots(),
+        )?;
+        Ok((Self(normalized.availability), validated.into_offers()))
     }
 
     pub(crate) fn issue_checked(
@@ -1822,7 +1819,8 @@ impl NativeCompilerTransport {
                 matches!(entry.payload, ArtifactPayload::Original(_)).then_some(entry.descriptor.id)
             })
             .collect();
-        let issued = Self::issue_checked_with_roots(roles, projection, artifacts, offers, &roots)?;
+        let issued =
+            Self::normalize_issued_contributions(roles, projection, artifacts, offers, &roots)?;
         issued.validate_selected_groups(projection)?;
         Ok(issued)
     }
@@ -1854,7 +1852,7 @@ impl NativeCompilerTransport {
         Ok(())
     }
 
-    fn issue_checked_with_roots(
+    fn normalize_issued_contributions(
         roles: &CompilerInputProjection,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
