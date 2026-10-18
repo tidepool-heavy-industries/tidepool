@@ -7052,13 +7052,6 @@ impl ArtifactView {
         )
     }
 
-    #[tracing::instrument(
-        target = "exomonad_harness::timing",
-        name = "exact.compiler_input_merge",
-        level = "debug",
-        skip_all,
-        fields(inclusive = true)
-    )]
     fn merge_compiler_inputs_with_demand(
         &self,
         projection: &CompilerInputProjection,
@@ -7066,6 +7059,59 @@ impl ArtifactView {
         incoming: &CompilerInputProjection,
         demand: CompilerNativeDemand<'_>,
         validation: CompilerInputValidation,
+    ) -> Result<
+        (
+            Self,
+            CompilerInputProjection,
+            compiler_projection::IssuedInputNativeDecisions,
+        ),
+        CompileError,
+    > {
+        self.merge_compiler_inputs_inner(projection, other, incoming, demand, validation, None)
+    }
+
+    fn merge_admitted_compiler_supports(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        let mut selected = BTreeMap::new();
+        let (artifacts, projection, input_decisions) =
+            left.artifacts().merge_compiler_inputs_inner(
+                left.projection(),
+                right.artifacts(),
+                right.projection(),
+                CompilerNativeDemand::SourceSelections {
+                    left: Some(left.input_decisions()),
+                    right: Some(right.input_decisions()),
+                },
+                CompilerInputValidation::Closed,
+                Some(&mut selected),
+            )?;
+        Ok(compiler_projection::ResolvedCompilerInputs {
+            artifacts,
+            projection,
+            selected,
+            input_decisions,
+        })
+    }
+
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.compiler_input_merge",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
+    fn merge_compiler_inputs_inner(
+        &self,
+        projection: &CompilerInputProjection,
+        other: &Self,
+        incoming: &CompilerInputProjection,
+        demand: CompilerNativeDemand<'_>,
+        validation: CompilerInputValidation,
+        mut selected_rows: Option<
+            &mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
+        >,
     ) -> Result<
         (
             Self,
@@ -7109,8 +7155,33 @@ impl ArtifactView {
             {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
-                for id in std::iter::once(role.interface()).chain(role.original()) {
-                    namespace.insert(id, source.resolve_binding(id, owned)?);
+                let canonical = source.resolve_binding(role.interface(), owned)?;
+                namespace.insert(role.interface(), canonical);
+                let original = role
+                    .original()
+                    .map(|id| {
+                        source.resolve_binding(id, owned).map(|binding| {
+                            namespace.insert(id, binding);
+                            binding
+                        })
+                    })
+                    .transpose()?;
+                if let Some(rows) = selected_rows.as_deref_mut() {
+                    rows.insert(
+                        owner.clone(),
+                        compiler_projection::ResolvedCompilerRole {
+                            interface: (
+                                canonical,
+                                Arc::clone(&source.lease.payloads[&role.interface()]),
+                            ),
+                            original: original.map(|binding| {
+                                (
+                                    binding,
+                                    Arc::clone(&source.lease.payloads[&binding.artifact]),
+                                )
+                            }),
+                        },
+                    );
                 }
             }
             if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {

@@ -293,12 +293,40 @@ impl IssuedInputNativeDecisions {
 /// Exact binding observations retained from successful compiler-role admission.
 /// These entries are acquisition owners, not a reconstruction from payload IDs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedCompilerRole {
-    interface: (ArtifactBinding, Arc<ArtifactEntry>),
-    original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+pub(super) struct ResolvedCompilerRole {
+    pub(super) interface: (ArtifactBinding, Arc<ArtifactEntry>),
+    pub(super) original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+}
+
+/// The solver's chosen bindings and their acquired payloads, not raw projection authority.
+/// Raw merge callers do not request or allocate these rows.
+pub(super) struct ResolvedCompilerInputs {
+    pub(super) artifacts: ArtifactView,
+    pub(super) projection: CompilerInputProjection,
+    pub(super) selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    pub(super) input_decisions: IssuedInputNativeDecisions,
 }
 
 impl ResolvedCompilerRole {
+    fn validate_original_pair(
+        state: &InventoryState,
+        canonical: ArtifactBinding,
+        carrier: ArtifactBinding,
+    ) -> Result<(), CompileError> {
+        if !state
+            .outgoing(InventoryNodeKey::Artifact(carrier))
+            .any(|(target, edge)| {
+                target == InventoryNodeKey::Artifact(canonical)
+                    && *edge == ArtifactDependency::Interface
+            })
+        {
+            return Err(failure(
+                "compiler fragment canonical pair differs from its issuing bindings",
+            ));
+        }
+        Ok(())
+    }
+
     fn retain_acquisitions(&mut self, retained: &ArtifactView) -> Result<(), CompileError> {
         for (binding, entry) in std::iter::once(&mut self.interface).chain(self.original.iter_mut())
         {
@@ -544,7 +572,34 @@ impl CompilerSourceSupport {
         );
         projection.validate(&artifacts)?;
         timing.advance("resolve_associations");
-        let mut selected = projection.resolve_associations(&artifacts)?;
+        let selected = projection.resolve_associations(&artifacts)?;
+        let support = Self::complete_resolved(
+            ResolvedCompilerInputs {
+                artifacts,
+                projection,
+                selected,
+                input_decisions: IssuedInputNativeDecisions::default(),
+            },
+            native_offers,
+            native_availability,
+            &mut timing,
+        )?;
+        timing.finish(true);
+        Ok(support)
+    }
+
+    fn complete_resolved(
+        inputs: ResolvedCompilerInputs,
+        native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
+        native_availability: crate::declaration_context::RequestNativeAvailability,
+        timing: &mut crate::timing::InvocationTiming,
+    ) -> Result<Self, CompileError> {
+        let ResolvedCompilerInputs {
+            artifacts,
+            projection,
+            mut selected,
+            input_decisions,
+        } = inputs;
         timing.advance("retain_issued_offer_custody");
         let mut offers = Vec::new();
         let retained = artifacts.retain_issued_offer_custody(
@@ -573,9 +628,8 @@ impl CompilerSourceSupport {
             artifacts: retained,
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
-            input_decisions: IssuedInputNativeDecisions::default(),
+            input_decisions,
         };
-        timing.finish(true);
         Ok(support)
     }
 
@@ -1621,32 +1675,26 @@ impl CompilerSourceSupport {
             "exact.compiler_support.merge",
             "merge_compiler_inputs_with_demand",
         );
-        let (artifacts, projection, decisions) = self.artifacts.merge_compiler_inputs_with_demand(
-            &self.projection,
-            &other.artifacts,
-            &other.projection,
-            CompilerNativeDemand::SourceSelections {
-                left: Some(&self.input_decisions),
-                right: Some(&other.input_decisions),
-            },
-            CompilerInputValidation::Closed,
-        )?;
-        timing.advance("rebuild_support");
-        let support = self.rebuild(
-            projection,
-            artifacts,
+        let mut inputs = ArtifactView::merge_admitted_compiler_supports(self, other)?;
+        timing.advance("validate_carried_associations");
+        for row in inputs.selected.values_mut() {
+            row.retain_acquisitions(&inputs.artifacts)?;
+        }
+        inputs
+            .projection
+            .validate_resolved(&inputs.selected, &inputs.artifacts)?;
+        let support = Self::complete_resolved(
+            inputs,
             self.native_offers
                 .iter()
                 .chain(other.native_offers.iter())
                 .cloned(),
+            self.native_availability.clone(),
+            &mut timing,
         )?;
         timing.advance("retain_normalized_availability");
         let result = support.retain_normalized_availability(other.native_availability());
         drop(support);
-        let result = result.map(|mut support| {
-            support.input_decisions = decisions;
-            support
-        });
         timing.finish(result.is_ok());
         result
     }
@@ -2142,9 +2190,21 @@ impl CompilerInputProjection {
         artifacts: CompilerRolePayloads<'_>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let selected = self.associated_entries(&artifacts)?;
-        for entry in selected.values() {
+        self.validate_requirements(selected.values().map(Arc::as_ref), |owner| {
+            artifacts
+                .get(&self.roles[owner].interface())
+                .map(Arc::as_ref)
+        })?;
+        Ok(selected)
+    }
+    fn validate_requirements<'a>(
+        &self,
+        entries: impl IntoIterator<Item = &'a ArtifactEntry>,
+        interface: impl Fn(&ExactModuleIdentity) -> Option<&'a ArtifactEntry>,
+    ) -> Result<(), CompileError> {
+        for entry in entries {
             for required in &entry.requirements {
-                let role = self.roles.get(required).ok_or_else(|| {
+                self.roles.get(required).ok_or_else(|| {
                     admission_failure(ArtifactInventoryFailure::MissingDependency {
                         artifact: entry.descriptor.id,
                         dependent: entry.descriptor.owner.clone(),
@@ -2153,8 +2213,7 @@ impl CompilerInputProjection {
                     })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
-                    artifacts
-                        .get(&role.interface())
+                    interface(required)
                         .expect("associated canonical interface")
                         .descriptor
                         .interface_sha256
@@ -2169,8 +2228,46 @@ impl CompilerInputProjection {
                 }
             }
         }
-        Ok(selected)
+        Ok(())
     }
+
+    fn validate_resolved(
+        &self,
+        selected: &BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+        view: &ArtifactView,
+    ) -> Result<(), CompileError> {
+        for (owner, role) in &self.roles {
+            #[cfg(test)]
+            type_query_work::canonical_check();
+            let row = selected.get(owner).expect("merged role has its chosen row");
+            if row.interface.0.artifact != role.interface()
+                || row.interface.1.descriptor.id != role.interface()
+                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+            {
+                return Err(failure("merged compiler row differs from its chosen role"));
+            }
+            Self::validate_role_payload(owner, role, &row.interface.1, |id| {
+                row.original
+                    .as_ref()
+                    .map(|(_, entry)| entry)
+                    .filter(|entry| entry.descriptor.id == id)
+            })?;
+        }
+        self.validate_requirements(
+            selected
+                .values()
+                .map(|row| row.original.as_ref().unwrap_or(&row.interface).1.as_ref()),
+            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+        )?;
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        for row in selected.values() {
+            if let Some((carrier, _)) = &row.original {
+                ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *carrier)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_associations(&self, view: &ArtifactView) -> Result<(), CompileError> {
         self.resolve_associations(view).map(|_| ())
     }
@@ -2190,17 +2287,7 @@ impl CompilerInputProjection {
             let canonical = view.resolve_binding(role.interface(), owned)?;
             let original = if let Some(original) = role.original() {
                 let carrier = view.resolve_binding(original, owned)?;
-                if !state
-                    .outgoing(InventoryNodeKey::Artifact(carrier))
-                    .any(|(target, edge)| {
-                        target == InventoryNodeKey::Artifact(canonical)
-                            && *edge == ArtifactDependency::Interface
-                    })
-                {
-                    return Err(failure(
-                        "compiler fragment canonical pair differs from its issuing bindings",
-                    ));
-                }
+                ResolvedCompilerRole::validate_original_pair(&state, canonical, carrier)?;
                 Some((carrier, Arc::clone(&entries[owner])))
             } else {
                 None
@@ -2234,34 +2321,43 @@ impl CompilerInputProjection {
             let interface = artifacts
                 .get(&role.interface())
                 .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
-            if &interface.descriptor.owner != owner || interface.is_native() {
-                return Err(failure("compiler interface role has another owner or kind"));
-            }
-            let entry = match role.original() {
-                None => interface,
-                Some(id) => {
-                    let original = artifacts.get(&id).ok_or_else(|| {
-                        failure("compiler original offer is outside retained custody")
-                    })?;
-                    let ArtifactPayload::Original(product) = &original.payload else {
-                        return Err(failure("compiler original offer has no native proof"));
-                    };
-                    let canonical = product.module_interface().ok_or_else(|| {
-                        failure("compiler original offer lacks canonical attachment")
-                    })?;
-                    if &original.descriptor.owner != owner
-                        || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
-                    {
-                        return Err(failure(
-                            "compiler original offer differs from its interface",
-                        ));
-                    }
-                    original
-                }
-            };
+            let entry =
+                Self::validate_role_payload(owner, role, interface, |id| artifacts.get(&id))?;
             selected.insert(owner.clone(), Arc::clone(entry));
         }
         Ok(selected)
+    }
+    fn validate_role_payload<'a>(
+        owner: &ExactModuleIdentity,
+        role: &CompilerInputRole,
+        interface: &'a Arc<ArtifactEntry>,
+        original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
+    ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        if &interface.descriptor.owner != owner || interface.is_native() {
+            return Err(failure("compiler interface role has another owner or kind"));
+        }
+        match role.original() {
+            None => Ok(interface),
+            Some(id) => {
+                let original = original(id).ok_or_else(|| {
+                    failure("compiler original offer is outside retained custody")
+                })?;
+                let ArtifactPayload::Original(product) = &original.payload else {
+                    return Err(failure("compiler original offer has no native proof"));
+                };
+                let canonical = product
+                    .module_interface()
+                    .ok_or_else(|| failure("compiler original offer lacks canonical attachment"))?;
+                if &original.descriptor.owner != owner
+                    || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
+                {
+                    return Err(failure(
+                        "compiler original offer differs from its interface",
+                    ));
+                }
+                Ok(original)
+            }
+        }
     }
 }
 
