@@ -461,12 +461,14 @@ pub fn spawn_agent() -> Effect {
         ctor: "SpawnAgentSpawnWith",
         method: "spawn_agent_spawn_with",
         args: vec![
+            // The prepended family witness occupies field 0. The runtime's
+            // Haskell live-value convention retains the installer at field 1.
+            installer_arg(),
             Arg {
                 name: "context",
                 ty: HsType::Named("SpawnContextWire"),
                 rust: RustBinding::Path("crate::start::SpawnContextWire"),
             },
-            installer_arg(),
             Arg {
                 name: "workspace",
                 ty: HsType::Named("SpawnWorkspaceWire"),
@@ -554,5 +556,25 @@ pub(crate) fn family_witness_arg() -> Arg {
         name: "family",
         ty: HsType::app(HsType::Named("FamilyWitness"), HsType::Var("modelFamily")),
         rust: RustBinding::Path("tidepool_bridge_effects::ModelFamilyWitness"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_spawn_installers_keep_the_haskell_live_value_field() {
+        for effect in [spawn_agent(), fork_agent()] {
+            let spawn = &effect.verbs[0];
+            let installer = spawn
+                .args
+                .iter()
+                .position(|argument| argument.name == "install");
+            assert_eq!(installer, Some(1), "{}", spawn.ctor);
+            assert_eq!(spawn.args[0].name, "family");
+            assert_eq!(spawn.args[2].name, "context");
+            assert!(matches!(spawn.args[1].rust, RustBinding::HaskellValue));
+        }
     }
 }

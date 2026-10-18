@@ -242,14 +242,14 @@ spawnSubagent context workspace options = do
     launch prepared = do
       admitted <- case context of
         ForkCtx _ -> send @(ForkAgent modelFamily) (ForkAgentSpawnWith (familyWitness @modelFamily)
-          (contextWire context) (entry prepared) (Launch.workspaceWire workspace)
+          (entry prepared) (contextWire context) (Launch.workspaceWire workspace)
           (effectKeys (knownEffects @childEffects))
           (toJSON (modelPermissionRequests (spawnPermissions options)))
           (spawnLabel options) (toJSON (modelSelection (spawnModel options)))
           (spawnInstructions options) (spawnLifetime options)
           (limitsWire <$> spawnLimits options) (preparedAgentSpecMetadata prepared))
         FreshCtx _ -> send @(SpawnAgent modelFamily) (SpawnAgentSpawnWith (familyWitness @modelFamily)
-          (contextWire context) (entry prepared) (Launch.workspaceWire workspace)
+          (entry prepared) (contextWire context) (Launch.workspaceWire workspace)
           (effectKeys (knownEffects @childEffects))
           (toJSON (modelPermissionRequests (spawnPermissions options)))
           (spawnLabel options) (toJSON (modelSelection (spawnModel options)))

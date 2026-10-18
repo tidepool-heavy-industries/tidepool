@@ -10018,12 +10018,12 @@ where
                     }),
                     ResidentRequest::ForkAgent(
                         crate::generated::fork_agent::ForkAgentReq::ForkAgentSpawnWith(
-                            family, spawn_context, _, workspace, effects, permissions, label, selection,
+                            family, _, spawn_context, workspace, effects, permissions, label, selection,
                             instructions, lifetime, limits, metadata,
                         ),
                     ) | ResidentRequest::SpawnAgent(
                         crate::generated::spawn_agent::SpawnAgentReq::SpawnAgentSpawnWith(
-                            family, spawn_context, _, workspace, effects, permissions, label, selection,
+                            family, _, spawn_context, workspace, effects, permissions, label, selection,
                             instructions, lifetime, limits, metadata,
                         ),
                     ) => {
