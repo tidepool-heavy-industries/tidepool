@@ -504,7 +504,7 @@ impl ScopeFixture {
         cancel_after_started: Option<Arc<ControlledBackend>>,
         cancelled_targets: usize,
     ) -> crate::KernelWorkbenchReply {
-        let receive = send_workbench(actor, source, control.clone());
+        let receive = send_workbench(actor, source, control.clone()).await;
         let started = async {
             match cancel_after_started {
                 Some(backend) => backend.started.acquire().await.unwrap().forget(),
@@ -850,21 +850,19 @@ impl ScopeFixture {
     }
 }
 
-fn send_workbench(
+async fn send_workbench(
     actor: &LocalActorRef,
     source: &str,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
 ) -> tokio::sync::oneshot::Receiver<crate::KernelWorkbenchReply> {
     let (reply, receive) = tokio::sync::oneshot::channel();
     actor
-        .address()
-        .send_message(KernelMessage::Workbench {
-            invocation: crate::ActorWorkbenchInvocation::unbound(
-                WorkbenchRequest::from_cell_input(source),
-            ),
+        .submit_workbench(
+            crate::ActorWorkbenchInvocation::unbound(WorkbenchRequest::from_cell_input(source)),
             control,
-            reply: reply.into(),
-        })
+            reply.into(),
+        )
+        .await
         .expect("production resident admission");
     receive
 }
