@@ -3310,9 +3310,10 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
         .unwrap();
     let mut graph = complete.artifacts().capture_graph_selection();
     assert!(
-        graph.roots.is_empty(),
+        complete.artifacts().selected_native_groups().is_empty(),
         "complete output retains available bodies without executable demand"
     );
+    graph.custody_roots.extend(graph.roots.drain(..));
     graph.roots = root_proof.selection.graph_selection().roots.clone();
     let selected = complete
         .artifacts()
