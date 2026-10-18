@@ -12,6 +12,10 @@ library. When changing launch configuration or tool contracts, update the
 scripted-provider fixtures, check exact test selections actually ran, and
 compile changed consumers.
 
+For actor-confined notebook policy, source reload, or settlement changes, follow
+the [actor verification guidance](../actor/AGENTS.md) for owning compile targets
+and the counted notebook cohort.
+
 When a positive progress barrier depends on a tool operation, observe that
 exact operation's typed terminal outcome as well as host liveness. Use
 `HostedTestRuntime::while_operation_succeeds` for native progress waits;

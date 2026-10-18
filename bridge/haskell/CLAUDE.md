@@ -117,6 +117,9 @@ closed artifact role: `["module", certificate path, certificate SHA, optional
 Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
 for native authored originals, `["join"]`, or `["value"]`. Native product
 owners require canonical module evidence. Roles never come from module-name spelling.
+Protected checked-value purpose paths may differ from their transported interface
+paths. Continuation binds them to the same admitted value-role owner and seal,
+sharing captured bytes; it never reacquires a missing original from a path.
 
 Native product rows have nine fields: unit, module, version, interface SHA, native
 SHA, native path, selected ordinals, the logical path/SHA descriptor for the
