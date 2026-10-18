@@ -2915,15 +2915,16 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         let ArtifactPayload::Original(original) = &entry.payload else {
             unreachable!()
         };
-        assert!(transport
-            .private
-            .receipt_original(
-                &original.owner().unit,
-                &original.owner().module,
-                &original.owner().module_version
-            )
-            .unwrap()
-            .is_none());
+        assert!(
+            RequestNativeAvailability(Arc::clone(&transport.availability))
+                .receipt_original(
+                    &original.owner().unit,
+                    &original.owner().module,
+                    &original.owner().module_version
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -3007,8 +3008,8 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
     .unwrap();
     assert!(duplicate.availability[&entries[0].descriptor.id].permits(9001));
     let original = duplicate.availability[&entries[0].descriptor.id].original_owner();
-    let receipt_owner = duplicate
-        .private
+    let private = RequestNativeAvailability(Arc::clone(&duplicate.availability));
+    let receipt_owner = private
         .receipt_original(&original.unit, &original.module, &original.module_version)
         .unwrap()
         .unwrap();

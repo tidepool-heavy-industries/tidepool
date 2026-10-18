@@ -13989,7 +13989,7 @@ pub(crate) mod tests {
             );
             if interface_only {
                 assert!(selection
-                    .selected_original_owners()
+                    .receipt_native_body_owners()
                     .all(|owner| owner != dependency.owner()));
                 assert!(request
                     .compiler_inputs()
