@@ -20,6 +20,8 @@ use tidepool_toolchain::exact_context::{
 pub(crate) struct ContextMaterializationWork {
     pub(crate) attempted: u64,
     pub(crate) completed: u64,
+    // Packet metrics cover completed attempts. When attempted != completed,
+    // any additional byte work from failed attempts remains unknown.
     pub(crate) changed_entries: u64,
     pub(crate) offered_bytes: u64,
     pub(crate) serialized_bytes: u64,
