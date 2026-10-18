@@ -385,9 +385,13 @@ impl IssuedTargetNativeSelection {
                 "issued native target roots differ from authenticated target",
             ));
         }
-        Ok(view
-            .native_requirements_for_exact_groups_locked(&state, owned, self.roots.to_vec())?
-            .1)
+        native_groups_in_custody(
+            &state,
+            &view.lease.payloads,
+            owned,
+            self.roots.to_vec(),
+            None,
+        )
     }
 }
 
@@ -727,8 +731,7 @@ impl NativeOriginalRequirement {
             .iter()
             .map(|ordinal| index.resolve(carrier, *ordinal))
             .collect::<Result<Vec<_>, _>>()?;
-        let (_, groups) =
-            native_requirements_for_exact_groups_in_custody(state, &lease.payloads, &nodes, roots)?;
+        let groups = native_groups_in_custody(state, &lease.payloads, &nodes, roots, None)?;
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
@@ -4589,24 +4592,52 @@ fn native_requirements_for_exact_groups_in_custody(
     state: &InventoryState,
     payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     owned: &imbl::OrdSet<InventoryNodeKey>,
-    mut pending: Vec<NativeGroupBinding>,
+    pending: Vec<NativeGroupBinding>,
 ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
+    let mut requirements = NativeRequirementCollector::default();
+    let groups =
+        native_groups_in_custody(state, payloads, owned, pending, Some(&mut requirements))?;
+    Ok((
+        NativeRequirements {
+            bindings: requirements.bindings.into_iter().collect(),
+            packages: requirements.packages.into_iter().collect(),
+        },
+        groups,
+    ))
+}
+
+#[derive(Default)]
+struct NativeRequirementCollector {
+    bindings: BTreeSet<NativeBindingRequirement>,
+    packages: BTreeSet<NativePackageRequirement>,
+}
+
+fn native_groups_in_custody(
+    state: &InventoryState,
+    payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    mut pending: Vec<NativeGroupBinding>,
+    mut requirements: Option<&mut NativeRequirementCollector>,
+) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
     let mut seen = BTreeSet::new();
-    let mut requirements = BTreeSet::new();
-    let mut packages = BTreeSet::new();
     while let Some(key) = pending.pop() {
         if !seen.insert(key) {
             continue;
         }
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
-        for package in &payloads[&key.binding.artifact()].retained_packages {
-            if key.original_ordinal == package.dependent_ordinal {
-                packages.insert(NativePackageRequirement {
-                    artifact_id: key.binding.artifact(),
-                    identity: package.identity.clone(),
-                    generation: package.generation,
-                    interface_digest: package.interface_digest,
-                });
+        // Payload membership is an issued-view invariant even when only groups
+        // are requested; keep these lookups independent of fact collection.
+        let payload = &payloads[&key.binding.artifact()];
+        if let Some(requirements) = requirements.as_deref_mut() {
+            for package in &payload.retained_packages {
+                if key.original_ordinal == package.dependent_ordinal {
+                    requirements.packages.insert(NativePackageRequirement {
+                        artifact_id: key.binding.artifact(),
+                        identity: package.identity.clone(),
+                        generation: package.generation,
+                        interface_digest: package.interface_digest,
+                    });
+                }
             }
         }
         for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
@@ -4628,29 +4659,25 @@ fn native_requirements_for_exact_groups_in_custody(
                     ..
                 } => {
                     let descriptor = &payloads[&target.artifact()].descriptor;
-                    requirements.insert(NativeBindingRequirement {
-                        artifact_id: descriptor.id,
-                        identity: tidepool_repr::execution_schema::SymbolIdentity {
-                            unit: descriptor.owner.unit.clone(),
-                            module: descriptor.owner.module.clone(),
-                            namespace: namespace.clone(),
-                            occurrence: occurrence.clone(),
-                            record_parent: record_parent.clone(),
-                        },
-                        generation: *generation,
-                    });
+                    if let Some(requirements) = requirements.as_deref_mut() {
+                        requirements.bindings.insert(NativeBindingRequirement {
+                            artifact_id: descriptor.id,
+                            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                                unit: descriptor.owner.unit.clone(),
+                                module: descriptor.owner.module.clone(),
+                                namespace: namespace.clone(),
+                                occurrence: occurrence.clone(),
+                                record_parent: record_parent.clone(),
+                            },
+                            generation: *generation,
+                        });
+                    }
                 }
                 _ => {}
             }
         }
     }
-    Ok((
-        NativeRequirements {
-            bindings: requirements.into_iter().collect(),
-            packages: packages.into_iter().collect(),
-        },
-        seen,
-    ))
+    Ok(seen)
 }
 
 struct ViewLease {
@@ -5770,7 +5797,9 @@ impl ArtifactView {
         &self,
         roots: &[NativeRequirementRoot],
     ) -> Result<NativeRequirements, CompileError> {
-        Ok(self.native_requirements_with_groups_from_roots(roots)?.0)
+        Ok(self
+            .native_requirements_with_group_bindings_from_roots(roots)?
+            .0)
     }
 
     pub(crate) fn native_sites_for_groups(
@@ -5824,6 +5853,7 @@ impl ArtifactView {
             .1)
     }
 
+    #[cfg(test)]
     fn native_requirements_with_groups_from_roots(
         &self,
         roots: &[NativeRequirementRoot],

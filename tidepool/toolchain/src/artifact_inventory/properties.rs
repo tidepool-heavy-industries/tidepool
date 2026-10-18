@@ -1390,6 +1390,30 @@ proptest! {
             original_ordinal: *ordinal,
         }).collect::<BTreeSet<_>>();
         prop_assert_eq!(&actual_groups, &expected_keys);
+        let exact_groups = {
+            let state = view.lease.inventory.0.lock().expect("inventory lock");
+            let owned = &view.read_projection(&state).nodes;
+            let root = resolve_group_binding(
+                &state,
+                owned,
+                view.resolve_binding(root_id, owned).unwrap(),
+                7,
+            ).unwrap();
+            let required = state.outgoing(InventoryNodeKey::Group(root)).find_map(|(target, label)| {
+                matches!(label, ArtifactDependency::NativeGroup { .. }).then_some(target)
+            }).expect("the fixed graph has a direct native dependency");
+            let mut missing_dependency = owned.clone();
+            missing_dependency.remove(&required);
+            assert!(native_groups_in_custody(
+                &state, &view.lease.payloads, &missing_dependency, vec![root], None,
+            ).is_err(), "groups-only traversal must refuse a dependency outside custody");
+            native_groups_in_custody(&state, &view.lease.payloads, owned, vec![root], None).unwrap()
+        };
+        let group_only_keys = exact_groups.iter().map(|group| NativeGroupKey {
+            artifact: group.binding.artifact(),
+            original_ordinal: group.original_ordinal,
+        }).collect::<BTreeSet<_>>();
+        prop_assert_eq!(&group_only_keys, &expected_keys);
         prop_assert_eq!(&actual_groups, &reversed_view.native_requirements_with_groups_from_roots(&roots).unwrap().1);
         prop_assert!(actual_groups.len() < view.selected_native_groups().len(), "available groups must not become executable roots");
         prop_assert_eq!(&actual, &reversed_view.native_requirements_from_roots(&roots).unwrap());
