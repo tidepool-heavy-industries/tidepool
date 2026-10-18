@@ -603,7 +603,7 @@ impl EntryPreparation {
         else {
             return Err(invalid("configured compiler deployment unavailable"));
         };
-        authority
+        CompilerDeploymentConfiguration::Configured(authority)
             .admit(
                 deployment.producer_identity,
                 deployment.consumed_worker_identity,
