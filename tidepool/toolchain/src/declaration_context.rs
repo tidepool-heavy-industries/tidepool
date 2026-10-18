@@ -3394,7 +3394,7 @@ impl RetainedArtifactMaterialization {
                 .then_with(|| left.0.cmp(&right.0))
         });
         let mut frontier = Vec::<(usize, usize, &Arc<Self>)>::new();
-        let mut covered = imbl::OrdSet::new();
+        let mut covered = imbl::OrdSet::<usize>::new();
         for candidate in candidates {
             if frontier.iter().any(|retained| {
                 coverage[candidate.1]
@@ -3472,7 +3472,7 @@ impl RetainedArtifactMaterialization {
             })
             .collect::<Vec<_>>();
         let mut seen_groups = BTreeSet::new();
-        let groups = observed
+        let groups: Vec<&PendingCertifiedGroup> = observed
             .iter()
             .flat_map(|owner| owner.groups.iter())
             .filter(|group| {
