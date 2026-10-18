@@ -432,6 +432,10 @@ impl FrozenWorkspace {
             let mut frozen: Self = serde_json::from_value(selection).map_err(|error| {
                 format!("invalid frozen workspace selection; prepare a new deployment and start a new run: {error}")
             })?;
+            let captured_config: super::ExomonadConfig = toml::from_str(&frozen.config)?;
+            if serde_json::to_value(&frozen.model_catalog)? != serde_json::to_value(captured_config.resolved_catalog()?)? {
+                return Err("frozen model catalog differs from captured launch configuration".into());
+            }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
@@ -539,11 +543,7 @@ impl FrozenWorkspace {
                 return Err("model aliases and provider model names must be non-empty".into());
             }
         }
-        let model_catalog = match &config.inference {
-            Some(inference) => Some(inference.resolve()?),
-            None => config.launch.embedded.as_ref().map(|embedded|
-                super::model_catalog::InferenceConfig::synthesize_legacy(&config.defaults, &config.models, embedded)?.resolve()).transpose()?,
-        };
+        let model_catalog = config.resolved_catalog()?;
         let base = workspace.join(".exomonad");
         let runtime_sources = crate::haskell_sources::runtime_source_roots(
             deployment.as_ref().map(|selection| &selection.sources),
@@ -1038,7 +1038,8 @@ impl FrozenWorkspace {
     }
 
     pub(crate) fn config(&self) -> Result<super::ExomonadConfig> {
-        let config: super::ExomonadConfig = toml::from_str(&self.config)?;
+        let mut config: super::ExomonadConfig = toml::from_str(&self.config)?;
+        config.apply_inference()?;
         config.launch.validate()?;
         Ok(config)
     }

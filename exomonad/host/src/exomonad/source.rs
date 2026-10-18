@@ -1000,6 +1000,13 @@ impl ExomonadSourceReload {
             return Err("source graph manifest count differs from its roots".into());
         }
         let path = std::fs::canonicalize(self.frozen.workspace_resources())?;
+        for root in include_paths.iter() {
+            if std::fs::canonicalize(root)? != path && ["Workspace", "Models"].iter().any(|name|
+                ["hs", "lhs", "hs-boot", "lhs-boot"].iter().any(|suffix|
+                    root.join(format!("Exomonad/{name}.{suffix}")).is_file())) {
+                return Err("authored source shadows a reserved generated Exomonad module".into());
+            }
+        }
         let manifest = source_root_manifest(&path)?;
         let mut matches = Vec::new();
         for (index, include) in include_paths.iter().enumerate() {

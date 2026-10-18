@@ -249,6 +249,30 @@ pub(crate) struct ExomonadConfig {
     pub(crate) prompts: workspace::PromptConfig,
 }
 
+impl ExomonadConfig {
+    pub(crate) fn apply_inference(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(inference) = &self.inference {
+        let catalog = inference.resolve().map_err(runtime_error)?;
+        let primary = &catalog.models[&catalog.primary];
+        self.defaults = ExomonadAgentDefaults { model: primary.model.clone(), reasoning: primary.reasoning };
+        let provider = &catalog.providers[&primary.provider];
+        if let Some(embedded) = &mut self.launch.embedded {
+            embedded.provider = provider.backend;
+            embedded.credential_file = provider.credential_file.clone().unwrap_or_default();
+            embedded.inference_limits = provider.inference_limits;
+        }
+    }
+        Ok(())
+    }
+    pub(crate) fn resolved_catalog(&self) -> Result<Option<model_catalog::ResolvedCatalog>, String> {
+        match &self.inference {
+            Some(config) => config.resolve().map(Some),
+            None => self.launch.embedded.as_ref().map(|embedded|
+                model_catalog::InferenceConfig::synthesize_legacy(&self.defaults, &self.models, embedded)?.resolve()).transpose(),
+        }
+    }
+}
+
 /// Valid fixture configurations use the production schema and its defaults.
 #[cfg(test)]
 pub(crate) fn write_fixture_project_config(
@@ -734,17 +758,7 @@ fn parse_project_config(
             path.display()
         ))
     })?;
-    if let Some(inference) = &config.inference {
-        let catalog = inference.resolve().map_err(runtime_error)?;
-        let primary = &catalog.models[&catalog.primary];
-        config.defaults = ExomonadAgentDefaults { model: primary.model.clone(), reasoning: primary.reasoning };
-        let provider = &catalog.providers[&primary.provider];
-        if let Some(embedded) = &mut config.launch.embedded {
-            embedded.provider = provider.backend;
-            embedded.credential_file = provider.credential_file.clone().unwrap_or_default();
-            embedded.inference_limits = provider.inference_limits;
-        }
-    }
+    config.apply_inference()?;
     config.launch.validate()?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
