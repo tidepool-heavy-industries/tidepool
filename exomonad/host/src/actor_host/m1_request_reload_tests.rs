@@ -303,6 +303,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(authored.join("AgentSpec.hs"), request_reload_spec()).unwrap();
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+            project.launch.embedded = Some(settings.clone());
             project.haskell.source_roots = vec![".".into()];
             project.haskell.spec = Some("AgentSpec.agentSpec".into());
         });
