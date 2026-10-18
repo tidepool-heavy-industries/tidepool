@@ -2139,6 +2139,7 @@ mod authored_tests {
     }
 
     use super::*;
+    use crate::recovery_artifacts::PackageInterfaceValidation;
     use tidepool_repr::Generation;
 
     #[test]
@@ -2662,7 +2663,10 @@ mod authored_tests {
         let producer = context.toolchain_identity_sha256();
         // Independent issuances can have the same GHC interface observation
         // while retaining different exact native carrier and Group bindings.
-        let mut branch_groups = Vec::new();
+        let mut branch_groups: Vec<(
+            crate::artifact_inventory::ArtifactBinding,
+            BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        )> = Vec::new();
         let mut branch_joins = Vec::new();
         let mut interface_observation = None;
         for marker in ["JoinScopeLeft", "JoinScopeRight"] {
@@ -2703,6 +2707,10 @@ mod authored_tests {
                 .collect::<BTreeSet<_>>();
             assert!(!groups.is_empty());
             if let Some((previous_carrier, previous_groups)) = branch_groups.first() {
+                assert_eq!(
+                    carrier.artifact, previous_carrier.artifact,
+                    "both scopes must carry the same actual native payload"
+                );
                 assert_ne!(
                     &carrier, previous_carrier,
                     "independent scopes must differ before the second compiler operation"
@@ -2790,6 +2798,103 @@ mod authored_tests {
                 original_id
             );
             joined.native_binding_custody_requirements().unwrap();
+            // Later native demand enters the ordinary closed request and target
+            // owner. This is admission, not execution of machine code.
+            let endpoint = ExtractCmd::new().unwrap().bind().unwrap();
+            let request_root = tempfile::tempdir().unwrap();
+            let request = Arc::new(joined.context().clone())
+                .prepare_compilation(request_root.path(), endpoint.identity().producer_bytes())
+                .unwrap();
+            let inputs = request.compiler_inputs();
+            let validation = PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let chosen = *groups.iter().next().unwrap();
+            let original = crate::certified_products::finalize_original_for_inventory(
+                certificate.product().clone(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let definitions = crate::certified_products::original_native_group_definitions(
+                &original,
+                chosen.original_ordinal,
+            )
+            .unwrap();
+            let binder = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => {
+                    binding.identity.clone()
+                }
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                    bindings[0].identity.clone()
+                }
+            };
+            let imports = [crate::certified_products::PendingImportOwner::Source {
+                owner: original.owner().clone(),
+                original_ordinal: chosen.original_ordinal,
+                binder,
+            }];
+            let mut fixed = inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .unwrap();
+            let demanded = inputs
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut fixed,
+                    inputs.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selection,
+                )
+                .unwrap();
+            let actual = demanded
+                .selection
+                .groups_for_target(&demanded.artifacts, None, &imports)
+                .unwrap();
+            assert!(actual.contains(&chosen));
+            assert!(
+                actual
+                    .iter()
+                    .filter(|group| group.binding.artifact() == original_id)
+                    .all(|group| groups.contains(group)),
+                "later demand must consume this accepted owner's exact scoped bindings"
+            );
+            let mut denied = imports.clone();
+            let crate::certified_products::PendingImportOwner::Source {
+                original_ordinal, ..
+            } = &mut denied[0]
+            else {
+                unreachable!()
+            };
+            *original_ordinal = u32::MAX;
+            assert!(!groups
+                .iter()
+                .any(|group| group.original_ordinal == u32::MAX));
+            assert!(
+                inputs
+                    .artifacts()
+                    .inventory()
+                    .admit_bound_target(
+                        &mut fixed,
+                        inputs.artifacts(),
+                        crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                            &denied
+                        ),
+                        vec![],
+                        &selection,
+                    )
+                    .is_err(),
+                "joining interfaces cannot grant an unavailable native ordinal"
+            );
             branch_groups.push((carrier, groups));
             branch_joins.push(joined);
         }
