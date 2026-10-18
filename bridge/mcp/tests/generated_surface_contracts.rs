@@ -109,6 +109,11 @@ fn generated_model_control_codecs_execute_and_preserve_callback_value() {
 }
 
 #[test]
+fn generic_model_family_row_witnesses_select_exact_fixed_keys() {
+    Surface::new().execute("GenericModelFamilies.hs");
+}
+
+#[test]
 fn compiled_default_actor_row_matches_generated_rust_order() {
     use exomonad_tool::{ActorEffectKey, ToolEffectKey, DEFAULT_ACTOR_EFFECTS};
 

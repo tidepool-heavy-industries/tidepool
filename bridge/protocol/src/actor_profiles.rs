@@ -944,20 +944,52 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         hs.push_str(&format!("  AsyncEffects ({} ': effects) =\n    TypeError ('Text \"{} cannot be used by an asynchronous tool, model callback, or hook.\")\n", effect.identity.haskell_name, effect.identity.haskell_name));
     }
     hs.push_str("  AsyncEffects (effect ': effects) = AsyncEffects effects\n");
-    let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
+    let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n{-# LANGUAGE TypeApplications #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
     row.push_str(&crate::gen::header("-- ", "Effect row witnesses"));
-    row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\n");
+    row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..), FamilyWitness (..), KnownFamily (familyWitness))\n");
     row.push_str(&imports(
-        &actor.iter().map(|effect| **effect).collect::<Vec<_>>(),
+        &actor
+            .iter()
+            .map(|effect| NominalEffect {
+                arguments: if effect.model_permission.is_some() {
+                    &[]
+                } else {
+                    effect.arguments
+                },
+                ..**effect
+            })
+            .collect::<Vec<_>>(),
     ));
     row.push_str("\n\n");
     row.push_str(ROW_WITNESS_INFRASTRUCTURE);
-    for effect in &actor {
+    for effect in actor
+        .iter()
+        .filter(|effect| effect.model_permission.is_none())
+    {
         row.push_str(&format!(
             "instance KnownEffect ({}) where effectWitness = EffectWitness {}\n",
             effect.row_entry(),
             effect.constructor
         ));
+    }
+
+    for operation in ModelOperation::ALL {
+        row.push_str(&format!(
+            "instance forall modelFamily. KnownFamily modelFamily => KnownEffect ({} modelFamily) where\n  effectWitness = case familyWitness @modelFamily of\n",
+            operation.name()
+        ));
+        for effect in actor.iter().filter(|effect| {
+            effect
+                .model_permission
+                .is_some_and(|permission| permission.operation == operation)
+        }) {
+            let permission = effect.model_permission.expect("filtered family operation");
+            row.push_str(&format!(
+                "    {}Witness -> EffectWitness {}\n",
+                permission.family.name(),
+                effect.constructor
+            ));
+        }
     }
 
     vec![
