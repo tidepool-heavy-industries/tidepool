@@ -1975,7 +1975,7 @@ impl ArtifactEntry {
         )
     }
 
-    fn canonical_artifact_id(
+    pub(crate) fn canonical_artifact_id(
         interface: &crate::certified_products::CertifiedModuleInterface,
     ) -> ArtifactId {
         Self::canonical_descriptor(interface).id

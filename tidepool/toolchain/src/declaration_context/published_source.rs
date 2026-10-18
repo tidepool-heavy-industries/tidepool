@@ -179,14 +179,10 @@ impl ExactDeclarationContext {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 unreachable!()
             };
-            let canonical = ArtifactEntry::canonical(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("published dependency lacks its canonical interface"))?
-                    .clone(),
-            )
-            .descriptor
-            .id;
+            let canonical =
+                ArtifactEntry::canonical_artifact_id(product.module_interface().ok_or_else(
+                    || failure("published dependency lacks its canonical interface"),
+                )?);
             let issued_binding = closure.selection_snapshot().namespace.get(&canonical);
             let current_binding = support
                 .artifacts()
