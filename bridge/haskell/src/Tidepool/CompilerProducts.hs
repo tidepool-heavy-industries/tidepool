@@ -60,7 +60,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeAvailableOriginalProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
@@ -458,13 +458,19 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner = case exact of
+      acquireOriginal siblings owner demanded = case exact of
         Nothing -> pure Nothing
         Just scope -> do
-          when (any (\original -> (originalUnit original,originalModule original) ==
-              (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
+          let available = [original | original <- scopeAvailableOriginalProducts scope
+                , (originalUnit original,originalModule original) ==
+                    (unitString (moduleUnit owner),moduleNameString (moduleName owner))]
+          unless (null available)
             (fail ("required binder is absent from the admitted original native census: "
-              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              ++ "; demanded=" ++ show (Set.toAscList demanded)
+              ++ "; admitted=" ++ show
+                [(originalVersion original,originalIfaceSha256 original,originalProductSha256 original,
+                  map originalOrdinal (originalGroups original)) | original <- available]))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -506,10 +512,14 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
                 , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
                 , owner `Set.notMember` sourceOwners
                 , Map.notMember owner modules, owner `Set.notMember` attempted])
+            demandedBy owner = Set.filter (\identity ->
+              (symbolUnit identity,symbolModule identity) ==
+                (T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))))
+              (rawOriginalProductDemands raw `Set.difference` known)
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> do
-          original <- acquireOriginal siblings owner
+          original <- acquireOriginal siblings owner (demandedBy owner)
           let version = ownerVersion interfaces owner
           -- A present canonical owner checks the current artifact bytes. A
           -- prepared hit avoids decoding and lowering, not validation work.
