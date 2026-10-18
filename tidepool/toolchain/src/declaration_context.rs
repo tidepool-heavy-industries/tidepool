@@ -18894,17 +18894,28 @@ mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        assert!(dependent_context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .metadata_snapshot()
-            .selected_native_groups
+        let issued_support = changed
+            .compiler_source_support()
+            .native_offers()
             .iter()
-            .any(|group| group.artifact == support_entry.descriptor.id));
-        // The exact support groups remain selected even though their compiler
-        // role is type-only. A redundant private support offer is optional.
+            .filter(|offer| offer.original() == support_entry.descriptor.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !issued_support.is_empty(),
+            "changed compiler proof must issue its exact support availability"
+        );
+        let propagated_support = dependent_context
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .filter(|offer| offer.original() == support_entry.descriptor.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            propagated_support, issued_support,
+            "type-only support must retain its issuer's exact carrier, interface, availability class and selection"
+        );
+        // Opaque availability survives type-only roles independently of
+        // executable group demand. A redundant private support offer is optional.
         OriginalCompilerInputs::from_native_availability(
             &dependent_context,
             producer,
