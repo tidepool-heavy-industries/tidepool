@@ -1401,7 +1401,8 @@ def analyze(record_path):
         "workspace_route": {"selected": environment.get("workspace_route"),
                             "installed_entry": (activation or {}).get("prepared_workspace_entry"),
                             "verified": environment.get("workspace_route") == "prepared-workspace"
-                                        and isinstance((activation or {}).get("prepared_workspace_entry"), str)},
+                                        and isinstance((activation or {}).get("prepared_workspace_entry"), str)
+                                        and (activation or {})["prepared_workspace_entry"].startswith("/")},
         "owned_artifact_observations": owner_observations,
         "trace_capture": capture_observation,
         "execution_observations": execution_observation,
