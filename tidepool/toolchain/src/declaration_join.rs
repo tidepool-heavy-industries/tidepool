@@ -402,6 +402,49 @@ impl CertifiedAuthoredDeclaration {
         &self.compiler_support
     }
 
+    pub(crate) fn publication_compiler_support(
+        &self,
+        visible: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+        let owner = ExactModuleIdentity {
+            unit: self.product.owner().unit.clone(),
+            module: self.product.owner().module.clone(),
+        };
+        if !matches!(
+            self.product
+                .module_interface()
+                .map(|interface| interface.origin()),
+            Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })
+        ) {
+            return Err(contract(
+                "authored publication lacks its certified source origin",
+            ));
+        }
+        let original = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            self.toolchain_identity_sha256,
+            &self.product,
+        );
+        let role = self
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .get(&owner);
+        if role
+            .and_then(|role| role.original())
+            .is_some_and(|id| id != original)
+        {
+            return Err(contract(
+                "authored publication source differs from its selected original",
+            ));
+        }
+        let sources = visible
+            .contains(&owner)
+            .then_some(owner)
+            .into_iter()
+            .collect();
+        self.compiler_support.for_source_owners(&sources)
+    }
+
     /// Preserve strict shared-source traversal while excluding only certified
     /// session implementation anchors from lexical selection.
     pub fn shared_source_lexical_surface(
@@ -941,6 +984,35 @@ impl AcceptedJoin {
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
         &self.compiler_support
+    }
+
+    pub(crate) fn publication_compiler_support(
+        &self,
+        visible: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+        let metadata = self.compiler_support.artifacts().metadata_snapshot();
+        let mut sources = BTreeSet::new();
+        for (owner, role) in self.compiler_support.projection().snapshot_roles() {
+            let Some(original) = role.original() else {
+                continue;
+            };
+            let entry = metadata
+                .artifacts
+                .get(&original)
+                .ok_or_else(|| contract("joined publication source is outside its custody"))?;
+            if entry.descriptor.owner != *owner {
+                return Err(contract("joined publication source has a different owner"));
+            }
+            if visible.contains(owner)
+                && matches!(&entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(product)
+                        if matches!(product.module_interface().map(|interface| interface.origin()),
+                            Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+            {
+                sources.insert(owner.clone());
+            }
+        }
+        self.compiler_support.for_source_owners(&sources)
     }
 
     pub fn input(&self) -> &DeclarationJoinInput {

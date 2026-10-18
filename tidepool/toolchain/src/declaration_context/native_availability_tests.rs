@@ -3078,8 +3078,10 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
             unreachable!()
         };
         assert!(
-            RequestNativeAvailability(Arc::clone(&transport.availability))
+            transport
+                .advertised
                 .receipt_original(
+                    &RequestNativeAvailability(Arc::clone(&transport.availability)),
                     &original.owner().unit,
                     &original.owner().module,
                     &original.owner().module_version
@@ -3172,8 +3174,14 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
     assert!(duplicate.availability[&entries[0].descriptor.id].permits(9001));
     let original = duplicate.availability[&entries[0].descriptor.id].original_owner();
     let private = RequestNativeAvailability(Arc::clone(&duplicate.availability));
-    let receipt_owner = private
-        .receipt_original(&original.unit, &original.module, &original.module_version)
+    let receipt_owner = duplicate
+        .advertised
+        .receipt_original(
+            &private,
+            &original.unit,
+            &original.module,
+            &original.module_version,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(receipt_owner.original_owner(), original);
