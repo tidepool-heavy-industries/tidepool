@@ -4,8 +4,8 @@ import qualified Tidepool.Effects.Core as Core
 
 data PublicShape = NewShape
 
-keepB :: Actor.ActorRef Maybe () -> Eff '[Core.Actor] ()
-keepB = Actor.drainActor
+keepB :: Actor.ActorDefinition () Maybe () -> () -> Eff '[Core.Actor] (Actor.ActorRef Maybe ())
+keepB = Actor.startActor
 
 answer :: Bool
 answer = True
