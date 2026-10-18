@@ -9018,7 +9018,10 @@ impl ExactDeclarationContext {
         Ok(RetainedArtifactMaterialization {
             _directory: Some(Arc::clone(&directory)),
             _parents: parents,
-            rows: rows.into_iter().map(|(id, row)| (id, Arc::new(row))).collect(),
+            rows: rows
+                .into_iter()
+                .map(|(id, row)| (id, Arc::new(row)))
+                .collect(),
             groups: groups.into(),
             execution_scope,
             graph_paths: graph_paths
@@ -9516,7 +9519,7 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
         .cloned()
         .collect::<Vec<_>>();
     let baseline = retain_native_offers(baseline, &offers)?;
-    baseline.bind_segment( entries, originals.source_selection())
+    baseline.bind_segment(entries, originals.source_selection())
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then
@@ -9550,7 +9553,7 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
         .filter(|entry| !admitted.contains(&entry.descriptor.id))
         .cloned()
         .collect();
-    bound.admit_bound_target( cursor, demand, visible, selection)
+    bound.admit_bound_target(cursor, demand, visible, selection)
 }
 
 /// Check the inventory's selected dependency closure without issuing group rows.
@@ -13509,9 +13512,9 @@ mod tests {
             &validation.inventory,
         )
         .unwrap();
-        let mut fixed = inputs.artifacts().bind_segment( vec![], &selected)
-            .unwrap();
-        let target = fixed.admit_bound_target(
+        let mut fixed = inputs.artifacts().bind_segment(vec![], &selected).unwrap();
+        let target = fixed
+            .admit_bound_target(
                 inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -14797,7 +14800,9 @@ mod tests {
                 crate::certified_products::tests::original_witness_fixture(
                     module,
                     Some(crate::certified_products::PendingImportOwner::Retained {
-                        identity: tidepool_repr::execution_schema::testing::identity("Value", "live"),
+                        identity: tidepool_repr::execution_schema::testing::identity(
+                            "Value", "live",
+                        ),
                         generation,
                     }),
                     version,
@@ -14848,14 +14853,14 @@ mod tests {
                 binder: binding.identity.clone(),
             }];
             let validation = PackageInterfaceValidation::default();
-            let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                inputs,
-                &inputs.metadata,
-                &validation.inventory,
-            )
-            .unwrap();
-            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
                 .unwrap();
+            let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
             let target = fixed.admit_bound_target(
                 &inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -15358,9 +15363,9 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-                .unwrap();
-            let target = fixed.admit_bound_target(
+            let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
+            let target = fixed
+                .admit_bound_target(
                     &inputs.artifacts(),
                     crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                         &imports,

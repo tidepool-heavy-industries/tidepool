@@ -805,15 +805,20 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         roots,
         "private availability cannot add executable body roots"
     );
-    let final_proof = final_inputs
-        .native_original_requirements()
-        .into_iter()
-        .find(|proof| proof.original == original)
-        .unwrap();
+    let availability = final_inputs.native_availability(original).unwrap();
+    let offers = availability
+        .offers()
+        .filter(|offer| offer.proof().is_some())
+        .collect::<Vec<_>>();
+    let [offer] = offers.as_slice() else {
+        panic!("one selected issuer remains in the request");
+    };
     assert_eq!(
-        final_proof
-            .issued_groups(&final_inputs.artifacts())
-            .unwrap(),
+        offer
+            .issued_group_carriers()
+            .unwrap()
+            .into_keys()
+            .collect::<BTreeSet<_>>(),
         groups
     );
     assert_eq!(baseline.semantic_sha256(), before);
@@ -1718,7 +1723,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let consume = |view: &ArtifactView,
                    selection: &crate::certified_products::CertifiedSourceSelection,
                    imports: &[crate::certified_products::PendingImportOwner]| {
-        let mut fixed = view.bind_segment( vec![], selection)
+        let mut fixed = view
+            .bind_segment(vec![], selection)
             .expect("bind the actual receipt owner before body demand");
         let demanded = fixed.admit_bound_target(
             view,
@@ -1733,8 +1739,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .resolve()
             .map(|resolved| resolved.groups().clone())
     };
-    let mut failed_then_retried = admitted.bind_segment( vec![], &selected)
-        .unwrap();
+    let mut failed_then_retried = admitted.bind_segment(vec![], &selected).unwrap();
     let fixed_before = failed_then_retried.observed_binding_state();
     let cursor_before = admitted.capture_graph_selection();
     let mixed = [demand.clone(), denied_demand.clone()];
@@ -1750,7 +1755,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         "a valid staged B7 followed by denied B9001 publishes no payload or choice"
     );
     assert_eq!(admitted.capture_graph_selection(), cursor_before);
-    let retried = failed_then_retried.admit_bound_target(
+    let retried = failed_then_retried
+        .admit_bound_target(
             &admitted,
             NativeArtifactDemand::CertifiedTargetImports(std::slice::from_ref(&demand)),
             vec![],
@@ -2002,12 +2008,20 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 .unwrap();
             assert_eq!(wire_mode(&request, "OptionalCensus"), full_mode());
             assert!(request.groups.is_empty());
-            let requirements = request.compiler_inputs().native_original_requirements();
-            assert_eq!(requirements.as_slice(), &[chosen.proof().unwrap().clone()]);
+            let availability = request
+                .compiler_inputs()
+                .native_availability(entry.descriptor.id)
+                .unwrap();
+            let offers = availability
+                .offers()
+                .filter(|offer| offer.proof().is_some())
+                .collect::<Vec<_>>();
+            let [offer] = offers.as_slice() else {
+                panic!("one selected issuer remains in the request");
+            };
+            assert!(offer.same_issuance(chosen));
             assert_eq!(
-                requirements[0]
-                    .issued_group_carriers(request.compiler_inputs().artifacts())
-                    .unwrap(),
+                offer.issued_group_carriers().unwrap(),
                 chosen.issued_group_carriers().unwrap()
             );
         }
@@ -2596,9 +2610,9 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         )
         .unwrap();
         let source = inputs.artifacts();
-        let mut fixed = source.bind_segment( vec![], &selection)
-            .unwrap();
-        let target = fixed.admit_bound_target(
+        let mut fixed = source.bind_segment(vec![], &selection).unwrap();
+        let target = fixed
+            .admit_bound_target(
                 source,
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -2851,10 +2865,10 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     )
     .unwrap();
     assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
-    let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-        .unwrap();
+    let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
     let imports = [source_import(&native, 9001)];
-    let demanded = fixed.admit_bound_target(
+    let demanded = fixed
+        .admit_bound_target(
             &inputs.artifacts(),
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
@@ -3192,8 +3206,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-                .unwrap();
+            let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
             let imports = [source_import(&native, 9001)];
             let demanded = fixed.admit_bound_target(
                 &inputs.artifacts(),
@@ -5501,9 +5514,10 @@ fn replay_native_transport_history(
     assert_eq!(wire_mode(&request, "IndependentLeft"), full_mode());
     coverage.full_without_demand += 1;
     for index in 0..2 {
-        assert!(inputs.native_original_requirements().iter().any(|proof| {
-            proof.original == proofs[index].original
-                && proof.issued_group_carriers(inputs.artifacts()).unwrap() == expected[index]
+        let availability = inputs.native_availability(proofs[index].original).unwrap();
+        assert!(availability.offers().any(|offer| {
+            offer.proof() == Some(&proofs[index])
+                && offer.issued_group_carriers().unwrap() == expected[index]
         }));
     }
     let validation = PackageInterfaceValidation::default();
@@ -5513,9 +5527,7 @@ fn replay_native_transport_history(
         &validation.inventory,
     )
     .unwrap();
-    let bind = || {
-        inputs.artifacts().bind_segment( vec![], &selected)
-    };
+    let bind = || inputs.artifacts().bind_segment(vec![], &selected);
     for index in 0..2 {
         let mut fixed = bind().unwrap();
         let imports = [source_import(&products[index + 1], 7)];
@@ -5799,10 +5811,10 @@ fn replay_native_transport_history(
             proof.issued_group_carriers(view).is_err(),
             "selected carrier snapshots do not reconstruct opaque Group availability"
         );
-        let mut fixed = view.bind_segment( vec![], &continued_selection)
-            .unwrap();
+        let mut fixed = view.bind_segment(vec![], &continued_selection).unwrap();
         let imports = [source_import(&dependent, 7)];
-        let admitted = fixed.admit_bound_target(
+        let admitted = fixed
+            .admit_bound_target(
                 view,
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
@@ -6046,8 +6058,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         for demanded in [7, 9001] {
-            let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-                .unwrap();
+            let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
             let imports = [source_import(&native, demanded)];
             let admitted = fixed.admit_bound_target(
                 inputs.artifacts(),
@@ -6067,8 +6078,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 );
             }
         }
-        let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-            .unwrap();
+        let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
         let imports = [source_import(&unrelated, 7)];
         let denied = fixed.admit_bound_target(
             inputs.artifacts(),
@@ -6353,10 +6363,10 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
                 if index == 0 {
-                    let mut fixed = inputs.artifacts().bind_segment( vec![], &selection)
-                        .unwrap();
+                    let mut fixed = inputs.artifacts().bind_segment(vec![], &selection).unwrap();
                     let imports = [source_import(native, 9001)];
-                    let demanded = fixed.admit_bound_target(
+                    let demanded = fixed
+                        .admit_bound_target(
                             &inputs.artifacts(),
                             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                                 &imports,
