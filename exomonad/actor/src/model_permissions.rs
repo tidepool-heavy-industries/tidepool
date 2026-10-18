@@ -62,9 +62,14 @@ impl AdmittedModelIdentity {
         provider: String,
         model: Model,
     ) -> Result<Self, ModelPermissionError> {
-        if [&catalog_identity, &key, &provider, model.value()]
-            .iter()
-            .any(|s| s.trim().is_empty())
+        if [
+            catalog_identity.as_str(),
+            key.as_str(),
+            provider.as_str(),
+            model.value(),
+        ]
+        .iter()
+        .any(|s| s.trim().is_empty())
         {
             return Err(ModelPermissionError::EmptyIdentity);
         }
