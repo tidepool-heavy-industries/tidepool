@@ -2362,6 +2362,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             )
             .unwrap();
             crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.launch.embedded = Some(settings.clone());
                 project.haskell.source_roots = vec![".".into()];
                 project.haskell.modules = vec!["AgentSpec".into()];
                 project.haskell.spec = Some("AgentSpec.agentSpec".into());

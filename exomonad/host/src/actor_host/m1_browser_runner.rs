@@ -805,6 +805,7 @@ pub(super) async fn production_browser_journey() {
         )
         .unwrap();
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+            project.launch.embedded = Some(settings.clone());
             project.haskell.source_roots = vec![".".into()];
             project.haskell.spec = Some("AgentSpec.agentSpec".into());
         });
