@@ -1406,8 +1406,12 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     .into_iter()
                     .filter(|key| key.artifact == descriptor.id)
                     .collect::<BTreeSet<_>>();
-                let context_carrier = context.artifact_view().selected_native_groups().into_iter()
-                    .filter(|key| key.artifact == descriptor.id).collect::<BTreeSet<_>>();
+                let context_carrier = context
+                    .artifact_view()
+                    .selected_native_groups()
+                    .into_iter()
+                    .filter(|key| key.artifact == descriptor.id)
+                    .collect::<BTreeSet<_>>();
                 assert!(carrier_groups.is_subset(&context_carrier));
                 assert!(carrier_groups.is_subset(&expected_warm_carrier));
                 assert!(!context_carrier.contains(&negate));
