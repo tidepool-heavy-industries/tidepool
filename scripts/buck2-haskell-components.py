@@ -145,6 +145,8 @@ def source_location(path):
         return path.relative_to(PACKAGE.resolve()).as_posix()
     if path.is_relative_to(WORKSPACE):
         relative = path.relative_to(WORKSPACE).as_posix()
+        if relative == "Examples/ModelCallWorkflow.hs":
+            return "//build/rust:workspace_model_call_source"
         return "//exomonad/examples/workspace:authored_haskell_" + normalized_path(relative)
     persona = ROOT / "exomonad/examples/persona/.exomonad"
     if path.is_relative_to(persona):
@@ -162,6 +164,8 @@ def source(module, roots):
         return path, "//bridge/mcp:effects_generated[" + path.replace("/", "_").replace(".", "_") + "]"
     if module in PROTOCOL_MODULES:
         return path, "//bridge/protocol:generated[" + normalized_path("bridge/haskell/lib/" + path) + "]"
+    if module == "Examples.ModelCallWorkflow" and "../../exomonad/examples/workspace/.exomonad" in roots:
+        return path, "//build/rust:workspace_model_call_source"
     if module == "Project.Checks" and "generated/pinned" in roots:
         return path, "//exomonad/host:workspace_pinned_check_source"
     if is_jev_core(module) and "generated/jev/core" in roots:

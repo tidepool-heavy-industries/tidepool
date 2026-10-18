@@ -86,6 +86,37 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         self.assertNotEqual((restored / tracked).read_bytes(), (workspace / tracked).read_bytes())
         self.assertEqual(json.loads((output / "workspace-gitlink.json").read_text()), self.record)
 
+    def test_provision_exports_selected_sources_despite_a_different_dirty_checkout(self):
+        source, workspace = self.source()
+        selected = {
+            path: subprocess.check_output([
+                str(self.git), "-C", str(workspace), "show", f'{self.record["revision"]}:{path}',
+            ])
+            for path in resource.PROJECTED_SOURCES
+        }
+        self.run_git(workspace, "checkout", "--detach", self.record["revision"] + "^")
+        for path in selected:
+            (workspace / path).write_bytes(b"mutable checkout is not the selected source\n")
+        output = self.root / "resource"
+        resource.provision(source, output, str(self.git))
+        for path, expected in selected.items():
+            self.assertEqual((output / "source" / path).read_bytes(), expected)
+
+    def test_provision_refuses_missing_selected_source_before_output(self):
+        source, workspace = self.source()
+        self.run_git(workspace, "rm", resource.PROJECTED_SOURCES[0])
+        self.run_git(workspace, "-c", "user.name=Resource test", "-c", "user.email=resource@example.invalid",
+                     "commit", "--quiet", "-m", "Remove projected source")
+        revision = self.run_git(workspace, "rev-parse", "HEAD")
+        qualification.write_json(source / "build/native-workspace-gitlink.json", self.record | {"revision": revision})
+        self.run_git(source, "add", "build/native-workspace-gitlink.json")
+        self.run_git(source, "update-index", "--cacheinfo", f'160000,{revision},.exomonad/workspace')
+        self.run_git(source, "-c", "user.name=Resource test", "-c", "user.email=resource@example.invalid",
+                     "commit", "--quiet", "-m", "Select missing source")
+        with self.assertRaises(subprocess.CalledProcessError):
+            resource.provision(source, self.root / "resource", str(self.git))
+        self.assertFalse((self.root / "resource").exists())
+
     def test_provision_refuses_a_descriptor_outside_the_committed_gitlink(self):
         source, _ = self.source()
         qualification.write_json(source / "build/native-workspace-gitlink.json", self.record | {"revision": "0" * 40})

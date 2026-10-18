@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Retain the recorded workspace commit as a self-contained Git bundle."""
+"""Retain the recorded workspace commit as a Git bundle and source tree."""
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tarfile
 
 
 # These skills have one authored source and must be published unchanged in the
@@ -16,6 +18,9 @@ PUBLISHED_SKILLS = (
     "exomonad-agent-spec/SKILL.md",
     "exomonad-command/references/hosted-tools.md",
 )
+
+
+PROJECTED_SOURCES = ("Examples/ModelCallWorkflow.hs",)
 
 
 def provision(source: Path, output: Path, git: str) -> str:
@@ -52,6 +57,13 @@ def provision(source: Path, output: Path, git: str) -> str:
                 f"workspace skill publication differs from its authored template: {relative}; "
                 "publish the template and record its reviewed workspace commit"
             )
+    projected = {
+        relative: subprocess.check_output(
+            [git, "-C", str(repository), "show", f"{revision}:{relative}"],
+            env=environment,
+        )
+        for relative in PROJECTED_SOURCES
+    }
     tree = run(repository, "rev-parse", revision + "^{tree}")
     output.mkdir()
     # Import original objects into an isolated repository; never change source
@@ -70,6 +82,16 @@ def provision(source: Path, output: Path, git: str) -> str:
         if run(isolated, "bundle", "list-heads", str(output / "workspace.bundle")) != f"{revision} HEAD\n{revision} refs/heads/workspace":
             raise ValueError("workspace bundle does not advertise its exact recorded commit")
         run(isolated, "bundle", "verify", str(output / "workspace.bundle"))
+        # Export the selected object, never the submodule's mutable checkout.
+        archive = subprocess.check_output(
+            [git, "-C", str(isolated), "archive", "--format=tar", revision],
+            env=environment,
+        )
+        with tarfile.open(fileobj=io.BytesIO(archive)) as contents:
+            contents.extractall(output / "source", filter="data")
+        for relative, original in projected.items():
+            if (output / "source" / relative).read_bytes() != original:
+                raise ValueError(f"workspace source projection differs from its committed bytes: {relative}")
     (output / "workspace-gitlink.json").write_bytes(descriptor.read_bytes())
     return revision
 

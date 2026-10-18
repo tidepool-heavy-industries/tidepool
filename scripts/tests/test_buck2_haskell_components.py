@@ -274,6 +274,9 @@ class ComponentProjectionTests(unittest.TestCase):
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")
         self.assertEqual(G.source("Project.Checks", ["generated/pinned"])[1],
                          "//exomonad/host:workspace_pinned_check_source")
+        self.assertEqual(G.source("Examples.ModelCallWorkflow",
+                                  ["../../exomonad/examples/workspace/.exomonad"])[1],
+                         "//build/rust:workspace_model_call_source")
         self.assertEqual(G.source("Jev.Core.Schema", ["generated/jev/core"])[1],
                          "toolchains//:jev_sources[core_Jev_Core_Schema_hs]")
         with tempfile.TemporaryDirectory() as directory:
@@ -284,6 +287,8 @@ class ComponentProjectionTests(unittest.TestCase):
             with patch.object(G, "WORKSPACE", workspace):
                 self.assertEqual(G.source_location(source),
                                  "//exomonad/examples/workspace:authored_haskell_Project_Control_hs")
+                self.assertEqual(G.source_location(workspace / "Examples/ModelCallWorkflow.hs"),
+                                 "//build/rust:workspace_model_call_source")
 
     def test_bootstrap_uses_declared_target_without_ambient_parser(self):
         with patch.object(G.subprocess, "run") as run:

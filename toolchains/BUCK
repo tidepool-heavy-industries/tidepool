@@ -175,7 +175,7 @@ nix_directory(
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
     store_path = read_root_config("nix", "workspace_git_resource", ""),
-    projected_sources = ["workspace.bundle"],
+    projected_sources = ["workspace.bundle", "source", "source/Examples/ModelCallWorkflow.hs"],
     visibility = ["PUBLIC"],
 )
 
