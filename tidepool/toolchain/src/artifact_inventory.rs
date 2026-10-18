@@ -9326,12 +9326,14 @@ mod tests {
                     );
                 cancellation.cancel();
                 let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
+                let settled_before_release = outcome.is_ok();
                 let producer_unchanged = held.is_empty();
                 drop(held);
                 let result = outcome
                     .or_else(|_| received.recv_timeout(std::time::Duration::from_secs(5)))
                     .expect("cancelled waiter must settle after producer release");
                 assert!(boundary.is_ok(), "inherited={inherited} compiler_merge={compiler_merge}: producer wait not observed; action={:?} close={:?}", result.action, result.close);
+                assert!(settled_before_release, "inherited={inherited} compiler_merge={compiler_merge}: cancellation must settle while the producer remains blocked");
                 assert!(
                     receiver_locked,
                     "retain_materialization must hold its receiver before the inherited producer"
