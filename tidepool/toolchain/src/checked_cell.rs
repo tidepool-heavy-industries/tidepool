@@ -2009,7 +2009,7 @@ impl CheckedValueInputs {
         name = "products.value_capture",
         level = "debug",
         skip_all,
-        fields(inclusive = true, generation)
+        fields(inclusive = true, generation = generation)
     )]
     fn capture_output(
         &self,
