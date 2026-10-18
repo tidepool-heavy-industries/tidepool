@@ -114,10 +114,17 @@ impl EmbeddedHarnessRuntime {
             .set(auth)
             .map_err(|_| "run inference already configured".to_owned())
     }
-    pub(super) fn configure_providers(&self, providers: std::collections::BTreeMap<String, super::run_auth::RunAuth>) -> Result<(), String> {
-        self.inference_providers.set(providers).map_err(|_| "run providers already configured".into())
+    pub(super) fn configure_providers(
+        &self,
+        providers: std::collections::BTreeMap<String, super::run_auth::RunAuth>,
+    ) -> Result<(), String> {
+        self.inference_providers
+            .set(providers)
+            .map_err(|_| "run providers already configured".into())
     }
-    pub(super) fn inference_providers(&self) -> Option<&std::collections::BTreeMap<String, super::run_auth::RunAuth>> {
+    pub(super) fn inference_providers(
+        &self,
+    ) -> Option<&std::collections::BTreeMap<String, super::run_auth::RunAuth>> {
         self.inference_providers.get()
     }
     pub(super) fn inference_auth(&self) -> &super::run_auth::RunAuth {

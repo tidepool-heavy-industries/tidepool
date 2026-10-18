@@ -309,23 +309,43 @@ impl EmbeddedService {
         let mut providers = std::collections::BTreeMap::new();
         if let Some(catalog) = catalog {
             for (key, provider) in &catalog.providers {
-                providers.insert(key.clone(), super::run_auth::RunAuth::from_provider(provider, runtime.store(), runtime.run_identity().to_owned())?);
+                providers.insert(
+                    key.clone(),
+                    super::run_auth::RunAuth::from_provider(
+                        provider,
+                        runtime.store(),
+                        runtime.run_identity().to_owned(),
+                    )?,
+                );
             }
         }
-        let selected = catalog.map(|catalog| providers[&catalog.models[&catalog.primary].provider].clone());
+        let selected =
+            catalog.map(|catalog| providers[&catalog.models[&catalog.primary].provider].clone());
         let auth = match (inference_auth, selected) {
             (Some(injected), Some(selected)) => {
-                if harness::transport::Auth::admission(&injected).map_err(|e| e.to_string())?.contract()
-                    != harness::transport::Auth::admission(&selected).map_err(|e| e.to_string())?.contract() {
+                if harness::transport::Auth::admission(&injected)
+                    .map_err(|e| e.to_string())?
+                    .contract()
+                    != harness::transport::Auth::admission(&selected)
+                        .map_err(|e| e.to_string())?
+                        .contract()
+                {
                     return Err("injected root transport differs from frozen catalog".into());
                 }
                 injected
             }
             (Some(auth), None) | (None, Some(auth)) => auth,
-            (None, None) => super::run_auth::RunAuth::from_settings(settings, runtime.store(), runtime.run_identity().to_owned())?,
+            (None, None) => super::run_auth::RunAuth::from_settings(
+                settings,
+                runtime.store(),
+                runtime.run_identity().to_owned(),
+            )?,
         };
         if let Some(catalog) = catalog {
-            providers.insert(catalog.models[&catalog.primary].provider.clone(), auth.clone());
+            providers.insert(
+                catalog.models[&catalog.primary].provider.clone(),
+                auth.clone(),
+            );
             runtime.configure_providers(providers)?;
         }
         runtime.configure_inference(auth)?;

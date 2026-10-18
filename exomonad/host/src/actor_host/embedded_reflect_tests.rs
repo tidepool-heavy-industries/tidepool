@@ -305,8 +305,10 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
     );
     let mut stale = identity.clone();
     stale.incarnation = "stale".into();
-    let stale_reader =
-        super::embedded_reflect::conversation_reader(store.clone(), Arc::new(move |_| Some(stale.clone())));
+    let stale_reader = super::embedded_reflect::conversation_reader(
+        store.clone(),
+        Arc::new(move |_| Some(stale.clone())),
+    );
     assert!(matches!(
         (stale_reader)(actor, 1).await,
         Err(exomonad_actor::ConversationUnavailable::Unreadable(_))

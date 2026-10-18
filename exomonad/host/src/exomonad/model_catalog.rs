@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use exomonad_actor::{Backend, Model, Reasoning};
 use serde::{Deserialize, Serialize};
 
-use super::EmbeddedLaunchConfig;
 use super::inference_selection::{AgentInferenceDefaults, InferenceLimitOverrides};
+use super::EmbeddedLaunchConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

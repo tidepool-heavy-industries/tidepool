@@ -433,8 +433,12 @@ impl FrozenWorkspace {
                 format!("invalid frozen workspace selection; prepare a new deployment and start a new run: {error}")
             })?;
             let captured_config: super::ExomonadConfig = toml::from_str(&frozen.config)?;
-            if serde_json::to_value(&frozen.model_catalog)? != serde_json::to_value(captured_config.resolved_catalog()?)? {
-                return Err("frozen model catalog differs from captured launch configuration".into());
+            if serde_json::to_value(&frozen.model_catalog)?
+                != serde_json::to_value(captured_config.resolved_catalog()?)?
+            {
+                return Err(
+                    "frozen model catalog differs from captured launch configuration".into(),
+                );
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
@@ -668,7 +672,8 @@ impl FrozenWorkspace {
         let resources_path = PathBuf::from("resources/Exomonad/Workspace.hs");
         if include.iter().any(|root| generates_workspace_module(root)) {
             return Err(
-                "Exomonad.Workspace and Exomonad.Models are reserved for generated interfaces".into(),
+                "Exomonad.Workspace and Exomonad.Models are reserved for generated interfaces"
+                    .into(),
             );
         }
         std::fs::create_dir_all(directory.join("resources/Exomonad"))?;
@@ -1113,7 +1118,11 @@ fn seal_prepared_directory(directory: &Path) -> Result<()> {
 fn generates_workspace_module(root: &Path) -> bool {
     ["hs", "lhs", "hs-boot", "lhs-boot"]
         .into_iter()
-        .any(|suffix| ["Workspace", "Models"].iter().any(|name| root.join(format!("Exomonad/{name}.{suffix}")).is_file()))
+        .any(|suffix| {
+            ["Workspace", "Models"]
+                .iter()
+                .any(|name| root.join(format!("Exomonad/{name}.{suffix}")).is_file())
+        })
 }
 
 fn generated_core_identity() -> Result<String> {

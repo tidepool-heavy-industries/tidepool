@@ -91,7 +91,11 @@ fn schema() -> Vec<Decl> {
         },
         Decl {
             name: "ModelSelectionEnvelope",
-            shape: Shape::Record(vec![f("catalog_identity", Text), f("key", Text), f("reasoning", Named("Reasoning"))]),
+            shape: Shape::Record(vec![
+                f("catalog_identity", Text),
+                f("key", Text),
+                f("reasoning", Named("Reasoning")),
+            ]),
         },
         Decl {
             name: "ModelRequestEnvelope",

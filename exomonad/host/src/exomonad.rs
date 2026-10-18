@@ -24,8 +24,8 @@ pub(crate) const STATUS_VERSION: u32 = 5;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 mod inference_selection;
-pub(crate) mod model_catalog;
 mod launch_preflight;
+pub(crate) mod model_catalog;
 pub use inference_selection::AgentInferenceDefaults as ExomonadAgentDefaults;
 pub mod resources;
 mod scaffold;
@@ -251,24 +251,40 @@ pub(crate) struct ExomonadConfig {
 
 impl ExomonadConfig {
     pub(crate) fn apply_inference(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(inference) = &self.inference {
-        let catalog = inference.resolve().map_err(runtime_error)?;
-        let primary = &catalog.models[&catalog.primary];
-        self.defaults = ExomonadAgentDefaults { model: primary.model.clone(), reasoning: primary.reasoning };
-        let provider = &catalog.providers[&primary.provider];
-        if let Some(embedded) = &mut self.launch.embedded {
-            embedded.provider = provider.backend;
-            embedded.credential_file = provider.credential_file.clone().unwrap_or_default();
-            embedded.inference_limits = provider.inference_limits;
+        if let Some(inference) = &self.inference {
+            let catalog = inference.resolve().map_err(runtime_error)?;
+            let primary = &catalog.models[&catalog.primary];
+            self.defaults = ExomonadAgentDefaults {
+                model: primary.model.clone(),
+                reasoning: primary.reasoning,
+            };
+            let provider = &catalog.providers[&primary.provider];
+            if let Some(embedded) = &mut self.launch.embedded {
+                embedded.provider = provider.backend;
+                embedded.credential_file = provider.credential_file.clone().unwrap_or_default();
+                embedded.inference_limits = provider.inference_limits;
+            }
         }
-    }
         Ok(())
     }
-    pub(crate) fn resolved_catalog(&self) -> Result<Option<model_catalog::ResolvedCatalog>, String> {
+    pub(crate) fn resolved_catalog(
+        &self,
+    ) -> Result<Option<model_catalog::ResolvedCatalog>, String> {
         match &self.inference {
             Some(config) => config.resolve().map(Some),
-            None => self.launch.embedded.as_ref().map(|embedded|
-                model_catalog::InferenceConfig::synthesize_legacy(&self.defaults, &self.models, embedded)?.resolve()).transpose(),
+            None => self
+                .launch
+                .embedded
+                .as_ref()
+                .map(|embedded| {
+                    model_catalog::InferenceConfig::synthesize_legacy(
+                        &self.defaults,
+                        &self.models,
+                        embedded,
+                    )?
+                    .resolve()
+                })
+                .transpose(),
         }
     }
 }
