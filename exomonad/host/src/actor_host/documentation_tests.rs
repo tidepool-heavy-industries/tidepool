@@ -2397,18 +2397,24 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                     "{candidate}"
                 );
                 assert!(!candidate.contains("GitOid"), "{candidate}");
-                let lookup = dispatch_lookup(
-                    policy.as_ref(),
-                    &[
-                        "implement",
-                        "reviewCandidate",
-                        "requestReview",
-                        "repair",
-                        "withDecision",
-                        "workspaceAgentSpec",
-                    ],
-                )
-                .await;
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let lookup = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_lookup(
+                            policy.as_ref(),
+                            &[
+                                "implement",
+                                "reviewCandidate",
+                                "requestReview",
+                                "repair",
+                                "withDecision",
+                                "workspaceAgentSpec",
+                            ],
+                        ),
+                    )
+                    .await;
                 assert_eq!(lookup["status"], "committed", "{lookup}");
             })
         })
