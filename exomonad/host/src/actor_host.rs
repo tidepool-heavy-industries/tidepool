@@ -891,6 +891,11 @@ pub(crate) fn resolve_model(
     if model.value().trim().is_empty() {
         return Err("model must be nonempty".into());
     }
+    if model.backend() == exomonad_actor::Backend::GeminiInteractions
+        && model.value() != "gemini-4-argon"
+    {
+        return Err("Gemini Interactions supports only gemini-4-argon".into());
+    }
     Ok(model.value().to_owned())
 }
 
@@ -905,15 +910,18 @@ pub(crate) fn resolve_reasoning(
 }
 
 fn reasoning_effort(reasoning: &exomonad_actor::Reasoning) -> harness::model::Effort {
-    use exomonad_actor::{DeepSeekReasoning as DS, OpenAIReasoning as OAI, Reasoning};
+    use exomonad_actor::{ArgonEffort, DeepSeekReasoning as DS, OpenAIReasoning as OAI, Reasoning};
     match reasoning {
         Reasoning::DeepSeekReasoning(DS::DeepSeekNone) => harness::model::Effort::None,
         Reasoning::DeepSeekReasoning(DS::DeepSeekLow)
-        | Reasoning::OpenAIReasoning(OAI::OpenAILow) => harness::model::Effort::Low,
+        | Reasoning::OpenAIReasoning(OAI::OpenAILow)
+        | Reasoning::ArgonReasoning(ArgonEffort::EffortLow) => harness::model::Effort::Low,
         Reasoning::DeepSeekReasoning(DS::DeepSeekHigh)
-        | Reasoning::OpenAIReasoning(OAI::OpenAIHigh) => harness::model::Effort::High,
+        | Reasoning::OpenAIReasoning(OAI::OpenAIHigh)
+        | Reasoning::ArgonReasoning(ArgonEffort::EffortHigh) => harness::model::Effort::High,
         Reasoning::DeepSeekReasoning(DS::DeepSeekMax) => harness::model::Effort::Max,
-        Reasoning::OpenAIReasoning(OAI::OpenAIMedium) => harness::model::Effort::Medium,
+        Reasoning::OpenAIReasoning(OAI::OpenAIMedium)
+        | Reasoning::ArgonReasoning(ArgonEffort::EffortMedium) => harness::model::Effort::Medium,
     }
 }
 

@@ -23,11 +23,19 @@ impl AgentInferenceDefaults {
         if self.model.value().trim().is_empty() {
             return Err("inference model must be nonempty".into());
         }
+        validate_model(&self.model)?;
         if self.model.backend() != self.reasoning.backend() {
             return Err("model and reasoning must select the same backend".into());
         }
         Ok(())
     }
+}
+
+fn validate_model(model: &Model) -> Result<(), String> {
+    if model.backend() == Backend::GeminiInteractions && model.value() != "gemini-4-argon" {
+        return Err("Gemini Interactions supports only gemini-4-argon".into());
+    }
+    Ok(())
 }
 
 /// Bare model strings are the old OpenAI configuration syntax. New selections
@@ -52,7 +60,9 @@ impl QualifiedModel {
         if self.model.trim().is_empty() {
             return Err("inference model must be nonempty".into());
         }
-        Ok(Model::for_backend(backend, self.model.trim()))
+        let model = Model::for_backend(backend, self.model.trim());
+        validate_model(&model)?;
+        Ok(model)
     }
 }
 
@@ -178,6 +188,40 @@ mod tests {
     }
 
     #[test]
+    fn gemini_config_admits_only_argon_and_typed_efforts() {
+        for effort in ["low", "medium", "high"] {
+            let text = format!("model={{backend='gemini_interactions',model='gemini-4-argon'}}\nreasoning={{backend='gemini_interactions',effort='{effort}'}}");
+            let selected: AgentInferenceDefaults = toml::from_str(&text).unwrap();
+            assert_eq!(selected.model, Model::GeminiArgon);
+            assert_eq!(selected.reasoning.value(), effort);
+            assert_eq!(
+                toml::from_str::<AgentInferenceDefaults>(&toml::to_string(&selected).unwrap())
+                    .unwrap(),
+                selected
+            );
+        }
+        for model in ["gemini-4", "gemini-4-argon-preview", "unknown"] {
+            let text = format!("model={{backend='gemini_interactions',model='{model}'}}");
+            assert!(toml::from_str::<AgentInferenceDefaults>(&text).is_err());
+        }
+        for effort in ["none", "max", "1024"] {
+            let text = format!("model={{backend='gemini_interactions',model='gemini-4-argon'}}\nreasoning={{backend='gemini_interactions',effort='{effort}'}}");
+            assert!(toml::from_str::<AgentInferenceDefaults>(&text).is_err());
+        }
+        let compatible = AgentInferenceDefaults {
+            model: Model::CustomModel(Backend::GeminiInteractions, "gemini-4-argon".into()),
+            reasoning: Reasoning::ArgonReasoning(exomonad_actor::ArgonEffort::EffortHigh),
+        };
+        compatible.validate().unwrap();
+        let invalid = AgentInferenceDefaults {
+            model: Model::CustomModel(Backend::GeminiInteractions, "unknown".into()),
+            ..compatible
+        };
+        assert!(invalid.validate().is_err());
+        assert!(toml::to_string(&invalid).is_err());
+    }
+
+    #[test]
     fn qualified_config_refuses_cross_backend_and_legacy_effort_ambiguity() {
         for input in [
             "model={backend='deepseek',model='deepseek-flash'}\nreasoning={backend='chatgpt_plan',effort='high'}",
@@ -225,6 +269,7 @@ impl InferenceLimitOverrides {
         let defaults = match backend {
             Backend::DeepSeek => harness::transport::InferenceLimits::deepseek_default(),
             Backend::OpenAIPlan => harness::transport::InferenceLimits::chatgpt_default(),
+            Backend::GeminiInteractions => harness::transport::InferenceLimits::gemini_default(),
         };
         harness::transport::InferenceLimits {
             max_output_tokens: self.max_output_tokens.or(defaults.max_output_tokens),

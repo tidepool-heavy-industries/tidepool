@@ -3,7 +3,7 @@
 use harness::transport::{
     auth::{
         chatgpt::{RunAccountAuth, SavedAccounts},
-        DeepSeekAuth,
+        DeepSeekAuth, GeminiAuth,
     },
     Auth, CredentialReference, NativeTransportAdmission, TransportError,
 };
@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub(crate) enum RunAuth {
     OpenAIPlan(RunAccountAuth),
     DeepSeek(DeepSeekAuth),
+    Gemini(GeminiAuth),
 }
 
 impl RunAuth {
@@ -44,6 +45,20 @@ impl RunAuth {
                     .map(Self::DeepSeek)
                     .map_err(|error| error.to_string())
             }
+            exomonad_actor::Backend::GeminiInteractions => {
+                let reference = if settings.credential_file.as_os_str().is_empty() {
+                    CredentialReference::Env {
+                        name: "GEMINI_API_KEY".into(),
+                    }
+                } else {
+                    CredentialReference::File {
+                        path: settings.credential_file.clone(),
+                    }
+                };
+                GeminiAuth::from_reference(reference, limits)
+                    .map(Self::Gemini)
+                    .map_err(|error| error.to_string())
+            }
         }
     }
 
@@ -65,13 +80,14 @@ impl RunAuth {
         match self {
             Self::OpenAIPlan(_) => exomonad_actor::Backend::OpenAIPlan,
             Self::DeepSeek(_) => exomonad_actor::Backend::DeepSeek,
+            Self::Gemini(_) => exomonad_actor::Backend::GeminiInteractions,
         }
     }
 
     pub(super) fn account(&self) -> Option<&RunAccountAuth> {
         match self {
             Self::OpenAIPlan(auth) => Some(auth),
-            Self::DeepSeek(_) => None,
+            Self::DeepSeek(_) | Self::Gemini(_) => None,
         }
     }
 }
@@ -81,12 +97,14 @@ impl Auth for RunAuth {
         match self {
             Self::OpenAIPlan(auth) => auth.admission(),
             Self::DeepSeek(auth) => auth.admission(),
+            Self::Gemini(auth) => auth.admission(),
         }
     }
     fn access(&self) -> Result<String, TransportError> {
         match self {
             Self::OpenAIPlan(auth) => auth.access(),
             Self::DeepSeek(auth) => auth.access(),
+            Self::Gemini(auth) => auth.access(),
         }
     }
 }
