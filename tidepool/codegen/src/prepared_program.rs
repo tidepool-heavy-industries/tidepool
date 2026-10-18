@@ -1285,7 +1285,9 @@ impl CompiledProgram {
                     .entry(id)
                     .or_insert_with(BTreeMap::new)
                     .insert(results.clone(), function);
-                abis.insert((id, results), abi);
+                if host_entries == HostEntries::All {
+                    abis.insert((id, results), abi);
+                }
             }
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
@@ -1433,14 +1435,14 @@ impl CompiledProgram {
             if signature.results.is_caller_result() {
                 continue;
             }
-            let key = (id, signature.results.clone());
-            let abi = abis[&key].clone();
             if slot >= plan.root_words {
                 return Err(CompileError::MissingRepresentation(id));
             }
             if host_entries == HostEntries::DefinitionsOnly {
                 continue;
             }
+            let key = (id, signature.results.clone());
+            let abi = abis[&key].clone();
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
                 &format!("prepared_adapter_{}", id.0),
