@@ -3170,10 +3170,10 @@ impl CertifiedInterfaceInputs {
 pub(crate) struct RetainedArtifactMaterialization {
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
-    rows: BTreeMap<ArtifactId, RetainedArtifactRow>,
+    rows: BTreeMap<ArtifactId, Arc<RetainedArtifactRow>>,
     groups: Arc<[PendingCertifiedGroup]>,
     execution_scope: Option<Value>,
-    graph_paths: BTreeMap<[u8; 32], OwnedExecutionGraphFile>,
+    graph_paths: BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
 }
@@ -3181,7 +3181,6 @@ pub(crate) struct RetainedArtifactMaterialization {
 /// Issued only when the owning materialization writes an admitted immutable
 /// graph. Its path is transported by the sealed exact scope, while the request
 /// retains the issuing directory through worker use, including detached captures.
-#[derive(Clone)]
 struct OwnedExecutionGraphFile {
     path: PathBuf,
     transport: crate::owned_input_arena::OwnedInputSlice,
@@ -3189,10 +3188,15 @@ struct OwnedExecutionGraphFile {
 }
 
 struct MaterializationFacts<'a> {
-    rows: BTreeMap<ArtifactId, &'a RetainedArtifactRow>,
+    rows: BTreeMap<ArtifactId, &'a Arc<RetainedArtifactRow>>,
     groups: Vec<&'a PendingCertifiedGroup>,
-    graph_paths: BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile>,
-    complete: Option<Arc<RetainedArtifactMaterialization>>,
+    graph_paths: BTreeMap<[u8; 32], &'a Arc<OwnedExecutionGraphFile>>,
+    observed: Vec<&'a RetainedArtifactMaterialization>,
+}
+
+struct MaterializationCoverage {
+    facts: imbl::OrdSet<usize>,
+    excluded: bool,
 }
 
 impl MaterializationFacts<'_> {
@@ -3203,14 +3207,14 @@ impl MaterializationFacts<'_> {
             rows: self
                 .rows
                 .into_iter()
-                .map(|(id, row)| (id, row.clone()))
+                .map(|(id, row)| (id, Arc::clone(row)))
                 .collect(),
             groups: self.groups.into_iter().cloned().collect::<Vec<_>>().into(),
             execution_scope: None,
             graph_paths: self
                 .graph_paths
                 .into_iter()
-                .map(|(digest, file)| (digest, file.clone()))
+                .map(|(digest, file)| (digest, Arc::clone(file)))
                 .collect(),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
@@ -3219,21 +3223,177 @@ impl MaterializationFacts<'_> {
 }
 
 impl RetainedArtifactMaterialization {
-    /// Reuse a complete issued closure, or detach a narrower selection from
-    /// historical delta owners. Each file retains its actual issuing directory.
-    pub(crate) fn select_custody(
+    /// Preserve complete physical owners, discarding only exact issued subsets.
+    /// A narrowed residual owns fact handles, never a historical parent graph.
+    pub(crate) fn select_custody_inputs(
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-    ) -> Option<Arc<Self>> {
-        let selected = Self::select_custody_facts(
+    ) -> Vec<Arc<Self>> {
+        let Some(mut selected) = Self::select_custody_facts(
             owners,
             &metadata.artifacts,
             &metadata.selected_native_groups,
-        )?;
-        if let Some(complete) = &selected.complete {
-            return Some(Arc::clone(complete));
+        ) else {
+            return Vec::new();
+        };
+        let available = metadata
+            .artifacts
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Slots name selected facts only for this operation. They are neither
+        // durable identities nor a registry of physical issuances.
+        let mut next = 0;
+        let mut slot = || {
+            let current = next;
+            next += 1;
+            current
+        };
+        let row_slots = selected
+            .rows
+            .keys()
+            .map(|id| (*id, slot()))
+            .collect::<BTreeMap<_, _>>();
+        let group_slots = selected
+            .groups
+            .iter()
+            .map(|group| {
+                let key =
+                    Self::selected_group_key(group, &available, &metadata.selected_native_groups)
+                        .expect("selected group has its exact metadata key");
+                (key, (slot(), *group))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let graph_slots = selected
+            .graph_paths
+            .keys()
+            .map(|id| (*id, slot()))
+            .collect::<BTreeMap<_, _>>();
+        let indices = selected
+            .observed
+            .iter()
+            .enumerate()
+            .map(|(index, owner)| (*owner as *const Self as usize, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut coverage = Vec::<MaterializationCoverage>::new();
+        // Postorder computes each node's entire retained footprint once. A
+        // shadowed or unselected ancestor fact excludes whole-owner reuse even
+        // when a later fact has the same logical key.
+        for owner in &selected.observed {
+            let mut facts = imbl::OrdSet::new();
+            let mut excluded = false;
+            for parent in &owner._parents {
+                let parent = &coverage[indices[&(Arc::as_ptr(parent) as usize)]];
+                facts.extend(parent.facts.iter().copied());
+                excluded |= parent.excluded;
+            }
+            for (id, row) in &owner.rows {
+                if selected
+                    .rows
+                    .get(id)
+                    .is_some_and(|selected| Arc::ptr_eq(row, selected))
+                {
+                    facts.insert(row_slots[id]);
+                } else {
+                    excluded = true;
+                }
+            }
+            for group in owner.groups.iter() {
+                let selected =
+                    Self::selected_group_key(group, &available, &metadata.selected_native_groups)
+                        .and_then(|key| group_slots.get(&key));
+                if let Some((slot, _)) =
+                    selected.filter(|(_, selected)| group.same_issuance(selected))
+                {
+                    facts.insert(*slot);
+                } else {
+                    excluded = true;
+                }
+            }
+            for (id, file) in &owner.graph_paths {
+                if selected
+                    .graph_paths
+                    .get(id)
+                    .is_some_and(|selected| Arc::ptr_eq(file, selected))
+                {
+                    facts.insert(graph_slots[id]);
+                } else {
+                    excluded = true;
+                }
+            }
+            coverage.push(MaterializationCoverage { facts, excluded });
         }
-        Some(selected.detach())
+        let mut seen = BTreeSet::new();
+        let mut candidates = owners
+            .iter()
+            .enumerate()
+            .filter_map(|(position, owner)| {
+                let identity = Arc::as_ptr(owner) as usize;
+                let index = indices[&identity];
+                let covered = &coverage[index];
+                (seen.insert(identity) && !covered.excluded && !covered.facts.is_empty())
+                    .then_some((position, index, owner))
+            })
+            .collect::<Vec<_>>();
+        // Larger exact footprints subsume subsets. For identical facts prefer
+        // an actual writer, then the later postorder node (an actual descendant
+        // follows its ancestors). No distinct issuer can pass fact identity.
+        candidates.sort_by(|left, right| {
+            coverage[right.1]
+                .facts
+                .len()
+                .cmp(&coverage[left.1].facts.len())
+                .then_with(|| {
+                    right
+                        .2
+                        ._directory
+                        .is_some()
+                        .cmp(&left.2._directory.is_some())
+                })
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut frontier = Vec::<(usize, usize, &Arc<Self>)>::new();
+        let mut covered = imbl::OrdSet::new();
+        for candidate in candidates {
+            if frontier.iter().any(|retained| {
+                coverage[candidate.1]
+                    .facts
+                    .is_subset(&coverage[retained.1].facts)
+            }) {
+                continue;
+            }
+            covered.extend(coverage[candidate.1].facts.iter().copied());
+            frontier.push(candidate);
+        }
+        // Restore source order for incomparable owners. Logical winner
+        // precedence was fixed before any physical subset reduction.
+        frontier.sort_by_key(|candidate| candidate.0);
+        let mut inputs = frontier
+            .into_iter()
+            .map(|(_, _, owner)| Arc::clone(owner))
+            .collect::<Vec<_>>();
+        selected
+            .rows
+            .retain(|id, _| !covered.contains(&row_slots[id]));
+        selected.groups.retain(|group| {
+            let key = Self::selected_group_key(group, &available, &metadata.selected_native_groups)
+                .expect("selected group has its exact metadata key");
+            !covered.contains(&group_slots[&key].0)
+        });
+        selected
+            .graph_paths
+            .retain(|id, _| !covered.contains(&graph_slots[id]));
+        if !selected.rows.is_empty()
+            || !selected.groups.is_empty()
+            || !selected.graph_paths.is_empty()
+        {
+            inputs.push(selected.detach());
+        }
+        inputs
     }
 
     /// Opaque availability retains physical files, not compilation cache history.
@@ -3251,11 +3411,6 @@ impl RetainedArtifactMaterialization {
         artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         selected_native_groups: &BTreeSet<NativeGroupKey>,
     ) -> Option<MaterializationFacts<'a>> {
-        let groups = Self::selected_group_refs_in(
-            owners.iter().map(Arc::as_ref),
-            artifacts,
-            selected_native_groups,
-        );
         let selected_graphs = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
@@ -3267,60 +3422,51 @@ impl RetainedArtifactMaterialization {
             .collect::<BTreeSet<_>>();
         let mut rows = BTreeMap::new();
         let mut graph_paths = BTreeMap::new();
+        let mut observed = Vec::new();
         let mut visited = BTreeSet::new();
-        let mut ancestors = BTreeSet::new();
-        let (mut row_count, mut group_count, mut graph_count) = (0, 0, 0);
         for owner in owners {
-            owner.visit_owners(&mut visited, &mut |owner| {
-                ancestors.extend(
-                    owner
-                        ._parents
-                        .iter()
-                        .map(|parent| Arc::as_ptr(parent) as usize),
-                );
-                row_count += owner.rows.len();
-                group_count += owner.groups.len();
-                graph_count += owner.graph_paths.len();
-                rows.extend(
-                    owner
-                        .rows
-                        .iter()
-                        .filter(|(id, _)| artifacts.contains_key(*id))
-                        .map(|(id, row)| (*id, row)),
-                );
-                graph_paths.extend(
-                    owner
-                        .graph_paths
-                        .iter()
-                        .filter(|(digest, _)| selected_graphs.contains(*digest))
-                        .map(|(digest, file)| (*digest, file)),
-                );
-            });
+            owner.visit_owners(&mut visited, &mut |owner| observed.push(owner));
+        }
+        let available = artifacts
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut seen_groups = BTreeSet::new();
+        let groups = observed
+            .iter()
+            .flat_map(|owner| owner.groups.iter())
+            .filter(|group| {
+                Self::selected_group_key(group, &available, selected_native_groups)
+                    .is_some_and(|key| seen_groups.insert(key))
+            })
+            .collect();
+        for &owner in &observed {
+            rows.extend(
+                owner
+                    .rows
+                    .iter()
+                    .filter(|(id, _)| artifacts.contains_key(*id))
+                    .map(|(id, row)| (*id, row)),
+            );
+            graph_paths.extend(
+                owner
+                    .graph_paths
+                    .iter()
+                    .filter(|(digest, _)| selected_graphs.contains(*digest))
+                    .map(|(digest, file)| (*digest, file)),
+            );
         }
         if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
             return None;
-        }
-        // A single actual source frontier owns these very borrowed facts.
-        // Reuse only its entire closure, with no excluded or shadowed issuers.
-        // Arc ancestry is operation-local ownership, never a digest/name match.
-        let mut complete = None;
-        if row_count == rows.len()
-            && group_count == groups.len()
-            && graph_count == graph_paths.len()
-        {
-            let frontier = owners
-                .iter()
-                .filter(|owner| !ancestors.contains(&(Arc::as_ptr(owner) as usize)))
-                .collect::<Vec<_>>();
-            if let [owner] = frontier.as_slice() {
-                complete = Some(Arc::clone(owner));
-            }
         }
         Some(MaterializationFacts {
             rows,
             groups,
             graph_paths,
-            complete,
+            observed,
         })
     }
 
@@ -3362,7 +3508,7 @@ impl RetainedArtifactMaterialization {
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
             for (id, row) in &owner.rows {
                 if selected.contains(id) {
-                    rows.insert(*id, row);
+                    rows.insert(*id, row.as_ref());
                 }
             }
         });
@@ -3378,6 +3524,23 @@ impl RetainedArtifactMaterialization {
             &metadata.artifacts,
             &metadata.selected_native_groups,
         )
+    }
+
+    fn selected_group_key(
+        group: &PendingCertifiedGroup,
+        available: &[(
+            &tidepool_repr::execution_schema::CachedHomeOwner,
+            ArtifactId,
+        )],
+        selected_native_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Option<NativeGroupKey> {
+        available.iter().find_map(|(selected, artifact)| {
+            let key = NativeGroupKey {
+                artifact: *artifact,
+                original_ordinal: group.group().original_ordinal(),
+            };
+            (**selected == *group.owner() && selected_native_groups.contains(&key)).then_some(key)
+        })
     }
 
     fn selected_group_refs_in<'a>(
@@ -3398,17 +3561,7 @@ impl RetainedArtifactMaterialization {
         for owner in owners {
             owner.visit_owners(&mut visited, &mut |owner| {
                 for group in owner.groups.iter() {
-                    let native = group.owner();
-                    if available
-                        .iter()
-                        .find_map(|(selected, artifact)| {
-                            let key = NativeGroupKey {
-                                artifact: *artifact,
-                                original_ordinal: group.group().original_ordinal(),
-                            };
-                            (**selected == *native && selected_native_groups.contains(&key))
-                                .then_some(key)
-                        })
+                    if Self::selected_group_key(group, &available, selected_native_groups)
                         .is_some_and(|key| seen.insert(key))
                     {
                         groups.push(group);
@@ -3426,14 +3579,13 @@ impl RetainedArtifactMaterialization {
                 owner
                     .graph_paths
                     .iter()
-                    .map(|(digest, path)| (*digest, path)),
+                    .map(|(digest, path)| (*digest, path.as_ref())),
             );
         });
         paths
     }
 }
 
-#[derive(Clone)]
 struct RetainedArtifactRow {
     owned_inputs:
         BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
@@ -8650,7 +8802,7 @@ impl ExactDeclarationContext {
             .filter(|entry| !inherited_rows.contains_key(&entry.descriptor.id))
             .cloned()
             .collect::<Vec<_>>();
-        let mut rows = BTreeMap::new();
+        let mut rows = BTreeMap::<ArtifactId, RetainedArtifactRow>::new();
         let mut arena_builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(
             tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64,
         )
@@ -8844,7 +8996,7 @@ impl ExactDeclarationContext {
         Ok(RetainedArtifactMaterialization {
             _directory: Some(Arc::clone(&directory)),
             _parents: parents,
-            rows,
+            rows: rows.into_iter().map(|(id, row)| (id, Arc::new(row))).collect(),
             groups: groups.into(),
             execution_scope,
             graph_paths: graph_paths
@@ -8853,11 +9005,11 @@ impl ExactDeclarationContext {
                 .map(|(digest, path)| {
                     (
                         digest,
-                        OwnedExecutionGraphFile {
+                        Arc::new(OwnedExecutionGraphFile {
                             transport: graph_transports[&digest].clone(),
                             path,
                             _directory: Arc::clone(&directory),
-                        },
+                        }),
                     )
                 })
                 .collect(),

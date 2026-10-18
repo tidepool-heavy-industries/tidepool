@@ -798,6 +798,13 @@ impl CertifiedRetainedCoreProducts {
 }
 
 impl PendingCertifiedGroup {
+    pub(crate) fn same_issuance(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.owner == other.owner
+            && Arc::ptr_eq(&self.group, &other.group)
+            && Arc::ptr_eq(&self.imports, &other.imports)
+    }
+
     pub fn origin(&self) -> ProductOrigin {
         self.origin
     }
