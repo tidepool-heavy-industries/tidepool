@@ -19006,8 +19006,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(missing_support, CompileError::CompilerEvidence(cause)
-            if matches!(*cause, crate::certified_products::CertificationError::Mismatch("source binder/group closure")))
+            matches!(&missing_support, CompileError::CompilerEvidence(cause)
+            if matches!(cause.as_ref(), crate::certified_products::CertificationError::Mismatch("source binder/group closure"))),
+            "unexpected absent-offer refusal: {missing_support:#?}"
         );
         let conflicting_support = OriginalCompilerInputs::from_selected_authored_declarations(
             &dependent_context,
