@@ -13368,14 +13368,14 @@ pub(crate) mod tests {
                     &PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
-                OriginalCompilerInputs::issue_segment_native_availability(
+                let completed = OriginalCompilerInputs::issue_segment_native_availability(
                     &mut physical,
                     &inventory.empty_view(),
                     vec![entry.clone()],
                 )
                 .unwrap();
                 let private =
-                    OriginalCompilerInputs::from_selection(&physical, &available).unwrap();
+                    OriginalCompilerInputs::from_selection(&physical, &completed).unwrap();
                 let support =
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                         &private,
