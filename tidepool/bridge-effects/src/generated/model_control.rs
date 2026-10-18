@@ -24,6 +24,14 @@ pub struct ModelRequestLimits {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ModelSelectionEnvelope {
+    pub catalog_identity: String,
+    pub key: String,
+    pub reasoning: Reasoning,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRequestEnvelope {
     pub instructions: String,
     pub input: String,
@@ -33,6 +41,7 @@ pub struct ModelRequestEnvelope {
     pub tools: Vec<exomonad_tool::ToolDeclaration>,
     pub result_schema: Option<serde_json::Value>,
     pub after_tool: bool,
+    pub selection: Option<ModelSelectionEnvelope>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -61,10 +70,25 @@ pub enum ModelOutcomeEnvelope {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ModelRequestObservationEnvelope {
+    pub request_id: String,
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelReceiptEnvelope {
     pub invocation_id: String,
     pub parent_cell: String,
     pub requests: Vec<String>,
+    pub request_observations: Vec<ModelRequestObservationEnvelope>,
+    pub duration_ms: u64,
     pub counts: ModelUsageEnvelope,
     pub cell_counts: ModelUsageEnvelope,
     pub outcome: ModelOutcomeEnvelope,

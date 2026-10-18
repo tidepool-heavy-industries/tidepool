@@ -10,6 +10,8 @@ pub enum Backend {
     DeepSeek,
     #[haskell(module = "Tidepool.Effects.Core")]
     OpenAIPlan,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    GeminiInteractions,
 }
 
 #[derive(
@@ -37,6 +39,8 @@ pub enum Model {
     DeepSeekFlash,
     #[haskell(module = "Tidepool.Effects.Core")]
     DeepSeekPro,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    GeminiArgon,
     #[haskell(module = "Tidepool.Effects.Core")]
     OpenAIModel(OpenAIModel),
     #[haskell(module = "Tidepool.Effects.Core")]
@@ -72,10 +76,24 @@ pub enum OpenAIReasoning {
 #[derive(
     ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
+pub enum ArgonEffort {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffortLow,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffortMedium,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffortHigh,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(tag = "tag", content = "contents", deny_unknown_fields)]
 pub enum Reasoning {
     #[haskell(module = "Tidepool.Effects.Core")]
     DeepSeekReasoning(DeepSeekReasoning),
     #[haskell(module = "Tidepool.Effects.Core")]
     OpenAIReasoning(OpenAIReasoning),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ArgonReasoning(ArgonEffort),
 }

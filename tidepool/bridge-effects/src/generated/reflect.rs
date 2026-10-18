@@ -57,6 +57,20 @@ pub enum RfTurnState {
     TurnUnknown,
 }
 
+/// Exact retained transport event, addressed by turn identity and event ID. Missing counters remain unknown. Output includes reasoning; do not add them. Duration is monotonic transport elapsed time including queue and authentication.
+#[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "TurnObservation")]
+pub struct RfTurnObservation {
+    pub event_id: i64,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
 /// One runtime request in recorded order, with its exact provider response
 /// identity when available. Timestamps may be absent in every state;
 /// only recorded items are returned.
@@ -65,6 +79,7 @@ pub enum RfTurnState {
 pub struct RfConversationTurn {
     pub identity: String,
     pub state: RfTurnState,
+    pub observations: Vec<RfTurnObservation>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub items: Vec<RfTurnItem>,
