@@ -7044,11 +7044,11 @@ pub(super) mod tests {
             let group = testing::projected_group(wire, 9).unwrap();
             let code = CertifiedGroupCode::admit(owner.clone(), group.clone()).unwrap();
             let registry = ImageRegistry::new();
-            let image = CompiledProgram::prepare_group_code(&code, &[None], &BTreeMap::new(), &BTreeMap::new(), &registry).unwrap();
+            let image = CompiledProgram::prepare_source_group_code(&code, &[None], &BTreeMap::new(), &BTreeMap::new(), &registry).unwrap();
             let weak = Arc::downgrade(&image);
             for id in ids {
                 let scoped = CertifiedGroup::admit(owner.clone(), group.clone(), vec![ImportOwner::Retained { id: SessionVarId::from_extract(id), generation }]).unwrap();
-                let selected = DemandedImage::lookup_with_literals(scoped, &registry, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+                let selected = DemandedImage::lookup_source_with_literals(scoped, &registry, &BTreeMap::new(), &BTreeMap::new()).unwrap();
                 proptest::prop_assert!(Arc::ptr_eq(&image, selected.image()));
             }
             drop(image);

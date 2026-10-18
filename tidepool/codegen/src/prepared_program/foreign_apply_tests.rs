@@ -181,17 +181,56 @@ fn owner(results: ResultContract) -> WireProgram {
 
 #[test]
 fn foreign_pap_partial_again_and_exact_results_survive_gc() {
+    foreign_pap_history(HostEntries::All);
+}
+
+#[test]
+fn definitions_only_foreign_pap_survives_gc_without_a_source_host_entry() {
+    foreign_pap_history(HostEntries::DefinitionsOnly);
+}
+
+fn foreign_pap_history(host_entries: HostEntries) {
     for reps in [
         vec![RuntimeRep::LiftedRef],
         vec![RuntimeRep::Int(64)],
         vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef],
     ] {
         let results = ResultContract::Returns(reps.clone());
-        let (mut machine, a) = PreparedMachine::new(
-            compile(owner(results.clone())),
-            PreparedMachineOptions { nursery_bytes: 128 },
+        let code = CertifiedGroupCode::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "ForeignApply".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(owner(results.clone()), 0).unwrap(),
         )
         .unwrap();
+        let image = CompiledProgram::compile_group_code_with_literals(
+            &code,
+            &package_literals::GroupPackageLiterals::default(),
+            host_entries,
+        )
+        .unwrap();
+        assert_eq!(
+            image.entries.len(),
+            if host_entries == HostEntries::All {
+                2
+            } else {
+                0
+            }
+        );
+        let (mut machine, a) =
+            PreparedMachine::new(image, PreparedMachineOptions { nursery_bytes: 128 }).unwrap();
+        if host_entries == HostEntries::DefinitionsOnly {
+            assert!(matches!(
+                machine.run_entry_retained(a, ValueId(1), &[], options(), RealmId::ROOT),
+                Err(ExecutionError::MissingEntry(ValueId(1)))
+            ));
+            assert_eq!(machine.handle_count(), 0);
+            assert_eq!(machine.failure(), None);
+        }
         let function = machine.retain_top(a, ValueId(0)).unwrap();
         let token = machine.retain_top(a, ValueId(1)).unwrap();
         let b = install_caller(
