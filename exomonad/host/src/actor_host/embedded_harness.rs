@@ -1013,7 +1013,7 @@ impl HostActor for EmbeddedHostActor {
             attachment: self.attachment.clone(),
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
-            inference_defaults: self.installation.inference_defaults(),
+            initial_reasoning: self.installation.inference_reasoning(),
             conversation_permission: self.installation.conversation_permission().cloned(),
             snapshot,
             store: self.store.clone(),
@@ -1072,10 +1072,7 @@ struct EmbeddedCancellationOwner {
 
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
-    inference_defaults: (
-        Option<exomonad_actor::Model>,
-        Option<exomonad_actor::Reasoning>,
-    ),
+    initial_reasoning: Option<exomonad_actor::Reasoning>,
     identity: HostIdentity,
     issuer: ActorRef,
     conversation_permission: Option<exomonad_actor::ConversationPermission>,
@@ -1835,7 +1832,7 @@ impl Provider for EmbeddedDispatcher {
                 });
                 let observing_store = self.store.clone();
                 let observing_identity = snapshot.operation.origin.clone();
-                let initial_reasoning = self.inference_defaults.1;
+                let initial_reasoning = self.initial_reasoning;
                 let inference_selection: InferenceSelectionObserver = Arc::new(move || {
                     let permission = fixed
                         .as_ref()

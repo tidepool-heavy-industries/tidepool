@@ -16,7 +16,6 @@ pub(super) struct EmbeddedPolicyInstallation {
     policy: Arc<dyn ResidentToolEndpoint>,
     projection: std::sync::Mutex<Option<CachedToolProjection>>,
     observation: exomonad_actor::ActorRuntimeObservationHandle,
-    model: Option<exomonad_actor::Model>,
     reasoning: Option<exomonad_actor::Reasoning>,
     conversation_permission: Option<exomonad_actor::ConversationPermission>,
 }
@@ -28,7 +27,6 @@ impl EmbeddedPolicyInstallation {
             installation.policy.clone(),
             installation.runtime_observation.clone(),
         );
-        policy.model = installation.model.clone();
         policy.reasoning = installation.reasoning;
         policy.conversation_permission =
             installation.capabilities.conversation_permission().cloned();
@@ -50,19 +48,13 @@ impl EmbeddedPolicyInstallation {
             policy,
             projection: std::sync::Mutex::new(None),
             observation,
-            model: None,
             reasoning: None,
             conversation_permission: None,
         }
     }
 
-    pub(super) fn inference_defaults(
-        &self,
-    ) -> (
-        Option<exomonad_actor::Model>,
-        Option<exomonad_actor::Reasoning>,
-    ) {
-        (self.model.clone(), self.reasoning)
+    pub(super) fn inference_reasoning(&self) -> Option<exomonad_actor::Reasoning> {
+        self.reasoning
     }
 
     pub(super) fn conversation_permission(
