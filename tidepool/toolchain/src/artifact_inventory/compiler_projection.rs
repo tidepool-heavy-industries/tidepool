@@ -1802,14 +1802,11 @@ impl CompilerInputProjection {
         for entry in entries {
             let (interface, original_reuse) = match &entry.payload {
                 ArtifactPayload::Original(product) => (
-                    ArtifactEntry::canonical(
+                    ArtifactEntry::canonical_artifact_id(
                         product
                             .module_interface()
-                            .ok_or_else(|| failure("native compiler role lacks its interface"))?
-                            .clone(),
-                    )
-                    .descriptor
-                    .id,
+                            .ok_or_else(|| failure("native compiler role lacks its interface"))?,
+                    ),
                     Some(entry.descriptor.id),
                 ),
                 _ => (entry.descriptor.id, None),
