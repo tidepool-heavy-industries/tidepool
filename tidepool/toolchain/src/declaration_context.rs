@@ -7424,7 +7424,7 @@ impl ExactDeclarationContext {
             .owner
             .facts
             .compiler_support
-            .admit_checked_products(producer_sha256, products)?;
+            .admit_available_checked_products(producer_sha256, products)?;
         self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }

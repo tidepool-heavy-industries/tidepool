@@ -1317,8 +1317,10 @@ impl CompilerSourceSupport {
             })
     }
 
+    /// Carry checked candidate availability and its custody while preserving
+    /// recorded source choices. Executable demand belongs to target admission.
     #[cfg(test)]
-    pub(crate) fn admit_checked_products(
+    pub(crate) fn admit_available_checked_products(
         &self,
         producer: [u8; 32],
         products: &[CertifiedRecoveryProduct],

@@ -489,7 +489,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let output = Arc::new(ArtifactEntry::original([2; 32], product.clone()).unwrap());
                     let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
                     let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
-                    let support = context.compiler_source_support().admit_checked_products([2; 32], &[product]).unwrap();
+                    let support = context.compiler_source_support().admit_available_checked_products([2; 32], &[product]).unwrap();
                     context = context.rebuild(|facts| facts.compiler_support = support).finish().unwrap();
                     let definitions = crate::certified_products::original_native_group_definitions(
                         match &output.payload { ArtifactPayload::Original(product) => product, _ => unreachable!() }, 0,
