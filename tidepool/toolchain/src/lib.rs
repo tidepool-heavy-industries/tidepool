@@ -168,6 +168,7 @@ impl CompileError {
         if matches!(
             &outcome.close,
             tidepool_extract_cmd::CompilerTransactionClose::Unconfirmed(_)
+                | tidepool_extract_cmd::CompilerTransactionClose::Retired(_)
         ) {
             return Err(Self::CompilerCloseUnconfirmed(Box::new(outcome)));
         }

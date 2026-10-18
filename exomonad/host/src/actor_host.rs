@@ -2932,6 +2932,7 @@ pub(crate) fn typecheck_candidate_revision_owned(
     if matches!(
         &outcome.close,
         tidepool_runtime::CompilerTransactionClose::Unconfirmed(_)
+            | tidepool_runtime::CompilerTransactionClose::Retired(_)
     ) {
         return Err(Box::new(ActorCompilerCheckUnconfirmed { outcome }));
     }

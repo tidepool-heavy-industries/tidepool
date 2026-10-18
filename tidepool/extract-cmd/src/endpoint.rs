@@ -228,6 +228,7 @@ impl std::error::Error for CompilerTransactionPublicationError {}
 pub enum CompilerTransactionClose {
     NotStarted,
     Clean,
+    Retired(CompilerTransactionCloseEvidence),
     Unconfirmed(CompilerTransactionCloseEvidence),
 }
 
@@ -235,13 +236,60 @@ impl CompilerTransactionClose {
     pub fn is_clean(&self) -> bool {
         matches!(self, Self::Clean)
     }
+
+    /// Resource settlement is independent of successful compiler action/END.
+    pub fn resources_retired(&self) -> bool {
+        match self {
+            Self::Clean | Self::NotStarted => true,
+            Self::Retired(evidence) => Self::retirement_observed(evidence),
+            Self::Unconfirmed(_) => false,
+        }
+    }
+
+    fn retirement_observed(evidence: &CompilerTransactionCloseEvidence) -> bool {
+        matches!(
+            &evidence.retirement,
+            CompilerTransactionRetirement::DaemonObserved(DaemonCompilerRetirement {
+                worker: CompilerWorkerRetirement::Reaped(_),
+                ..
+            })
+        ) && evidence.earlier.iter().all(Self::resources_retired)
+    }
+
+    fn merge(self, incoming: Self) -> Self {
+        use CompilerTransactionClose::{Clean, NotStarted, Retired, Unconfirmed};
+        let normalize = |close| match close {
+            Self::Retired(evidence) if !Self::retirement_observed(&evidence) => {
+                Self::Unconfirmed(evidence)
+            }
+            close => close,
+        };
+        match (normalize(self), normalize(incoming)) {
+            (Unconfirmed(mut evidence), previous @ (Retired(_) | Unconfirmed(_))) => {
+                evidence.earlier.push(previous);
+                Unconfirmed(evidence)
+            }
+            (Retired(previous), Unconfirmed(mut evidence)) => {
+                evidence.earlier.push(Retired(previous));
+                Unconfirmed(evidence)
+            }
+            (Retired(mut evidence), Retired(previous)) => {
+                evidence.earlier.push(Retired(previous));
+                Retired(evidence)
+            }
+            (abnormal @ (Retired(_) | Unconfirmed(_)), Clean | NotStarted)
+            | (Clean | NotStarted, abnormal @ (Retired(_) | Unconfirmed(_))) => abnormal,
+            (Clean, _) | (_, Clean) => Clean,
+            (NotStarted, NotStarted) => NotStarted,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerTransactionCloseEvidence {
     pub reason: CompilerTransactionCloseReason,
     pub retirement: CompilerTransactionRetirement,
-    pub earlier: Vec<CompilerTransactionCloseEvidence>,
+    pub earlier: Vec<CompilerTransactionClose>,
     input_custody: CompilerInputCustody,
 }
 
@@ -363,6 +411,19 @@ pub enum CompilerTransactionRetirement {
         disconnect: Option<Result<(), CompilerTransactionCloseFailure>>,
     },
     Direct(DirectCompilerRetirement),
+    DaemonObserved(DaemonCompilerRetirement),
+}
+
+/// The old worker was reaped. Its warm namespace remains with the exact daemon
+/// slot at settlement; this is neither scratch deletion nor future liveness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonCompilerRetirement {
+    pub(crate) epoch: [u8; 32],
+    pub(crate) admission_id: u64,
+    pub(crate) worker_slot: u32,
+    pub(crate) worker: CompilerWorkerRetirement,
+    pub(crate) termination: Result<(), CompilerIoCause>,
+    pub(crate) failure: CompilerIoCause,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -508,6 +569,33 @@ fn append_close_cause(output: &mut Vec<u8>, cause: &CompilerIoCause) -> io::Resu
         }
     }
     append_close_field(output, cause.message.as_bytes())
+}
+
+pub(crate) fn write_retirement_cause(
+    writer: &mut impl Write,
+    cause: &CompilerIoCause,
+) -> io::Result<()> {
+    let mut body = Vec::new();
+    append_close_cause(&mut body, cause)?;
+    writer.write_all(&(body.len() as u32).to_le_bytes())?;
+    writer.write_all(&body)
+}
+
+pub(crate) fn read_retirement_cause(reader: &mut impl Read) -> io::Result<CompilerIoCause> {
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_FAILURE_END_BYTES {
+        return Err(invalid_close("oversized retirement cause"));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let mut decoder = CloseDecoder(&body);
+    let cause = decoder.cause()?;
+    if !decoder.0.is_empty() {
+        return Err(invalid_close("trailing retirement cause"));
+    }
+    Ok(cause)
 }
 
 fn encode_failure_end(report: &CompilerFrontendCloseReport) -> io::Result<Vec<u8>> {
@@ -808,6 +896,7 @@ impl HostAdmissionCancellation {
 #[derive(Debug, Default)]
 struct CancellationState {
     cancelled: bool,
+    cancelled_at: Option<Instant>,
     target: Option<CancellationTarget>,
 }
 
@@ -925,6 +1014,7 @@ impl CompilerTransactionCancellation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.cancelled = true;
+            state.cancelled_at.get_or_insert_with(Instant::now);
             state.target.take()
         };
         cancel_target(target);
@@ -935,6 +1025,14 @@ impl CompilerTransactionCancellation {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cancelled
+    }
+
+    pub(crate) fn retirement_deadline(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancelled_at
+            .map(|started| started + DIRECT_CLOSE_TIMEOUT)
     }
 
     pub(crate) fn arm_daemon(&self, stream: &UnixStream) -> io::Result<()> {
@@ -987,7 +1085,7 @@ fn cancel_target(target: Option<CancellationTarget>) {
         Some(CancellationTarget::Daemon(stream)) => {
             // best-effort: the daemon connection may already be closed by
             // the peer or by a concurrent cancellation.
-            stream.shutdown(Shutdown::Both).ok();
+            stream.shutdown(Shutdown::Write).ok();
         }
         None => {}
     }
@@ -1927,20 +2025,9 @@ fn retain_earlier_close(
     close: CompilerTransactionClose,
     mut earlier: Vec<CompilerTransactionCloseEvidence>,
 ) -> CompilerTransactionClose {
-    if earlier.is_empty() {
-        return close;
-    }
-    let mut evidence = match close {
-        CompilerTransactionClose::Unconfirmed(evidence) => evidence,
-        settled @ (CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted) => {
-            let Some(evidence) = earlier.pop() else {
-                return settled;
-            };
-            evidence
-        }
-    };
-    evidence.earlier.extend(earlier);
-    CompilerTransactionClose::Unconfirmed(evidence)
+    earlier.drain(..).fold(close, |combined, evidence| {
+        combined.merge(CompilerTransactionClose::Unconfirmed(evidence))
+    })
 }
 
 struct TransactionScopeGuard<C: FnOnce(CompilerTransactionClose)> {
@@ -1974,20 +2061,7 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
     };
     let mut close = retain_earlier_close(close, scope.admission_close);
     for observed in scope.reported_close {
-        match observed {
-            CompilerTransactionClose::Unconfirmed(mut evidence) => {
-                if let CompilerTransactionClose::Unconfirmed(previous) = close {
-                    evidence.earlier.push(previous);
-                }
-                close = CompilerTransactionClose::Unconfirmed(evidence);
-            }
-            CompilerTransactionClose::Clean
-                if matches!(close, CompilerTransactionClose::NotStarted) =>
-            {
-                close = CompilerTransactionClose::Clean;
-            }
-            _ => {}
-        }
+        close = close.merge(observed);
     }
     if let CompilerTransactionClose::Unconfirmed(evidence) = &mut close {
         evidence.input_custody.extend(scope.input_custody);
@@ -2348,37 +2422,40 @@ impl CompilerTransaction {
                 mut transaction,
                 socket: _,
             } => {
-                if let Some(reason) = prior {
-                    let disconnect =
-                        transaction
-                            .stream
-                            .shutdown(Shutdown::Both)
-                            .map_err(|source| {
+                // A failed action does not invalidate known response framing. The
+                // sole reader drains its retirement event without replaying work.
+                match daemon::end_transaction(&mut transaction) {
+                    Ok(daemon::DaemonClose::Clean) if prior.is_none() => {
+                        CompilerTransactionClose::Clean
+                    }
+                    Ok(daemon::DaemonClose::Retired(retirement)) => {
+                        let confirmed =
+                            matches!(&retirement.worker, CompilerWorkerRetirement::Reaped(_));
+                        let evidence = CompilerTransactionCloseEvidence::new(
+                            prior
+                                .unwrap_or(CompilerTransactionCloseReason::FrontendReportedFailure),
+                            CompilerTransactionRetirement::DaemonObserved(retirement),
+                        );
+                        if confirmed {
+                            CompilerTransactionClose::Retired(evidence)
+                        } else {
+                            CompilerTransactionClose::Unconfirmed(evidence)
+                        }
+                    }
+                    result => {
+                        let reason = prior.unwrap_or_else(|| match result {
+                            Err(error) => CompilerTransactionCloseReason::EndFailed(
                                 CompilerTransactionCloseFailure::new(
-                                    CompilerTransactionClosePhase::DaemonDisconnect,
-                                    source,
-                                )
-                            });
-                    CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
-                        reason,
-                        retirement: CompilerTransactionRetirement::DaemonUnobserved {
-                            disconnect: Some(disconnect),
-                        },
-                        earlier: Vec::new(),
-                        input_custody: CompilerInputCustody::default(),
-                    })
-                } else {
-                    match daemon::end_transaction(&mut transaction) {
-                        Ok(()) => CompilerTransactionClose::Clean,
-                        Err(error) => CompilerTransactionClose::Unconfirmed(
-                            CompilerTransactionCloseEvidence {
-                                reason: CompilerTransactionCloseReason::EndFailed(
-                                    CompilerTransactionCloseFailure::new(
-                                        CompilerTransactionClosePhase::DaemonEndAcknowledgement,
-                                        io::Error::other(error),
-                                    ),
+                                    CompilerTransactionClosePhase::DaemonEndAcknowledgement,
+                                    io::Error::other(error),
                                 ),
-                                retirement: CompilerTransactionRetirement::DaemonUnobserved {
+                            ),
+                            Ok(_) => CompilerTransactionCloseReason::FailedRequest,
+                        });
+                        CompilerTransactionClose::Unconfirmed(
+                            CompilerTransactionCloseEvidence::new(
+                                reason,
+                                CompilerTransactionRetirement::DaemonUnobserved {
                                     disconnect: Some(
                                         transaction.stream.shutdown(Shutdown::Both).map_err(
                                             |source| {
@@ -2390,10 +2467,8 @@ impl CompilerTransaction {
                                         ),
                                     ),
                                 },
-                                earlier: Vec::new(),
-                                input_custody: CompilerInputCustody::default(),
-                            },
-                        ),
+                            ),
+                        )
                     }
                 }
             }
@@ -2447,6 +2522,68 @@ mod tests {
         config.source_file = Some("tidepool/extract-cmd/src/endpoint.rs");
         config.test_name = Some(test_name);
         config
+    }
+
+    #[test]
+    fn close_merge_preserves_retired_action_and_all_earlier_uncertainty() {
+        fn retired() -> CompilerTransactionClose {
+            CompilerTransactionClose::Retired(CompilerTransactionCloseEvidence::new(
+                CompilerTransactionCloseReason::Cancelled,
+                CompilerTransactionRetirement::DaemonObserved(DaemonCompilerRetirement {
+                    epoch: [1; 32],
+                    admission_id: 1,
+                    worker_slot: 0,
+                    worker: CompilerWorkerRetirement::Reaped(std::process::ExitStatus::from_raw(9)),
+                    termination: Ok(()),
+                    failure: CompilerIoCause {
+                        raw_os_error: None,
+                        kind: io::ErrorKind::Interrupted,
+                        message: "cancelled test request".into(),
+                    },
+                }),
+            ))
+        }
+        fn uncertain() -> CompilerTransactionClose {
+            CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence::new(
+                CompilerTransactionCloseReason::FailedRequest,
+                CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+            ))
+        }
+        fn count(close: &CompilerTransactionClose) -> usize {
+            match close {
+                CompilerTransactionClose::Retired(evidence)
+                | CompilerTransactionClose::Unconfirmed(evidence) => {
+                    1 + evidence.earlier.iter().map(count).sum::<usize>()
+                }
+                _ => 0,
+            }
+        }
+        for neutral in [
+            CompilerTransactionClose::Clean,
+            CompilerTransactionClose::NotStarted,
+        ] {
+            for combined in [neutral.clone().merge(retired()), retired().merge(neutral)] {
+                assert!(matches!(combined, CompilerTransactionClose::Retired(_)));
+                assert!(combined.resources_retired());
+                assert!(!combined.is_clean());
+                assert_eq!(count(&combined), 1);
+            }
+        }
+        for combined in [retired().merge(uncertain()), uncertain().merge(retired())] {
+            assert!(matches!(combined, CompilerTransactionClose::Unconfirmed(_)));
+            assert!(!combined.resources_retired());
+            assert_eq!(count(&combined), 2);
+        }
+        let repeated = retired()
+            .merge(retired())
+            .merge(uncertain())
+            .merge(retired());
+        assert_eq!(count(&repeated), 4);
+        assert!(!repeated.resources_retired());
+        let left = retired().merge(uncertain()).merge(retired());
+        let right = retired().merge(uncertain().merge(retired()));
+        assert_eq!(count(&left), count(&right));
+        assert_eq!(left.resources_retired(), right.resources_retired());
     }
 
     #[test]
@@ -2840,12 +2977,14 @@ mod tests {
             Clean,
             Cancelled,
             FailedRequest,
+            Retired,
         }
         let observation = prop_oneof![
             Just(Observation::NotStarted),
             Just(Observation::Clean),
             Just(Observation::Cancelled),
             Just(Observation::FailedRequest),
+            Just(Observation::Retired),
         ];
         TestRunner::new(config)
             .run(&prop::collection::vec(observation, 0..32), |history| {
@@ -2862,6 +3001,27 @@ mod tests {
                             report(match step {
                                 Observation::NotStarted => CompilerTransactionClose::NotStarted,
                                 Observation::Clean => CompilerTransactionClose::Clean,
+                                Observation::Retired => CompilerTransactionClose::Retired(
+                                    CompilerTransactionCloseEvidence::new(
+                                        CompilerTransactionCloseReason::Cancelled,
+                                        CompilerTransactionRetirement::DaemonObserved(
+                                            DaemonCompilerRetirement {
+                                                epoch: [1; 32],
+                                                admission_id: 1,
+                                                worker_slot: 0,
+                                                worker: CompilerWorkerRetirement::Reaped(
+                                                    std::process::ExitStatus::from_raw(9),
+                                                ),
+                                                termination: Ok(()),
+                                                failure: CompilerIoCause {
+                                                    raw_os_error: None,
+                                                    kind: io::ErrorKind::Interrupted,
+                                                    message: "cancelled test request".into(),
+                                                },
+                                            },
+                                        ),
+                                    ),
+                                ),
                                 Observation::Cancelled | Observation::FailedRequest => {
                                     CompilerTransactionClose::Unconfirmed(
                                         CompilerTransactionCloseEvidence::new(
@@ -2892,15 +3052,36 @@ mod tests {
                         matches!(step, Observation::Cancelled | Observation::FailedRequest)
                     })
                     .count();
+                let retired = history
+                    .iter()
+                    .filter(|step| matches!(step, Observation::Retired))
+                    .count();
                 fn count(evidence: &CompilerTransactionCloseEvidence) -> usize {
-                    1 + evidence.earlier.iter().map(count).sum::<usize>()
+                    1 + evidence
+                        .earlier
+                        .iter()
+                        .map(|close| match close {
+                            CompilerTransactionClose::Retired(evidence)
+                            | CompilerTransactionClose::Unconfirmed(evidence) => count(evidence),
+                            _ => 0,
+                        })
+                        .sum::<usize>()
                 }
                 match settled.close() {
                     CompilerTransactionClose::Unconfirmed(evidence) => {
-                        prop_assert_eq!(count(evidence), uncertain);
+                        prop_assert_eq!(count(evidence), uncertain + retired);
                         prop_assert!(weak.upgrade().is_some());
                     }
+                    CompilerTransactionClose::Retired(evidence) => {
+                        prop_assert_eq!(uncertain, 0);
+                        prop_assert!(retired > 0);
+                        prop_assert_eq!(count(evidence), retired);
+                        prop_assert!(settled.close().resources_retired());
+                        prop_assert!(!settled.close().is_clean());
+                        prop_assert!(weak.upgrade().is_none());
+                    }
                     CompilerTransactionClose::Clean => {
+                        prop_assert_eq!(retired, 0);
                         prop_assert_eq!(uncertain, 0);
                         prop_assert!(history
                             .iter()
@@ -2908,6 +3089,7 @@ mod tests {
                         prop_assert!(weak.upgrade().is_none());
                     }
                     CompilerTransactionClose::NotStarted => {
+                        prop_assert_eq!(retired, 0);
                         prop_assert_eq!(uncertain, 0);
                         prop_assert!(!history
                             .iter()
@@ -4092,7 +4274,9 @@ mod tests {
                             match command[0] {
                                 daemon::TRANSACTION_END => {
                                     counts.lock().unwrap().ends += 1;
-                                    connection.write_all(&[1]).unwrap();
+                                    connection
+                                        .write_all(&[daemon::TRANSACTION_END_ACK])
+                                        .unwrap();
                                     break;
                                 }
                                 daemon::TRANSACTION_REQUEST => {
@@ -4106,6 +4290,7 @@ mod tests {
                                         cancellation.cancel();
                                         break;
                                     }
+                                    connection.write_all(&[daemon::TRANSACTION_OUTPUT]).unwrap();
                                     daemon::write_response(
                                         &mut connection,
                                         0,

@@ -1608,7 +1608,8 @@ impl<T> RendererProduction<T> {
                     Err(error) => Err(RendererProductionFailure::Compile(error)),
                 }
             }
-            close @ crate::CompilerTransactionClose::Unconfirmed(_) => {
+            close @ (crate::CompilerTransactionClose::Unconfirmed(_)
+            | crate::CompilerTransactionClose::Retired(_)) => {
                 self.native = RendererNativeState::CloseUnconfirmed;
                 Err(RendererProductionFailure::CloseUnconfirmed {
                     close,
