@@ -1222,8 +1222,9 @@ mod tests {
                 limit: MANIFEST_LIMIT,
             })
         );
+        let mut references = usize::MAX;
         assert_eq!(
-            charge_references(&mut usize::MAX, 1, 0),
+            charge_references(&mut references, 1, 0),
             Err(InventoryEncodingError::ArithmeticOverflow)
         );
         let signature = Signature {

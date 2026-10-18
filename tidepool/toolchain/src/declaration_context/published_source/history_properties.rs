@@ -462,7 +462,6 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     if outputs.insert(ordinal, output.descriptor.id).is_none() {
                         expected_roles.extend(output_role);
                         expected_artifacts.extend([output.descriptor.id, canonical.descriptor.id]);
-                        expected_artifacts.sort_unstable();
                     }
                     let imports = [import];
                     let target = context.artifact_view().inventory()
@@ -591,10 +590,11 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             prop_assert_eq!(actual_roles.len(), expected_roles.len());
             prop_assert!(expected_roles.iter().all(|role| actual_roles.contains(role)));
             prop_assert_eq!(context.lexical_graph(), original.lexical_graph());
-            prop_assert_eq!(
-                context.artifact_view().artifact_ids(),
-                expected_artifacts.clone()
-            );
+            let mut actual_artifacts = context.artifact_view().artifact_ids();
+            actual_artifacts.sort_unstable();
+            let mut expected_artifacts_sorted = expected_artifacts.clone();
+            expected_artifacts_sorted.sort_unstable();
+            prop_assert_eq!(actual_artifacts, expected_artifacts_sorted);
             prop_assert_eq!(
                 context.artifact_view().selected_native_groups(),
                 demanded

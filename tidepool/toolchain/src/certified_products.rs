@@ -28,8 +28,6 @@ pub use finalized_module::{
     FinalizedModuleReceipt,
 };
 
-#[cfg(test)]
-use crate::cache::CompletedSourceEvidence;
 use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
