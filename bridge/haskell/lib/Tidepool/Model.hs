@@ -37,9 +37,9 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson
 import Tidepool.Model.Selection
-import Tidepool.Internal.ModelControl
+import Tidepool.Internal.ModelControl hiding (ModelOperation (..))
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..))
+import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..), KnownFamily (familyWitness))
 
 -- | Optional narrower limits. Missing fields retain the cell's limits;
 -- negative values are refused before any provider request. Reported token
@@ -58,25 +58,24 @@ data ResultFormat a where
   TextResult :: ResultFormat Text
   JsonResult :: (FromJSON a, JsonSchema a) => Proxy a -> ResultFormat a
 
-data ModelTurn tools effects a = ModelTurn
+data ModelTurn family tools effects a = ModelTurn
   { turnSpec :: AgentSpec tools effects
   , turnInstructions :: Text
   , turnFormat :: ResultFormat a
-  , turnModel :: Maybe ModelSelectionEnvelope
+  , turnModel :: Model family
   , turnLimits :: ModelLimits
   }
 
-textTurn :: AgentSpec tools effects -> Text -> ModelTurn tools effects Text
-textTurn spec instructions = ModelTurn spec instructions TextResult Nothing defaultLimits
+textTurn :: Model family -> AgentSpec tools effects -> Text -> ModelTurn family tools effects Text
+textTurn model spec instructions = ModelTurn spec instructions TextResult model defaultLimits
 
-typedTurn :: forall a tools effects. (FromJSON a, JsonSchema a) => AgentSpec tools effects -> Text -> ModelTurn tools effects a
-typedTurn spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) Nothing defaultLimits
+typedTurn :: forall a family tools effects. (FromJSON a, JsonSchema a) => Model family -> AgentSpec tools effects -> Text -> ModelTurn family tools effects a
+typedTurn model spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) model defaultLimits
 
--- | Select through the caller's frozen workspace model configuration. Omitting
--- this option inherits the caller's resolved model; the host bounds all choices.
-withModel :: ModelChoice choice => choice -> ModelTurn tools effects a -> ModelTurn tools effects a
-withModel model turn = turn { turnModel = Just (modelSelection model) }
-withLimits :: ModelLimits -> ModelTurn tools effects a -> ModelTurn tools effects a
+-- | Select another exact model and effort in the same provider family.
+withModel :: Model family -> ModelTurn family tools effects a -> ModelTurn family tools effects a
+withModel model turn = turn { turnModel = model }
+withLimits :: ModelLimits -> ModelTurn family tools effects a -> ModelTurn family tools effects a
 withLimits limits turn = turn { turnLimits = limits }
 
 data ModelLimit = ProviderRequests | ToolAttempts | ReportedTokens | Deadline
@@ -136,21 +135,21 @@ data ModelResult a = ModelResult
 -- cancellation contract and cannot be caught by this wrapper.
 -- Callback and after-tool programs use the ordinary row, even inside a
 -- synchronous notebook. Raise a base-row invocation into the enclosing row.
-invokeModel :: (Member ModelCall effects, HasAgentApi tools (Eff effects), AsyncEffects effects)
-            => ModelTurn tools effects a -> Text -> Eff effects (ModelResult a)
+invokeModel :: forall family tools effects a. (KnownFamily family, Member (ModelCall family) effects, HasAgentApi tools (Eff effects), AsyncEffects effects)
+            => ModelTurn family tools effects a -> Text -> Eff effects (ModelResult a)
 invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
   Left err -> pure (failed (InvalidModelSpec (renderToolCompileError err)))
   Right compiled -> do
-    initial <- send (ModelStartWith (request compiled))
+    initial <- send @(ModelCall family) (ModelStartWith (familyWitness @family) (request compiled))
     drive compiled Nothing initial
   where
     request compiled = toJSON (ModelRequestEnvelope
-      (turnInstructions turn) input Nothing Nothing
+      (turnInstructions turn) input
       (requestLimits (turnLimits turn)) (declarationsToJson (declarations compiled))
-      (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))) (turnModel turn))
+      (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))) (modelSelection (turnModel turn)))
     stop Nothing failure = pure (failed failure)
     stop (Just token) failure = do
-      closed <- send (ModelCloseWith token)
+      closed <- send @(ModelCall family) (ModelCloseWith (familyWitness @family) token)
       pure (failed (either (ModelCleanupFailed failure) (const failure) closed))
     drive _ active (Left err) = stop active (ModelBoundary err)
     drive compiled active (Right value) = case fromJSON value of
@@ -159,13 +158,13 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
         pure (ModelResult (decodeOutcome (turnFormat turn) (receiptOutcome receipt)) (Just (publicReceipt receipt)))
       Success (ModelCallback token callId name args) -> do
         answer <- dispatch compiled name args
-        next <- send (ModelResumeWith token callId (toolDispatchReply answer))
+        next <- send @(ModelCall family) (ModelResumeWith (familyWitness @family) token callId (toolDispatchReply answer))
         drive compiled (Just token) next
       Success (ModelHook token operation name args handle ordinal semantic output) -> do
         annotation <- case afterTool (turnSpec turn) of
           Nothing -> pure NoAnnotation
           Just hook -> hook (ToolCall name args) (ToolResult name handle ordinal semantic output)
-        next <- send (ModelAnnotateWith token operation (toJSON (controlAnnotation annotation)))
+        next <- send @(ModelCall family) (ModelAnnotateWith (familyWitness @family) token operation (toJSON (controlAnnotation annotation)))
         drive compiled (Just token) next
 
 failed :: ModelFailure -> ModelResult a

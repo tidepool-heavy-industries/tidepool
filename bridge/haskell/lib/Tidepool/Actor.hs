@@ -33,6 +33,7 @@ module Tidepool.Actor
   , settlementSource
   , ActorLifecycle (..)
   , lifecycleSource
+  , withModelPermissions
   , withSources
   , stateful
   , EffectProfile (..)
@@ -64,6 +65,8 @@ module Tidepool.Actor
 
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
+import Tidepool.Aeson (toJSON)
+import Tidepool.Model.Selection (modelPermissionRequests, noModelPermissions)
 import Tidepool.Internal.RequestSite (RequestSite, requestSiteIdentity)
 import Prelude
 import Tidepool.Actor.Source
@@ -83,6 +86,8 @@ import Tidepool.Actor.Internal
   , initialization
   , behavior
   , onShutdown
+  , actorModelPermissions
+  , withModelPermissions
   , actorWorkspace
   , actorSources
   , withSources
@@ -145,7 +150,8 @@ startActorWithSite site definition@ActorDefinition
         result <- raiseKernel (install startup initial)
         send (ActorPublishExitWith result site)
   (actorId, incarnation, _) <- send
-    (ActorStartWith actorLabel site entry (profileCode profile) (actorWorkspace definition))
+    (ActorStartWith actorLabel site entry (profileCode profile)
+      (toJSON (modelPermissionRequests (actorModelPermissions definition))) (actorWorkspace definition))
   pure (ActorRef actorId incarnation)
 
 -- | Private unit-exit launch used by forwarding services whose protocol remains
@@ -202,7 +208,8 @@ replaceActorWithSite site (ActorRef previousId previousIncarnation) definition@A
             result <- raiseKernel (install committed)
             send (ActorPublishExitWith result site)
       (actorId, incarnation) <- send (ActorReplaceWith
-        (previousId, previousIncarnation) site entry actorLabel (profileCode profile))
+        (previousId, previousIncarnation) site entry actorLabel (profileCode profile)
+        (toJSON (modelPermissionRequests (actorModelPermissions definition))))
       pure (ActorRef actorId incarnation)
 
 decodeShutdownReason :: Int -> ShutdownReason
@@ -337,6 +344,7 @@ stateful actorLabel profile step = ActorDefinitionInternal
   , internalBehavior = \_ -> statefulLoop step
   , internalOnShutdown = const (pure ())
   , internalWorkspace = Nothing
+  , internalModelPermissions = noModelPermissions
   , internalSources = []
   , internalReplacement = Just (statefulLoop step)
   }
