@@ -782,8 +782,12 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                     .unwrap();
             }
             prop_assert_eq!(
-                view.namespace(),
-                selected_issue.completed_output().artifacts().namespace()
+                view.capture_graph_selection().namespace,
+                selected_issue
+                    .completed_output()
+                    .artifacts()
+                    .capture_graph_selection()
+                    .namespace
             );
             prop_assert_eq!(
                 view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
