@@ -12650,12 +12650,15 @@ pub(crate) mod tests {
             producer_bytes,
         );
         let schema = fixture_finalized_product(
-            original_groups_fixture_with_interface(
+            original_groups_fixture_in_unit_with_sites(
+                "main",
                 "DependencySchema",
                 vec![(191, vec![]), (195, vec![]), (197, vec![])],
                 151,
                 &BTreeMap::new(),
                 b"schema exact canonical".to_vec(),
+                &BTreeMap::new(),
+                &[],
             ),
             producer.sha256(),
         );
@@ -12668,7 +12671,10 @@ pub(crate) mod tests {
                     vec![PendingImportOwner::Source {
                         owner: schema.owner().clone(),
                         original_ordinal: 197,
-                        binder: testing::identity("DependencySchema", "entry_197"),
+                        binder: SymbolIdentity {
+                            unit: "main".into(),
+                            ..testing::identity("DependencySchema", "entry_197")
+                        },
                     }],
                 )],
                 152,
