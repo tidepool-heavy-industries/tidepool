@@ -293,12 +293,40 @@ impl IssuedInputNativeDecisions {
 /// Exact binding observations retained from successful compiler-role admission.
 /// These entries are acquisition owners, not a reconstruction from payload IDs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedCompilerRole {
-    interface: (ArtifactBinding, Arc<ArtifactEntry>),
-    original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+pub(super) struct ResolvedCompilerRole {
+    pub(super) interface: (ArtifactBinding, Arc<ArtifactEntry>),
+    pub(super) original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+}
+
+/// The solver's chosen bindings and their acquired payloads, not raw projection authority.
+/// Raw merge callers do not request or allocate these rows.
+pub(super) struct ResolvedCompilerInputs {
+    pub(super) artifacts: ArtifactView,
+    pub(super) projection: CompilerInputProjection,
+    pub(super) selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    pub(super) input_decisions: IssuedInputNativeDecisions,
 }
 
 impl ResolvedCompilerRole {
+    fn validate_original_pair(
+        state: &InventoryState,
+        canonical: ArtifactBinding,
+        carrier: ArtifactBinding,
+    ) -> Result<(), CompileError> {
+        if !state
+            .outgoing(InventoryNodeKey::Artifact(carrier))
+            .any(|(target, edge)| {
+                target == InventoryNodeKey::Artifact(canonical)
+                    && *edge == ArtifactDependency::Interface
+            })
+        {
+            return Err(failure(
+                "compiler fragment canonical pair differs from its issuing bindings",
+            ));
+        }
+        Ok(())
+    }
+
     fn retain_acquisitions(&mut self, retained: &ArtifactView) -> Result<(), CompileError> {
         for (binding, entry) in std::iter::once(&mut self.interface).chain(self.original.iter_mut())
         {
@@ -544,7 +572,34 @@ impl CompilerSourceSupport {
         );
         projection.validate(&artifacts)?;
         timing.advance("resolve_associations");
-        let mut selected = projection.resolve_associations(&artifacts)?;
+        let selected = projection.resolve_associations(&artifacts)?;
+        let support = Self::complete_resolved(
+            ResolvedCompilerInputs {
+                artifacts,
+                projection,
+                selected,
+                input_decisions: IssuedInputNativeDecisions::default(),
+            },
+            native_offers,
+            native_availability,
+            &mut timing,
+        )?;
+        timing.finish(true);
+        Ok(support)
+    }
+
+    fn complete_resolved(
+        inputs: ResolvedCompilerInputs,
+        native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
+        native_availability: crate::declaration_context::RequestNativeAvailability,
+        timing: &mut crate::timing::InvocationTiming,
+    ) -> Result<Self, CompileError> {
+        let ResolvedCompilerInputs {
+            artifacts,
+            projection,
+            mut selected,
+            input_decisions,
+        } = inputs;
         timing.advance("retain_issued_offer_custody");
         let mut offers = Vec::new();
         let retained = artifacts.retain_issued_offer_custody(
@@ -573,9 +628,8 @@ impl CompilerSourceSupport {
             artifacts: retained,
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
-            input_decisions: IssuedInputNativeDecisions::default(),
+            input_decisions,
         };
-        timing.finish(true);
         Ok(support)
     }
 
@@ -1361,6 +1415,10 @@ impl CompilerSourceSupport {
             "exact.value_interface_admission",
             "create_entries",
         );
+        if values.is_empty() {
+            timing.finish(true);
+            return Ok(self.clone());
+        }
         let entries = values
             .iter()
             .map(|value| {
@@ -1372,8 +1430,61 @@ impl CompilerSourceSupport {
             })
             .collect::<Vec<_>>();
         timing.advance("merge_projection");
-        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        let projection = self.projection.merge(&issued)?;
+        let (projection, entries) = match self
+            .artifacts
+            .inventory()
+            .prepare_value_interface_append(self, entries)?
+        {
+            ValueInterfaceAdmission::Append(append) => {
+                let appended = append.issue()?;
+                let mut rows = self.selected.rows.clone();
+                for (owner, interface) in appended.selected {
+                    rows.insert(
+                        owner,
+                        ResolvedCompilerRole {
+                            interface,
+                            original: None,
+                        },
+                    );
+                }
+                // The inventory appended only interface rows with checked
+                // targets. Earlier exact namespace bindings, scopes, roots and
+                // acquisitions remain owned by the same parent snapshot.
+                let result = Self {
+                    projection: appended.projection,
+                    artifacts: appended.artifacts,
+                    selected: Arc::new(AdmittedCompilerRoles {
+                        rows,
+                        home_units: Arc::clone(&self.selected.home_units),
+                    }),
+                    native_offers: Arc::clone(&self.native_offers),
+                    native_availability: self.native_availability.clone(),
+                    input_decisions: self.input_decisions.clone(),
+                };
+                timing.finish(true);
+                return Ok(result);
+            }
+            ValueInterfaceAdmission::General {
+                projection,
+                entries,
+                reason,
+            } => {
+                match reason {
+                    ValueInterfaceGeneralAdmission::RetainedOwner(owner) => {
+                        tracing::trace!(?owner, "value interface uses general owner admission");
+                    }
+                    ValueInterfaceGeneralAdmission::UnselectedRepeat(artifact)
+                    | ValueInterfaceGeneralAdmission::MissingNamespaceBinding(artifact)
+                    | ValueInterfaceGeneralAdmission::DifferentRequirementBindings(artifact) => {
+                        tracing::trace!(
+                            ?artifact,
+                            "value interface requires general binding admission"
+                        );
+                    }
+                }
+                (projection, entries)
+            }
+        };
         timing.advance("native_dependency_catalog");
         let catalog = NativeDependencyCatalog::from_source(self)?;
         timing.advance("admit_interfaces");
@@ -1623,32 +1734,25 @@ impl CompilerSourceSupport {
             "exact.compiler_support.merge",
             "merge_compiler_inputs_with_demand",
         );
-        let (artifacts, projection, decisions) = self.artifacts.merge_compiler_inputs_with_demand(
-            &self.projection,
-            &other.artifacts,
-            &other.projection,
-            CompilerNativeDemand::SourceSelections {
-                left: Some(&self.input_decisions),
-                right: Some(&other.input_decisions),
-            },
-            CompilerInputValidation::Closed,
-        )?;
-        timing.advance("rebuild_support");
-        let support = self.rebuild(
-            projection,
-            artifacts,
+        let inputs = ArtifactView::merge_admitted_compiler_supports(self, other)?;
+        timing.advance("validate_carried_associations");
+        // Merged custody preserves the checked payload facts; only its acquisition
+        // owner can change. Refresh those Arcs once, after offer retention below.
+        inputs
+            .projection
+            .validate_resolved(&inputs.selected, &inputs.artifacts)?;
+        let support = Self::complete_resolved(
+            inputs,
             self.native_offers
                 .iter()
                 .chain(other.native_offers.iter())
                 .cloned(),
+            self.native_availability.clone(),
+            &mut timing,
         )?;
         timing.advance("retain_normalized_availability");
         let result = support.retain_normalized_availability(other.native_availability());
         drop(support);
-        let result = result.map(|mut support| {
-            support.input_decisions = decisions;
-            support
-        });
         timing.finish(result.is_ok());
         result
     }
@@ -2144,9 +2248,21 @@ impl CompilerInputProjection {
         artifacts: CompilerRolePayloads<'_>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let selected = self.associated_entries(&artifacts)?;
-        for entry in selected.values() {
+        self.validate_requirements(selected.values().map(Arc::as_ref), |owner| {
+            artifacts
+                .get(&self.roles[owner].interface())
+                .map(Arc::as_ref)
+        })?;
+        Ok(selected)
+    }
+    fn validate_requirements<'a>(
+        &self,
+        entries: impl IntoIterator<Item = &'a ArtifactEntry>,
+        interface: impl Fn(&ExactModuleIdentity) -> Option<&'a ArtifactEntry>,
+    ) -> Result<(), CompileError> {
+        for entry in entries {
             for required in &entry.requirements {
-                let role = self.roles.get(required).ok_or_else(|| {
+                self.roles.get(required).ok_or_else(|| {
                     admission_failure(ArtifactInventoryFailure::MissingDependency {
                         artifact: entry.descriptor.id,
                         dependent: entry.descriptor.owner.clone(),
@@ -2155,8 +2271,7 @@ impl CompilerInputProjection {
                     })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
-                    artifacts
-                        .get(&role.interface())
+                    interface(required)
                         .expect("associated canonical interface")
                         .descriptor
                         .interface_sha256
@@ -2171,8 +2286,46 @@ impl CompilerInputProjection {
                 }
             }
         }
-        Ok(selected)
+        Ok(())
     }
+
+    fn validate_resolved(
+        &self,
+        selected: &BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+        view: &ArtifactView,
+    ) -> Result<(), CompileError> {
+        for (owner, role) in &self.roles {
+            #[cfg(test)]
+            type_query_work::canonical_check();
+            let row = selected.get(owner).expect("merged role has its chosen row");
+            if row.interface.0.artifact != role.interface()
+                || row.interface.1.descriptor.id != role.interface()
+                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+            {
+                return Err(failure("merged compiler row differs from its chosen role"));
+            }
+            Self::validate_role_payload(owner, role, &row.interface.1, |id| {
+                row.original
+                    .as_ref()
+                    .map(|(_, entry)| entry)
+                    .filter(|entry| entry.descriptor.id == id)
+            })?;
+        }
+        self.validate_requirements(
+            selected
+                .values()
+                .map(|row| row.original.as_ref().unwrap_or(&row.interface).1.as_ref()),
+            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+        )?;
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        for row in selected.values() {
+            if let Some((carrier, _)) = &row.original {
+                ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *carrier)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_associations(&self, view: &ArtifactView) -> Result<(), CompileError> {
         self.resolve_associations(view).map(|_| ())
     }
@@ -2192,17 +2345,7 @@ impl CompilerInputProjection {
             let canonical = view.resolve_binding(role.interface(), owned)?;
             let original = if let Some(original) = role.original() {
                 let carrier = view.resolve_binding(original, owned)?;
-                if !state
-                    .outgoing(InventoryNodeKey::Artifact(carrier))
-                    .any(|(target, edge)| {
-                        target == InventoryNodeKey::Artifact(canonical)
-                            && *edge == ArtifactDependency::Interface
-                    })
-                {
-                    return Err(failure(
-                        "compiler fragment canonical pair differs from its issuing bindings",
-                    ));
-                }
+                ResolvedCompilerRole::validate_original_pair(&state, canonical, carrier)?;
                 Some((carrier, Arc::clone(&entries[owner])))
             } else {
                 None
@@ -2236,40 +2379,391 @@ impl CompilerInputProjection {
             let interface = artifacts
                 .get(&role.interface())
                 .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
-            if &interface.descriptor.owner != owner || interface.is_native() {
-                return Err(failure("compiler interface role has another owner or kind"));
-            }
-            let entry = match role.original() {
-                None => interface,
-                Some(id) => {
-                    let original = artifacts.get(&id).ok_or_else(|| {
-                        failure("compiler original offer is outside retained custody")
-                    })?;
-                    let ArtifactPayload::Original(product) = &original.payload else {
-                        return Err(failure("compiler original offer has no native proof"));
-                    };
-                    let canonical = product.module_interface().ok_or_else(|| {
-                        failure("compiler original offer lacks canonical attachment")
-                    })?;
-                    if &original.descriptor.owner != owner
-                        || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
-                    {
-                        return Err(failure(
-                            "compiler original offer differs from its interface",
-                        ));
-                    }
-                    original
-                }
-            };
+            let entry =
+                Self::validate_role_payload(owner, role, interface, |id| artifacts.get(&id))?;
             selected.insert(owner.clone(), Arc::clone(entry));
         }
         Ok(selected)
+    }
+    fn validate_role_payload<'a>(
+        owner: &ExactModuleIdentity,
+        role: &CompilerInputRole,
+        interface: &'a Arc<ArtifactEntry>,
+        original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
+    ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        if &interface.descriptor.owner != owner || interface.is_native() {
+            return Err(failure("compiler interface role has another owner or kind"));
+        }
+        match role.original() {
+            None => Ok(interface),
+            Some(id) => {
+                let original = original(id).ok_or_else(|| {
+                    failure("compiler original offer is outside retained custody")
+                })?;
+                let ArtifactPayload::Original(product) = &original.payload else {
+                    return Err(failure("compiler original offer has no native proof"));
+                };
+                let canonical = product
+                    .module_interface()
+                    .ok_or_else(|| failure("compiler original offer lacks canonical attachment"))?;
+                if &original.descriptor.owner != owner
+                    || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
+                {
+                    return Err(failure(
+                        "compiler original offer differs from its interface",
+                    ));
+                }
+                Ok(original)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn value_certificate(
+        module: &str,
+        requirements: Vec<ExactModuleIdentity>,
+    ) -> Arc<crate::recovery_artifacts::CertifiedValueInterface> {
+        let interface = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "unit",
+            module,
+            BTreeMap::new(),
+        );
+        Arc::new(
+            crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+                [2; 32],
+                ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: module.into(),
+                },
+                interface.interface_bytes().to_vec(),
+                interface.package_imports_bytes().to_vec(),
+                requirements,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn checked_value_admission(
+        source: &CompilerSourceSupport,
+        values: &[Arc<crate::recovery_artifacts::CertifiedValueInterface>],
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        let entries = values
+            .iter()
+            .map(|value| {
+                Arc::new(ArtifactEntry::interface(
+                    value.interface().clone(),
+                    JoinedInterfaceRole::ValueInterface,
+                    value.requirements().to_vec(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
+        let projection = source.projection.merge(&issued)?;
+        let catalog = NativeDependencyCatalog::from_source(source)?;
+        let artifacts = projection.admit_interfaces_with_native_offers(
+            &source.artifacts,
+            entries,
+            &source.native_offers,
+            &catalog,
+        )?;
+        source.rebuild(projection, artifacts, source.native_offers.iter().cloned())
+    }
+
+    #[test]
+    fn fresh_value_append_preserves_native_permissions_and_exact_execution_roots() {
+        let raw = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture(
+                "AppendNative",
+                vec![(7, vec![]), (9001, vec![])],
+                61,
+                &BTreeMap::new(),
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[raw])
+            .remove(0)
+            .product;
+        let entry = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let inventory = ArtifactInventory::default();
+        let full = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let full_offers = IssuedNativeOffer::issue_context_offers(&projection, &full, &[]).unwrap();
+        for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
+            let groups = ordinals
+                .iter()
+                .map(|ordinal| NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: *ordinal,
+                })
+                .collect();
+            let chosen = inventory
+                .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &groups)
+                .unwrap();
+            let offers =
+                IssuedNativeOffer::issue_context_offers(&projection, &chosen, &[]).unwrap();
+            let availability =
+                crate::declaration_context::RequestNativeAvailability::issue_checked(
+                    &projection,
+                    &chosen,
+                    &offers,
+                )
+                .unwrap();
+            let source =
+                CompilerSourceSupport::new(projection.clone(), chosen, offers, availability)
+                    .unwrap()
+                    .retain_offers(full_offers.iter().cloned())
+                    .unwrap();
+            let before = source.artifacts.capture_graph_selection();
+            let old_edges = source.artifacts.binding_dependencies();
+            let required_binding = source.selected[&entry.descriptor.owner].interface.0;
+            let value = value_certificate("FreshAppend", vec![entry.descriptor.owner.clone()]);
+            let work = inventory.metrics();
+            let actual = source.admit_value_interfaces(&[value.clone()]).unwrap();
+            let after = inventory.metrics();
+            assert_eq!(after.graph_visits, work.graph_visits);
+            assert_eq!(after.admission_owner_lookups, work.admission_owner_lookups);
+            let graph = actual.artifacts.capture_graph_selection();
+            let expected_roots = before
+                .roots
+                .iter()
+                .copied()
+                .chain(std::iter::once(InventoryNodeKey::Artifact(
+                    actual.artifacts.namespace()[&value.artifact_id()],
+                )))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                graph.roots.iter().copied().collect::<BTreeSet<_>>(),
+                expected_roots
+            );
+            assert_eq!(graph.native_groups, before.native_groups);
+            for binding in before.namespace {
+                assert_eq!(actual.artifacts.namespace()[&binding.artifact], binding);
+            }
+            assert!(old_edges
+                .iter()
+                .all(|edge| actual.artifacts.binding_dependencies().contains(edge)));
+            let expected_new_edge = (
+                InventoryNodeKey::Artifact(actual.artifacts.namespace()[&value.artifact_id()]),
+                InventoryNodeKey::Artifact(required_binding),
+                ArtifactDependency::Interface,
+            );
+            assert_eq!(
+                actual.artifacts.binding_dependencies().into_iter()
+                    .filter(|edge| !old_edges.contains(edge)).collect::<BTreeSet<_>>(),
+                BTreeSet::from([expected_new_edge]),
+                "a fresh type adds only its canonical interface obligation, never an original or Group edge",
+            );
+            assert_eq!(actual.native_availability, source.native_availability);
+            let row = actual
+                .native_availability
+                .rows()
+                .find(|row| {
+                    row.target_original(row.original_owner())
+                        .is_some_and(|original| original.descriptor.id == entry.descriptor.id)
+                })
+                .unwrap();
+            assert_eq!(row.permits(7), ordinals.contains(&7));
+            assert_eq!(row.permits(9001), ordinals.contains(&9001));
+            assert_eq!(actual.input_decisions, source.input_decisions);
+            assert!(Arc::ptr_eq(
+                &actual.selected.home_units,
+                &source.selected.home_units
+            ));
+            let oracle = checked_value_admission(&source, &[value.clone()]).unwrap();
+            assert_eq!(actual.projection, oracle.projection);
+            assert_eq!(actual.native_availability, oracle.native_availability);
+            assert_eq!(
+                graph.native_groups,
+                oracle.artifacts.capture_graph_selection().native_groups
+            );
+            let repeated = actual.admit_value_interfaces(&[value]).unwrap();
+            assert!(Arc::ptr_eq(
+                &actual.artifacts.lease,
+                &repeated.artifacts.lease
+            ));
+            assert_eq!(actual.selected, repeated.selected);
+            let empty = actual.admit_value_interfaces(&[]).unwrap();
+            assert!(Arc::ptr_eq(&actual.selected, &empty.selected));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn value_repeat_requires_exact_dependency_issuer(extra in 1usize..5) {
+            let inventory = ArtifactInventory::default();
+            let canonical = Arc::new(crate::artifact_inventory::tests::entry("SharedCanonical", &[]));
+            let make = |extra: usize| {
+                let mut entries = vec![canonical.clone()];
+                entries.extend((0..extra).map(|index| Arc::new(
+                    crate::artifact_inventory::tests::entry(&format!("Cohort{index}"), &[]),
+                )));
+                let view = inventory.admit_shared(&inventory.empty_view(), entries).unwrap();
+                CompilerSourceSupport::new(
+                    CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap(),
+                    view, [], Default::default(),
+                ).unwrap()
+            };
+            let first = make(0);
+            let value = value_certificate("IssuedValue", vec![canonical.descriptor.owner.clone()]);
+            let first = first.admit_value_interfaces(&[value.clone()]).unwrap();
+            let second = make(extra);
+            let a = first.selected[&canonical.descriptor.owner].interface.0;
+            let b = second.selected[&canonical.descriptor.owner].interface.0;
+            proptest::prop_assert_eq!(a.artifact, b.artifact);
+            proptest::prop_assert_ne!(a, b);
+            let mixed = second.merge(&first).unwrap();
+            let old_value = mixed.selected[&ExactModuleIdentity { unit: "unit".into(), module: "IssuedValue".into() }].interface.0;
+            let old_edge = (InventoryNodeKey::Artifact(old_value), InventoryNodeKey::Artifact(a), ArtifactDependency::Interface);
+            proptest::prop_assert!(mixed.artifacts.binding_dependencies().contains(&old_edge));
+            let entry = Arc::new(ArtifactEntry::interface(value.interface().clone(), JoinedInterfaceRole::ValueInterface, value.requirements().to_vec()));
+            proptest::prop_assert!(matches!(inventory.prepare_value_interface_append(&mixed, vec![entry]).unwrap(),
+                ValueInterfaceAdmission::General { reason: ValueInterfaceGeneralAdmission::DifferentRequirementBindings(_), .. }),
+                "repeating a value must check the exact requirement issuer");
+            let repeated = mixed.admit_value_interfaces(&[value.clone()]).unwrap();
+            let oracle = checked_value_admission(&mixed, &[value]).unwrap();
+            proptest::prop_assert_eq!(repeated.artifacts.capture_graph_selection(), oracle.artifacts.capture_graph_selection());
+            let unrelated = value_certificate("UnrelatedFreshValue", vec![]);
+            let appended = mixed.admit_value_interfaces(&[unrelated]).unwrap();
+            proptest::prop_assert_eq!(appended.selected[&canonical.descriptor.owner].interface.0, b);
+            proptest::prop_assert!(appended.artifacts.binding_dependencies().contains(&old_edge));
+            proptest::prop_assert_eq!(appended.artifacts.selected_native_groups(), mixed.artifacts.selected_native_groups());
+        }
+    }
+
+    #[test]
+    fn value_append_refuses_bad_metadata_and_keeps_hidden_owner_checks() {
+        let inventory = ArtifactInventory::default();
+        let required = Arc::new(crate::artifact_inventory::tests::entry(
+            "RequiredValueType",
+            &[],
+        ));
+        let hidden = Arc::new(crate::artifact_inventory::tests::entry(
+            "HiddenValueType",
+            &[],
+        ));
+        let view = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![required.clone(), hidden.clone()],
+            )
+            .unwrap();
+        let source = CompilerSourceSupport::new(
+            CompilerInputProjection::from_issued_entries(&[required.clone()]).unwrap(),
+            view,
+            [],
+            Default::default(),
+        )
+        .unwrap();
+        let hidden_value = value_certificate("HiddenValueType", vec![]);
+        let hidden_entry = Arc::new(ArtifactEntry::interface(
+            hidden_value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        assert!(matches!(
+            inventory
+                .prepare_value_interface_append(&source, vec![hidden_entry])
+                .unwrap(),
+            ValueInterfaceAdmission::General {
+                reason: ValueInterfaceGeneralAdmission::RetainedOwner(_),
+                ..
+            }
+        ));
+        let value = value_certificate("CheckedValue", vec![required.descriptor.owner.clone()]);
+        let first = source.admit_value_interfaces(&[value.clone()]).unwrap();
+        let bad_requirements = value_certificate("CheckedValue", vec![]);
+        assert_eq!(value.artifact_id(), bad_requirements.artifact_id());
+        assert!(
+            matches!(first.admit_value_interfaces(&[bad_requirements]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { .. }))
+        );
+        let absent = value_certificate(
+            "AbsentRequirement",
+            vec![ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "Absent".into(),
+            }],
+        );
+        assert!(
+            matches!(source.admit_value_interfaces(&[absent]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. }))
+        );
+        let foreign = value_certificate(
+            "ForeignRequirement",
+            vec![ExactModuleIdentity {
+                unit: "foreign".into(),
+                module: required.descriptor.owner.module.clone(),
+            }],
+        );
+        assert!(
+            matches!(source.admit_value_interfaces(&[foreign]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. }))
+        );
+        let replacement = value_certificate("RequiredValueType", vec![]);
+        assert!(
+            matches!(source.admit_value_interfaces(&[replacement]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }))
+        );
+        let mut sealed = ArtifactEntry::interface(
+            value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            value.requirements().to_vec(),
+        );
+        sealed
+            .interface_seals
+            .insert(required.descriptor.owner.clone(), [0; 32]);
+        assert!(
+            matches!(inventory.prepare_value_interface_append(&source, vec![Arc::new(sealed)]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::InterfaceSealMismatch { .. }))
+        );
+    }
+
+    #[test]
+    fn fresh_value_batch_preserves_local_cyclic_interface_requirements() {
+        let source = CompilerSourceSupport::empty();
+        let left = value_certificate(
+            "LocalLeft",
+            vec![ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "LocalRight".into(),
+            }],
+        );
+        let right = value_certificate(
+            "LocalRight",
+            vec![ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "LocalLeft".into(),
+            }],
+        );
+        let batch = [left.clone(), right.clone()];
+        let actual = source.admit_value_interfaces(&batch).unwrap();
+        let oracle = checked_value_admission(&source, &batch).unwrap();
+        assert_eq!(actual.projection, oracle.projection);
+        assert_eq!(
+            actual.artifacts.capture_graph_selection(),
+            oracle.artifacts.capture_graph_selection()
+        );
+        let namespace = actual.artifacts.namespace();
+        let edges = actual.artifacts.binding_dependencies();
+        assert!(edges.contains(&(
+            InventoryNodeKey::Artifact(namespace[&left.artifact_id()]),
+            InventoryNodeKey::Artifact(namespace[&right.artifact_id()]),
+            ArtifactDependency::Interface
+        )));
+        assert!(edges.contains(&(
+            InventoryNodeKey::Artifact(namespace[&right.artifact_id()]),
+            InventoryNodeKey::Artifact(namespace[&left.artifact_id()]),
+            ArtifactDependency::Interface
+        )));
+    }
 
     // The ordinary type-query front door parses Names through the existing
     // signature codec; interface authority still comes from the admitted view.
@@ -2919,7 +3413,13 @@ mod tests {
     fn source_merge_keeps_native_choices_with_the_selected_exact_issuer() {
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool, empty: bool| {
+        let foreign_inventory = ArtifactInventory::default();
+        let issue = |marker: &str, with_caller: bool, empty: bool, foreign: bool| {
+            let inventory = if foreign {
+                &foreign_inventory
+            } else {
+                &inventory
+            };
             let selected = if with_caller {
                 &entries[..]
             } else {
@@ -2947,9 +3447,11 @@ mod tests {
             )
             .unwrap()
         };
-        for empty_winner in [false, true] {
-            let winner = issue("WinnerMarker", false, empty_winner);
-            let historical = issue("HistoricalMarker", true, false);
+        for (empty_winner, cross_inventory) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let winner = issue("WinnerMarker", false, empty_winner, false);
+            let historical = issue("HistoricalMarker", true, false, cross_inventory);
             let parent = &entries[1];
             let owner = &parent.descriptor.owner;
             let pair = |support: &CompilerSourceSupport| {
@@ -2987,9 +3489,17 @@ mod tests {
                 .into_iter()
                 .chain(historical.artifacts.binding_dependencies())
                 .collect::<BTreeSet<_>>();
+            type_query_work::take();
             let joined = winner
                 .merge(&historical)
                 .expect("a losing historical issuer does not replace the selected input choice");
+            let merge_work = type_query_work::take();
+            assert_eq!(
+                merge_work.resolved_rows, 0,
+                "post-solver finalization does not rediscover chosen bindings"
+            );
+            assert_eq!(merge_work.census_rows, joined.projection.roles.len());
+            assert!(!joined.selected.rows.is_empty());
             let (kernel, kernel_projection, kernel_decisions) = winner
                 .artifacts
                 .merge_compiler_inputs_with_demand(
@@ -3013,6 +3523,7 @@ mod tests {
                 kernel.capture_graph_selection(),
                 prior_constructor.capture_graph_selection()
             );
+            type_query_work::take();
             let mut prior_support = winner
                 .rebuild(
                     kernel_projection,
@@ -3026,7 +3537,25 @@ mod tests {
                 .unwrap()
                 .retain_normalized_availability(historical.native_availability())
                 .unwrap();
+            let prior_work = type_query_work::take();
+            assert!(
+                prior_work.resolved_rows > 0,
+                "the reference rebuild calibrates removed work"
+            );
             prior_support.input_decisions = kernel_decisions;
+            assert_eq!(joined.selected, prior_support.selected);
+            assert_eq!(
+                joined.native_offer_observations().unwrap(),
+                prior_support.native_offer_observations().unwrap()
+            );
+            for row in joined.selected.values() {
+                for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                    assert!(
+                        Arc::ptr_eq(entry, &joined.artifacts.lease.payloads[&binding.artifact]),
+                        "chosen row acquires the final payload owner"
+                    );
+                }
+            }
             assert_eq!(
                 joined.artifacts.capture_graph_selection(),
                 prior_support.artifacts.capture_graph_selection(),
