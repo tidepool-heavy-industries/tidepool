@@ -283,10 +283,21 @@ unknown executed count or zero selection cannot qualify a passing cohort.
 `run --jobs N` selects bounded concurrency (default one); `--delegated-service`
 and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
+
+To run a canary from a cohort, repeat `run --exact-test FULL_TEST_NAME` for
+each selected member. Omitting the option runs the full cohort. Empty names,
+duplicates and names outside the sealed cohort refuse before execution; selected
+tests run in sealed cohort order. The report retains `sealed_cohort` and
+`selected_tests`, and checks actual counts against the selected subset. The
+descriptor and the cohort's resource, timeout and lifecycle contracts stay unchanged.
+
 The browser driver and its locked npm inputs are assembled by the declared
 native bundle action and checked against its source contract. Freeze cannot
 substitute a separately supplied driver. Schema 4 descriptors require that
 contract; historical frozen bundles retain their own qualification program.
+`--browser-node` selects the actual immutable executable file, usually `bin/node`
+within its Nix output. Freeze and verify reject a directory or non-executable
+file; `driver.mjs` remains a data argument to that executable.
 
 Every runtime cohort seals `owned-resident` compilation into its descriptor,
 matching the resident daemon used by CLI launch. A direct override, missing mode,
@@ -679,9 +690,8 @@ exact compiler request/service joins, per-call timing, validation summaries,
 native-image decisions, successful Cranelift compile summaries and machine
 publication records remain enabled. `TIDEPOOL_TIMING_SUMMARY=1` is forwarded
 through the owned compiler; per-file/module timing and host span lifecycle events
-remain disabled. `--trace-profile full` is an explicit diagnostic control for a
-bounded selected cohort, with detailed attribution enabled. Primary paired
-latency repetitions use minimal; detailed captures do not replace those results.
+remain disabled. Primary paired latency repetitions use minimal; detailed
+captures do not replace those results.
 
 Measurement qualification binds the requested runner profile to successful host
 and compiler capture receipts in the actual retained writers. An existing custom
