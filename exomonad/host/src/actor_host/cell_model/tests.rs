@@ -1,5 +1,6 @@
 use super::super::test_campaign::{
-    commit_workspace, committed_display_text, dispatch_haskell_script, TestCampaign,
+    commit_workspace, committed_display_text, dispatch_haskell_script,
+    dispatch_haskell_script_result, TestCampaign,
 };
 use super::*;
 use exomonad_actor::{Model, Reasoning};
@@ -478,16 +479,26 @@ async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_r
                     .into_iter()
                     .map(|node| node.actor)
                     .collect::<Vec<_>>();
-                let refused = dispatch_haskell_script(
+                let refused = dispatch_haskell_script_result(
                     endpoint.as_ref(),
                     include_str!("../fixtures/record_model_denied.hs"),
                 )
-                .await;
-                assert_eq!(refused["status"], "rejected", "{refused}");
+                .await
+                .expect_err("omitting the explicit grant must refuse actor admission");
+                let exomonad_actor::ResidentToolError::Invocation(failure) = refused else {
+                    panic!("actor admission must retain its typed execution refusal: {refused:?}");
+                };
+                let receipt = failure
+                    .receipts()
+                    .last()
+                    .expect("admission failure retains the input receipt");
                 assert_eq!(
-                    refused["items"].as_array().unwrap().last().unwrap()["failureLayer"],
-                    "effect",
-                    "{refused}"
+                    receipt.status,
+                    tidepool_runtime::session::WorkbenchItemStatus::Rejected
+                );
+                assert_eq!(
+                    receipt.failure_layer,
+                    Some(tidepool_runtime::session::WorkbenchFailureLayer::Effect)
                 );
                 assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
                 assert_eq!(script.requests.lock().unwrap().len(), 4);
