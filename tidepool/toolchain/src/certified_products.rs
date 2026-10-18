@@ -12660,7 +12660,8 @@ pub(crate) mod tests {
             producer.sha256(),
         );
         let consumer = fixture_native_declaration_product(
-            original_groups_fixture_with_interface(
+            original_groups_fixture_in_unit_with_sites(
+                "main",
                 "Tidepool.Session.Lib.G5",
                 vec![(
                     5,
@@ -12673,6 +12674,8 @@ pub(crate) mod tests {
                 152,
                 &BTreeMap::new(),
                 b"consumer exact canonical".to_vec(),
+                &BTreeMap::new(),
+                &[],
             ),
             producer.sha256(),
             5,
