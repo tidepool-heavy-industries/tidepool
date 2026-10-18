@@ -3230,7 +3230,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         .err()
         .expect("explicit source Original cannot accept a competing historical Original");
         assert!(
-            matches!(error, CompileError::ArtifactInventory(_)),
+            matches!(&error, CompileError::ExtractFailed(detail) if detail == "exact declaration context: issued native dependency conflicts with request interface"),
             "actual_error={error:?}"
         );
     }
