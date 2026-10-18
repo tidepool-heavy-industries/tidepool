@@ -11322,11 +11322,7 @@ mod tests {
             let projection =
                 CompilerInputProjection::from_issued_entries(&views[index].entries()).unwrap();
             let context = combined
-                .context_with_graph_selection(
-                    &selections[index],
-                    &projection.roles(),
-                    vec![],
-                )
+                .context_with_graph_selection(&selections[index], &projection.roles(), vec![])
                 .unwrap();
             assert_eq!(context.compiler_input_projection(), &projection);
             assert!(context
