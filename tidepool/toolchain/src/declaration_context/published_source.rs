@@ -753,7 +753,7 @@ mod tests {
             .native_groups
             .iter()
             .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
-        let transport = NativeCompilerTransport::issue(
+        let transport = NativeCompilerTransport::issue_checked(
             context.compiler_input_projection(),
             &context.compiler_metadata_snapshot().unwrap(),
             context.artifact_view(),
@@ -1034,10 +1034,9 @@ mod tests {
                                         next.artifact_view().selected_native_groups(),
                                         expected_groups
                                     );
-                                    assert!(edges.iter().all(|edge| next
-                                        .artifact_view()
-                                        .binding_dependencies()
-                                        .contains(edge)));
+                                    assert!(edges.iter().all(|edge| {
+                                        next.artifact_view().binding_dependencies().contains(edge)
+                                    }));
                                     if repetition > 0 {
                                         assert_eq!(
                                             next.semantic_sha256(),
@@ -1273,9 +1272,11 @@ mod tests {
             .clone()
             .extend_interface_context(&demanded)
             .unwrap();
-        assert_eq!(extended.artifact_view().capture_graph_selection().roots,
+        assert_eq!(
+            extended.artifact_view().capture_graph_selection().roots,
             demanded.artifact_view().capture_graph_selection().roots,
-            "type evidence must preserve the existing complete demand independently of published subset policy");
+            "type evidence must preserve the existing complete demand independently of published subset policy"
+        );
 
         assert_eq!(
             support.projection().snapshot_roles()[&root.descriptor.owner],

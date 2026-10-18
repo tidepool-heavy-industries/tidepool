@@ -187,7 +187,9 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
             binding_edges: decoded.binding_dependencies().unwrap(),
             interfaces: artifacts.interface_dependencies(),
         };
-        let mut cold = recovered.context_with_snapshot(decoded).unwrap();
+        let mut cold = recovered
+            .context_for_expected_snapshot(receipt.root(), &receipt)
+            .unwrap();
         cold.bind_snapshot_baseline(&receipt).unwrap();
         assert!(cold
             .compiler_source_support()
