@@ -3551,9 +3551,8 @@ impl ArtifactInventory {
             .set(projection)
             .ok()
             .expect("fresh bound projection");
-        inherited_materializations.extend(
-            view.attach_projected_materializations(&demanded_materializations),
-        );
+        inherited_materializations
+            .extend(view.attach_projected_materializations(&demanded_materializations));
         let _ = view
             .reads
             .inherited_materializations
@@ -6375,15 +6374,14 @@ impl ArtifactView {
             .into_iter()
             .filter(|node| !selected_nodes.contains(node))
             .collect::<Vec<_>>();
-        custody_roots.extend(
-            retained_ids
-                .difference(&initial)
-                .map(|id| {
-                    self.resolve_binding(*id, owned)
-                        .map(InventoryNodeKey::Artifact)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        // These dependencies retain bytes, not a compiler or execution choice.
+        // Every required id came from native_owners built from this owned graph.
+        // Preserve each exact issuer instead of resolving its shared payload id.
+        custody_roots.extend(owned.iter().copied().filter(|node| {
+            matches!(node, InventoryNodeKey::Artifact(binding)
+                if retained_ids.contains(&binding.artifact)
+                    && !initial.contains(&binding.artifact))
+        }));
         let retained_nodes =
             admitted_closure(&state, selected.iter().chain(custody_roots.iter()).copied());
         custody_roots.extend(owned.iter().copied().filter(|node| {
@@ -14892,6 +14890,133 @@ mod tests {
         drop(restored);
         drop(restored_old);
         assert_eq!(recovery.node_count(), 0);
+    }
+
+    fn check_hidden_native_custody_bindings(branches: usize, reverse: bool) {
+        let inventory = ArtifactInventory::default();
+        let hidden = Arc::new(issued_native_groups(
+            "HiddenCustody",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let root = Arc::new(issued_native_groups(
+            "CustodyRoot",
+            vec![(0, vec![issued_source(&hidden, 7)])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let ArtifactPayload::Original(product) = &root.payload else {
+            unreachable!()
+        };
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            product.module_interface().unwrap().clone(),
+        ));
+        let mut broad = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![canonical.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let mut issuers = (0..branches)
+            .map(|index| {
+                inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        vec![
+                            root.clone(),
+                            hidden.clone(),
+                            Arc::new(entry(&format!("CustodyBranch{index}"), &[])),
+                        ],
+                        &BTreeSet::from([
+                            NativeGroupKey {
+                                artifact: root.descriptor.id,
+                                original_ordinal: 0,
+                            },
+                            NativeGroupKey {
+                                artifact: hidden.descriptor.id,
+                                original_ordinal: 7,
+                            },
+                        ]),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        if reverse {
+            issuers.reverse();
+        }
+        for issued in &issuers {
+            broad = broad.retain_custody(issued).unwrap();
+        }
+        let before = broad.capture_graph_selection();
+        let expected_hidden = before
+            .bindings
+            .iter()
+            .copied()
+            .filter(|binding| binding.artifact == hidden.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_hidden.len(), branches);
+        let selected = broad.select_roots(vec![canonical.descriptor.id]).unwrap();
+        let graph = selected.capture_graph_selection();
+        assert_eq!(
+            graph
+                .bindings
+                .iter()
+                .copied()
+                .filter(|binding| binding.artifact == hidden.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            expected_hidden,
+        );
+        assert_eq!(graph.namespace, broad.capture_graph_selection().namespace);
+        assert!(selected.selected_native_groups().is_empty());
+        assert!(graph.roots.iter().all(|node| matches!(node, ArtifactBindingNode::Artifact(binding) if binding.artifact == canonical.descriptor.id)));
+        assert!(graph
+            .selections
+            .iter()
+            .all(|scope| before.selections.contains(scope)));
+        assert!(matches!(selected.select_roots(vec![hidden.descriptor.id]),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == hidden.descriptor.id)));
+        assert!(
+            matches!(selected.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: hidden.descriptor.id, original_ordinal: 7,
+        }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+            ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == hidden.descriptor.id))
+        );
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                selected.entries(),
+                &graph,
+                &selected.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        drop(selected);
+        drop(broad);
+        drop(issuers);
+        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        drop(recovered);
+        assert_eq!(recovered_inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn hidden_native_custody_preserves_independent_bindings_without_selection() {
+        check_hidden_native_custody_bindings(2, false);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn hidden_native_custody_histories_preserve_exact_graphs(
+            branches in 2usize..6,
+            reverse in proptest::bool::ANY,
+        ) {
+            check_hidden_native_custody_bindings(branches, reverse);
+        }
     }
 
     #[test]
