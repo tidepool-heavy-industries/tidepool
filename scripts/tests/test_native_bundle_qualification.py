@@ -1321,8 +1321,10 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertEqual(cohort['compiler_mode'], 'owned-resident')
         self.assertEqual(cohort['required_startup_mode'], 'prepared')
         self.assertEqual(cohort['required_stdlib_mode'], 'catalog-backed')
-        for count, passed, expected in ((1, True, 0), (0, True, 1), (None, True, 1), (1, False, 1)):
-            with self.subTest(count=count, passed=passed), tempfile.TemporaryDirectory() as directory:
+        outcomes = [('complete', 1, True, 0), ('zero', 0, True, 1),
+                    ('unknown', None, True, 1), ('missing', None, True, 1), ('failed', 1, False, 1)]
+        for label, count, passed, expected in outcomes:
+            with self.subTest(outcome=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 descriptor_path = root / 'qualification.json'
                 descriptor_path.write_text('frozen descriptor')
@@ -1340,16 +1342,31 @@ class NativeQualificationTests(unittest.TestCase):
                                       if value == '--exact'], cohort['tests'])
                     self.assertEqual(command[command.index('--expected-count') + 1], '1')
                     self.assertIn('--ignored', command)
+                    execution = captured_execution({
+                        'schema': 1, 'status': 'finished', 'executed_test_count': count,
+                        'exit_code': 0 if passed else 101,
+                        'process_cleanup_status': 'confirmed',
+                        'hosted_cleanup_status': 'confirmed',
+                        'compiler_cleanup_status': 'confirmed',
+                    })
+                    if label == 'missing':
+                        del execution['executed_test_count']
                     qualification.write_json(output / 'tests/case.json', {
-                        'test': cohort['tests'][0], 'passed': passed,
-                        'execution': {'executed_test_count': count, 'exit_code': 0 if passed else 101}})
+                        'version': 2, 'test': cohort['tests'][0], 'passed': passed,
+                        'execution': execution})
                     return subprocess.CompletedProcess(command, 0)
                 with patch.object(qualification, 'verify', return_value=descriptor), \
                      patch.object(qualification.subprocess, 'run', side_effect=execute):
                     self.assertEqual(qualification.main([
                         'run', str(descriptor_path), '--cohort', 'prepared-child-smoke',
                         '--output', str(output), '--jobs', '1']), expected)
-                self.assertEqual(json.loads((output / 'report.json').read_text())['completed'], expected == 0)
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(report['schema'], 2)
+                self.assertEqual(report['behavioral_completed'], expected == 0)
+                self.assertEqual(report['behavior_selection_completed'], expected == 0)
+                self.assertEqual(report['executed_test_count'], count)
+                self.assertEqual(report['unknown_execution_count'], int(count is None))
+                self.assertEqual(report['tests'][0]['passed'], passed)
 
     def test_persona_startup_seals_exact_history_and_preserves_incomplete_receipts(self):
         cohort = qualification.cohorts()['persona-startup']
