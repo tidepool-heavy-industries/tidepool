@@ -917,6 +917,7 @@ test-suite model-turn-test
     Tidepool.Internal.ModelControl
     Tidepool.Internal.RequestSite
     Tidepool.Model
+    Tidepool.Model.Selection
     Tidepool.Patch
     Tidepool.Prelude
     Tidepool.QQ.Bash

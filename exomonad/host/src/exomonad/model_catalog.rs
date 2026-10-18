@@ -69,7 +69,29 @@ fn constructor_valid(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
         && !matches!(
             name,
-            "True" | "False" | "Just" | "Nothing" | "Left" | "Right" | "LT" | "EQ" | "GT"
+            "True"
+                | "False"
+                | "Just"
+                | "Nothing"
+                | "Left"
+                | "Right"
+                | "LT"
+                | "EQ"
+                | "GT"
+                | "ModelSelection"
+                | "ArgonOptions"
+                | "DeepSeekOptions"
+                | "OpenAIOptions"
+                | "ArgonLow"
+                | "ArgonMedium"
+                | "ArgonHigh"
+                | "DeepSeekNone"
+                | "DeepSeekLow"
+                | "DeepSeekHigh"
+                | "DeepSeekMax"
+                | "OpenAILow"
+                | "OpenAIMedium"
+                | "OpenAIHigh"
         )
 }
 
@@ -131,6 +153,11 @@ impl InferenceConfig {
                 .providers
                 .get(&model.provider)
                 .ok_or_else(|| format!("model {name}: unknown provider {}", model.provider))?;
+            if provider.backend == Backend::GeminiInteractions && model.model != "gemini-4-argon" {
+                return Err(format!(
+                    "model {name}: Gemini Interactions requires gemini-4-argon"
+                ));
+            }
             resolved.insert(
                 name.clone(),
                 ResolvedModel {
@@ -208,11 +235,6 @@ impl InferenceConfig {
             },
         );
         for (alias, model) in aliases {
-            if matches!(model, Model::CustomModel(..)) {
-                return Err(format!(
-                    "legacy alias {alias}: custom IDs require an explicit catalog"
-                ));
-            }
             if model.backend() != embedded.provider {
                 return Err(format!(
                     "legacy alias {alias}: backend differs from provider"
@@ -274,6 +296,145 @@ impl InferenceConfig {
         config.resolve()?;
         Ok(config)
     }
+}
+
+impl ResolvedCatalog {
+    /// Emit the workspace's closed choices from its admitted catalog, never disk inventory.
+    pub(crate) fn render_haskell_models(&self) -> Result<String, String> {
+        let primary = self
+            .models
+            .get(&self.primary)
+            .ok_or_else(|| "catalog primary model is missing".to_string())?;
+        let mut declarations = Vec::new();
+        let mut cases = Vec::new();
+        let mut allowed = Vec::new();
+        let mut constructors = BTreeSet::new();
+        for (key, model) in &self.models {
+            if !constructor_valid(&model.constructor) || !constructors.insert(&model.constructor) {
+                return Err(format!(
+                    "invalid or colliding model constructor {}",
+                    model.constructor
+                ));
+            }
+            if model.model.backend() != model.reasoning.backend() {
+                return Err(format!("model {key}: model and reasoning backends differ"));
+            }
+            let shape = option_shape(model.model.backend());
+            declarations.push(format!("{} {}", model.constructor, shape.options));
+            cases.push(format!(
+                "  modelSelection ({} options) = ModelSelection {} {} (Core.{} ({} options))",
+                model.constructor,
+                haskell_literal(&self.identity),
+                haskell_literal(key),
+                shape.reasoning,
+                shape.field,
+            ));
+            allowed.push(format!(
+                "({}, {})",
+                haskell_literal(key),
+                default_choice(model)?
+            ));
+        }
+        let shape = option_shape(primary.model.backend());
+        Ok(format!(
+            r#"{{-# LANGUAGE FlexibleContexts #-}}
+{{-# LANGUAGE OverloadedStrings #-}}
+
+module Exomonad.Models
+  ( Model (..)
+  , primaryModel
+  , allowedModels
+  , setNextEffort
+  , module Tidepool.Model.Selection
+  ) where
+
+import Prelude
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import qualified Tidepool.Agent.Context as Context
+import qualified Tidepool.Effects.Core as Core
+import Tidepool.Model.Selection
+
+data Model = {}
+  deriving (Eq, Show)
+
+instance ModelChoice Model where
+{}
+
+primaryModel :: Model
+primaryModel = {}
+
+allowedModels :: [(Text, Model)]
+allowedModels = [{}]
+
+setNextEffort :: Member Context.ContextReadWrite effects => {} -> Eff effects ()
+setNextEffort = Context.setNextReasoning . Core.{}
+"#,
+            declarations.join(" | "),
+            cases.join("\n"),
+            default_choice(primary)?,
+            allowed.join(", "),
+            shape.effort,
+            shape.reasoning,
+        ))
+    }
+}
+
+struct OptionShape {
+    options: &'static str,
+    effort: &'static str,
+    field: &'static str,
+    reasoning: &'static str,
+    prefix: &'static str,
+}
+
+fn option_shape(backend: Backend) -> OptionShape {
+    match backend {
+        Backend::GeminiInteractions => OptionShape {
+            options: "ArgonOptions",
+            effort: "ArgonEffort",
+            field: "argonEffort",
+            reasoning: "ArgonReasoning",
+            prefix: "Argon",
+        },
+        Backend::DeepSeek => OptionShape {
+            options: "DeepSeekOptions",
+            effort: "DeepSeekReasoning",
+            field: "deepSeekEffort",
+            reasoning: "DeepSeekReasoning",
+            prefix: "DeepSeek",
+        },
+        Backend::OpenAIPlan => OptionShape {
+            options: "OpenAIOptions",
+            effort: "OpenAIReasoning",
+            field: "openAIEffort",
+            reasoning: "OpenAIReasoning",
+            prefix: "OpenAI",
+        },
+    }
+}
+
+fn default_choice(model: &ResolvedModel) -> Result<String, String> {
+    let shape = option_shape(model.model.backend());
+    let effort = match model.reasoning.value() {
+        "none" => "None",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "max" => "Max",
+        effort => return Err(format!("unsupported reasoning setting {effort}")),
+    };
+    Ok(format!(
+        "{} ({} {}{})",
+        model.constructor, shape.options, shape.prefix, effort
+    ))
+}
+
+fn haskell_literal(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        tidepool_runtime::session::escape_workbench_haskell_string(value)
+    )
 }
 
 #[cfg(test)]
@@ -381,5 +542,123 @@ mod tests {
         assert!(provider.validate().is_ok());
         provider.credential_file = None;
         assert!(provider.validate().is_err());
+    }
+
+    #[test]
+    fn gemini_catalog_admits_only_argon() {
+        let mut config = config();
+        config.providers.get_mut("deepseek").unwrap().backend = Backend::GeminiInteractions;
+        assert!(config.resolve().is_err());
+        config.models.get_mut("flash").unwrap().model = "gemini-4-argon".into();
+        let resolved = config.resolve().unwrap();
+        assert_eq!(resolved.models["flash"].model, Model::GeminiArgon);
+        config.models.get_mut("flash").unwrap().model = "gemini-other".into();
+        assert!(config.resolve().is_err());
+    }
+
+    #[test]
+    fn renderer_emits_provider_specific_closed_choices() {
+        let mut config = config();
+        for (key, backend, model, constructor, effort) in [
+            (
+                "argon",
+                Backend::GeminiInteractions,
+                "gemini-4-argon",
+                "Argon",
+                "medium",
+            ),
+            ("openai", Backend::OpenAIPlan, "gpt-6.1-sol", "Sol", "low"),
+        ] {
+            let mut provider = config.providers["deepseek"].clone();
+            provider.backend = backend;
+            config.providers.insert(key.into(), provider);
+            config.models.insert(
+                key.into(),
+                ModelConfig {
+                    provider: key.into(),
+                    model: model.into(),
+                    constructor: constructor.into(),
+                    effort: effort.into(),
+                },
+            );
+            config
+                .profiles
+                .get_mut("work")
+                .unwrap()
+                .allowed
+                .push(key.into());
+        }
+        let catalog = config.resolve().unwrap();
+        let source = catalog.render_haskell_models().unwrap();
+        assert!(source.contains(
+            "data Model = Argon ArgonOptions | Flash DeepSeekOptions | Sol OpenAIOptions"
+        ));
+        assert!(source.contains("modelSelection (Argon options) = ModelSelection"));
+        assert!(source.contains("(Core.ArgonReasoning (argonEffort options))"));
+        assert!(source.contains("(Core.DeepSeekReasoning (deepSeekEffort options))"));
+        assert!(source.contains("(Core.OpenAIReasoning (openAIEffort options))"));
+        assert!(source.contains("primaryModel = Flash (DeepSeekOptions DeepSeekHigh)"));
+        assert!(source.contains("(\"argon\", Argon (ArgonOptions ArgonMedium))"));
+        assert!(source.contains("(\"openai\", Sol (OpenAIOptions OpenAILow))"));
+        assert!(source.contains(&format!(
+            "ModelSelection \"{}\" \"argon\"",
+            catalog.identity
+        )));
+        assert!(source.contains("setNextEffort :: Member Context.ContextReadWrite effects => DeepSeekReasoning -> Eff effects ()"));
+    }
+
+    #[test]
+    fn renderer_escapes_catalog_keys_and_identity_with_existing_haskell_owner() {
+        let mut catalog = config().resolve().unwrap();
+        let model = catalog.models.remove("flash").unwrap();
+        catalog.primary = "key\"\n\\".into();
+        catalog.models.insert(catalog.primary.clone(), model);
+        catalog.identity = "identity\"\n".into();
+        let source = catalog.render_haskell_models().unwrap();
+        assert!(source.contains(&haskell_literal(&catalog.identity)));
+        assert!(source.contains(&haskell_literal(&catalog.primary)));
+        assert!(!source.contains("identity\"\n"));
+    }
+
+    #[test]
+    fn renderer_rejects_option_constructor_collisions() {
+        for constructor in [
+            "ArgonOptions",
+            "DeepSeekOptions",
+            "OpenAIOptions",
+            "ArgonLow",
+            "ModelSelection",
+        ] {
+            let mut config = config();
+            config.models.get_mut("flash").unwrap().constructor = constructor.into();
+            assert!(config.resolve().is_err(), "{constructor}");
+        }
+        let mut catalog = config().resolve().unwrap();
+        catalog.models.get_mut("flash").unwrap().constructor = "ArgonOptions".into();
+        assert!(catalog.render_haskell_models().is_err());
+    }
+
+    #[test]
+    fn legacy_registered_custom_alias_is_admitted_and_constructor_collision_refused() {
+        let embedded: EmbeddedLaunchConfig = toml::from_str(
+            "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
+        )
+        .unwrap();
+        let defaults = AgentInferenceDefaults::deepseek_default();
+        let mut aliases = BTreeMap::from([(
+            "local-fast".into(),
+            Model::for_backend(Backend::DeepSeek, "registered-custom"),
+        )]);
+        let catalog = InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(catalog.models["local-fast"].constructor, "LocalFast");
+        assert_eq!(
+            catalog.models["local-fast"].model.value(),
+            "registered-custom"
+        );
+        aliases.insert("local_fast".into(), Model::DeepSeekFlash);
+        assert!(InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded).is_err());
     }
 }
