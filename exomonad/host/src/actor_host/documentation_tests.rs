@@ -958,6 +958,7 @@ async fn record_actor_launch_publishes_and_routes_child_reply() {
             crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
                 project.haskell.source_roots = vec![".".into()];
                 project.haskell.modules = vec!["LaunchFixture".into()];
+                super::test_campaign::author_scripted_model_catalog(project);
             });
             std::fs::write(
                 authored.join("LaunchFixture.hs"),
@@ -2203,6 +2204,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
             crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
                 project.haskell.source_roots = vec![".".into()];
                 project.haskell.modules = vec!["Project.Types".into(), "Project.Work".into()];
+                super::test_campaign::author_scripted_model_catalog(project);
             });
             std::fs::write(
                 authored.join("Project/Types.hs"),
@@ -2317,6 +2319,10 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                 project.models.clear();
             });
             configure(&authored);
+            crate::exomonad::edit_fixture_project_config(
+                &authored,
+                super::test_campaign::author_scripted_model_catalog,
+            );
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
