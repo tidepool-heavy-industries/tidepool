@@ -1841,6 +1841,98 @@ fn scripted_catalog_creation_carries_host_settings_into_frozen_inputs() {
     }
 }
 
+#[test]
+fn prepared_scaffold_captures_the_final_catalog_once() {
+    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repository
+        .writer()
+        .commit_file("README.md", "source\n", "seed")
+        .unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let credential = settings.credential_file.clone();
+    let mut config = ActorHostConfig {
+        run_id: "catalog-fixture".into(),
+        systemd_slice: None,
+        source_exclude: Vec::new(),
+        source_import: Default::default(),
+        command_resources: None,
+        exomonad_executable: std::env::current_exe().unwrap(),
+        workspace_inputs: None,
+        haskell_root: crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        workspace: repository.path().to_path_buf(),
+        run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(files.path()).unwrap(),
+        root_binding_path: files.path().join("root-binding.json"),
+        embedded: Some(settings),
+        inference_auth: None,
+        tmux_session: String::new(),
+        model: exomonad_actor::Model::for_backend(
+            exomonad_actor::Backend::OpenAIPlan,
+            "test-model",
+        ),
+        reasoning: Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
+        pane_environment: BTreeMap::new(),
+        jev: None,
+    };
+    super::scaffold_admission_tests::prepared_scaffold(&mut config);
+    assert!(config.workspace_inputs.is_none());
+    let manifest = config.run_directory.path().join("workspace/selection.json");
+    assert!(
+        !manifest.exists(),
+        "scaffolding must not issue an immutable selection"
+    );
+    let authored = config.workspace.join(".exomonad");
+    crate::exomonad::edit_fixture_project_config(&authored, |project| {
+        project.defaults.model = exomonad_actor::Model::for_backend(
+            exomonad_actor::Backend::OpenAIPlan,
+            "first-configured-model",
+        );
+        crate::exomonad::author_scripted_model_catalog(project);
+    });
+    commit_workspace(&config.workspace);
+    let first = crate::exomonad::workspace::FrozenWorkspace::load(
+        &config.workspace,
+        config.run_directory.path(),
+    )
+    .unwrap();
+    let catalog = first.model_catalog.as_ref().unwrap();
+    assert_eq!(
+        catalog.models[&catalog.primary].model.value(),
+        "first-configured-model"
+    );
+    assert_eq!(
+        catalog.providers["scripted"].credential_file.as_ref(),
+        Some(&credential)
+    );
+    assert_eq!(
+        std::fs::read(first.workspace_resources().join("Exomonad/Models.hs")).unwrap(),
+        catalog.render_haskell_models().unwrap().as_bytes(),
+    );
+    let issued = std::fs::read(&manifest).unwrap();
+    crate::exomonad::edit_fixture_project_config(&authored, |project| {
+        project
+            .inference
+            .as_mut()
+            .unwrap()
+            .models
+            .get_mut("primary")
+            .unwrap()
+            .model = "later-model".into();
+    });
+    commit_workspace(&config.workspace);
+    let reopened = crate::exomonad::workspace::FrozenWorkspace::load(
+        &config.workspace,
+        config.run_directory.path(),
+    )
+    .unwrap();
+    assert_eq!(reopened.identity(), first.identity());
+    assert_eq!(
+        serde_json::to_value(&reopened.model_catalog).unwrap(),
+        serde_json::to_value(&first.model_catalog).unwrap()
+    );
+    assert_eq!(std::fs::read(manifest).unwrap(), issued);
+}
+
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
 /// through a workspace whose `flake.nix` names the jev-dsl revision and whose
 /// own `Jev/Operators.hs` fixes that library's JSON type to Tidepool's. These
