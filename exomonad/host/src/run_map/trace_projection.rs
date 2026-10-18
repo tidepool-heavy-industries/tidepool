@@ -603,7 +603,15 @@ mod tests {
         let trace = workspace.join(".exomonad/logs/projection.jsonl");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::create_dir_all(trace.parent().unwrap()).unwrap();
-        let status = crate::exomonad::run_map_status_fixture(&workspace);
+        let status = crate::exomonad::run_status_fixture(
+            "projection",
+            &workspace,
+            "session",
+            crate::exomonad::RunPhase::Ready {
+                root_actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(3)),
+                root_thread: "thread-3".into(),
+            },
+        );
         let status_bytes = serde_json::to_vec(&status).unwrap();
         assert_eq!(
             crate::exomonad::decode_run_status(&status_bytes).unwrap(),

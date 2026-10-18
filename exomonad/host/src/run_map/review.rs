@@ -1447,12 +1447,16 @@ mod tests {
         fs::create_dir_all(&codex).unwrap();
         fs::write(
             run.join("status.json"),
-            json!({
-                "version":4,"run_id":"run-7","workspace":workspace,"session":"test",
-                "agent":{"model":"test","effort":"low"},
-                "phase":{"state":"ready","root_actor":{"id":1,"incarnation":1},"root_thread":"thread-root"}
-            })
-            .to_string(),
+            serde_json::to_vec(&crate::exomonad::run_status_fixture(
+                "run-7",
+                &workspace,
+                "test",
+                crate::exomonad::RunPhase::Ready {
+                    root_actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1)),
+                    root_thread: "thread-root".into(),
+                },
+            ))
+            .unwrap(),
         )
         .unwrap();
         fs::write(workspace.join(".exomonad/logs/run-7.jsonl"), TRACE).unwrap();
