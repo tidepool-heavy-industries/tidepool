@@ -1179,11 +1179,15 @@ mod tests {
         ))
     }
 
-    fn publish_scoped_context(
+    fn stage_scoped_context(
         base: &RecoveryGraph,
         context: &ScopedCompilerContext,
         incarnation: u64,
-    ) -> (RecoveryGraph, ScopedCompilerContext, ContextRoot) {
+    ) -> (
+        ScopedCompilerContext,
+        ContextRoot,
+        StagedCompilerContextPublication,
+    ) {
         let (graph, context) = base
             .stage_compiler_context(base.store.path().parent().unwrap(), context, None)
             .unwrap();
@@ -1198,11 +1202,21 @@ mod tests {
             .unwrap()
             .with_compiler_context(Some(context))
             .unwrap();
+        (installing, root, staged)
+    }
+
+    fn publish_scoped_context(
+        base: &RecoveryGraph,
+        context: &ScopedCompilerContext,
+        incarnation: u64,
+    ) -> (RecoveryGraph, ScopedCompilerContext, ContextRoot) {
+        let (installing, root, staged) = stage_scoped_context(base, context, incarnation);
         let (graph, installation) = match staged.commit() {
             StoreDisposition::Committed(value) => value,
             _ => panic!("context publication must commit"),
         };
-        // The graph and exact compiler owner are installed before acknowledgement.
+        // This component fixture models installation before acknowledgement;
+        // scope inheritance is exercised separately through PersistentSession.
         assert!(matches!(installing, ScopedCompilerContext::New(_)));
         let installed = installation.installed_blocking().unwrap().unwrap();
         assert!(Arc::ptr_eq(installing.exact(), installed.exact()));
@@ -1255,6 +1269,86 @@ mod tests {
             observe_context_materialization(|| publish_scoped_context(&reopened, &a, 5));
         assert_eq!((reopening.attempted, reopening.completed), (1, 1));
         assert_eq!(reopened_root, a_root);
+    }
+
+    #[test]
+    fn context_custody_refuses_foreign_pair_and_never_promotes_abandoned_publication() {
+        let (_directory, base) = fixture();
+        let context = new_scoped_context();
+        let (candidate, pending) = base
+            .stage_compiler_context(base.store.path().parent().unwrap(), &context, None)
+            .unwrap();
+        let root = pending.root().clone();
+        assert!(
+            candidate.context(&root).is_ok(),
+            "candidate checks own their pending representation"
+        );
+        assert!(
+            candidate.acquire_context(&root).is_err(),
+            "cold acquisition cannot consume pending bytes"
+        );
+        assert!(base.acquire_context(&root).is_err());
+
+        let (_other_directory, other) = fixture();
+        let (other_candidate, other_pending) = other
+            .stage_compiler_context(other.store.path().parent().unwrap(), &context, None)
+            .unwrap();
+        assert_eq!(
+            other_pending.root(),
+            &root,
+            "same CID in another store is the discriminator"
+        );
+        assert!(other_candidate
+            .candidate()
+            .prepare(other.store_revision(), other.high_water())
+            .unwrap()
+            .with_compiler_context(Some(pending))
+            .is_err());
+        drop(other_pending);
+        drop(candidate);
+        assert!(base.acquire_context(&root).is_err());
+        assert!(base.store.ensure_ready().is_ok());
+
+        let (_, refused_root, refused) = stage_scoped_context(&base, &context, 1);
+        base.store.inject_fault(StoreFault::BeforeCommit);
+        assert!(matches!(refused.commit(), StoreDisposition::Refused(_)));
+        assert!(base.acquire_context(&refused_root).is_err());
+        assert!(base.store.ensure_ready().is_ok());
+        assert!(base.public_owners().next().is_none());
+
+        let (_, _, stale) = stage_scoped_context(&base, &context, 2);
+        let (graph, stored, _) = publish_scoped_context(&base, &context, 1);
+        assert!(matches!(
+            stale.commit(),
+            StoreDisposition::Refused(crate::session::recovery_store::StoreRefusal::StaleRevision)
+        ));
+        let ((_, _, _), work) =
+            observe_context_materialization(|| publish_scoped_context(&graph, &stored, 3));
+        assert_eq!(
+            work,
+            ContextMaterializationWork::default(),
+            "refusal must not invalidate confirmed custody"
+        );
+
+        let (_uncertain_directory, uncertain_base) = fixture();
+        let (installing, _, staged) = stage_scoped_context(&uncertain_base, &context, 1);
+        let (_graph, installation) = match staged.commit() {
+            StoreDisposition::Committed(value) => value,
+            _ => panic!("uncertainty control requires an actual durable commit"),
+        };
+        assert!(matches!(installing, ScopedCompilerContext::New(_)));
+        drop(installation);
+        assert!(
+            uncertain_base.store.ensure_ready().is_err(),
+            "lost installation acknowledgement retains recovery obligation"
+        );
+        assert!(uncertain_base
+            .stage_compiler_context(
+                uncertain_base.store.path().parent().unwrap(),
+                &installing,
+                None
+            )
+            .is_err());
     }
 
     fn node(id: u64, parent: Option<u64>, context_root: ContextRoot, label: &str) -> RecoveryNode {
