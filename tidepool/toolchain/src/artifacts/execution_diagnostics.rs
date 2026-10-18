@@ -108,6 +108,10 @@ fn diagnostic_root() -> io::Result<Option<PathBuf>> {
     if std::env::var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref() != Ok("1") {
         return Ok(None);
     }
+    if !compiler_capture_enabled(std::env::var_os("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref())?
+    {
+        return Ok(None);
+    }
     let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("diagnostic scope lacks its case root"))?;
@@ -117,6 +121,19 @@ fn diagnostic_root() -> io::Result<Option<PathBuf>> {
         ));
     }
     Ok(Some(root))
+}
+
+// Host lifecycle and trace ownership keep their shared diagnostic scope. This
+// selector controls only the compiler's extra output/source retention work.
+fn compiler_capture_enabled(value: Option<&std::ffi::OsStr>) -> io::Result<bool> {
+    match value {
+        None => Ok(true),
+        Some(value) if value == "capture" => Ok(true),
+        Some(value) if value == "off" => Ok(false),
+        _ => Err(io::Error::other(
+            "unsupported compiler diagnostic capture mode",
+        )),
+    }
 }
 
 /// Optional, bounded observations of a case-owned original compiler directory.
@@ -469,5 +486,14 @@ mod tests {
         assert_eq!(snapshot.issues.len(), 2);
         assert!(!retained.path().join("large").exists());
         assert!(!retained.path().join("linked").exists());
+    }
+
+    #[test]
+    fn compiler_capture_selector_defaults_on_and_refuses_unknown_values() {
+        use std::ffi::OsStr;
+        assert!(compiler_capture_enabled(None).unwrap());
+        assert!(compiler_capture_enabled(Some(OsStr::new("capture"))).unwrap());
+        assert!(!compiler_capture_enabled(Some(OsStr::new("off"))).unwrap());
+        assert!(compiler_capture_enabled(Some(OsStr::new("invalid"))).is_err());
     }
 }

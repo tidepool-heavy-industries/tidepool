@@ -796,7 +796,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(case['trace_profile'], 'minimal')
 
     def test_full_timing_and_retained_case_survive_disabled_compiler_diagnostics(self):
-        for mode, enabled in (('capture', '1'), ('off', '0')):
+        for mode in ('capture', 'off'):
             with self.subTest(mode=mode):
                 root = Path(self.tmp.name) / ('capture-mode-' + mode)
                 observed = {}
@@ -806,13 +806,15 @@ class IsolatedLibtestTests(unittest.TestCase):
                     observed.update(environment or {})
                     return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
 
-                with patch.dict(os.environ, {'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE': '1'}), \
+                with patch.dict(os.environ, {'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE': '0',
+                                             'TIDEPOOL_TEST_COMPILER_DIAGNOSTICS': 'ambient-invalid'}), \
                      patch.object(runner, 'execute', side_effect=run):
                     result = runner.run_one(str(self.binary), 'suite::works', False, 10, record,
                         artifact_root=root, retain_artifacts=True, trace_profile='full',
                         compiler_diagnostics=mode)
                 self.assertTrue(result[0])
-                self.assertEqual(observed['TIDEPOOL_TEST_DIAGNOSTIC_SCOPE'], enabled)
+                self.assertEqual(observed['TIDEPOOL_TEST_DIAGNOSTIC_SCOPE'], '1')
+                self.assertEqual(observed['TIDEPOOL_TEST_COMPILER_DIAGNOSTICS'], mode)
                 self.assertEqual(observed['TIDEPOOL_TEST_TRACE_PROFILE'], 'full')
                 self.assertEqual(observed['TIDEPOOL_TIMING'], '1')
                 self.assertEqual(observed['TIDEPOOL_TIMING_SUMMARY'], '1')

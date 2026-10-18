@@ -147,6 +147,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
+    'TIDEPOOL_TEST_COMPILER_DIAGNOSTICS',
     'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
     'TIDEPOOL_TEST_TRACE_PROFILE', 'TIDEPOOL_TIMING_SUMMARY',
@@ -1276,7 +1277,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record['artifact_custody'] = disposable_tree_custody(artifact_root, private_parent=True)
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
-                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1' if compiler_diagnostics == 'capture' else '0')
+                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1',
+                           TIDEPOOL_TEST_COMPILER_DIAGNOSTICS=compiler_diagnostics)
         if trace_profile is not None:
             environment['TIDEPOOL_TEST_TRACE_PROFILE'] = trace_profile
             environment['TIDEPOOL_TIMING'] = '0' if trace_profile == 'minimal' else '1'

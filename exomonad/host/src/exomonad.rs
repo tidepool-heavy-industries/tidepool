@@ -2890,6 +2890,7 @@ const FORWARDED_ENV_NAMES: &[&str] = &[
     "TIDEPOOL_KEEP_TEST_LOGS",
     "TIDEPOOL_TEST_ARTIFACT_ROOT",
     "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
+    "TIDEPOOL_TEST_COMPILER_DIAGNOSTICS",
 ];
 fn deployment_environment_unsets(
     environment: &std::collections::BTreeMap<String, String>,
@@ -4502,6 +4503,10 @@ mod tests {
         let selected = std::collections::BTreeMap::from([
             ("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE".to_owned(), "1".to_owned()),
             (
+                "TIDEPOOL_TEST_COMPILER_DIAGNOSTICS".to_owned(),
+                "off".to_owned(),
+            ),
+            (
                 "TIDEPOOL_TEST_ARTIFACT_ROOT".to_owned(),
                 "/tmp/owned-compiler-evidence".to_owned(),
             ),
@@ -4515,6 +4520,7 @@ mod tests {
                 .then(|| "/tmp/owned-compiler-evidence".to_owned())
         });
         assert!(!unset.contains_key("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE"));
+        assert!(!unset.contains_key("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS"));
         assert_eq!(
             unset.get("TIDEPOOL_TEST_ARTIFACT_ROOT").map(String::as_str),
             Some("/tmp/owned-compiler-evidence")
