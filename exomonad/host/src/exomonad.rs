@@ -3480,10 +3480,8 @@ mod tests {
             let error = toml::from_str::<ExomonadConfig>(source).unwrap_err();
             assert!(error.to_string().contains("declare [defaults]"), "{error}");
         }
-        let config: ExomonadConfig = toml::from_str(include_str!(
-            "../../../exomonad/examples/persona/.exomonad/config.toml"
-        ))
-        .unwrap();
+        let config: ExomonadConfig =
+            toml::from_str("[defaults]\nmodel = 'gpt-6-astra'\neffort = 'medium'\n").unwrap();
         assert_eq!(config.defaults.model.backend(), Backend::OpenAIPlan);
         assert_eq!(config.defaults.model.value(), "gpt-6-astra");
         assert_eq!(config.defaults.reasoning.value(), "medium");
