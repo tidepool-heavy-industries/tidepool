@@ -20,11 +20,34 @@ fn admitted_explicit_row_preserves_order_and_duplicates() {
 
 #[test]
 fn refused_explicit_row_names_every_unavailable_interpreter() {
-    let requested = vec![Key::Reflect, Key::Jev, Key::ModelCall];
+    let requested = vec![
+        Key::Reflect,
+        Key::Jev,
+        Key::ModelCallDeepSeek,
+        Key::ModelCallArgon,
+    ];
     for (supported, expected) in [
-        (vec![], vec![Key::Reflect, Key::Jev, Key::ModelCall]),
-        (vec![Key::Reflect], vec![Key::Jev, Key::ModelCall]),
-        (vec![Key::Reflect, Key::Jev], vec![Key::ModelCall]),
+        (
+            vec![],
+            vec![
+                Key::Reflect,
+                Key::Jev,
+                Key::ModelCallDeepSeek,
+                Key::ModelCallArgon,
+            ],
+        ),
+        (
+            vec![Key::Reflect],
+            vec![Key::Jev, Key::ModelCallDeepSeek, Key::ModelCallArgon],
+        ),
+        (
+            vec![Key::Reflect, Key::Jev],
+            vec![Key::ModelCallDeepSeek, Key::ModelCallArgon],
+        ),
+        (
+            vec![Key::Reflect, Key::Jev, Key::ModelCallDeepSeek],
+            vec![Key::ModelCallArgon],
+        ),
     ] {
         let support = supported
             .iter()
