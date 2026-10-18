@@ -922,6 +922,9 @@ impl CompilerSourceSupport {
             &artifacts,
         )?;
         let mut restored = Self::new(self.projection.clone(), artifacts, offers, availability)?;
+        restored
+            .native_availability
+            .validate_role_coverage(&restored.projection)?;
         let state = restored
             .artifacts
             .lease
@@ -2274,7 +2277,8 @@ mod tests {
             let projection =
                 CompilerInputProjection::from_issued_entries(&[selected.clone(), required])
                     .unwrap();
-            let support = CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap();
+            let support =
+                CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap();
             let before = inventory.metrics();
             let interfaces = support.selected_interfaces().unwrap();
             let owner = selected.descriptor.owner.clone();
@@ -2301,8 +2305,13 @@ mod tests {
             let baseline_view = interfaces
                 .select_owners(narrowed.projection.roles.keys().cloned().collect())
                 .unwrap();
-            let baseline =
-                CompilerSourceSupport::new(narrowed.projection.clone(), baseline_view, [], Default::default()).unwrap();
+            let baseline = CompilerSourceSupport::new(
+                narrowed.projection.clone(),
+                baseline_view,
+                [],
+                Default::default(),
+            )
+            .unwrap();
             let after = inventory.metrics();
             assert_eq!(narrowed.projection, baseline.projection);
             assert_eq!(narrowed.selected, baseline.selected);
@@ -2421,7 +2430,8 @@ mod tests {
                 IssuedNativeOffer::issue_context_offers(&historical_projection, &view, &[])
                     .unwrap();
             assert!(!offers.is_empty());
-            let support = CompilerSourceSupport::new(projection, view, offers, Default::default()).unwrap();
+            let support =
+                CompilerSourceSupport::new(projection, view, offers, Default::default()).unwrap();
             assert!(
                 support.artifacts.reads.read_projection.get().is_none(),
                 "the real offer retention must leave a cold returned view for this control"
@@ -2585,8 +2595,13 @@ mod tests {
 
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
-            let refusal =
-                CompilerSourceSupport::new(missing, support.artifacts.clone(), [], Default::default()).unwrap_err();
+            let refusal = CompilerSourceSupport::new(
+                missing,
+                support.artifacts.clone(),
+                [],
+                Default::default(),
+            )
+            .unwrap_err();
             assert!(matches!(refusal, CompileError::ArtifactInventory(error)
                 if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { dependent, required: dependency, .. }
                     if dependent == &selected.descriptor.owner && dependency == &required.descriptor.owner)));

@@ -1363,6 +1363,24 @@ impl RequestNativeAvailability {
             .collect()
     }
 
+    pub(crate) fn validate_role_coverage(
+        &self,
+        projection: &CompilerInputProjection,
+    ) -> Result<(), CompileError> {
+        for original in projection
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+        {
+            if !self.0.contains_key(&original) {
+                return Err(failure(
+                    "selected original lacks its normalized native permission row",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn rows(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
         self.0.values()
     }
@@ -1434,6 +1452,9 @@ impl RequestNativeAvailability {
         roles: &CompilerInputProjection,
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
+        if self.0.is_empty() {
+            return Ok(self.clone());
+        }
         let metadata = artifacts.metadata_snapshot();
         let mut retained = BTreeSet::new();
         let mut roots_by_contribution = BTreeMap::new();
@@ -1700,6 +1721,7 @@ impl NativeCompilerTransport {
         normalized: &RequestNativeAvailability,
     ) -> Result<Self, CompileError> {
         let normalized = normalized.for_canonical_roles(roles, artifacts)?;
+        normalized.validate_role_coverage(roles)?;
         let mut metadata = CompilerArtifactMetadata {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
