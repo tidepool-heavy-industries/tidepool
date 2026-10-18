@@ -2583,12 +2583,37 @@ mod authored_tests {
             )
             .unwrap(),
         );
-        let result = crate::artifacts::test_support::certify_authored_declaration(
+        let independent = crate::artifacts::test_support::certify_authored_declaration(
             second,
             &root.path().join(second.relative_hs_path()),
             second_source,
             &[root.path().to_path_buf()],
             root.path(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                ExactDeclarationContext::new(
+                    &[first_certificate.clone(), Arc::new(independent)], &[], Vec::new()
+                ),
+                Err(CompileError::ArtifactInventory(error))
+                    if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict {
+                        owner: ExactModuleIdentity { unit: "main".into(), module: first.module_name() }
+                    }
+            ),
+            "independent compilation cannot replace an already selected canonical owner"
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(std::slice::from_ref(&first_certificate), &[], Vec::new())
+                .unwrap(),
+        );
+        let result = crate::artifacts::test_support::certify_authored_declaration_in_context(
+            second,
+            &root.path().join(second.relative_hs_path()),
+            second_source,
+            &[root.path().to_path_buf()],
+            root.path(),
+            context,
         )
         .unwrap();
         for module in [first, second] {
