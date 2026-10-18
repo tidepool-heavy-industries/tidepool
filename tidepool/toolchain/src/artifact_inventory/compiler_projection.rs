@@ -1140,11 +1140,26 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn retain_custody(&self, incoming: &ArtifactView) -> Result<Self, CompileError> {
-        self.rebuild(
-            self.projection.clone(),
-            self.artifacts.retain_custody(incoming)?,
-            self.native_offers.iter().cloned(),
-        )
+        let artifacts = self.artifacts.retain_custody(incoming)?;
+        let artifacts =
+            artifacts.retain_issued_offer_custody(self.native_offers.iter().cloned())?;
+        let mut selected = self.selected.rows.clone();
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        // Custody attachment preserves the exact namespace and executable
+        // roots. Its acquisition owners may change; its qualified rows cannot.
+        Ok(Self {
+            projection: self.projection.clone(),
+            artifacts,
+            native_offers: Arc::clone(&self.native_offers),
+            native_availability: self.native_availability.clone(),
+            selected: Arc::new(AdmittedCompilerRoles {
+                rows: selected,
+                home_units: Arc::clone(&self.selected.home_units),
+            }),
+            input_decisions: self.input_decisions.clone(),
+        })
     }
 
     pub(crate) fn retain_offers(
@@ -1161,11 +1176,38 @@ impl CompilerSourceSupport {
             // retained order. No new acquisition or seed is being attached.
             return Ok(self.clone());
         }
-        self.rebuild(
-            self.projection.clone(),
-            self.artifacts.clone(),
-            self.native_offers.iter().cloned().chain(incoming),
-        )
+        let mut offers = Vec::new();
+        let artifacts = self.artifacts.retain_issued_offer_custody(
+            self.native_offers
+                .iter()
+                .cloned()
+                .chain(incoming)
+                .filter_map(|offer| {
+                    if offers.contains(&offer) {
+                        None
+                    } else {
+                        offers.push(offer.clone());
+                        Some(offer)
+                    }
+                }),
+        )?;
+        let mut selected = self.selected.rows.clone();
+        for row in selected.values_mut() {
+            row.retain_acquisitions(&artifacts)?;
+        }
+        // Raw offers add checked custody only. They cannot change the admitted
+        // namespace, normalized permissions or recorded execution decisions.
+        Ok(Self {
+            projection: self.projection.clone(),
+            artifacts,
+            native_offers: offers.into(),
+            native_availability: self.native_availability.clone(),
+            selected: Arc::new(AdmittedCompilerRoles {
+                rows: selected,
+                home_units: Arc::clone(&self.selected.home_units),
+            }),
+            input_decisions: self.input_decisions.clone(),
+        })
     }
 
     pub(crate) fn bind_snapshot_baseline(
