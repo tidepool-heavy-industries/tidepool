@@ -2624,7 +2624,7 @@ mod authored_tests {
                 Err(CompileError::ArtifactInventory(error))
                     if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict {
                         owner: ExactModuleIdentity { unit: "main".into(), module: first.module_name() }
-                    } && matches!(error.owner_conflict,
+                    } && matches!(&error.owner_conflict,
                         Some(crate::artifact_inventory::ArtifactOwnerConflictEvidence::CompilerRole { existing, incoming })
                             if existing.interface() == first_identity && incoming.interface() == independent_identity)
             ),
