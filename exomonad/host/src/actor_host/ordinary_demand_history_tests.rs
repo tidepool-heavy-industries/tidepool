@@ -290,11 +290,11 @@ fn daemon_work(rows: &[Value], requests: &[Value], unrelated: &[Value]) -> Vec<V
     // The independent daemon census must not disappear merely because the
     // corresponding host identification was lost from its retained slice.
     for row in fields.iter().filter(|row| {
-        // Request-scoped timing/work is independently observable even if all
-        // lifecycle records were lost. Partial physical identities also refuse.
-        ["daemon_epoch", "admission_id", "request_ordinal"]
-            .iter()
-            .any(|key| row.get(key).is_some())
+        // Admission-level queue rows have no request yet. Request-scoped
+        // timing/work remains observable even if lifecycle records were lost.
+        row.get("request_ordinal").is_some()
+            || row["execution_layer"] == "physical"
+            || row["name"] == "compile_request"
             || matches!(
                 row["message"].as_str(),
                 Some(
@@ -654,6 +654,9 @@ fn completed_request_census_preserves_absent_groups_and_refuses_missing_identifi
     assert_eq!(work[0]["group_observation_status"], "not_emitted");
     assert_eq!(work[0]["work"], json!([]));
     assert!(daemon_work(&[], &[], &[]).is_empty());
+    let admission_only = [json!({"fields":{"message":"compiler job dequeued",
+        "daemon_epoch":"a".repeat(64), "admission_id":1}})];
+    assert!(daemon_work(&admission_only, &[], &[]).is_empty());
     let timing_only = [json!({"span":request, "fields":{
         "message":"compiler timing", "line":"tidepool-group-work {}"}})];
     assert!(std::panic::catch_unwind(|| daemon_work(&timing_only, &[], &[])).is_err());
