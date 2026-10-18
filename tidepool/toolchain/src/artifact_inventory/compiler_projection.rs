@@ -858,7 +858,8 @@ impl CompilerSourceSupport {
         let availability = match fragment {
             Some(fragment) => self
                 .native_availability
-                .merge(fragment.native_availability())?,
+                .merge(fragment.native_availability())?
+                .into_rows(),
             None => self.native_availability.clone(),
         };
         let mut support = Self::new(projection, artifacts, offers, availability)?;
