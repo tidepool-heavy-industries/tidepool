@@ -6188,17 +6188,11 @@ mod tests {
             let selected = inventory
                 .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &groups)
                 .unwrap();
-            let support = crate::declaration_context::issue_fixture_compiler_support(
-                projection.clone(),
-                selected,
-            )
-            .unwrap()
-            .retain_offers(full_support.native_offers().iter().cloned())
-            .unwrap();
             let original = Arc::new(
-                ExactDeclarationContext::from_authenticated_execution_support(
+                ExactDeclarationContext::from_authenticated_execution(
                     producer,
-                    support,
+                    &selected,
+                    projection.clone(),
                     vec![
                         ExactLexicalNode {
                             owner: owner.clone(),
@@ -6212,6 +6206,8 @@ mod tests {
                     owner.clone(),
                     std::slice::from_ref(&owner),
                 )
+                .unwrap()
+                .retain_issued_native_offers(full_support.native_offers().iter().cloned())
                 .unwrap(),
             );
             let first =
@@ -6256,6 +6252,7 @@ mod tests {
                 .unwrap();
             drop(values);
             drop(original);
+            drop(selected);
             drop(full_support);
             drop(projection);
             drop(entries);
