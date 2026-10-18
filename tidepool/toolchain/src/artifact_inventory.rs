@@ -2373,6 +2373,39 @@ struct SelectedOwners {
     native: BTreeMap<NativeOwnerKey, ArtifactId>,
 }
 
+/// A value extension may append new interface rows without revisiting existing
+/// native decisions only when their exact issuing bindings cannot be replaced.
+enum ValueInterfaceAdmission {
+    Append(CheckedValueInterfaceAppend),
+    General {
+        projection: CompilerInputProjection,
+        entries: Vec<Arc<ArtifactEntry>>,
+        reason: ValueInterfaceGeneralAdmission,
+    },
+}
+
+enum ValueInterfaceGeneralAdmission {
+    RetainedOwner(ExactModuleIdentity),
+    UnselectedRepeat(ArtifactId),
+    MissingNamespaceBinding(ArtifactId),
+    DifferentRequirementBindings(ArtifactId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ValueInterfaceTarget {
+    Selected(ArtifactBinding),
+    Appended(ArtifactId),
+}
+
+/// Prepared by the inventory from one already-admitted compiler support owner.
+/// Existing scopes and roots stay with `parent`; only `entries` acquire rows.
+struct CheckedValueInterfaceAppend {
+    parent: ArtifactView,
+    projection: CompilerInputProjection,
+    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    dependencies: BTreeMap<ArtifactId, BTreeSet<ValueInterfaceTarget>>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum NativeClosureStage {
     Admission,
@@ -3567,6 +3600,174 @@ impl ArtifactInventory {
             artifacts: view,
             target_native_selection,
         })
+    }
+
+    /// Classify the transition before issuing any new binding. A collision uses
+    /// general admission; invalid facts remain errors rather than fallback.
+    fn prepare_value_interface_append(
+        &self,
+        source: &CompilerSourceSupport,
+        entries: Vec<Arc<ArtifactEntry>>,
+    ) -> Result<ValueInterfaceAdmission, CompileError> {
+        let parent = source.artifacts();
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("value interface belongs to another inventory"));
+        }
+        let mut incoming = BTreeMap::new();
+        for entry in &entries {
+            if !matches!(
+                &entry.payload,
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+            ) {
+                return Err(failure(
+                    "value extension requires a certified value interface",
+                ));
+            }
+            if incoming
+                .insert(entry.descriptor.id, Arc::clone(entry))
+                .is_some_and(|previous| previous != *entry)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::MetadataConflict {
+                        artifact: entry.descriptor.id,
+                    },
+                ));
+            }
+        }
+        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
+        let projection = source.projection().merge(&issued)?;
+        let retained_owners = parent
+            .lease
+            .payloads
+            .values()
+            .map(|entry| &entry.descriptor.owner)
+            .collect::<BTreeSet<_>>();
+        let mut reason = None;
+        let mut appended = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for (id, entry) in &incoming {
+            if let Some(previous) = parent.lease.payloads.get(id) {
+                // Requirements are not part of the value payload ID. Repeated
+                // bytes cannot replace a previously issued dependency row.
+                ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
+                if source
+                    .projection()
+                    .snapshot_roles()
+                    .get(&entry.descriptor.owner)
+                    .is_some_and(|role| role.interface() == *id)
+                {
+                    if let Some(binding) = parent.lease.selection.namespace.get(id) {
+                        targets.insert(
+                            entry.descriptor.owner.clone(),
+                            ValueInterfaceTarget::Selected(*binding),
+                        );
+                        continue;
+                    }
+                }
+                reason.get_or_insert(ValueInterfaceGeneralAdmission::UnselectedRepeat(*id));
+            } else if retained_owners.contains(&entry.descriptor.owner) {
+                // Hidden canonical/native children can lack compiler roles.
+                // A projection-only freshness check cannot exclude them.
+                reason.get_or_insert_with(|| {
+                    ValueInterfaceGeneralAdmission::RetainedOwner(entry.descriptor.owner.clone())
+                });
+            } else {
+                appended.insert(*id, Arc::clone(entry));
+                targets.insert(
+                    entry.descriptor.owner.clone(),
+                    ValueInterfaceTarget::Appended(*id),
+                );
+            }
+        }
+        if let Some(reason) = reason {
+            return Ok(ValueInterfaceAdmission::General {
+                projection,
+                entries,
+                reason,
+            });
+        }
+        let mut dependencies = BTreeMap::new();
+        for (id, entry) in &incoming {
+            let mut row = BTreeSet::new();
+            for required in &entry.requirements {
+                let target = match targets.get(required) {
+                    Some(target) => *target,
+                    None => {
+                        let binding = source
+                            .projection()
+                            .snapshot_roles()
+                            .get(required)
+                            .and_then(|role| {
+                                parent.lease.selection.namespace.get(&role.interface())
+                            })
+                            .copied();
+                        let Some(binding) = binding else {
+                            // A closed support may still require namespace
+                            // finalization. Its existing checked path selects
+                            // that binding; this append never guesses one.
+                            if source.projection().snapshot_roles().contains_key(required) {
+                                return Ok(ValueInterfaceAdmission::General {
+                                    projection,
+                                    entries,
+                                    reason: ValueInterfaceGeneralAdmission::MissingNamespaceBinding(
+                                        source.projection().snapshot_roles()[required].interface(),
+                                    ),
+                                });
+                            }
+                            return Err(admission_failure(
+                                ArtifactInventoryFailure::MissingDependency {
+                                    artifact: *id,
+                                    dependent: entry.descriptor.owner.clone(),
+                                    required: required.clone(),
+                                    dependency: ArtifactDependency::Interface,
+                                },
+                            ));
+                        };
+                        ValueInterfaceTarget::Selected(binding)
+                    }
+                };
+                row.insert(target);
+            }
+            if appended.contains_key(id) {
+                dependencies.insert(*id, row);
+            } else {
+                let ValueInterfaceTarget::Selected(binding) = targets[&entry.descriptor.owner]
+                else {
+                    unreachable!("repeated value has its selected binding")
+                };
+                let expected = row
+                    .iter()
+                    .map(|target| match target {
+                        ValueInterfaceTarget::Selected(target) => Some((
+                            InventoryNodeKey::Artifact(*target),
+                            ArtifactDependency::Interface,
+                        )),
+                        ValueInterfaceTarget::Appended(_) => None,
+                    })
+                    .collect::<Option<BTreeSet<_>>>();
+                let state = self.0.lock().expect("inventory lock");
+                let actual = state
+                    .outgoing(InventoryNodeKey::Artifact(binding))
+                    .map(|(target, edge)| (target, edge.clone()))
+                    .collect::<BTreeSet<_>>();
+                drop(state);
+                if expected.as_ref() != Some(&actual) {
+                    return Ok(ValueInterfaceAdmission::General {
+                        projection,
+                        entries,
+                        reason: ValueInterfaceGeneralAdmission::DifferentRequirementBindings(*id),
+                    });
+                }
+            }
+        }
+        Ok(ValueInterfaceAdmission::Append(
+            CheckedValueInterfaceAppend {
+                parent: parent.clone(),
+                projection,
+                entries: appended,
+                dependencies,
+            },
+        ))
     }
 
     /// The compiler-role owner supplies the exact namespace before adding
