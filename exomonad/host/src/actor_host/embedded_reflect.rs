@@ -63,7 +63,36 @@ fn read_conversation(
     let history = store
         .embedded_conversation_history(identity)
         .map_err(unreadable)?;
-    Ok(recent_turns(history, count))
+    let mut turns = recent_turns(history, count);
+    for turn in &mut turns {
+        let request = RequestId(turn.turn.clone());
+        for event in store.events(Some(&request)).map_err(unreadable)? {
+            if event.kind != "responses_transport" {
+                continue;
+            }
+            let observation: harness::transport::TransportObservation =
+                serde_json::from_str(&event.payload).map_err(unreadable)?;
+            let usage = observation.usage.as_ref();
+            let count =
+                |value: Option<u64>| value.map(i64::try_from).transpose().map_err(unreadable);
+            turn.observations.push(exomonad_model::TurnObservation {
+                event_id: event.id,
+                provider: observation
+                    .backend
+                    .map(|backend| serde_json::to_value(backend))
+                    .transpose()
+                    .map_err(unreadable)?
+                    .and_then(|backend| backend.as_str().map(str::to_owned)),
+                model: observation.requested_model,
+                input_tokens: count(usage.and_then(|usage| usage.input_tokens))?,
+                cached_tokens: count(usage.and_then(|usage| usage.cached_tokens))?,
+                output_tokens: count(usage.and_then(|usage| usage.output_tokens))?,
+                reasoning_tokens: count(usage.and_then(|usage| usage.reasoning_tokens))?,
+                duration_ms: count(observation.total_ms)?,
+            });
+        }
+    }
+    Ok(turns)
 }
 
 fn unreadable(error: impl std::fmt::Display) -> ConversationUnavailable {
@@ -95,6 +124,7 @@ fn recent_turns(history: EmbeddedConversationHistory, limit: usize) -> Vec<Conve
             EmbeddedModelResponseState::Unknown => ConversationTurnState::Unknown,
         },
         turn: request.0,
+        observations: Vec::new(),
         started_at: None,
         completed_at: None,
         items: Vec::new(),

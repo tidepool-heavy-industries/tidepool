@@ -126,11 +126,29 @@ fn schema() -> Vec<Decl> {
             ]),
         },
         Decl {
+            name: "ModelRequestObservationEnvelope",
+            shape: Shape::Record(vec![
+                f("request_id", Text),
+                f("provider", Text),
+                f("model", Text),
+                f("input_tokens", optional(Count)),
+                f("cached_tokens", optional(Count)),
+                f("output_tokens", optional(Count)),
+                f("reasoning_tokens", optional(Count)),
+                f("duration_ms", Count),
+            ]),
+        },
+        Decl {
             name: "ModelReceiptEnvelope",
             shape: Shape::Record(vec![
                 f("invocation_id", Text),
                 f("parent_cell", Text),
                 f("requests", list(Text)),
+                f(
+                    "request_observations",
+                    list(Named("ModelRequestObservationEnvelope")),
+                ),
+                f("duration_ms", Count),
                 f("counts", Named("ModelUsageEnvelope")),
                 f("cell_counts", Named("ModelUsageEnvelope")),
                 f("outcome", Named("ModelOutcomeEnvelope")),

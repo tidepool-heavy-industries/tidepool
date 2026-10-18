@@ -1,7 +1,7 @@
 do
       answer <- send (ReflectWith 2)
       case answer of
-        Right [ConversationTurn _ (Just "opened") (Just "closed") firstItems, ConversationTurn _ Nothing Nothing secondItems]
+        Right [ConversationTurn { turnStartedAt = Just "opened", turnCompletedAt = Just "closed", turnItems = firstItems }, ConversationTurn { turnStartedAt = Nothing, turnCompletedAt = Nothing, turnItems = secondItems }]
           | firstItems ==
               [ TurnMessage RoleUser "read the brief"
               , TurnToolCall "c1" "haskell" "briefQuery"

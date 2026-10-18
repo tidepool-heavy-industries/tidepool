@@ -287,12 +287,28 @@ pub enum ConversationTurnState {
     Unknown,
 }
 
+/// Exact retained transport event for a request, without copied raw usage.
+/// Output includes reasoning tokens; reasoning must not be added to output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnObservation {
+    pub event_id: i64,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
 /// One model request and its recorded messages and tool activity, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationTurn {
     /// Stable runtime request identity; distinct from a provider response ID.
     pub turn: String,
     pub state: ConversationTurnState,
+    #[serde(default)]
+    pub observations: Vec<TurnObservation>,
     /// Recorded timestamps, when available. Absence does not imply progress.
     pub started_at: Option<String>,
     pub completed_at: Option<String>,

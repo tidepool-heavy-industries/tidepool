@@ -33,6 +33,7 @@ module Tidepool.Model
   , ModelLimit (..)
   , ModelReceipt (..)
   , ModelUsage (..)
+  , ModelRequestObservation (..)
   ) where
 
 import Prelude
@@ -105,6 +106,21 @@ data ModelUsage = ModelUsage
   , requestsWithoutUsage :: Int
   } deriving (Eq, Show)
 
+-- | Per-request counters retain missing reports separately from explicit zero.
+-- The request identity resolves retained host transport and raw usage evidence.
+-- Output includes reasoning tokens; do not add reasoning to output.
+-- Duration covers the transport await, including stream consumption.
+data ModelRequestObservation = ModelRequestObservation
+  { observedRequestIdentity :: Text
+  , observedProvider :: Text
+  , observedModel :: Text
+  , observedInputTokens :: Maybe Int
+  , observedCachedTokens :: Maybe Int
+  , observedOutputTokens :: Maybe Int
+  , observedReasoningTokens :: Maybe Int
+  , requestDurationMs :: Int
+  } deriving (Eq, Show)
+
 -- | References identify evidence retained by the host. Full transcripts are
 -- not copied into every notebook result. Usage is per invocation; nested
 -- invocations have their own receipts and share the cell's aggregate limit.
@@ -112,6 +128,8 @@ data ModelReceipt = ModelReceipt
   { invocationIdentity :: Text
   , parentCellIdentity :: Text
   , requestIdentities :: [Text]
+  , requestObservations :: [ModelRequestObservation]
+  , invocationDurationMs :: Int
   , invocationUsage :: ModelUsage
   } deriving (Eq, Show)
 data ModelResult a = ModelResult
@@ -170,11 +188,15 @@ resultSchema TextResult = Nothing
 resultSchema (JsonResult proxy) = Just (jsonSchema proxy)
 
 publicReceipt :: ModelReceiptEnvelope -> ModelReceipt
-publicReceipt (ModelReceiptEnvelope identity cell requests (ModelUsageEnvelope rq tools tokens unknown) _ _) =
-  ModelReceipt identity cell requests (ModelUsage rq tools tokens unknown)
+publicReceipt (ModelReceiptEnvelope identity cell requests observations duration (ModelUsageEnvelope rq tools tokens unknown) _ _) =
+  ModelReceipt identity cell requests (map publicObservation observations) duration (ModelUsage rq tools tokens unknown)
+
+publicObservation :: ModelRequestObservationEnvelope -> ModelRequestObservation
+publicObservation (ModelRequestObservationEnvelope request provider model input cached output reasoning duration) =
+  ModelRequestObservation request provider model input cached output reasoning duration
 
 receiptOutcome :: ModelReceiptEnvelope -> ModelOutcomeEnvelope
-receiptOutcome (ModelReceiptEnvelope _ _ _ _ _ outcome) = outcome
+receiptOutcome (ModelReceiptEnvelope _ _ _ _ _ _ _ outcome) = outcome
 
 controlAnnotation :: Annotation -> ModelAnnotationEnvelope
 controlAnnotation NoAnnotation = ModelNoAnnotation

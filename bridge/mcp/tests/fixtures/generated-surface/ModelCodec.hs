@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 import Prelude
+import Data.Text (Text)
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
 import Tidepool.Effects.Core (Model (..), SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..), JevCallError (..))
@@ -14,8 +15,12 @@ main :: IO ()
 main = do
   let semantic = object ["answer" .= (42 :: Int)]
       counts = ModelUsageEnvelope 1 1 8 0
-      receipt = ModelReceiptEnvelope "invocation" "cell" ["request"] counts counts (ModelTypedOutcome semantic)
+      observation = ModelRequestObservationEnvelope "request" "deep_seek" "actual-provider-model"
+        (Just 7) (Just 0) Nothing Nothing 12
+      receipt = ModelReceiptEnvelope "invocation" "cell" ["request"] [observation] 23 counts counts (ModelTypedOutcome semantic)
       hook = ModelHook "invocation" "operation" "tool" Null "retained" 3 semantic "output"
+  roundtrip observation
+  assert (toJSON observation == object ["request_id" .= ("request" :: Text), "provider" .= ("deep_seek" :: Text), "model" .= ("actual-provider-model" :: Text), "input_tokens" .= (Just 7 :: Maybe Int), "cached_tokens" .= (Just 0 :: Maybe Int), "output_tokens" .= (Nothing :: Maybe Int), "reasoning_tokens" .= (Nothing :: Maybe Int), "duration_ms" .= (12 :: Int)]) "request observation lost missing versus zero or identity"
   mapM_ roundtrip [ModelCallback "invocation" "operation" "tool" semantic, hook, ModelFinished receipt]
   mapM_ roundtrip [ModelNoAnnotation,ModelAbstained "reason",ModelAnnotated "text",ModelPruned "handle" "short"]
   roundtrip (ModelRequestEnvelope "instructions" "input" Nothing (Just ModelLowEffort)

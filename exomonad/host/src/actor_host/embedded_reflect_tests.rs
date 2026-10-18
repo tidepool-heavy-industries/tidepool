@@ -246,6 +246,7 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
         }
     );
     assert_eq!(settled[0].completed_at, None);
+    assert!(settled[0].observations.is_empty());
     let (_wake, incoming) = mpsc::unbounded_channel();
     let second = engine
         .run_embedded(
@@ -308,6 +309,49 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
         super::embedded_reflect::conversation_reader(store, Arc::new(move |_| Some(stale.clone())));
     assert!(matches!(
         (stale_reader)(actor, 1).await,
+        Err(exomonad_actor::ConversationUnavailable::Unreadable(_))
+    ));
+    let event = json!({
+        "version": 1, "requested_model": "actual-model", "backend": "deep_seek",
+        "total_ms": 17, "usage": {"version": 3, "input_tokens": 7, "cached_tokens": 0},
+        "http_status": 200, "server_request_id": null, "content_type": null,
+        "response_created_id": null, "body_elapsed_ms": 15, "first_byte_ms": null,
+        "received_bytes": null, "received_chunks": null, "framed_events": null,
+        "event_kind_tail": [], "sse_event_kind_tail": [], "last_recognized_event": null,
+        "unknown_event_count": 0, "unframed_line_bytes": 0, "unframed_data_bytes": 0,
+        "unframed_event_name": false, "metadata_truncated": false, "terminal": null,
+        "end": "clean_eof"
+    });
+    // Multiple transport attempts remain distinct exact evidence, in durable order.
+    for _ in 0..2 {
+        store
+            .record_event(Some(&active_request), "responses_transport", &event)
+            .unwrap();
+    }
+    let evidence = (reader)(actor, 3).await.unwrap();
+    let turn = evidence
+        .iter()
+        .find(|turn| turn.turn == active_request.0)
+        .unwrap();
+    assert_eq!(turn.observations.len(), 2);
+    let observation = &turn.observations[0];
+    assert!(observation.event_id < turn.observations[1].event_id);
+    assert_eq!(observation.provider.as_deref(), Some("deep_seek"));
+    assert_eq!(observation.model.as_deref(), Some("actual-model"));
+    assert_eq!(observation.input_tokens, Some(7));
+    assert_eq!(observation.cached_tokens, Some(0));
+    assert_eq!(observation.output_tokens, None);
+    assert_eq!(observation.reasoning_tokens, None);
+    assert_eq!(observation.duration_ms, Some(17));
+    store
+        .record_event(
+            Some(&active_request),
+            "responses_transport",
+            &json!({"invalid": true}),
+        )
+        .unwrap();
+    assert!(matches!(
+        (reader)(actor, 3).await,
         Err(exomonad_actor::ConversationUnavailable::Unreadable(_))
     ));
 }

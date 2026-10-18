@@ -2450,6 +2450,7 @@ async fn watchdog_recent_calls_include_only_completed_turns() {
     let turn = |identity: &str, state| ConversationTurn {
         turn: identity.into(),
         state,
+        observations: Vec::new(),
         started_at: None,
         completed_at: None,
         items: vec![

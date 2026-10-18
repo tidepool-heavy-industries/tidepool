@@ -61,6 +61,7 @@ handleModel (ModelResumeWith token call answer)
 handleModel (ModelAnnotateWith token op annotation)
   | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (toJSON
       (Control.ModelFinished (Control.ModelReceiptEnvelope token "cell" ["request"]
+        [Control.ModelRequestObservationEnvelope "request" "deep_seek" "actual-model" (Just 7) (Just 0) Nothing Nothing 12] 23
         (Control.ModelUsageEnvelope 2 1 42 0) (Control.ModelUsageEnvelope 2 1 42 0)
         (Control.ModelTypedOutcome (toJSON (Reply 3 Nothing)))))))
   | otherwise = error "hook identity/annotation changed"
@@ -97,6 +98,11 @@ scenario = do
     Right (Reply 3 Nothing) -> pure ()
     _ -> error "typed result did not decode"
   unless (fmap invocationIdentity (modelReceipt result) == Just "i") (error "missing receipt")
+  unless (fmap requestObservations (modelReceipt result) == Just
+    [ModelRequestObservation "request" "deep_seek" "actual-model" (Just 7) (Just 0) Nothing Nothing 12])
+    (error "public receipt lost optional counters or actual model identity")
+  unless (fmap invocationDurationMs (modelReceipt result) == Just 23)
+    (error "public receipt lost invocation duration")
   unless (jsonSchema (Proxy @(Maybe Int)) == object [("anyOf", Array [jsonSchema (Proxy @Int), object [("type", String "null")]])]) (error "Maybe schema omits null")
   unless (jsonSchema (Proxy @[Maybe Int]) == object [("type", String "array"), ("items", jsonSchema (Proxy @(Maybe Int)))]) (error "array optional schema drift")
   unless (jsonSchema (Proxy @Reply) == object
@@ -153,7 +159,7 @@ noToolsExample = do
           , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
           , tools == toJSON ([] :: [Value])
           , not hook -> pure (Right (toJSON (Control.ModelFinished
-              (Control.ModelReceiptEnvelope "invocation" "cell" ["request"]
+              (Control.ModelReceiptEnvelope "invocation" "cell" ["request"] [] 0
                 (Control.ModelUsageEnvelope 1 0 7 0) (Control.ModelUsageEnvelope 1 0 7 0)
                 (Control.ModelTextOutcome "bounded answer")))))
         _ -> error "NoTools recipe changed selector, input, limits, tools or hook"
@@ -213,7 +219,7 @@ runPersonaNotebook = go 1
                   Just DeepSeekPro -> "DeepSeekPro"
                   _ -> error "Persona model example changed its explicit model selector"
             in (Right (toJSON (Control.ModelFinished
-                  (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"]
+                  (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"] [] 0
                     (Control.ModelUsageEnvelope 1 0 9 0) (Control.ModelUsageEnvelope 1 0 9 0)
                     (Control.ModelTextOutcome ("answer from " <> label)))))
                , ModelRequested label input)
@@ -234,7 +240,7 @@ personaNotebookExample = do
       Right answer -> require (answer == "answer from " <> label) "model answer changed"
       Left failure -> error (show failure)
     require (modelReceipt result == Just (ModelReceipt ("persona-" <> label)
-      "persona-cell" [label <> "-request"] (ModelUsage 1 0 9 0)))
+      "persona-cell" [label <> "-request"] [] 0 (ModelUsage 1 0 9 0)))
       "Persona composition lost receipt identity or bounded usage")
     [("DeepSeekFlash", flashResult), ("DeepSeekPro", proResult)]
   case [text | DisplayPublished text <- events] of

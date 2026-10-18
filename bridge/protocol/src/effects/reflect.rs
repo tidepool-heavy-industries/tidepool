@@ -210,6 +210,53 @@ pub fn reflect() -> Effect {
                 ],
             },
             TypeDef {
+                name: "TurnObservation",
+                wire_rust: Some("RfTurnObservation"),
+                haskell_module: None,
+                shape: TypeShape::Record {
+                    fields: vec![
+                        field("observationEventId", "event_id", HsType::Int),
+                        field(
+                            "observationProvider",
+                            "provider",
+                            HsType::maybe(HsType::Text),
+                        ),
+                        field("observationModel", "model", HsType::maybe(HsType::Text)),
+                        field(
+                            "observationInputTokens",
+                            "input_tokens",
+                            HsType::maybe(HsType::Int),
+                        ),
+                        field(
+                            "observationCachedTokens",
+                            "cached_tokens",
+                            HsType::maybe(HsType::Int),
+                        ),
+                        field(
+                            "observationOutputTokens",
+                            "output_tokens",
+                            HsType::maybe(HsType::Int),
+                        ),
+                        field(
+                            "observationReasoningTokens",
+                            "reasoning_tokens",
+                            HsType::maybe(HsType::Int),
+                        ),
+                        field(
+                            "observationDurationMs",
+                            "duration_ms",
+                            HsType::maybe(HsType::Int),
+                        ),
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WIRE,
+                domain: None,
+                doc: &[
+                    "Exact retained transport event, addressed by turn identity and event ID. Missing counters remain unknown. Output includes reasoning; do not add them. Duration is monotonic transport elapsed time including queue and authentication.",
+                ],
+            },
+            TypeDef {
                 name: "ConversationTurn",
                 wire_rust: Some("RfConversationTurn"),
                 haskell_module: None,
@@ -217,6 +264,11 @@ pub fn reflect() -> Effect {
                     fields: vec![
                         field("turnIdentity", "identity", HsType::Text),
                         field("turnState", "state", HsType::Named("ConversationTurnState")),
+                        field(
+                            "turnObservations",
+                            "observations",
+                            HsType::list(HsType::Named("TurnObservation")),
+                        ),
                         field("turnStartedAt", "started_at", HsType::maybe(HsType::Text)),
                         field(
                             "turnCompletedAt",

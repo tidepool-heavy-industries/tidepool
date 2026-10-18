@@ -26,6 +26,7 @@ fn bulky_turn(index: usize) -> exomonad_actor::ConversationTurn {
     exomonad_actor::ConversationTurn {
         turn: format!("turn-{index}"),
         state: exomonad_actor::ConversationTurnState::Unknown,
+        observations: Vec::new(),
         started_at: None,
         completed_at: None,
         items: vec![
@@ -168,6 +169,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     let turn = exomonad_actor::ConversationTurn {
         turn: "oversized-turn".into(),
         state: exomonad_actor::ConversationTurnState::Unknown,
+        observations: Vec::new(),
         started_at: None,
         completed_at: None,
         items: vec![exomonad_actor::TurnItem::ToolResult {

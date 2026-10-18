@@ -45,6 +45,7 @@ module Tidepool.Actors.Exomonad
   , Reflect
   , reflect
   , ConversationTurn (..)
+  , TurnObservation (..)
   , ConversationRole (..)
   , TurnItem (..)
   , ReflectError (..)
@@ -293,6 +294,7 @@ import Tidepool.Effects.Core
   , Reflect
   , reflect
   , ConversationTurn (..)
+  , TurnObservation (..)
   , ConversationRole (..)
   , TurnItem (..)
   , ReflectError (..)

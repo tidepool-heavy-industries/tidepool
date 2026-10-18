@@ -89,6 +89,20 @@ fn turn(turn: ConversationTurn) -> RfConversationTurn {
         },
         started_at: turn.started_at,
         completed_at: turn.completed_at,
+        observations: turn
+            .observations
+            .into_iter()
+            .map(|observation| tidepool_bridge_effects::RfTurnObservation {
+                event_id: observation.event_id,
+                provider: observation.provider,
+                model: observation.model,
+                input_tokens: observation.input_tokens,
+                cached_tokens: observation.cached_tokens,
+                output_tokens: observation.output_tokens,
+                reasoning_tokens: observation.reasoning_tokens,
+                duration_ms: observation.duration_ms,
+            })
+            .collect(),
         items: turn.items.into_iter().map(item).collect(),
     }
 }
@@ -152,6 +166,16 @@ mod tests {
             state: ConversationTurnState::Completed {
                 provider_response_id: Some("provider-response".into()),
             },
+            observations: vec![exomonad_model::TurnObservation {
+                event_id: 17,
+                provider: Some("deep_seek".into()),
+                model: Some("actual".into()),
+                input_tokens: Some(7),
+                cached_tokens: Some(0),
+                output_tokens: None,
+                reasoning_tokens: None,
+                duration_ms: Some(23),
+            }],
             started_at: Some("2026-09-17T00:00:00Z".into()),
             completed_at: None,
             items: vec![
@@ -176,6 +200,16 @@ mod tests {
             vec![RfConversationTurn {
                 identity: "t1".into(),
                 state: RfTurnState::TurnCompleted(Some("provider-response".into())),
+                observations: vec![tidepool_bridge_effects::RfTurnObservation {
+                    event_id: 17,
+                    provider: Some("deep_seek".into()),
+                    model: Some("actual".into()),
+                    input_tokens: Some(7),
+                    cached_tokens: Some(0),
+                    output_tokens: None,
+                    reasoning_tokens: None,
+                    duration_ms: Some(23),
+                }],
                 started_at: Some("2026-09-17T00:00:00Z".into()),
                 completed_at: None,
                 items: vec![
