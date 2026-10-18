@@ -11,12 +11,16 @@
 //! identity  ::= "TPDPI003" producer[32] consumed_worker[32] boot_epoch[32]
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR003" expected_epoch[32]
+//! transaction ::= "TPDTR004" expected_epoch[32] workload:u8
 //!                 (request-tag request)* end-tag
 //! stop      ::= "TPDST001"
 //! stop_ack  ::= 1u8
 //! decision  ::= accepted:u8 admission_id:u64-LE | rejected:u8 frame(reason) | busy:u8
-//! close_ack ::= accepted:u8
+//! transaction_event ::= output:0u8 response | end_ack:2u8
+//!                     | retired:1u8 epoch[32] admission_id:u64-LE slot:u32-LE
+//!                       parsed_requests:u64-LE emitted_outputs:u64-LE
+//!                       termination worker_retirement failure_cause
+//! retirement causes use the bounded typed failure-END cause codec.
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
 //!
@@ -77,12 +81,15 @@ const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// explicit `REJECTED` and may safely rebind.
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
-pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR003";
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR004";
 // Direct v2 exit0 confirms checked worker/scratch close, independently of
 // the daemon's admission/BEGIN version and cleanup acknowledgement protocol.
 pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR002";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
+pub(crate) const TRANSACTION_OUTPUT: u8 = 0;
+pub(crate) const TRANSACTION_RETIRED: u8 = 1;
+pub(crate) const TRANSACTION_END_ACK: u8 = 2;
 /// Requests one worker serves before the daemon replaces it. Keep ordinary
 /// request-count rotation out of the common session length; the RSS ceiling
 /// remains the tighter bound when a worker grows quickly.
@@ -597,6 +604,197 @@ pub(crate) struct DaemonTransaction {
     epoch: DaemonEpoch,
     admission_id: AdmissionId,
     next_request: RequestOrdinal,
+    received_outputs: u64,
+    terminal: Option<DaemonTerminal>,
+    framing_known: bool,
+    end_sent: bool,
+    cancellation: Option<crate::CompilerTransactionCancellation>,
+}
+
+#[derive(Clone, Debug)]
+struct DaemonTerminal {
+    epoch: [u8; 32],
+    admission_id: u64,
+    worker_slot: u32,
+    parsed_requests: u64,
+    emitted_outputs: u64,
+    retirement: WorkerAbortRetirement,
+    failure: crate::endpoint::CompilerIoCause,
+}
+
+enum TransactionEvent {
+    Output(Output),
+    Retired(DaemonTerminal),
+    EndAcknowledged,
+}
+
+pub(crate) enum DaemonClose {
+    Clean,
+    Retired(crate::endpoint::DaemonCompilerRetirement),
+}
+
+struct TransactionReader<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+    cancellation: Option<crate::CompilerTransactionCancellation>,
+}
+impl Read for TransactionReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let expired = || {
+            self.cancellation
+                .as_ref()
+                .and_then(|cancel| cancel.retirement_deadline())
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        };
+        crate::process::read_exact_until(self.stream, bytes, self.deadline, expired).map_err(
+            |error| {
+                // Read::read_exact retries Interrupted. Here cancellation means the
+                // absolute retirement deadline expired, so retry must not restart it.
+                if error.kind() == io::ErrorKind::Interrupted && expired() {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "compiler cancellation retirement deadline exceeded",
+                    )
+                } else {
+                    error
+                }
+            },
+        )?;
+        Ok(bytes.len())
+    }
+}
+
+fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, DaemonError> {
+    use crate::endpoint::{read_retirement_cause, CompilerWorkerRetirement};
+    match read_exact_or_crash(reader, 1)?[0] {
+        TRANSACTION_OUTPUT => decode_output(reader).map(TransactionEvent::Output),
+        TRANSACTION_RETIRED => {
+            let epoch = read_exact_or_crash(reader, 32)?
+                .try_into()
+                .expect("exact epoch size");
+            let admission_id =
+                u64::from_le_bytes(read_exact_or_crash(reader, 8)?.try_into().unwrap());
+            let worker_slot = read_u32(reader)?;
+            let parsed_requests =
+                u64::from_le_bytes(read_exact_or_crash(reader, 8)?.try_into().unwrap());
+            let emitted_outputs =
+                u64::from_le_bytes(read_exact_or_crash(reader, 8)?.try_into().unwrap());
+            let termination = match read_exact_or_crash(reader, 1)?[0] {
+                0 => Ok(()),
+                1 => Err(read_retirement_cause(reader).map_err(DaemonError::Io)?),
+                _ => {
+                    return Err(DaemonError::Protocol(
+                        "invalid retirement termination tag".into(),
+                    ))
+                }
+            };
+            let worker = match read_exact_or_crash(reader, 1)?[0] {
+                1 => {
+                    CompilerWorkerRetirement::Reaped(ExitStatus::from_raw(read_u32(reader)? as i32))
+                }
+                2 => CompilerWorkerRetirement::WaitUnconfirmed(
+                    read_retirement_cause(reader).map_err(DaemonError::Io)?,
+                ),
+                _ => {
+                    return Err(DaemonError::Protocol(
+                        "invalid worker retirement tag".into(),
+                    ))
+                }
+            };
+            let failure = read_retirement_cause(reader).map_err(DaemonError::Io)?;
+            Ok(TransactionEvent::Retired(DaemonTerminal {
+                epoch,
+                admission_id,
+                worker_slot,
+                parsed_requests,
+                emitted_outputs,
+                retirement: WorkerAbortRetirement {
+                    termination,
+                    worker,
+                },
+                failure,
+            }))
+        }
+        TRANSACTION_END_ACK => Ok(TransactionEvent::EndAcknowledged),
+        _ => Err(DaemonError::Protocol("unknown transaction event".into())),
+    }
+}
+
+fn write_retirement(
+    writer: &mut impl Write,
+    terminal: &DaemonTerminal,
+) -> Result<(), FrontendError> {
+    use crate::endpoint::{write_retirement_cause, CompilerWorkerRetirement};
+    writer
+        .write_all(&[TRANSACTION_RETIRED])
+        .map_err(FrontendError::Io)?;
+    writer
+        .write_all(&terminal.epoch)
+        .map_err(FrontendError::Io)?;
+    writer
+        .write_all(&terminal.admission_id.to_le_bytes())
+        .map_err(FrontendError::Io)?;
+    writer
+        .write_all(&terminal.worker_slot.to_le_bytes())
+        .map_err(FrontendError::Io)?;
+    writer
+        .write_all(&terminal.parsed_requests.to_le_bytes())
+        .map_err(FrontendError::Io)?;
+    writer
+        .write_all(&terminal.emitted_outputs.to_le_bytes())
+        .map_err(FrontendError::Io)?;
+    match &terminal.retirement.termination {
+        Ok(()) => writer.write_all(&[0]).map_err(FrontendError::Io)?,
+        Err(cause) => {
+            writer.write_all(&[1]).map_err(FrontendError::Io)?;
+            write_retirement_cause(writer, cause).map_err(FrontendError::Io)?;
+        }
+    }
+    match &terminal.retirement.worker {
+        CompilerWorkerRetirement::Reaped(status) => {
+            writer.write_all(&[1]).map_err(FrontendError::Io)?;
+            writer
+                .write_all(&status.into_raw().to_le_bytes())
+                .map_err(FrontendError::Io)?;
+        }
+        CompilerWorkerRetirement::WaitUnconfirmed(cause) => {
+            writer.write_all(&[2]).map_err(FrontendError::Io)?;
+            write_retirement_cause(writer, cause).map_err(FrontendError::Io)?;
+        }
+    }
+    write_retirement_cause(writer, &terminal.failure).map_err(FrontendError::Io)?;
+    writer.flush().map_err(FrontendError::Io)
+}
+
+impl DaemonTransaction {
+    fn read_event(&mut self, deadline: Instant) -> Result<TransactionEvent, DaemonError> {
+        let mut reader = TransactionReader {
+            stream: &mut self.stream,
+            deadline,
+            cancellation: self.cancellation.clone(),
+        };
+        let event = read_transaction_event(&mut reader);
+        if event.is_err() {
+            self.framing_known = false;
+        }
+        let event = event?;
+        if let TransactionEvent::Retired(terminal) = &event {
+            let submitted = self.next_request.0 - 1;
+            if terminal.epoch != self.epoch.0
+                || terminal.admission_id != self.admission_id.0
+                || terminal.emitted_outputs != self.received_outputs
+                || terminal.parsed_requests < terminal.emitted_outputs
+                || terminal.parsed_requests > submitted
+                || terminal.parsed_requests - terminal.emitted_outputs > 1
+            {
+                self.framing_known = false;
+                return Err(DaemonError::Protocol(
+                    "retirement differs from exact accepted transaction".into(),
+                ));
+            }
+        }
+        Ok(event)
+    }
 }
 
 #[cfg(test)]
@@ -607,11 +805,16 @@ impl DaemonTransaction {
             epoch: DaemonEpoch([0; 32]),
             admission_id: AdmissionId(1),
             next_request: RequestOrdinal(1),
+            received_outputs: 0,
+            terminal: None,
+            framing_known: true,
+            end_sent: false,
+            cancellation: None,
         }
     }
 }
 
-fn read_admission_id(stream: &mut UnixStream) -> Result<AdmissionId, DaemonError> {
+fn read_admission_id(stream: &mut impl Read) -> Result<AdmissionId, DaemonError> {
     let bytes: [u8; 8] = read_exact_or_crash(stream, 8)
         .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))?
         .try_into()
@@ -668,6 +871,7 @@ pub(crate) enum DaemonError {
     /// The daemon acknowledged acceptance before the enclosed response error.
     AfterAcceptance(Box<DaemonError>),
     CompletionUnconfirmed(crate::CompilerCompletionFailure),
+    RequestRetired(crate::endpoint::CompilerIoCause),
     Protocol(String),
     ResponseTooLarge {
         declared: u64,
@@ -715,6 +919,7 @@ impl std::fmt::Display for DaemonError {
             }
             DaemonError::CapacityRefusal(CapacityRefusal::PreparationUnsupported) => write!(f, "compiler daemon has no separate preparation capacity; foreground work remains available"),
             DaemonError::CapacityRefusal(CapacityRefusal::MemoryUnavailable) => write!(f, "compiler daemon cannot admit the retained worker footprint within current memory headroom"),
+            DaemonError::RequestRetired(cause) => write!(f, "compiler request retired after failure: {}", cause.message),
             DaemonError::Cancelled => write!(f, "compiler daemon admission was cancelled"),
             DaemonError::AfterAcceptance(error) => {
                 write!(f, "daemon response failed after acceptance: {error}")
@@ -955,7 +1160,12 @@ fn begin_transaction_once(
             }
         }));
     }
-    let state = read_exact_or_crash(&mut stream, 1).map_err(|error| {
+    let mut reader = TransactionReader {
+        stream: &mut stream,
+        deadline: Instant::now() + admission_timeout,
+        cancellation: cancellation.cloned(),
+    };
+    let state = read_exact_or_crash(&mut reader, 1).map_err(|error| {
         if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
             DaemonError::Cancelled
         } else {
@@ -964,7 +1174,7 @@ fn begin_transaction_once(
     })?[0];
     match state {
         ACCEPTED => {
-            let admission_id = read_admission_id(&mut stream)?;
+            let admission_id = read_admission_id(&mut reader)?;
             stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
@@ -973,6 +1183,11 @@ fn begin_transaction_once(
                 epoch: DaemonEpoch(*epoch),
                 admission_id,
                 next_request: RequestOrdinal(1),
+                received_outputs: 0,
+                terminal: None,
+                framing_known: true,
+                end_sent: false,
+                cancellation: cancellation.cloned(),
             })
         }
         REJECTED => {
@@ -994,6 +1209,11 @@ pub(crate) fn execute_transaction_request(
     cwd: &Path,
     argv: &[OsString],
 ) -> Result<Output, DaemonError> {
+    if !transaction.framing_known || transaction.terminal.is_some() || transaction.end_sent {
+        return Err(DaemonError::AfterAcceptance(Box::new(
+            DaemonError::Protocol("compiler transaction no longer accepts requests".into()),
+        )));
+    }
     let ordinal = transaction.next_request;
     transaction.next_request = RequestOrdinal(ordinal.0.checked_add(1).ok_or_else(|| {
         DaemonError::AfterAcceptance(Box::new(DaemonError::Protocol(
@@ -1007,45 +1227,118 @@ pub(crate) fn execute_transaction_request(
         cwd,
         argv,
     );
-    let stream = &mut transaction.stream;
     let started = Instant::now();
-    stream
+    let write = transaction
+        .stream
         .write_all(&[TRANSACTION_REQUEST])
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    stream
-        .write_all(&encode_request(cwd, argv))
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    stream
-        .flush()
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    let response =
-        decode_output(stream).map_err(|error| DaemonError::AfterAcceptance(Box::new(error)));
+        .and_then(|()| transaction.stream.write_all(&encode_request(cwd, argv)))
+        .and_then(|()| transaction.stream.flush());
+    if let Err(error) = write {
+        if !transaction
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            transaction.framing_known = false;
+            return Err(DaemonError::AfterAcceptance(Box::new(DaemonError::Io(
+                error,
+            ))));
+        }
+        // Only our explicit write-half cancellation preserves known response
+        // framing after a partial outgoing request. Never resume a bad decoder.
+    }
+    let response = transaction.read_event(Instant::now() + IO_TIMEOUT);
     tracing::info!(
         phase = "compiler_transaction_response",
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        success = response.is_ok(),
+        success = matches!(&response, Ok(TransactionEvent::Output(_))),
         "compiler phase finished"
     );
-    response
+    match response.map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))? {
+        TransactionEvent::Output(output) => {
+            if ordinal.0 != transaction.received_outputs + 1 {
+                transaction.framing_known = false;
+                return Err(DaemonError::AfterAcceptance(Box::new(
+                    DaemonError::Protocol("unexpected response ordinal".into()),
+                )));
+            }
+            transaction.received_outputs += 1;
+            Ok(output)
+        }
+        TransactionEvent::Retired(terminal) => {
+            let error = if transaction
+                .cancellation
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+            {
+                DaemonError::Cancelled
+            } else {
+                DaemonError::RequestRetired(terminal.failure.clone())
+            };
+            transaction.terminal = Some(terminal);
+            Err(DaemonError::AfterAcceptance(Box::new(error)))
+        }
+        TransactionEvent::EndAcknowledged => {
+            transaction.framing_known = false;
+            Err(DaemonError::AfterAcceptance(Box::new(
+                DaemonError::Protocol("END acknowledged before END was sent".into()),
+            )))
+        }
+    }
 }
 
-pub(crate) fn end_transaction(transaction: &mut DaemonTransaction) -> Result<(), DaemonError> {
-    let stream = &mut transaction.stream;
-    stream
-        .write_all(&[TRANSACTION_END])
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    stream
-        .flush()
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    let acknowledgement = read_exact_or_crash(stream, 1)
-        .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))?;
-    if acknowledgement == [ACCEPTED] {
-        Ok(())
-    } else {
-        Err(DaemonError::AfterAcceptance(Box::new(
-            DaemonError::Protocol("compiler transaction close was not acknowledged".to_owned()),
-        )))
+pub(crate) fn end_transaction(
+    transaction: &mut DaemonTransaction,
+) -> Result<DaemonClose, DaemonError> {
+    if !transaction.framing_known {
+        return Err(DaemonError::AfterAcceptance(Box::new(
+            DaemonError::Protocol("failed response framing cannot establish retirement".into()),
+        )));
     }
+    if transaction.terminal.is_none() && !transaction.end_sent {
+        if transaction
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            transaction
+                .stream
+                .shutdown(Shutdown::Write)
+                .map_err(DaemonError::Io)?;
+        } else {
+            transaction
+                .stream
+                .write_all(&[TRANSACTION_END])
+                .map_err(DaemonError::Io)?;
+            transaction.end_sent = true;
+            transaction.stream.flush().map_err(DaemonError::Io)?;
+        }
+    }
+    if transaction.terminal.is_none() {
+        match transaction.read_event(Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT)? {
+            TransactionEvent::Retired(terminal) => transaction.terminal = Some(terminal),
+            TransactionEvent::EndAcknowledged if transaction.end_sent => {
+                return Ok(DaemonClose::Clean)
+            }
+            _ => {
+                transaction.framing_known = false;
+                return Err(DaemonError::AfterAcceptance(Box::new(
+                    DaemonError::Protocol("unexpected event while closing transaction".into()),
+                )));
+            }
+        }
+    }
+    let terminal = transaction.terminal.take().expect("terminal just admitted");
+    Ok(DaemonClose::Retired(
+        crate::endpoint::DaemonCompilerRetirement {
+            epoch: terminal.epoch,
+            admission_id: terminal.admission_id,
+            worker_slot: terminal.worker_slot,
+            worker: terminal.retirement.worker,
+            termination: terminal.retirement.termination,
+            failure: terminal.failure,
+        },
+    ))
 }
 
 fn explicit_refusal(stream: &mut UnixStream) -> Option<DaemonError> {
@@ -1286,6 +1579,7 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
 enum RequestStep {
     Request(std::path::PathBuf, Vec<OsString>),
     End,
+    Disconnected,
     Malformed,
 }
 
@@ -1293,6 +1587,7 @@ enum RequestStep {
 enum ConnectionOutcome {
     Continue,
     Retire,
+    Quarantine(WorkerAbortRetirement),
 }
 
 /// Owns the pinned-worker portion of one connection's lifecycle: begin the
@@ -1352,13 +1647,17 @@ fn service_transaction(
     let mut orderly_end = false;
     let mut one_shot_response = None;
     let mut request_ordinal = RequestOrdinal(0);
+    let mut emitted_outputs = 0u64;
     while transaction_failed.is_none() {
         match next_request(&mut connection) {
             RequestStep::End => {
                 orderly_end = true;
                 break;
             }
-            RequestStep::Malformed => break,
+            RequestStep::Disconnected | RequestStep::Malformed => {
+                transaction_failed = Some(FrontendError::WorkerClientDisconnected);
+                break;
+            }
             RequestStep::Request(cwd, argv) => {
                 request_ordinal =
                     RequestOrdinal(request_ordinal.0.checked_add(1).ok_or_else(|| {
@@ -1433,6 +1732,9 @@ fn service_transaction(
                             "compiler diagnostics processed"
                         );
                         if transaction {
+                            if connection.write_all(&[TRANSACTION_OUTPUT]).is_err() {
+                                break;
+                            }
                             if write_response_with_timing(
                                 &mut connection,
                                 code,
@@ -1445,6 +1747,7 @@ fn service_transaction(
                             {
                                 break;
                             }
+                            emitted_outputs += 1;
                         } else {
                             // The client may close and release its request inputs as
                             // soon as it receives this response. Keep it waiting
@@ -1501,7 +1804,36 @@ fn service_transaction(
         }
         // The accepted request(s) stay indeterminate; diagnostic bytes cannot
         // acknowledge END. Retire this worker before reporting that distinction.
-        worker.abort();
+        let retirement = worker.abort();
+        if transaction {
+            let terminal = DaemonTerminal {
+                epoch: *epoch,
+                admission_id: admission_id.0,
+                worker_slot: worker_slot as u32,
+                parsed_requests: request_ordinal.0,
+                emitted_outputs,
+                retirement: retirement.clone(),
+                failure: match &error {
+                    FrontendError::Io(source) => crate::endpoint::CompilerIoCause::from(source),
+                    _ => crate::endpoint::CompilerIoCause {
+                        raw_os_error: None,
+                        kind: io::ErrorKind::Other,
+                        message: error.to_string(),
+                    },
+                },
+            };
+            log_reject_failure(
+                run_id,
+                "transaction retirement",
+                write_retirement(&mut connection, &terminal),
+            );
+        }
+        if matches!(
+            &retirement.worker,
+            crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(_)
+        ) {
+            return Ok(ConnectionOutcome::Quarantine(retirement));
+        }
         if let Some((code, stdout, stderr, _, _)) = &one_shot_response {
             let delivered = write_unconfirmed_response(
                 &mut connection,
@@ -1525,7 +1857,7 @@ fn service_transaction(
         log_send_failure(
             run_id,
             "transaction accepted",
-            connection.write_all(&[ACCEPTED]),
+            connection.write_all(&[TRANSACTION_END_ACK]),
         );
         log_send_failure(run_id, "transaction accepted flush", connection.flush());
     }
@@ -1969,15 +2301,50 @@ fn grant_worker_argv(
     Ok(request.worker_argv())
 }
 
+struct QuarantinedSlot {
+    worker: Worker,
+    retirement: WorkerAbortRetirement,
+    _resource_permit: ResourcePermit,
+    _admission_permit: Option<AdmissionPermit>,
+    prior: Option<Box<FrontendError>>,
+}
+
+/// Failed daemon shutdown retains every exact child/namespace/grant owner.
+/// Dropping this explicit outcome uses Worker's bounded retirement policy;
+/// neither disposal nor a failed observation is a cleanup acknowledgement.
+pub struct RetainedDaemonWorkers(Vec<QuarantinedSlot>);
+
+impl std::fmt::Debug for RetainedDaemonWorkers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|slot| (slot.worker.child.id(), &slot.retirement, &slot.prior)),
+            )
+            .finish()
+    }
+}
+
 struct ResidentSlot {
     resources: std::sync::Arc<ResourceAdmission>,
     slot: usize,
+    quarantined: bool,
+}
+
+impl ResidentSlot {
+    fn quarantine(&mut self) {
+        self.quarantined = true;
+        self.resources.alive[self.slot].store(false, Ordering::Release);
+    }
 }
 
 impl Drop for ResidentSlot {
     fn drop(&mut self) {
         self.resources.alive[self.slot].store(false, Ordering::Release);
-        self.resources.worker_rss[self.slot].store(0, Ordering::Release);
+        if !self.quarantined {
+            self.resources.worker_rss[self.slot].store(0, Ordering::Release);
+        }
     }
 }
 
@@ -2149,9 +2516,9 @@ fn serve_workers(
             let ready_tx = ready_tx.clone();
             let resources = std::sync::Arc::clone(&resources);
             let dispatch = dispatch.clone();
-            slots.push(scope.spawn(move || -> Result<(), FrontendError> {
+            slots.push(scope.spawn(move || -> Result<Option<QuarantinedSlot>, FrontendError> {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
-                let _resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot };
+                let mut resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot, quarantined: false };
                 let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
                     run_id,
@@ -2221,7 +2588,7 @@ fn serve_workers(
                             if transaction {
                                 let mut command = [0u8; 1];
                                 if connection.read_exact(&mut command).is_err() {
-                                    return RequestStep::Malformed;
+                                    return RequestStep::Disconnected;
                                 }
                                 match command[0] {
                                     TRANSACTION_END => RequestStep::End,
@@ -2264,10 +2631,19 @@ fn serve_workers(
                             }
                         },
                     );
-                    resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
-                    drop(resource_permit);
+                    if let Some(rss) = worker_rss_mb(worker.child.id()) {
+                        resources.worker_rss[slot].store(rss, Ordering::Release);
+                    }
                     match outcome {
-                        Ok(ConnectionOutcome::Continue) => {}
+                        Ok(ConnectionOutcome::Continue) => { drop(resource_permit); }
+                        Ok(ConnectionOutcome::Quarantine(retirement)) => {
+                            resident.quarantine();
+                            drop(job_rx);
+                            return Ok(Some(QuarantinedSlot {
+                                worker, retirement, _resource_permit: resource_permit,
+                                _admission_permit: _permit, prior: None,
+                            }));
+                        }
                         Ok(ConnectionOutcome::Retire) => {
                             retire.store(true, Ordering::Release);
                             break;
@@ -2279,13 +2655,21 @@ fn serve_workers(
                             // daemon alive at reduced capacity rather than
                             // taking the whole endpoint down over one slot.
                             tracing::error!(run_id, slot, %error, "compiler worker slot failed and is retiring");
-                            worker.abort();
+                            let retirement = worker.abort();
+                            if matches!(&retirement.worker, crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(_)) {
+                                resident.quarantine();
+                                drop(job_rx);
+                                return Ok(Some(QuarantinedSlot {
+                                    worker, retirement, _resource_permit: resource_permit,
+                                    _admission_permit: _permit, prior: Some(Box::new(error)),
+                                }));
+                            }
                             return Err(error);
                         }
                     }
                 }
                 worker.shutdown();
-                Ok(())
+                Ok(None)
             }));
         }
         drop(ready_tx);
@@ -2502,29 +2886,46 @@ fn serve_workers(
 
         // Accepted jobs finish before the listener backlog is drained.
         drop(job_txs);
-        let mut first_error = outcome.err();
-        for slot in slots {
-            match slot.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+        collect_slot_retirement(outcome, slots.into_iter().map(|slot| slot.join()))
+    })
+}
+
+fn collect_slot_retirement(
+    outcome: Result<(), FrontendError>,
+    outcomes: impl IntoIterator<
+        Item = std::thread::Result<Result<Option<QuarantinedSlot>, FrontendError>>,
+    >,
+) -> Result<u8, FrontendError> {
+    let mut first_error = outcome.err();
+    let mut quarantined = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(owner))) => quarantined.push(owner),
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
-                Err(_) => {
-                    if first_error.is_none() {
-                        first_error = Some(FrontendError::Daemon(
-                            "compiler worker slot thread panicked".to_owned(),
-                        ));
-                    }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(FrontendError::Daemon(
+                        "compiler worker slot thread panicked".to_owned(),
+                    ));
                 }
             }
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(0),
-        }
-    })
+    }
+    if !quarantined.is_empty() {
+        return Err(FrontendError::UnconfirmedWorkers {
+            retained: RetainedDaemonWorkers(quarantined),
+            prior: first_error.map(Box::new),
+        });
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(0),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -3184,6 +3585,38 @@ enum WorkerOperation {
     EndTransaction,
 }
 
+/// Observations of the exact aborted child. The namespace stays with its
+/// existing Worker/slot owner; reaping alone does not authorize its deletion.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkerAbortRetirement {
+    pub(crate) termination: Result<(), crate::endpoint::CompilerIoCause>,
+    pub(crate) worker: crate::endpoint::CompilerWorkerRetirement,
+}
+
+fn observe_aborted_worker(
+    mut observe: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+    deadline: Instant,
+) -> crate::endpoint::CompilerWorkerRetirement {
+    use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
+    loop {
+        match observe() {
+            Ok(Some(status)) => return CompilerWorkerRetirement::Reaped(status),
+            Err(error) => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(&error));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(
+                    &io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "aborted compiler worker retirement remains unconfirmed",
+                    ),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -3460,14 +3893,24 @@ impl Worker {
         Ok(())
     }
 
-    pub(crate) fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) -> WorkerAbortRetirement {
+        use crate::endpoint::CompilerIoCause;
         drop(self.stdin.take());
-        if let Err(error) = self.child.kill() {
+        let termination = self.child.kill().map_err(|error| {
             tracing::warn!(%error, "failed to kill aborted compiler worker");
-        }
-        if let Err(error) = self.child.wait() {
-            tracing::warn!(%error, "failed to reap aborted compiler worker");
-        }
+            CompilerIoCause::from(&error)
+        });
+        let worker = observe_aborted_worker(
+            || self.child.try_wait(),
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        );
+        let retirement = WorkerAbortRetirement {
+            termination,
+            worker,
+        };
+        tracing::debug!(termination = ?retirement.termination,
+            worker = ?retirement.worker, "aborted compiler worker retirement observed");
+        retirement
     }
 
     /// Direct frontend success must prove both bracket acknowledgement and
@@ -4285,6 +4728,194 @@ mod tests {
     }
 
     #[test]
+    fn permanent_wait_error_quarantines_the_actual_service_without_respawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let pid = worker.child.id();
+        worker.child.kill().unwrap();
+        let mut status = 0;
+        // SAFETY: this test deliberately reaps only its exact owned child
+        // outside Child's observation, to force a genuine permanent ECHILD.
+        assert_eq!(
+            unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) },
+            pid as libc::pid_t
+        );
+        let config = DaemonConfig {
+            socket: dir.path().join("unused.sock"),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
+        };
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let mut served = 0;
+        let mut rotated = false;
+        let mut replacements = 0;
+        let outcome = service_transaction(
+            server,
+            &mut worker,
+            0,
+            &prepared,
+            &config,
+            "wait-error",
+            &[0; 32],
+            Duration::ZERO,
+            AdmissionId(1),
+            CompileWorkload::Foreground,
+            ExecutionGrant {
+                jobs: 1,
+                capabilities: 1,
+            },
+            Duration::from_secs(1),
+            100,
+            u64::MAX,
+            true,
+            &mut served,
+            &mut rotated,
+            &mut replacements,
+            |_| RequestStep::End,
+        )
+        .unwrap();
+        let ConnectionOutcome::Quarantine(retirement) = outcome else {
+            panic!("unobserved wait must quarantine the actual service owner")
+        };
+        assert!(
+            matches!(retirement.worker, crate::CompilerWorkerRetirement::WaitUnconfirmed(ref cause) if cause.raw_os_error == Some(libc::ECHILD))
+        );
+        assert_eq!(
+            worker.child.id(),
+            pid,
+            "uncertain worker cannot be replaced"
+        );
+        assert!(!rotated);
+        assert_eq!(replacements, 0);
+        let TransactionEvent::Retired(terminal) = read_transaction_event(&mut client).unwrap()
+        else {
+            panic!("negative retirement event required")
+        };
+        assert_eq!(terminal.retirement.worker, retirement.worker);
+    }
+
+    #[test]
+    fn simultaneous_quarantines_retain_all_owners_and_release_only_queued_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let resources = ResourceAdmission::with_limits(3, 10 * WARM_WORKER_MB, 1, 1);
+        let capacity = admission_capacity(8, 10 * WARM_WORKER_MB);
+        let mut owners = Vec::new();
+        let mut busy = Vec::new();
+        for expected_slot in 0..2 {
+            let permit = resources
+                .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+                .unwrap();
+            assert_eq!(permit.slot, expected_slot);
+            let marker = std::sync::Arc::new(AtomicBool::new(true));
+            busy.push(std::sync::Arc::clone(&marker));
+            let worker = Worker::spawn_in_slot(&prepared, &[7; 32], expected_slot).unwrap();
+            owners.push(QuarantinedSlot {
+                worker,
+                retirement: WorkerAbortRetirement {
+                    termination: Ok(()),
+                    worker: crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(
+                        crate::endpoint::CompilerIoCause::from(&io::Error::from_raw_os_error(
+                            libc::ECHILD,
+                        )),
+                    ),
+                },
+                _resource_permit: permit,
+                _admission_permit: Some(AdmissionPermit(marker)),
+                prior: None,
+            });
+        }
+        let third = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(third.slot, 2);
+        let queued = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(queued.slot, 0);
+        let (client, server) = UnixStream::pair().unwrap();
+        let (_accepted, acceptance) = std::sync::mpsc::channel();
+        let queued_busy = std::sync::Arc::new(AtomicBool::new(true));
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(PendingJob {
+            admission_id: AdmissionId(99),
+            queued_at: Instant::now(),
+            job: Job::Transaction(server),
+            accepted: acceptance,
+            permit: Some(AdmissionPermit(std::sync::Arc::clone(&queued_busy))),
+            resource_permit: queued,
+        })
+        .unwrap();
+        let mut guards = (0..2)
+            .map(|slot| ResidentSlot {
+                resources: std::sync::Arc::clone(&resources),
+                slot,
+                quarantined: false,
+            })
+            .collect::<Vec<_>>();
+        for guard in &mut guards {
+            guard.quarantine();
+        }
+        assert!(!resources.alive[0].load(Ordering::Acquire));
+        assert!(!resources.alive[1].load(Ordering::Acquire));
+        drop(rx); // Accepted queued work is never executed by an unavailable slot.
+        assert!(!queued_busy.load(Ordering::Acquire));
+        let mut client = client;
+        assert_eq!(client.read(&mut [0u8; 1]).unwrap(), 0);
+        assert_eq!(resources.usage.lock().unwrap().jobs, 3);
+        drop(third);
+        let failure = std::thread::scope(|scope| {
+            let handles = owners
+                .into_iter()
+                .map(|owner| scope.spawn(move || Ok(Some(owner))))
+                .collect::<Vec<_>>();
+            collect_slot_retirement(
+                Err(FrontendError::Daemon("earlier failure".into())),
+                handles.into_iter().map(|handle| handle.join()),
+            )
+            .unwrap_err()
+        });
+        assert_eq!(resources.usage.lock().unwrap().jobs, 2);
+        assert!(busy.iter().all(|owner| owner.load(Ordering::Acquire)));
+        let FrontendError::UnconfirmedWorkers { retained, prior } = &failure else {
+            panic!("all quarantined owners must survive the existing join path");
+        };
+        assert_eq!(retained.0.len(), 2);
+        assert!(prior.is_some());
+        assert!(retained.0.iter().all(|owner| owner.worker.stdin.is_some()));
+        drop(failure); // Explicit owner disposal; never a cleanup receipt.
+        assert_eq!(resources.usage.lock().unwrap().jobs, 0);
+        assert!(busy.iter().all(|owner| !owner.load(Ordering::Acquire)));
+        drop(guards);
+        drop(dir);
+    }
+
+    #[test]
+    fn abort_observation_preserves_permanent_wait_error_without_retry() {
+        let mut observations = 0;
+        let retired = observe_aborted_worker(
+            || {
+                observations += 1;
+                Err(io::Error::from_raw_os_error(libc::ECHILD))
+            },
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        );
+        assert_eq!(observations, 1);
+        assert!(matches!(retired,
+            crate::endpoint::CompilerWorkerRetirement::WaitUnconfirmed(cause)
+                if cause.raw_os_error == Some(libc::ECHILD)));
+    }
+
+    #[test]
     fn build_products_stay_warm_only_after_reaped_slot_rotation() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("Expr.hs");
@@ -4307,7 +4938,11 @@ mod tests {
         assert_eq!(first[0], rotated[0]);
         assert_eq!(rotated[1], "alpha");
         assert_ne!(first[3], rotated[3]);
-        worker.abort();
+        let retired = worker.abort();
+        assert!(matches!(
+            retired.worker,
+            crate::endpoint::CompilerWorkerRetirement::Reaped(_)
+        ));
         worker.respawn(&prepared).unwrap();
         assert_eq!(
             products_response(&mut worker, dir.path(), &argv)[1],
@@ -5667,6 +6302,141 @@ tidepool-reuse-error: witness failed\n";
         std::fs::remove_file(socket).ok();
     }
 
+    fn retirement_fixture(parsed: u64, emitted: u64) -> DaemonTerminal {
+        DaemonTerminal {
+            epoch: [0; 32],
+            admission_id: 1,
+            worker_slot: 2,
+            parsed_requests: parsed,
+            emitted_outputs: emitted,
+            retirement: WorkerAbortRetirement {
+                termination: Ok(()),
+                worker: crate::CompilerWorkerRetirement::Reaped(ExitStatus::from_raw(9)),
+            },
+            failure: crate::CompilerIoCause {
+                raw_os_error: Some(libc::ECANCELED),
+                kind: io::ErrorKind::Interrupted,
+                message: "cancelled protocol fixture".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn transaction_retirement_checks_exact_identity_and_response_boundary() {
+        for case in 0..6 {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let mut transaction = DaemonTransaction::for_test(client);
+            let mut terminal = retirement_fixture(0, 0);
+            match case {
+                0 => {}
+                1 => terminal.epoch[0] = 1,
+                2 => terminal.admission_id = 2,
+                3 => terminal.parsed_requests = 1,
+                4 => terminal.emitted_outputs = 1,
+                5 => {
+                    terminal.retirement.worker = crate::CompilerWorkerRetirement::WaitUnconfirmed(
+                        crate::CompilerIoCause::from(&io::Error::from_raw_os_error(libc::ECHILD)),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            write_retirement(&mut server, &terminal).unwrap();
+            let result = transaction.read_event(Instant::now() + Duration::from_secs(1));
+            if case == 0 || case == 5 {
+                let TransactionEvent::Retired(observed) = result.unwrap() else {
+                    panic!("wrong event")
+                };
+                assert_eq!(observed.retirement.worker, terminal.retirement.worker);
+                assert_eq!(observed.failure, terminal.failure);
+            } else {
+                assert!(result.is_err());
+                assert!(!transaction.framing_known);
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_cancellation_drains_before_during_and_after_response_without_replay() {
+        for phase in 0..3 {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let cancellation = crate::CompilerTransactionCancellation::new();
+            cancellation.arm_daemon(&client).unwrap();
+            let mut transaction = DaemonTransaction::for_test(client);
+            transaction.cancellation = Some(cancellation.clone());
+            let server_cancel = cancellation.clone();
+            let server_thread = std::thread::spawn(move || {
+                if phase != 0 {
+                    assert_eq!(
+                        read_exact_or_crash(&mut server, 1).unwrap(),
+                        [TRANSACTION_REQUEST]
+                    );
+                    read_request(&mut server).unwrap();
+                    if phase == 1 {
+                        server_cancel.cancel();
+                    } else {
+                        server.write_all(&[TRANSACTION_OUTPUT]).unwrap();
+                        write_response(&mut server, 0, b"completed output", b"").unwrap();
+                    }
+                }
+                let mut byte = [0];
+                assert_eq!(
+                    server.read(&mut byte).unwrap(),
+                    0,
+                    "cancellation must half-close only the request direction"
+                );
+                write_retirement(
+                    &mut server,
+                    &retirement_fixture(u64::from(phase != 0), u64::from(phase == 2)),
+                )
+                .unwrap();
+            });
+            if phase == 0 {
+                cancellation.cancel();
+            }
+            let result = execute_transaction_request(
+                &mut transaction,
+                Path::new("/tmp"),
+                &["one-request".into()],
+            );
+            if phase == 2 {
+                assert_eq!(result.unwrap().stdout, b"completed output");
+                cancellation.cancel();
+            } else {
+                assert!(
+                    matches!(result, Err(DaemonError::AfterAcceptance(error)) if matches!(*error, DaemonError::Cancelled))
+                );
+            }
+            let DaemonClose::Retired(observed) = end_transaction(&mut transaction).unwrap() else {
+                panic!("cancelled work cannot acknowledge END")
+            };
+            assert!(matches!(
+                observed.worker,
+                crate::CompilerWorkerRetirement::Reaped(_)
+            ));
+            assert_eq!(observed.worker_slot, 2);
+            assert!(!transaction.end_sent);
+            server_thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn transaction_truncated_output_never_resumes_at_a_retirement_frame() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut transaction = DaemonTransaction::for_test(client);
+        // A complete event tag and partial Output cannot be mistaken for a
+        // later terminal boundary. Its owner refuses all further decoding.
+        server.write_all(&[TRANSACTION_OUTPUT, 0]).unwrap();
+        let started = Instant::now();
+        assert!(transaction
+            .read_event(started + Duration::from_millis(50))
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        write_retirement(&mut server, &retirement_fixture(0, 0)).unwrap();
+        assert!(end_transaction(&mut transaction).is_err());
+        assert!(!transaction.framing_known);
+        assert!(!transaction.end_sent);
+    }
+
     #[test]
     fn transaction_carries_ordered_requests_and_waits_for_close_acknowledgement() {
         let socket = test_socket("transaction");
@@ -5690,12 +6460,13 @@ tidepool-reuse-error: witness failed\n";
                 assert_eq!(command, [TRANSACTION_REQUEST]);
                 let (_, argv) = read_request(&mut connection).unwrap();
                 assert_eq!(argv, [OsString::from(expected)]);
+                connection.write_all(&[TRANSACTION_OUTPUT]).unwrap();
                 write_response(&mut connection, 0, expected.as_bytes(), b"").unwrap();
             }
             let mut command = [0u8; 1];
             connection.read_exact(&mut command).unwrap();
             assert_eq!(command, [TRANSACTION_END]);
-            connection.write_all(&[ACCEPTED]).unwrap();
+            connection.write_all(&[TRANSACTION_END_ACK]).unwrap();
         });
 
         let mut transaction = begin_transaction(&socket, &[3; 32]).unwrap();
@@ -5826,9 +6597,14 @@ tidepool-reuse-error: witness failed\n";
                 )
                 .unwrap();
                 for _ in 0..request_count {
-                    assert_eq!(decode_output(&mut client).unwrap().status.code(), Some(0));
+                    assert!(
+                        matches!(read_transaction_event(&mut client).unwrap(), TransactionEvent::Output(output) if output.status.code() == Some(0))
+                    );
                 }
-                assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [ACCEPTED]);
+                assert_eq!(
+                    read_exact_or_crash(&mut client, 1).unwrap(),
+                    [TRANSACTION_END_ACK]
+                );
             }
         });
         worker.shutdown();
@@ -6406,6 +7182,7 @@ tidepool-reuse-error: witness failed\n";
 
         for operation in [
             WorkerOperation::BeginTransaction,
+            WorkerOperation::Request,
             WorkerOperation::EndTransaction,
         ] {
             let dir = scratch.path().join(format!("{operation:?}"));
@@ -6415,7 +7192,7 @@ tidepool-reuse-error: witness failed\n";
             let phase = match operation {
                 WorkerOperation::BeginTransaction => TRANSACTION_REQUEST,
                 WorkerOperation::EndTransaction => TRANSACTION_END,
-                WorkerOperation::Request => unreachable!(),
+                WorkerOperation::Request => 18,
             };
             std::fs::write(dir.join("phase"), [phase]).unwrap();
             let socket = dir.join("daemon.sock");
@@ -6468,12 +7245,16 @@ tidepool-reuse-error: witness failed\n";
             let (client_settled_tx, client_settled_rx) = std::sync::mpsc::channel();
             let client = std::thread::spawn(move || {
                 let result = match operation {
-                    WorkerOperation::BeginTransaction => {
-                        execute_transaction_request(&mut transaction, &client_dir, &client_argv)
-                            .map(|_| ())
+                    WorkerOperation::BeginTransaction | WorkerOperation::Request => {
+                        let action = execute_transaction_request(
+                            &mut transaction,
+                            &client_dir,
+                            &client_argv,
+                        )
+                        .map(|_| ());
+                        (action, end_transaction(&mut transaction))
                     }
-                    WorkerOperation::EndTransaction => end_transaction(&mut transaction),
-                    WorkerOperation::Request => unreachable!(),
+                    WorkerOperation::EndTransaction => (Ok(()), end_transaction(&mut transaction)),
                 };
                 client_settled_tx.send(()).unwrap();
                 result
@@ -6504,9 +7285,27 @@ tidepool-reuse-error: witness failed\n";
             client_settled_rx
                 .recv_timeout(Duration::from_secs(4))
                 .expect("control operation did not settle");
-            let error = client.join().unwrap().unwrap_err();
-            assert!(error.was_accepted(), "{error}");
-            assert!(!error.permits_rebind(), "{error}");
+            let (action, close) = client.join().unwrap();
+            if !matches!(operation, WorkerOperation::EndTransaction) {
+                let error = action.unwrap_err();
+                assert!(error.was_accepted(), "{error}");
+                assert!(!error.permits_rebind(), "{error}");
+            }
+            let DaemonClose::Retired(retirement) =
+                close.expect("exact worker retirement must be reported on the original connection")
+            else {
+                panic!("failed/cancelled control work cannot become clean END");
+            };
+            assert!(matches!(
+                retirement.worker,
+                crate::CompilerWorkerRetirement::Reaped(_)
+            ));
+            let pids = std::fs::read_to_string(dir.join("worker-pids")).unwrap();
+            let first = pids.lines().next().unwrap();
+            assert!(
+                !Path::new("/proc").join(first).exists(),
+                "retirement receipt preceded exact worker reap"
+            );
             if !matches!(recovery, ControlRecovery::Stop) {
                 let next = preflight(&socket).unwrap();
                 assert_eq!(next.epoch, binding.epoch);

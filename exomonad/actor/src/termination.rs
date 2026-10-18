@@ -164,13 +164,10 @@ pub enum CompilerWorkClose {
 
 impl CompilerWorkClose {
     pub(crate) fn is_confirmed(&self) -> bool {
-        matches!(
-            self,
-            Self::Settled(
-                tidepool_runtime::CompilerTransactionClose::Clean
-                    | tidepool_runtime::CompilerTransactionClose::NotStarted
-            )
-        )
+        match self {
+            Self::Settled(close) => close.resources_retired(),
+            Self::Pending | Self::Abandoned => false,
+        }
     }
 }
 

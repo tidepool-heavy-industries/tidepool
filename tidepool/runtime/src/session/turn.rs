@@ -3008,9 +3008,15 @@ pub fn finish_cell_program_admitted(
         .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
     let outcome = outcome.into_outcome();
     let prepared = outcome.action?;
-    if let crate::CompilerTransactionClose::Unconfirmed(evidence) = outcome.close {
-        tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = "unconfirmed", "cell program publication refused");
-        return Err(CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into());
+    match outcome.close {
+        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
+        crate::CompilerTransactionClose::Unconfirmed(evidence)
+        | crate::CompilerTransactionClose::Retired(evidence) => {
+            tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?evidence, "cell program publication refused");
+            return Err(
+                CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
+            );
+        }
     }
     if !belongs_to_owner {
         return Err(CompileError::CompilerPublication(
