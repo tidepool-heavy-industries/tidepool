@@ -3286,15 +3286,42 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
     );
     graph.custody_roots.extend(graph.roots.drain(..));
     graph.roots = root_proof.selection.graph_selection().roots.clone();
+    let expected = graph
+        .bindings
+        .iter()
+        .copied()
+        .map(ArtifactBindingNode::Artifact)
+        .chain(
+            graph
+                .native_groups
+                .iter()
+                .copied()
+                .map(ArtifactBindingNode::Group),
+        )
+        .collect::<BTreeSet<_>>();
+    let closure = complete
+        .artifacts()
+        .selection_snapshot()
+        .nodes_from_seeds(graph.roots.iter().chain(&graph.custody_roots).copied())
+        .unwrap();
+    let custody_distinct = graph.custody_roots.iter().copied().collect::<BTreeSet<_>>();
+    let missing = expected
+        .iter()
+        .filter(|node| !closure.contains(*node))
+        .collect::<Vec<_>>();
+    let extra = closure
+        .iter()
+        .filter(|node| !expected.contains(*node))
+        .collect::<Vec<_>>();
     let selected = complete
         .artifacts()
         .select_issued(
             vec![ids[1]],
             &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
-                graph,
+                graph.clone(),
             ),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("actual_error={error:?}; expected={} closure={} roots={:?} custody_count={} custody_distinct={} missing={missing:?} extra={extra:?}", expected.len(), closure.len(), graph.roots, graph.custody_roots.len(), custody_distinct.len()));
     assert_eq!(
         selected.selected_native_groups(),
         BTreeSet::from([
