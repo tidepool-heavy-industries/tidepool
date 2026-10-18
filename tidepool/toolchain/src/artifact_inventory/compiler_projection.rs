@@ -2455,7 +2455,10 @@ mod tests {
             let row = actual
                 .native_availability
                 .rows()
-                .find(|row| row.original.descriptor.id == entry.descriptor.id)
+                .find(|row| {
+                    row.target_original(row.original_owner())
+                        .is_some_and(|original| original.descriptor.id == entry.descriptor.id)
+                })
                 .unwrap();
             assert_eq!(row.permits(7), ordinals.contains(&7));
             assert_eq!(row.permits(9001), ordinals.contains(&9001));
