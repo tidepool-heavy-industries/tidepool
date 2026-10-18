@@ -501,6 +501,59 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
     );
     super::scaffold_admission_tests::prepared_scaffold(config);
     configure_command_path(config);
+    let contract = auth.admission().unwrap().contract().clone();
+    let (credential_file, credential_env) = match &contract.credential {
+        CredentialReference::File { path } => (Some(path.clone()), None),
+        CredentialReference::Env { name } => (None, Some(name.clone())),
+    };
+    crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
+        use crate::exomonad::model_catalog::{
+            InferenceConfig, ModelConfig, ProfileConfig, ProviderConfig,
+        };
+        use std::collections::BTreeMap;
+        let mut provider = ProviderConfig {
+            backend: exomonad_actor::Backend::DeepSeek,
+            credential_file,
+            credential_env,
+            endpoint: Some(contract.endpoint.clone()),
+            inference_limits: Default::default(),
+        };
+        provider.inference_limits.max_output_tokens = contract.limits.max_output_tokens;
+        provider.inference_limits.connect_timeout_secs = Some(contract.limits.connect_timeout_secs);
+        provider.inference_limits.total_timeout_secs = Some(contract.limits.total_timeout_secs);
+        provider.inference_limits.max_inflight = Some(contract.limits.max_inflight);
+        project.inference = Some(InferenceConfig {
+            profile: "offline".into(),
+            providers: BTreeMap::from([("offline".into(), provider)]),
+            models: BTreeMap::from([
+                (
+                    "primary".into(),
+                    ModelConfig {
+                        provider: "offline".into(),
+                        model: exomonad_actor::Model::DeepSeekFlash.value().into(),
+                        constructor: "Primary".into(),
+                        effort: "high".into(),
+                    },
+                ),
+                (
+                    "pro".into(),
+                    ModelConfig {
+                        provider: "offline".into(),
+                        model: exomonad_actor::Model::DeepSeekPro.value().into(),
+                        constructor: "Pro".into(),
+                        effort: "high".into(),
+                    },
+                ),
+            ]),
+            profiles: BTreeMap::from([(
+                "offline".into(),
+                ProfileConfig {
+                    default: "primary".into(),
+                    allowed: vec!["primary".into(), "pro".into()],
+                },
+            )]),
+        });
+    });
     config.inference_auth = Some(RunAuth::DeepSeek(auth));
     config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
     std::fs::write(config.workspace.join("score.rs"), INITIAL).unwrap();
