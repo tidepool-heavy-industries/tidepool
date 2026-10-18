@@ -1980,10 +1980,9 @@ mod tests {
                         .join(&interface.interface.interface_path)
                         .is_file());
                 }
-                let roles: Vec<CompilerInputRole> = serde_json::from_slice(
-                    &serde_json::to_vec(&snapshot.compiler_input_roles()).unwrap(),
-                )
-                .unwrap();
+                // Complete owner evidence uses the strong recorded roles;
+                // legacy graph DTOs can omit unused available proof scopes.
+                let roles = snapshot.compiler_input_roles();
                 let snapshot_selection: crate::artifact_inventory::ArtifactGraphSelection =
                     serde_json::from_slice(
                         &serde_json::to_vec(&snapshot.artifact_view().capture_graph_selection())
