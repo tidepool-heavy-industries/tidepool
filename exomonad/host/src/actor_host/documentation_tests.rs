@@ -2370,7 +2370,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                 let result = displayed(
                     campaign,
                     policy.as_ref(),
-                    "import qualified Project.SkillChecks\nimport qualified Project.RecursiveSpec\nobserved <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
+                    "import qualified Project.SkillChecks\nimport qualified Project.RecursiveSpec\nobserved <- snapshot\ndisplay (show (swarmUsage observed))",
                 )
                 .await;
                 assert!(
