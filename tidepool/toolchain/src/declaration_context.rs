@@ -17983,18 +17983,30 @@ mod tests {
 
     #[test]
     fn exact_product_binding_preserves_lexical_evidence_and_request_identity() {
+        use crate::artifact_inventory::CanonicalProducerIdentity;
         use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
 
         let directory = tempfile::tempdir().unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let first_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .admit_producer(
+                CanonicalProducerIdentity::from_producer_bytes(b"first producer").sha256(),
+            )
+            .unwrap();
+        let second_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .admit_producer(
+                CanonicalProducerIdentity::from_producer_bytes(b"second producer").sha256(),
+            )
+            .unwrap();
         let roots = [
             directory.path().join("first"),
             directory.path().join("second"),
         ];
-        let first_request = ExactCompileContext::new(context.clone())
+        let first_request = ExactCompileContext::new(Arc::new(first_context))
             .prepare_compilation(&directory.path().join("first-request"), b"first producer")
             .unwrap();
-        let second_request = ExactCompileContext::new(context)
+        let second_request = ExactCompileContext::new(Arc::new(second_context))
             .prepare_compilation(&directory.path().join("second-request"), b"second producer")
             .unwrap();
         let (first, source) = generated_source_admission_fixture(&roots[0], &first_request);
