@@ -2909,6 +2909,29 @@ mod tests {
             let joined = winner
                 .merge(&historical)
                 .expect("a losing historical issuer does not replace the selected input choice");
+            let prior_constructor = super::tests::reference_compiler_selection(
+                &winner.artifacts,
+                &historical.artifacts,
+                &joined.artifacts.namespace(),
+                joined.artifacts.roots(),
+            );
+            assert_eq!(
+                joined.artifacts.capture_graph_selection(),
+                prior_constructor.capture_graph_selection(),
+            );
+            let current_metadata = joined.artifacts.metadata_snapshot();
+            let prior_metadata = prior_constructor.metadata_snapshot();
+            assert_eq!(current_metadata.entries, prior_metadata.entries);
+            assert_eq!(current_metadata.artifacts, prior_metadata.artifacts);
+            assert_eq!(
+                current_metadata.selected_native_groups,
+                prior_metadata.selected_native_groups
+            );
+            assert_eq!(
+                current_metadata.ambiguous_native_owners,
+                prior_metadata.ambiguous_native_owners
+            );
+            drop(prior_constructor);
             assert_eq!(pair(&joined), pair(&winner));
             assert_eq!(joined.input_decisions.facts[owner].groups, winner_choices);
             let selected_groups = joined.artifacts.capture_graph_selection().native_groups;

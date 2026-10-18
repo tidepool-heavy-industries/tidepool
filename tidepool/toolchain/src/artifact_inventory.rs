@@ -10398,6 +10398,185 @@ mod tests {
         ))
     }
 
+    // Frozen f866 constructor sequence: the policy solver is deliberately not
+    // duplicated. Its output roots/namespace feed both construction paths.
+    pub(super) fn reference_compiler_selection(
+        left: &ArtifactView,
+        right: &ArtifactView,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        roots: &[InventoryNodeKey],
+    ) -> ArtifactView {
+        left.validate_issued_merge(right).unwrap();
+        let joined = left
+            .merge_validated_namespace(right, namespace.clone())
+            .unwrap();
+        let custody = joined
+            .roots()
+            .iter()
+            .chain(joined.custody_roots())
+            .copied()
+            .filter(|node| !roots.contains(node))
+            .collect::<BTreeSet<_>>();
+        let retained = joined.inventory().retain(
+            roots.to_vec(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = joined.retain_projected_materializations(retained).unwrap();
+        retained.replace_namespace(namespace);
+        retained
+    }
+
+    fn check_direct_compiler_selection(
+        count: usize,
+        cross_inventory: bool,
+        reverse: bool,
+        extend: bool,
+    ) {
+        let first = ArtifactInventory::default();
+        let second = if cross_inventory {
+            ArtifactInventory::default()
+        } else {
+            first.clone()
+        };
+        let shared = Arc::new(entry("SharedMergeLeaf", &[]));
+        let issue =
+            |inventory: &ArtifactInventory, prefix: &str| {
+                let mut entries = vec![shared.clone()];
+                entries.extend((0..count).map(|index| {
+                    Arc::new(entry(&format!("{prefix}{index}"), &["SharedMergeLeaf"]))
+                }));
+                let roles = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+                entries.push(Arc::new(entry(&format!("{prefix}Custody"), &[])));
+                let view = inventory
+                    .admit_shared(&inventory.empty_view(), entries)
+                    .unwrap();
+                view.entries();
+                (view, roles)
+            };
+        let (left, left_roles, left_excluded) = issue(&first, "LeftMerge");
+        let (right, right_roles, right_excluded) = issue(&second, "RightMerge");
+        let (left, left_roles, right, right_roles) = if reverse {
+            (right, right_roles, left, left_roles)
+        } else {
+            (left, left_roles, right, right_roles)
+        };
+        let inventory = left.inventory().clone();
+        let before = inventory.metrics();
+        let (actual, roles, _) = left
+            .merge_compiler_inputs_with_demand(
+                &left_roles,
+                &right,
+                &right_roles,
+                if extend {
+                    CompilerNativeDemand::ExtendInterfaces
+                } else {
+                    CompilerNativeDemand::RoleIssuer
+                },
+                CompilerInputValidation::Closed,
+            )
+            .unwrap();
+        let actual_work = inventory.metrics().graph_visits - before.graph_visits;
+        let before = inventory.metrics();
+        let expected =
+            reference_compiler_selection(&left, &right, &actual.namespace(), actual.roots());
+        let reference_work = inventory.metrics().graph_visits - before.graph_visits;
+        assert_eq!(
+            actual_work, 0,
+            "warm operands need no inventory closure rewalk"
+        );
+        assert!(reference_work >= (count * 2 + 1) as u64);
+        assert_eq!(roles, left_roles.merge(&right_roles).unwrap());
+        assert_eq!(
+            actual.capture_graph_selection(),
+            expected.capture_graph_selection()
+        );
+        assert_eq!(
+            actual.binding_dependencies(),
+            expected.binding_dependencies()
+        );
+        assert_eq!(actual.selection_snapshot(), expected.selection_snapshot());
+        let actual_metadata = actual.metadata_snapshot();
+        let expected_metadata = expected.metadata_snapshot();
+        assert_eq!(actual_metadata.entries, expected_metadata.entries);
+        assert_eq!(actual_metadata.artifacts, expected_metadata.artifacts);
+        assert_eq!(
+            actual_metadata.dependencies(),
+            expected_metadata.dependencies()
+        );
+        assert_eq!(
+            actual_metadata.selected_native_groups,
+            expected_metadata.selected_native_groups
+        );
+        assert_eq!(
+            actual_metadata.ambiguous_native_owners,
+            expected_metadata.ambiguous_native_owners
+        );
+        if extend {
+            assert!(left
+                .roots()
+                .iter()
+                .all(|root| actual.roots().contains(root)));
+        } else {
+            assert!(actual.roots().iter().all(|root| actual
+                .namespace()
+                .values()
+                .any(|binding| *root == InventoryNodeKey::Artifact(*binding))));
+        }
+        for id in actual.artifact_ids() {
+            assert!(Arc::ptr_eq(
+                &actual.lease.payloads[&id],
+                &expected.lease.payloads[&id]
+            ));
+        }
+        let selected = actual.namespace()[&shared.descriptor.id];
+        assert_eq!(selected, left.namespace()[&shared.descriptor.id]);
+        assert_ne!(selected, right.namespace()[&shared.descriptor.id]);
+        let packet = actual.capture_graph_selection();
+        let edges = actual.binding_dependencies();
+        let entries = actual.entries();
+        drop(expected);
+        drop(left);
+        drop(right);
+        drop(first);
+        drop(second);
+        assert_eq!(actual.capture_graph_selection(), packet);
+        let fresh = ArtifactInventory::default();
+        let recovered = fresh
+            .recover_selection(&fresh.empty_view(), entries, &packet, &edges)
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), packet);
+        assert!(left_excluded.upgrade().is_none() && right_excluded.upgrade().is_none());
+        assert!(actual.lease.materialization_sources.is_empty());
+        assert!(actual.lease.materialization.parents.is_empty());
+    }
+
+    #[test]
+    fn direct_compiler_selection_matches_prior_constructor_without_closure_rewalk() {
+        for count in [1, 8, 64] {
+            for cross_inventory in [false, true] {
+                for reverse in [false, true] {
+                    for extend in [false, true] {
+                        check_direct_compiler_selection(count, cross_inventory, reverse, extend);
+                    }
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn direct_compiler_selection_recovers_exact_issued_owners(
+            count in 1usize..12,
+            cross_inventory in proptest::bool::ANY,
+            reverse in proptest::bool::ANY,
+            extend in proptest::bool::ANY,
+        ) {
+            check_direct_compiler_selection(count, cross_inventory, reverse, extend);
+        }
+    }
+
     #[test]
     fn shared_canonical_payload_preserves_each_issued_child_binding() {
         let inventory = ArtifactInventory::default();

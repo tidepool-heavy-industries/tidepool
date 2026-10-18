@@ -913,3 +913,87 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     assert!(payload.upgrade().is_none());
     assert!(!proof.scopes.is_empty());
 }
+
+#[test]
+fn compiler_support_merge_keeps_preferred_physical_rows_after_donor_drop() {
+    for reverse in [false, true] {
+        let (first, producer) = metadata_fixture();
+        let (second, second_producer) = metadata_fixture();
+        assert_eq!(producer, second_producer);
+        let scratch = tempfile::tempdir().unwrap();
+        let first_request = first
+            .prepare_compilation(&scratch.path().join("first"), &producer)
+            .unwrap();
+        let second_request = second
+            .prepare_compilation(&scratch.path().join("second"), &producer)
+            .unwrap();
+        let (left, right, preferred, excluded) = if reverse {
+            (&second, &first, &first_request, &second_request)
+        } else {
+            (&first, &second, &second_request, &first_request)
+        };
+        let preferred_paths = preferred
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.interface.path.clone())
+            .collect::<Vec<_>>();
+        let expected_bytes = preferred_paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        let preferred_directory = preferred
+            .materialization
+            .as_ref()
+            .unwrap()
+            .directory()
+            .path()
+            .to_path_buf();
+        let excluded_directory = excluded
+            .materialization
+            .as_ref()
+            .unwrap()
+            .directory()
+            .path()
+            .to_path_buf();
+        let support = left
+            .compiler_source_support()
+            .merge(right.compiler_source_support())
+            .unwrap();
+        let merged = Arc::new(left.as_ref().clone().rebuild(|facts| {
+            facts.compiler_support = support;
+        }));
+        let request = merged
+            .prepare_compilation(&scratch.path().join("merged"), &producer)
+            .unwrap();
+        assert_eq!(
+            request
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.interface.path.clone())
+                .collect::<Vec<_>>(),
+            preferred_paths,
+            "the last physical issuer wins even for byte-identical artifacts"
+        );
+        assert_eq!(
+            request
+                .materialization
+                .as_ref()
+                .unwrap()
+                .payload_work
+                .written_bytes,
+            0
+        );
+        drop(first_request);
+        drop(second_request);
+        drop(first);
+        drop(second);
+        assert!(!excluded_directory.exists());
+        assert!(preferred_directory.is_dir());
+        for (path, expected) in preferred_paths.iter().zip(expected_bytes) {
+            assert_eq!(std::fs::read(path).unwrap(), expected);
+        }
+        drop(request);
+        drop(merged);
+        assert!(!preferred_directory.exists());
+    }
+}
