@@ -598,24 +598,8 @@ impl EntryPreparation {
             ));
         }
         require_absent_output(&self.output)?;
-        let CompilerDeploymentConfiguration::Configured(authority) =
-            CompilerDeploymentConfiguration::from_env().map_err(invalid)?
-        else {
-            return Err(invalid("configured compiler deployment unavailable"));
-        };
-        CompilerDeploymentConfiguration::Configured(authority)
-            .admit(
-                deployment.producer_identity,
-                deployment.consumed_worker_identity,
-            )
-            .map_err(invalid)?;
-        sources.revalidate(source)?;
         if admitted.output.source_path() != source {
             return Err(invalid("admitted original selects another source"));
-        }
-        if let Some(catalog) = catalog {
-            catalog.validate_deployment(deployment)?;
-            catalog.validate_current_sources()?;
         }
         if admitted.dependency_selection.is_some()
             && !matches!(sources, ProductionEntrySources::FrozenWorkspace(_))
@@ -661,6 +645,22 @@ impl EntryPreparation {
             != manifest_bytes
         {
             return Err(invalid("original manifest changed before publication"));
+        }
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().map_err(invalid)?
+        else {
+            return Err(invalid("configured compiler deployment unavailable"));
+        };
+        CompilerDeploymentConfiguration::Configured(authority)
+            .admit(
+                deployment.producer_identity,
+                deployment.consumed_worker_identity,
+            )
+            .map_err(invalid)?;
+        sources.revalidate(source)?;
+        if let Some(catalog) = catalog {
+            catalog.validate_deployment(deployment)?;
+            catalog.validate_current_sources()?;
         }
         if inventory(self.raw())? != manifest.files {
             return Err(invalid("complete original container differs"));

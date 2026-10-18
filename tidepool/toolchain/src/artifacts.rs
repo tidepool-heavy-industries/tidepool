@@ -8436,21 +8436,31 @@ mod module_product_tests {
         let source = authored.join("Input.hs");
         std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
         let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
-        for captured in [false, true] {
-            let output = root
-                .path()
-                .join(if captured { "captured" } else { "extra" });
+        #[derive(Clone, Copy)]
+        enum Mutation {
+            Captured,
+            Extra,
+            Source,
+        }
+        for mutation in [Mutation::Captured, Mutation::Extra, Mutation::Source] {
+            let name = match mutation {
+                Mutation::Captured => "captured",
+                Mutation::Extra => "extra",
+                Mutation::Source => "source",
+            };
+            let output = root.path().join(name);
             let raw = output.with_extension("preparing").join("raw");
             let changed = raw.clone();
+            let changed_source = source.clone();
             let loads = production_entry::entry_load_count();
             let admissions = production_entry::entry_admission_count();
             let error = production_entry::with_checkpoint_observer(
                 move |stage| {
                     if stage == EntryCheckpoint::ManifestWrite {
-                        let path = if captured {
-                            changed.join("meta.cbor")
-                        } else {
-                            changed.join("unconsumed-extra")
+                        let path = match mutation {
+                            Mutation::Captured => changed.join("meta.cbor"),
+                            Mutation::Extra => changed.join("unconsumed-extra"),
+                            Mutation::Source => changed_source.clone(),
                         };
                         std::fs::write(path, b"changed after semantic admission").unwrap();
                     }
