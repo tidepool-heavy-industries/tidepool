@@ -1953,15 +1953,27 @@ impl PersistentSession {
             Arc<super::admission::RuntimeLexicalScopeLease>,
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(
+        let source = staged.scope();
+        let mut successor = None;
+        let committed = self.adopt_staged_declaration_prepared(
             staged,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
                     session.prepare_declaration_successor(staged, origin, changes, next_epoch)?;
+                successor = Some(retained.scope());
                 prepare(view, visibility, retained)
             },
-        )
+        );
+        if committed.is_ok() {
+            let context = self.lib().current_scoped_compiler_context_in(source);
+            self.lib_mut()
+                .tips
+                .get_mut(&successor.expect("prepared declaration successor"))
+                .expect("installed declaration successor scope")
+                .exact_context = context;
+        }
+        committed
     }
 
     fn adopt_staged_declaration_prepared<A: FnOnce()>(
