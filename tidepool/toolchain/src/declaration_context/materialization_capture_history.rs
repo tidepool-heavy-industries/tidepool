@@ -120,7 +120,7 @@ fn observe_materialization_parent_roster(
                 "row_count": rows.len(), "row_sources": rows.iter().take(32).collect::<Vec<_>>(),
                 "row_directory_correlations": ancestor.rows.values().take(32).map(|row| Arc::as_ptr(&row._directory) as usize).collect::<Vec<_>>(),
                 "group_count": ancestor.groups.len(),
-                "group_keys": ancestor.groups.iter().take(32).map(|group| (group.owner(), group.group().original_ordinal())).collect::<Vec<_>>(),
+                "group_keys": ancestor.groups.iter().take(32).map(|group| (&group.owner().unit, &group.owner().module, group.group().original_ordinal())).collect::<Vec<_>>(),
                 "graph_count": ancestor.graph_paths.len(),
                 "graph_sources": ancestor.graph_paths.iter().take(32).map(|(digest, file)| (hex(digest), &file.path, file._directory.path())).collect::<Vec<_>>(),
             }));
