@@ -344,6 +344,13 @@ through later native execution and case settlement. Requests are recorded before
 compiler execution, so timeout or hard termination preserves pending inputs.
 Ordinary production and build-action scratch retain their normal cleanup.
 
+The runner's `--compiler-diagnostics off` independently sets
+`TIDEPOOL_TEST_COMPILER_DIAGNOSTICS=off`: automatic compiler transaction capture
+is disabled and scratch uses its ordinary lifetime, while hosted lifecycle
+evidence and the selected trace/timing profile remain enabled. The default
+`capture` preserves transaction diagnostics. Failure-path evidence retention
+remains independent of this automatic-capture choice.
+
 `CompilerDiagnosticCapture` records bounded hashes and consumed-source copies
 before consumers execute; raw compiler products stay at their original paths.
 The hash walk covers at most 128 MiB, 4096 entries and depth 16; the existing

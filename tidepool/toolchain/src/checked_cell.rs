@@ -3952,12 +3952,16 @@ pub(crate) fn admit_checked_cell<'a>(
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     program: Option<&CheckedPlannedCellSpecification>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
+    let mut admission_timing = crate::timing::InvocationTiming::start_scoped(
+        "checked_cell.admit",
+        "read_decode_and_receipt_header",
+    );
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
     let header = row(&value, if program.is_some() { 12 } else { 10 })?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
-    let output = decode(&observations)?;
-    let output = cell_observations(&output)?;
+    let output_value = decode(&observations)?;
+    let output = cell_observations(&output_value)?;
     let checked_source = string(&output[2])?.to_owned();
     validate_cell_receipt_header(
         header,
@@ -3998,6 +4002,7 @@ pub(crate) fn admit_checked_cell<'a>(
         Some(program) => decode_typed_segment_plans(&header[11], program)?,
         None => Vec::new(),
     };
+    admission_timing.advance("late_source_revalidation_and_evidence_capture");
     let evidence = if program.is_some() {
         admissions
             .into_iter()
@@ -4023,6 +4028,7 @@ pub(crate) fn admit_checked_cell<'a>(
             .ok_or_else(|| failure("cell has no exact final source witness"))?;
         vec![(checked_source.clone(), source.evidence().clone())]
     };
+    admission_timing.advance("signatures_and_item_correspondence");
     let signatures = list(&header[8], 65536)?
         .iter()
         .map(decode_signature)
@@ -4206,7 +4212,8 @@ pub(crate) fn admit_checked_cell<'a>(
             failure("whole-cell authority contains an unowned pin, plan or signature")
         });
     }
-    Ok(Arc::new(ExactCheckedCell {
+    admission_timing.advance("assemble_checked_owner");
+    let cell = Arc::new(ExactCheckedCell {
         specification: specification.clone(),
         producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
             producer,
@@ -4225,7 +4232,13 @@ pub(crate) fn admit_checked_cell<'a>(
         planned_declarations,
         typed_segments,
         value_inputs,
-    }))
+    });
+    admission_timing.advance("temporary_receipt_values_drop");
+    drop(output_value);
+    drop(value);
+    drop(receipt);
+    admission_timing.finish(true);
+    Ok(cell)
 }
 
 /// Opaque exact key joining a planned entry with its compiler-issued capture.

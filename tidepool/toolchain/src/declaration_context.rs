@@ -7871,6 +7871,12 @@ impl ExactDeclarationContext {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Vec<u8> {
         use sha2::Digest;
+        let span = tracing::debug_span!(target: "exomonad_harness::timing", "exact.semantic_encoding", inclusive = true, artifacts = metadata.artifacts.len(), selected_native_groups = metadata.selected_native_groups.len(), lexical_nodes = self.owner.facts.lexical.len());
+        let _entered = span.enter();
+        let mut semantic_timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.semantic_encoding",
+            "construct_metadata_json_digest_and_semantic_value",
+        );
         let mut lexical = self.owner.facts.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
         let mut native = metadata
@@ -8021,8 +8027,13 @@ impl ExactDeclarationContext {
             ]));
         }
         let value = Value::Array(fields);
+        semantic_timing.advance("encode_semantic_value");
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
+        tracing::debug!(target: "exomonad_harness::timing", encoded_bytes = bytes.len(), "semantic encoded bytes");
+        semantic_timing.advance("temporary_semantic_value_drop");
+        drop(value);
+        semantic_timing.finish(true);
         bytes
     }
 
