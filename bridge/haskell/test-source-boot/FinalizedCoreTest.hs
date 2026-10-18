@@ -58,7 +58,7 @@ import Numeric (showHex)
 import Data.List (isInfixOf, isPrefixOf, stripPrefix, intercalate)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory
-  , removeDirectoryRecursive, removeFile )
+  , removeDirectoryRecursive, removeFile, listDirectory )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
@@ -75,10 +75,10 @@ import Tidepool.ExactScope
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
-import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
-import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
+import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts)
 import Tidepool.GhcPipeline
-  ( pprPipelineResult, pprFinalizedModules, prHscEnv, prResultType, PipelineSelection(..)
+  ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
   , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected, withSourceImportIntents )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
@@ -249,6 +249,19 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     [item] -> pure item
     _ -> fail "compiler omitted its original module summary"
   deferredFinalizationChecks work env finalized
+  let heldDirectory = work </> "capture-before-materialization"
+  createDirectory heldDirectory
+  heldInterfaces <- newPreparedOriginalInterfaceArtifacts prepared heldDirectory
+  ((_, issuedOutputs), publicationCounts) <- withTiming $ captureDiagnostics $ do
+    held <- captureFinalizedModuleArtifacts heldInterfaces env (pprFinalizedModules prepared)
+      (pprPackageImports prepared) (preparedFreshDependencies prepared) heldDirectory
+    capturedFiles <- listDirectory heldDirectory
+    assert (null capturedFiles) "held capture wrote finalized packet destination files"
+    materializeFinalizedModuleArtifactsWithOutputs heldDirectory held
+  packetFiles <- listDirectory heldDirectory
+  assert (not (null issuedOutputs) && length packetFiles == length issuedOutputs
+      && captureCount "finalized_payload_materializations" publicationCounts == fromIntegral (length packetFiles))
+    "first publication materialized a finalized packet payload more than once"
   capture <- captureCompilerFixture (FixtureCompilerInput work source [work]) prepared
   scopePath <- writeGenuineMetadataScope work ["FinalizedCoreFixture"] capture
   scope <- requireRight =<< readExactScope scopePath

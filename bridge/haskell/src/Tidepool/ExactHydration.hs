@@ -72,8 +72,7 @@ import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
   , lookupHpt )
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
-import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Driver.Session (DynFlags, importPaths, targetProfile, ghcMode, GhcMode(CompManager), xopt)
+import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
 import qualified GHC.Parser as Parser (parseImport)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
