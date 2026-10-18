@@ -1765,6 +1765,124 @@ mod tests {
     }
 
     #[test]
+    fn issued_daemon_retirement_settles_actor_resources_without_authorizing_failed_cells() {
+        // The owning native runner must provide its actual private daemon;
+        // direct fallback cannot issue the daemon retirement under test.
+        std::env::var_os(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV)
+            .expect("this regression requires the native runner's owned compiler daemon");
+        let services = crate::capabilities::WorkbenchServices::new();
+        let owner = RetainedActorExit::new();
+        let ticket = admitted_compiler(&services, &owner);
+        let observation = ticket.control().observation();
+        let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "cancel accepted compiler use");
+        let settled = ticket.run_with_close(|close| {
+            tidepool_toolchain::artifacts::check_source(
+                &tidepool_toolchain::artifacts::SourceCheckRequest {
+                    source: "module RetirementObservation where\nvalue = (42 :: Int)\n",
+                    include: &[], fallback_module_name: "RetirementObservation",
+                }, close,
+            ).expect("the real compiler request must finish before cancellation of its still-open transaction");
+            assert!(matches!(observation.observation(), CompilerWorkClose::Pending));
+            owner.request_shutdown(terminal.clone());
+            Err::<(), _>("primary cancelled action")
+        });
+        assert_eq!(settled.action(), &Err("primary cancelled action"));
+        let issued = settled.close().clone();
+        assert!(matches!(
+            &issued,
+            tidepool_runtime::CompilerTransactionClose::Retired(_)
+        ));
+        assert!(issued.resources_retired());
+        assert!(
+            !issued.is_clean(),
+            "abnormal resource settlement cannot authorize compiler publication"
+        );
+        owner.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
+            334,
+        ))));
+        owner.publish(terminal.clone()).unwrap();
+        assert_eq!(owner.get(), Some(terminal));
+        assert!(owner.cleanup().unwrap().is_confirmed());
+        assert!(admitted_compiler_refusal(&services, &owner));
+
+        let actor = crate::ActorRef::first(crate::ActorId(335));
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([33; 16]);
+        let failed = Err(crate::KernelInvocationFailure::Failed {
+            actor,
+            detail: "primary execution failure".into(),
+            receipts: Vec::new(),
+            diagnostic: None,
+        });
+        let cancelled = Err(crate::KernelInvocationFailure::Cancelled { actor });
+        let complete = Ok(crate::KernelStep::Continue(
+            tidepool_runtime::session::WorkbenchResponse {
+                publication: None,
+                status: tidepool_runtime::session::WorkbenchRunStatus::Completed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 1,
+                total: 1,
+            },
+        ));
+        for (reply, expected) in [
+            (&failed, crate::CellExitCause::Failed),
+            (&cancelled, crate::CellExitCause::Cancelled),
+        ] {
+            let exit = crate::CellExit::from_reply(
+                execution,
+                reply,
+                owner.cleanup().unwrap().is_confirmed(),
+                false,
+            );
+            assert_eq!(exit.cause, expected);
+            assert!(exit.cleanup_confirmed);
+            assert!(!exit.permits_context_commit());
+        }
+        let successful = crate::CellExit::from_reply(
+            execution,
+            &complete,
+            owner.cleanup().unwrap().is_confirmed(),
+            false,
+        );
+        assert_eq!(successful.cause, crate::CellExitCause::FullReturn);
+        assert!(
+            successful.permits_context_commit(),
+            "successful execution has an independent resource-only cleanup requirement"
+        );
+
+        // Reuse only the already-issued immutable observation. Earlier unknown
+        // use must survive both report orders and retain its exact input owner.
+        for uncertain_first in [false, true] {
+            let retained = RetainedActorExit::new();
+            let ticket = admitted_compiler(&services, &retained);
+            let file = Arc::new(tempfile::tempfile().unwrap());
+            let weak = Arc::downgrade(&file);
+            let result = ticket.run_with_close(|close| {
+                assert!(tidepool_extract_cmd::retain_compiler_input_file(file));
+                for report in if uncertain_first {
+                    [uncertain_close(), issued.clone()]
+                } else {
+                    [issued.clone(), uncertain_close()]
+                } {
+                    close(report);
+                }
+                Err::<(), _>("earlier uncertain input use")
+            });
+            retained.retain_cleanup(clean_actor_cleanup(actor));
+            assert_eq!(result.action(), &Err("earlier uncertain input use"));
+            assert!(matches!(
+                result.close(),
+                tidepool_runtime::CompilerTransactionClose::Unconfirmed(_)
+            ));
+            assert!(!retained.cleanup().unwrap().is_confirmed());
+            assert!(weak.upgrade().is_some());
+            drop(result);
+            drop(retained);
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[test]
     fn completed_compiler_close_is_retained_before_actor_stop() {
         let services = crate::capabilities::WorkbenchServices::new();
         let owner = RetainedActorExit::new();
