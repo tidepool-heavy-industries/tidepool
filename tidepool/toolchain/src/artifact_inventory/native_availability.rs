@@ -697,6 +697,16 @@ impl PartialEq for NativeOfferContribution {
 impl Eq for NativeOfferContribution {}
 
 impl NativeOfferContribution {
+    pub(crate) fn matches_direct_canonical_binding(
+        &self,
+        original: ArtifactId,
+        canonical: ArtifactId,
+        namespace: &ArtifactView,
+    ) -> bool {
+        self.offer
+            .matches_canonical_binding_within(original, canonical, namespace, &self.reachable)
+    }
+
     pub(crate) fn snapshot_facts(
         &self,
     ) -> Result<crate::declaration_context::NativeContributionSnapshotFacts, CompileError> {
@@ -1622,17 +1632,38 @@ impl IssuedNativeOffer {
 
     /// Observe an issued carrier's affinity without granting any body groups.
     /// Empty and partial rows keep their normalized permission unchanged.
-    pub(crate) fn matches_direct_canonical_binding(&self, namespace: &ArtifactView) -> bool {
-        let Some(canonical) = namespace.lease.selection.namespace.get(&self.0.interface) else {
+    pub(crate) fn matches_direct_canonical_binding(
+        &self,
+        original: ArtifactId,
+        canonical: ArtifactId,
+        namespace: &ArtifactView,
+    ) -> bool {
+        self.matches_canonical_binding_within(
+            original,
+            canonical,
+            namespace,
+            &self.0.custody.reachable,
+        )
+    }
+
+    fn matches_canonical_binding_within(
+        &self,
+        original: ArtifactId,
+        canonical: ArtifactId,
+        namespace: &ArtifactView,
+        reachable: &imbl::OrdSet<ArtifactBindingNode>,
+    ) -> bool {
+        let Some(canonical) = namespace.lease.selection.namespace.get(&canonical) else {
             return false;
         };
         self.0.custody.artifact_carriers.iter().any(|carrier| {
-            if carrier.artifact != self.0.original
+            if carrier.artifact != original
+                || !reachable.contains(&ArtifactBindingNode::Artifact(*carrier))
                 || namespace
                     .lease
                     .selection
                     .namespace
-                    .get(&self.0.original)
+                    .get(&original)
                     .is_some_and(|selected| selected != carrier)
             {
                 return false;
@@ -1653,7 +1684,7 @@ impl IssuedNativeOffer {
                 .any(|(_, target, edge)| {
                     *target == ArtifactBindingNode::Artifact(*canonical)
                         && *edge == ArtifactDependency::Interface
-                        && self.0.custody.reachable.contains(target)
+                        && reachable.contains(target)
                 })
         })
     }

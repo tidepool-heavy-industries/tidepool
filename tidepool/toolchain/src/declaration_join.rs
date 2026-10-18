@@ -1,6 +1,7 @@
 //! Compiler validation of an exact declaration join. The public version is
 //! opaque: the resident session compares it on accepted and rejected outcomes.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
