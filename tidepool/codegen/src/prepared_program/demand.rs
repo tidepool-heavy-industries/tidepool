@@ -762,12 +762,46 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        Self::compile_with_entries(group, registry, packages, sources, super::HostEntries::All)
+    }
+
+    /// Compile selected source definitions; Rust entry calls belong to the target.
+    pub fn compile_source_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        Self::compile_with_entries(
+            group,
+            registry,
+            packages,
+            sources,
+            super::HostEntries::DefinitionsOnly,
+        )
+    }
+
+    fn compile_with_entries(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        host_entries: super::HostEntries,
+    ) -> Result<Self, DemandError> {
         let literals = Self::select_literals(&group, packages, sources)?;
-        let image =
-            registry.get_or_compile_literal_group(&group.code_identity(), &literals, || {
-                CompiledProgram::compile_certified_group_with_literals(&group, &literals)
-                    .map(Arc::new)
-            })?;
+        let image = registry.get_or_compile_literal_group(
+            &group.code_identity(),
+            &literals,
+            host_entries,
+            || {
+                CompiledProgram::compile_group_code_with_literals(
+                    &group.code_identity(),
+                    &literals,
+                    host_entries,
+                )
+                .map(Arc::new)
+            },
+        )?;
         Ok(Self {
             group,
             image,
@@ -783,9 +817,35 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        Self::lookup_with_entries(group, registry, packages, sources, super::HostEntries::All)
+    }
+
+    /// Lookup only the exact definitions-only source image; never elect a producer.
+    pub fn lookup_source_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        Self::lookup_with_entries(
+            group,
+            registry,
+            packages,
+            sources,
+            super::HostEntries::DefinitionsOnly,
+        )
+    }
+
+    fn lookup_with_entries(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        host_entries: super::HostEntries,
+    ) -> Result<Self, DemandError> {
         let literals = Self::select_literals(&group, packages, sources)?;
         let image = registry
-            .lookup_literal_group(&group.code_identity(), &literals)
+            .lookup_literal_group(&group.code_identity(), &literals, host_entries)
             .ok_or(DemandError::MissingPreparedNativeImage)?;
         Ok(Self {
             group,
@@ -1581,6 +1641,122 @@ mod tests {
             inventory.seal([source("a")]),
             Err(DemandError::MissingSource(missing)) if missing == source("missing")
         ));
+    }
+
+    #[test]
+    fn source_host_entry_modes_separate_keys_and_actual_emission() {
+        #[derive(Clone)]
+        struct Writer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for count in [1, 4] {
+            let (owner, projected, imports) =
+                outlined_fixture(0, count, 0, false, false, 0).unwrap();
+            let group = CertifiedGroup::admit(owner, projected, imports).unwrap();
+            let registry = ImageRegistry::new();
+            let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Writer(Arc::clone(&output));
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let source = DemandedImage::compile_source_with_literals(
+                    group.clone(),
+                    &registry,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert!(source.image().entries.is_empty());
+                let prepared_source = CompiledProgram::prepare_source_group_code(
+                    &group.code_identity(),
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &registry,
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(source.image(), &prepared_source));
+                drop(prepared_source);
+                assert!(
+                    matches!(
+                        DemandedImage::lookup_with_literals(
+                            group.clone(),
+                            &registry,
+                            &BTreeMap::new(),
+                            &BTreeMap::new()
+                        ),
+                        Err(DemandError::MissingPreparedNativeImage)
+                    ),
+                    "AllEntries cannot consume a live DefinitionsOnly key"
+                );
+                let reused = DemandedImage::lookup_source_with_literals(
+                    group.clone(),
+                    &registry,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(source.image(), reused.image()));
+                let all = DemandedImage::compile(group.clone(), &registry).unwrap();
+                assert!(!Arc::ptr_eq(source.image(), all.image()));
+                assert_eq!(all.image().entries.len(), count);
+                assert_eq!(
+                    all.image().pipeline.functions_defined()
+                        - source.image().pipeline.functions_defined(),
+                    count as u64
+                );
+                let all_hit = DemandedImage::compile_with_literals(
+                    group.clone(),
+                    &registry,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(all.image(), all_hit.image()));
+                assert_eq!(registry.misses(), 2);
+                let weak = Arc::downgrade(source.image());
+                drop(source);
+                drop(reused);
+                assert!(weak.upgrade().is_none());
+                assert!(
+                    matches!(
+                        DemandedImage::lookup_source_with_literals(
+                            group.clone(),
+                            &registry,
+                            &BTreeMap::new(),
+                            &BTreeMap::new()
+                        ),
+                        Err(DemandError::MissingPreparedNativeImage)
+                    ),
+                    "a live AllEntries image cannot replace expired source custody"
+                );
+                assert_eq!(registry.misses(), 2, "Ready lookup does not compile");
+            });
+            let log = output.lock().unwrap();
+            let counts = std::str::from_utf8(&log)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["fields"]["message"] == "prepared compile")
+                .map(|row| {
+                    row["fields"]["host_entry_adapters"]
+                        .as_u64()
+                        .expect("actual emitter count")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(counts, vec![0, count as u64]);
+        }
     }
 
     #[test]

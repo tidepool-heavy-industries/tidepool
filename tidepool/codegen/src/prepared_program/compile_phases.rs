@@ -42,6 +42,8 @@ pub(crate) struct CompileScale {
     pub plan_thunks: usize,
     /// Top-level bindings (the program's own roots).
     pub tops: usize,
+    /// Per-top Rust host adapters actually emitted successfully.
+    pub host_entry_adapters: usize,
     /// Constructor declarations this program carries.
     pub constructors: usize,
     /// Globals this program imports from already-installed programs.
@@ -119,6 +121,7 @@ pub(crate) fn record(image_instance: u64, phases: &CompilePhases, scale: &Compil
         plan_functions = scale.plan_functions,
         plan_thunks = scale.plan_thunks,
         tops = scale.tops,
+        host_entry_adapters = scale.host_entry_adapters,
         constructors = scale.constructors,
         imports = scale.imports,
         functions_defined = scale.functions_defined,

@@ -607,6 +607,59 @@ fn install_source_literal(
 }
 
 #[test]
+fn literal_source_host_entry_modes_never_share_a_native_key() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let source_producer = DemandedImage::compile_source_with_literals(
+        producer.group().clone(),
+        &registry,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(source_producer.image().entries.is_empty());
+    assert!(!Arc::ptr_eq(source_producer.image(), producer.image()));
+    let literals = source_producer.source_literals();
+    assert_eq!(literals, producer.source_literals());
+    let group = source_literal_consumer(false, literal_owner().module_version);
+    let source = DemandedImage::compile_source_with_literals(
+        group.clone(),
+        &registry,
+        &BTreeMap::new(),
+        &literals,
+    )
+    .unwrap();
+    assert!(source.image().entries.is_empty());
+    assert!(matches!(
+        DemandedImage::lookup_with_literals(group.clone(), &registry, &BTreeMap::new(), &literals),
+        Err(DemandError::MissingPreparedNativeImage)
+    ));
+    let all =
+        DemandedImage::compile_with_literals(group.clone(), &registry, &BTreeMap::new(), &literals)
+            .unwrap();
+    assert!(!Arc::ptr_eq(source.image(), all.image()));
+    assert_eq!(all.image().entries.len(), 1);
+    let ready =
+        DemandedImage::lookup_source_with_literals(group, &registry, &BTreeMap::new(), &literals)
+            .unwrap();
+    assert!(Arc::ptr_eq(source.image(), ready.image()));
+    // Both images embed the same authenticated byte storage despite distinct entry products.
+    assert_eq!(
+        source.image().authenticated_source_literal(GlobalId(0)),
+        all.image().authenticated_source_literal(GlobalId(0))
+    );
+    let mut machine = machine();
+    let ids = install_source_literal(&mut machine, &ready, &source_producer).unwrap();
+    assert!(matches!(
+        machine.run_entry_retained(ids[0], ValueId(0), &[], call(), RealmId::ROOT),
+        Err(ExecutionError::MissingEntry(ValueId(0)))
+    ));
+    assert_eq!(machine.handle_count(), 0);
+    let ids = install_source_literal(&mut machine, &all, &source_producer).unwrap();
+    assert_bytes(address(&mut machine, ids[0]));
+}
+
+#[test]
 fn source_literal_original_group_executes_without_a_managed_address_handle() {
     let registry = ImageRegistry::new();
     let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);

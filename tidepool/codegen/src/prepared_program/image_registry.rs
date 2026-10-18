@@ -63,10 +63,11 @@ enum ImageKey {
         PreparedProgram,
         super::package_literals::GroupPackageLiterals,
     ),
-    Group(CertifiedGroupCode),
+    Group(CertifiedGroupCode, super::HostEntries),
     LiteralGroup(
         CertifiedGroupCode,
         super::package_literals::GroupPackageLiterals,
+        super::HostEntries,
     ),
 }
 
@@ -85,11 +86,12 @@ impl ImageKey {
     fn group(
         group: &CertifiedGroupCode,
         literals: &super::package_literals::GroupPackageLiterals,
+        host_entries: super::HostEntries,
     ) -> Self {
         if literals.iter().next().is_none() {
-            Self::Group(group.clone())
+            Self::Group(group.clone(), host_entries)
         } else {
-            Self::LiteralGroup(group.clone(), literals.clone())
+            Self::LiteralGroup(group.clone(), literals.clone(), host_entries)
         }
     }
 }
@@ -189,7 +191,7 @@ impl<'a> Observation<'a> {
         let domain = match key {
             ImageKey::Program(_) => "program",
             ImageKey::LiteralProgram(..) => "literal_program",
-            ImageKey::Group(_) => "group",
+            ImageKey::Group(..) => "group",
             ImageKey::LiteralGroup(..) => "literal_group",
         };
         Self {
@@ -198,7 +200,7 @@ impl<'a> Observation<'a> {
             operation,
             domain,
             group: match key {
-                ImageKey::Group(group) | ImageKey::LiteralGroup(group, _) => Some(group),
+                ImageKey::Group(group, _) | ImageKey::LiteralGroup(group, _, _) => Some(group),
                 ImageKey::Program(_) | ImageKey::LiteralProgram(..) => None,
             },
             started: Instant::now(),
@@ -413,8 +415,9 @@ impl ImageRegistry {
         &self,
         group: &CertifiedGroupCode,
         literals: &super::package_literals::GroupPackageLiterals,
+        host_entries: super::HostEntries,
     ) -> Option<Arc<CompiledProgram>> {
-        self.lookup_key(ImageKey::group(group, literals))
+        self.lookup_key(ImageKey::group(group, literals, host_entries))
     }
 
     /// Never elect a compiler or join a flight. The registry lock protects only
@@ -546,16 +549,20 @@ impl ImageRegistry {
         group: &CertifiedGroupCode,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        self.get_or_compile_key(ImageKey::Group(group.clone()), compile)
+        self.get_or_compile_key(
+            ImageKey::Group(group.clone(), super::HostEntries::All),
+            compile,
+        )
     }
 
     pub(super) fn get_or_compile_literal_group<E>(
         &self,
         group: &CertifiedGroupCode,
         literals: &super::package_literals::GroupPackageLiterals,
+        host_entries: super::HostEntries,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        self.get_or_compile_key(ImageKey::group(group, literals), compile)
+        self.get_or_compile_key(ImageKey::group(group, literals, host_entries), compile)
     }
 
     fn get_or_compile_key<E>(
