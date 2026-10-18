@@ -1807,7 +1807,7 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     );
     let idle_setup = dispatch_haskell_script(
         root.as_ref(),
-        "import qualified Tidepool.Agent.Contract as A\nRight idle <- spawnSubagent (FreshCtx \"idle notification recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+        "import qualified Tidepool.Agent.Contract as A\nRight idle <- spawnSubagent (FreshCtx \"idle notification recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",
     )
     .await;
     assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
@@ -2076,7 +2076,7 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
     let setup = dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
-         Right worker <- spawnSubagent (FreshCtx \"reply-whole-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-whole-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-whole\" :: Text\n\
          Right answer <- request @[Text] worker [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]] (defaultRequestOptions { requestLabel = Just requestName })",
     )
@@ -3128,7 +3128,7 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     let setup = dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
-         Right worker <- spawnSubagent (FreshCtx \"reply-preview-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-preview-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-preview\" :: Text\n\
          Right answer <- request @String worker (\"a readable reply\" :: String) (defaultRequestOptions { requestLabel = Just requestName })",
     )
@@ -3194,7 +3194,7 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
     let setup = dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\n\
-         Right worker <- spawnSubagent (FreshCtx \"reply-preview-text-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-preview-text-recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))\n\
          let requestName = \"reply-preview-text\" :: Text\n\
          Right answer <- request @Text worker (\"a readable reply\" :: Text) (defaultRequestOptions { requestLabel = Just requestName })",
     )
