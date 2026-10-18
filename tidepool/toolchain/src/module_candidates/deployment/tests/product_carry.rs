@@ -1639,3 +1639,465 @@ fn read_owned_slice(slice: &crate::owned_input_arena::OwnedInputSlice) -> Vec<u8
     assert_eq!(sha2::Sha256::digest(&bytes).as_slice(), slice.sha256());
     bytes
 }
+
+/// Compiler-shaped receipts enter the same source and product admission as a
+/// completed ordinary request; catalog bytes still come through export/load.
+fn admit_borrowed_catalog(
+    fixture: &Fixture,
+    selected: &super::super::super::CandidateSet,
+) -> Result<crate::certified_products::CertifiedProducts, Box<dyn std::error::Error>> {
+    admit_borrowed_catalog_receipt(fixture, selected, &BTreeMap::new(), |_| {})
+}
+
+fn admit_borrowed_catalog_receipt(
+    fixture: &Fixture,
+    selected: &super::super::super::CandidateSet,
+    packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
+    change: impl FnOnce(&mut crate::certified_products::CertifiedReceipt),
+) -> Result<crate::certified_products::CertifiedProducts, Box<dyn std::error::Error>> {
+    use crate::certified_products::{
+        AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedReceipt,
+        ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
+    };
+    let input = fixture._root.path().join("current-input.hs");
+    fs::write(&input, b"target").unwrap();
+    let evidence = selected.by_owner.values().next().unwrap().evidence.clone();
+    let evidence_bytes = serde_json::to_vec(&*evidence).unwrap();
+    let empty_products = tidepool_test_data::prepared_encode::encode_module_products(&[]);
+    let empty_packages = super::super::super::tests::package_bundle_with_sidecars(vec![]);
+    let parsed = ParsedModuleProducts::decode(&empty_products, &empty_packages).unwrap();
+    let modules = selected
+        .by_owner
+        .values()
+        .map(|bundle| CertifiedModuleReceipt {
+            origin: ProductOrigin::Cached,
+            unit: bundle.owner.unit.clone(),
+            module: bundle.owner.module.clone(),
+            module_version: Some(bundle.owner.module_version.clone()),
+            skinny_iface_sha256: bundle.owner.skinny_iface_sha256,
+            product_sha256: bundle.owner.product_sha256,
+            source_sha256: super::super::super::parse_sha(&bundle.source_sha256).unwrap(),
+            dependency_witness_sha256: Sha256::digest(
+                serde_json::to_vec(&*bundle.evidence).unwrap(),
+            )
+            .into(),
+            groups: bundle
+                .product
+                .groups
+                .iter()
+                .map(|group| AcceptedGroup {
+                    original_ordinal: group.original_ordinal(),
+                    globals: group
+                        .globals()
+                        .iter()
+                        .map(|global| {
+                            let package = &packages
+                                [&(global.identity.unit.clone(), global.identity.module.clone())];
+                            AcceptedGlobal {
+                                identity: global.identity.clone(),
+                                rep: global.rep.clone(),
+                                entry_signature: global.entry_signature.map(|id| {
+                                    group.definitions().signatures()[id.0 as usize].clone()
+                                }),
+                                required_evaluated: global.required_evaluated,
+                                owner: ReceiptImportOwner::Package {
+                                    unit: global.identity.unit.clone(),
+                                    module: global.identity.module.clone(),
+                                    binder: global.identity.clone(),
+                                    interface_digest: package.sha256,
+                                },
+                            }
+                        })
+                        .collect(),
+                })
+                .collect(),
+            interface_requirements: bundle.original_module_interface.requirements().clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut receipt = CertifiedReceipt {
+        finalization: crate::certified_products::tests::fixture_finalization_from_products(
+            None, &modules, &parsed,
+        ),
+        modules,
+        targets: BTreeMap::new(),
+        packages: packages.clone(),
+        source_recipe: WorkerExecutionSource::Ordinary,
+    };
+    change(&mut receipt);
+    let source = crate::artifacts::admit_compiler_source(
+        parsed.operation(),
+        &evidence_bytes,
+        &input,
+        "target",
+    )?;
+    let include = NativeSourceRole::ORDERED
+        .iter()
+        .map(|role| fixture.source.join(role.relative_root()))
+        .collect::<Vec<_>>();
+    Ok(crate::certified_products::certify_products(
+        Some(selected),
+        &receipt,
+        &parsed,
+        &source,
+        fixture.output.as_path(),
+        &fixture.authority.producer_identity,
+        &include,
+        None,
+    )?)
+}
+
+#[test]
+fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_recovery() {
+    for with_execution in [false, true] {
+        let fixture = Fixture::with_modules_and_execution(&["Library"], with_execution);
+        let package = Arc::new(fixture.load().unwrap());
+        let weak_package = Arc::downgrade(&package);
+        let selected = borrow_catalog(&package).unwrap();
+        let bundle = &selected.by_owner[&("u".into(), "Library".into())];
+        let original = bundle.product.deployment_original().unwrap().clone();
+        assert_eq!(
+            original.source_sha256(),
+            None,
+            "catalog identity is not a fresh source observation"
+        );
+        let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
+        let accepted = &admitted.recovery_products[0];
+        assert_eq!(
+            accepted.source_sha256(),
+            Some(super::super::super::parse_sha(&bundle.source_sha256).unwrap())
+        );
+        assert_eq!(
+            original.source_sha256(),
+            None,
+            "admission does not upgrade the acquired owner"
+        );
+
+        // Ordinary owned candidate issuance is an independent comparison path:
+        // it cannot reach the acquired original accessor or the reuse branch.
+        let mut ordinary = borrow_catalog(&package).unwrap();
+        let bundle = ordinary
+            .by_owner
+            .get_mut(&("u".into(), "Library".into()))
+            .unwrap();
+        bundle.product =
+            super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+        let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
+        assert_eq!(accepted, &issued.recovery_products[0]);
+        assert!(!Arc::ptr_eq(
+            accepted.facts().unwrap(),
+            issued.recovery_products[0].facts().unwrap()
+        ));
+        // Keep semantic comparison before the reuse assertion so a no-reuse
+        // sensitivity mutant distinguishes lost sharing from changed output.
+        assert!(
+            Arc::ptr_eq(original.facts().unwrap(), accepted.facts().unwrap()),
+            "exact catalog admission must retain its issued facts"
+        );
+
+        let durable = tempfile::tempdir().unwrap();
+        let producer = accepted.module_interface().unwrap().producer_sha256();
+        let references = crate::recovery_artifacts::materialize_certified_products(
+            durable.path(),
+            producer,
+            &admitted.recovery_products,
+        )
+        .unwrap();
+        let verified = references
+            .iter()
+            .map(|reference| {
+                crate::recovery_artifacts::verify_materialized_ref(durable.path(), reference)
+                    .unwrap()
+            })
+            .collect();
+        let restored = crate::certified_products::certify_recovery_products_with_validation(
+            verified,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(restored[0].product.source_sha256(), None);
+        assert!(restored[0].product.same_durable_artifact(accepted));
+        drop(ordinary);
+        drop(selected);
+        drop(package);
+        assert!(weak_package.upgrade().is_none());
+        assert!(
+            accepted.same_durable_artifact(&original),
+            "accepted facts outlive catalog selection and package"
+        );
+    }
+}
+
+#[test]
+fn cached_catalog_admission_reissues_a_changed_recipe_and_refuses_stale_source() {
+    let fixture = Fixture::with_modules_and_execution(&["Library"], true);
+    let package = Arc::new(fixture.load().unwrap());
+    let mut selected = borrow_catalog(&package).unwrap();
+    let bundle = selected
+        .by_owner
+        .get_mut(&("u".into(), "Library".into()))
+        .unwrap();
+    let original = bundle.product.deployment_original().unwrap().clone();
+    assert!(original.execution_source().is_some());
+    // Native receipt admission permits a product without replay authority. This
+    // is a binding change, not permission to carry the old recipe into output.
+    bundle.original_execution = None;
+    let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
+    let rebound = &admitted.recovery_products[0];
+    assert!(rebound.execution_source().is_none());
+    assert!(!Arc::ptr_eq(
+        original.facts().unwrap(),
+        rebound.facts().unwrap()
+    ));
+    assert_eq!(original.product_bytes(), rebound.product_bytes());
+    assert_eq!(original.module_interface(), rebound.module_interface());
+    let mut ordinary = borrow_catalog(&package).unwrap();
+    let bundle = ordinary
+        .by_owner
+        .get_mut(&("u".into(), "Library".into()))
+        .unwrap();
+    bundle.original_execution = None;
+    bundle.product =
+        super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+    let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
+    assert_eq!(rebound, &issued.recovery_products[0]);
+
+    let source_path = selected.by_owner[&("u".into(), "Library".into())]
+        .source
+        .clone();
+    fs::write(source_path, b"module Library where\nvalue = 8\n").unwrap();
+    // The owning source-admission boundary must refuse before product reuse.
+    assert!(package.validate_current_sources().is_err());
+    for candidates in [&selected, &ordinary] {
+        let error = admit_borrowed_catalog(&fixture, candidates).err().unwrap();
+        let Some(crate::CompileError::CompilerEvidence(error)) =
+            error.downcast_ref::<crate::CompileError>()
+        else {
+            panic!("source admission must retain its typed refusal");
+        };
+        assert!(
+            matches!(error.as_ref(), crate::certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+            if matches!(failure.as_ref(), crate::cache::DependencyEvidenceFailure::Source {
+                reason: crate::cache::SourceWitnessFailure::Changed { .. }, ..
+            }))
+        );
+    }
+}
+
+/// Raw representation fixtures receive authority only from the ordinary product
+/// certifier, then cross the production catalog writer and reader.
+fn package_native_catalog_fixture(
+    packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
+) -> Fixture {
+    use crate::certified_products::{
+        AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedReceipt,
+        ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
+    };
+    use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
+    let mut fixture = Fixture::with_modules_execution_and_packages(&["Library"], false, packages);
+    let acquired = fixture.load().unwrap();
+    let evidence = acquired.records[0].evidence.clone();
+    let ((unit, module), package) = packages.first_key_value().unwrap();
+    let mut binder = testing::identity(module, "package_value");
+    binder.unit = unit.clone();
+    let mut wire = testing::wire_program();
+    let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0] else {
+        panic!("raw representation fixture");
+    };
+    top.identity = testing::identity("Library", "entry");
+    top.identity.unit = "u".into();
+    wire.globals = vec![GlobalDecl {
+        identity: binder.clone(),
+        rep: RuntimeRep::LiftedRef,
+        entry_signature: None,
+        required_evaluated: false,
+        required_generation: None,
+    }];
+    let raw = RawModuleProduct {
+        unit: "u".into(),
+        module: "Library".into(),
+        interface: b"Library".to_vec(),
+        groups: vec![testing::projected_group(wire, 7).unwrap()],
+    };
+    let bytes = tidepool_test_data::prepared_encode::encode_module_products(&[raw]);
+    let package_bundle = super::super::super::tests::package_bundle_with_sidecars(vec![(
+        "u".into(),
+        "Library".into(),
+        acquired.records[0].package_imports.clone(),
+    )]);
+    let parsed = ParsedModuleProducts::decode(&bytes, &package_bundle).unwrap();
+    let evidence_bytes = serde_json::to_vec(&*evidence).unwrap();
+    let modules = vec![CertifiedModuleReceipt {
+        origin: ProductOrigin::Fresh,
+        unit: "u".into(),
+        module: "Library".into(),
+        module_version: None,
+        source_sha256: super::super::super::parse_sha(&acquired.records[0].source_sha256).unwrap(),
+        skinny_iface_sha256: Sha256::digest(b"Library").into(),
+        product_sha256: Sha256::digest(&bytes).into(),
+        dependency_witness_sha256: Sha256::digest(&evidence_bytes).into(),
+        interface_requirements: BTreeMap::new(),
+        groups: vec![AcceptedGroup {
+            original_ordinal: 7,
+            globals: vec![AcceptedGlobal {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Package {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                    binder,
+                    interface_digest: package.sha256,
+                },
+            }],
+        }],
+    }];
+    let receipt = CertifiedReceipt {
+        finalization: crate::certified_products::tests::fixture_finalization_from_products(
+            Some(&fixture.output),
+            &modules,
+            &parsed,
+        ),
+        modules,
+        targets: BTreeMap::new(),
+        packages: packages.clone(),
+        source_recipe: WorkerExecutionSource::Ordinary,
+    };
+    let input = fixture._root.path().join("native-package-input.hs");
+    fs::write(&input, b"target").unwrap();
+    let include = acquired.source_selection().include_roots();
+    let source = crate::artifacts::admit_compiler_source(
+        parsed.operation(),
+        &evidence_bytes,
+        &input,
+        "target",
+    )
+    .unwrap();
+    let issued = crate::certified_products::certify_products(
+        None,
+        &receipt,
+        &parsed,
+        &source,
+        &fixture.output,
+        &fixture.authority.producer_identity,
+        &include,
+        None,
+    )
+    .unwrap();
+    drop(source);
+    let (_, prepared) = super::super::super::prepare_publication(
+        &fixture.authority.producer_identity,
+        &include,
+        &evidence,
+        parsed,
+        "target",
+        super::super::super::CandidateVersionOrigin::Ordinary,
+        &issued.recovery_products,
+    );
+    let output = fixture._root.path().join("native-products");
+    export_under(
+        &output,
+        acquired.source_selection(),
+        &crate::toolchain::AdmittedCompilerDeployment {
+            producer_identity: fixture.authority.producer_identity,
+            consumed_worker_identity: fixture.authority.consumed_worker_identity,
+        },
+        &prepared,
+        RootPolicy::Fixture,
+    )
+    .unwrap();
+    fixture.output = output;
+    fixture
+}
+
+#[test]
+fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift() {
+    let external = tempfile::tempdir().unwrap();
+    let path = external.path().join("External.hi");
+    fs::write(&path, b"external-package-interface").unwrap();
+    let packages = BTreeMap::from([(
+        ("external".into(), "External".into()),
+        crate::certified_products::PackageInterfaceWitness {
+            selected_path: path.clone(),
+            sha256: Sha256::digest(b"external-package-interface").into(),
+        },
+    )]);
+    let fixture = package_native_catalog_fixture(&packages);
+    let package = Arc::new(fixture.load().unwrap());
+    let selected = borrow_catalog(&package).unwrap();
+    let original = selected.by_owner[&("u".into(), "Library".into())]
+        .product
+        .deployment_original()
+        .unwrap();
+    let admitted = admit_borrowed_catalog_receipt(&fixture, &selected, &packages, |_| {}).unwrap();
+    assert_eq!(admitted.groups.len(), 1);
+    assert!(
+        matches!(admitted.groups[0].imports(), [crate::certified_products::PendingImportOwner::Package { unit, module, .. }]
+        if unit == "external" && module == "External")
+    );
+    assert!(Arc::ptr_eq(
+        original.facts().unwrap(),
+        admitted.recovery_products[0].facts().unwrap()
+    ));
+    let mut ordinary = borrow_catalog(&package).unwrap();
+    let bundle = ordinary
+        .by_owner
+        .get_mut(&("u".into(), "Library".into()))
+        .unwrap();
+    bundle.product =
+        super::super::super::CandidateProduct::decode(bundle.product.bytes().to_vec()).unwrap();
+    let issued = admit_borrowed_catalog_receipt(&fixture, &ordinary, &packages, |_| {}).unwrap();
+    assert_eq!(admitted.recovery_products, issued.recovery_products);
+    assert!(!Arc::ptr_eq(
+        original.facts().unwrap(),
+        issued.recovery_products[0].facts().unwrap()
+    ));
+    fs::write(path, b"changed-external-package-interface").unwrap();
+    for candidates in [&selected, &ordinary] {
+        let error = admit_borrowed_catalog_receipt(&fixture, candidates, &packages, |_| {})
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<crate::certified_products::CertificationError>(),
+            Some(crate::certified_products::CertificationError::StaleEvidence)
+        ));
+    }
+}
+
+#[test]
+fn cached_catalog_admission_refuses_conflicting_and_unoffered_receipts_before_reuse() {
+    let fixture = Fixture::with_modules(&["Library", "Unused"]);
+    let package = Arc::new(fixture.load().unwrap());
+    let selected = borrow_catalog(&package).unwrap();
+    let conflicting =
+        admit_borrowed_catalog_receipt(&fixture, &selected, &BTreeMap::new(), |receipt| {
+            receipt
+                .modules
+                .iter_mut()
+                .find(|module| module.module == "Unused")
+                .unwrap()
+                .dependency_witness_sha256 = [91; 32];
+        })
+        .err()
+        .unwrap();
+    assert!(matches!(
+        conflicting.downcast_ref::<crate::certified_products::CertificationError>(),
+        Some(crate::certified_products::CertificationError::Mismatch(
+            "product/iface/source/evidence digest"
+        ))
+    ));
+    let unoffered =
+        admit_borrowed_catalog_receipt(&fixture, &selected, &BTreeMap::new(), |receipt| {
+            let mut extra = receipt.modules[0].clone();
+            extra.module = "UnusedUnoffered".into();
+            receipt.modules.push(extra);
+        })
+        .err()
+        .unwrap();
+    assert!(matches!(
+        unoffered.downcast_ref::<crate::certified_products::CertificationError>(),
+        Some(crate::certified_products::CertificationError::Mismatch(
+            "selected candidate"
+        ))
+    ));
+}

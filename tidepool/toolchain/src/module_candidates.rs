@@ -394,6 +394,15 @@ impl CandidateProduct {
     pub(crate) fn bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
+    /// Borrow immutable native facts from the same acquired record as the bytes.
+    pub(crate) fn deployment_original(
+        &self,
+    ) -> Option<&crate::recovery_artifacts::CertifiedRecoveryProduct> {
+        match &self.bytes {
+            CandidateProductBytes::Deployment(record) => record.certified_original(),
+            CandidateProductBytes::Owned(_) => None,
+        }
+    }
     pub(crate) fn decoded(&self) -> &RawModuleProduct {
         &self.decoded
     }
