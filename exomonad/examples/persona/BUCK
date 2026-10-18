@@ -16,6 +16,13 @@ load("@prelude//:rules.bzl", "export_file", "filegroup")
 
 filegroup(
     name = "seed",
-    srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/config.toml", "*.md"])},
+    srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/config*.toml", "*.md"])},
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "argon_config",
+    src = ".exomonad/config.argon.toml",
+    out = "config.argon.toml",
     visibility = ["PUBLIC"],
 )

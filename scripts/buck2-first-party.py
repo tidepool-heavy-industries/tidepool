@@ -457,6 +457,7 @@ EXTERNAL_SOURCE_LABELS = {
     "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
     "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
     "bridge/haskell/examples/model-turns/ContextWorkflow.hs": "//bridge/haskell:context_workflow_example",
+    "exomonad/examples/persona/.exomonad/config.argon.toml": "//exomonad/examples/persona:argon_config",
     "exomonad/examples/persona/.exomonad/prompts/base.md": "//exomonad/examples/persona:authored_prompt_base_md",
     "exomonad/examples/persona/.exomonad/prompts/agent.md": "//exomonad/examples/persona:authored_prompt_agent_md",
     "exomonad/examples/persona/.exomonad/prompts/api-guide.md": "//exomonad/examples/persona:authored_prompt_api_guide_md",

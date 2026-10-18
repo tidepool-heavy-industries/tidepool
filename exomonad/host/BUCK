@@ -67,6 +67,7 @@ tidepool_buildscript_run(
 rust_filegroup(
     name = "exomonad_host_sources",
     mapped_srcs = {
+        "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "Cargo.toml": "exomonad/host/Cargo.toml",
         "src/actor_host.rs": "exomonad/host/src/actor_host.rs",
         "src/actor_host/application_supervisor.rs": "exomonad/host/src/actor_host/application_supervisor.rs",
@@ -216,6 +217,7 @@ tidepool_rust_library(
 rust_filegroup(
     name = "exomonad_sources",
     mapped_srcs = {
+        "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "Cargo.toml": "exomonad/host/Cargo.toml",
         "src/actor_host.rs": "exomonad/host/src/actor_host.rs",
         "src/actor_host/application_supervisor.rs": "exomonad/host/src/actor_host/application_supervisor.rs",
@@ -368,6 +370,7 @@ tidepool_rust_binary(
 rust_filegroup(
     name = "exomonad-view-helper_sources",
     mapped_srcs = {
+        "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "Cargo.toml": "exomonad/host/Cargo.toml",
         "src/actor_host.rs": "exomonad/host/src/actor_host.rs",
         "src/actor_host/application_supervisor.rs": "exomonad/host/src/actor_host/application_supervisor.rs",
@@ -520,6 +523,7 @@ tidepool_rust_binary(
 rust_filegroup(
     name = "exomonad_unit_tests_sources",
     mapped_srcs = {
+        "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "Cargo.toml": "exomonad/host/Cargo.toml",
         "src/actor_host.rs": "exomonad/host/src/actor_host.rs",
         "src/actor_host/application_supervisor.rs": "exomonad/host/src/actor_host/application_supervisor.rs",
@@ -734,6 +738,7 @@ rust_filegroup(
         "//:actor_skill_exomonad_project_work": ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
         "//:actor_skill_exomonad_review": ".exomonad/workspace/skills/exomonad-review/SKILL.md",
         "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
+        "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "//exomonad/examples/persona:authored_prompt_agent_md": "exomonad/examples/persona/.exomonad/prompts/agent.md",
         "//exomonad/examples/persona:authored_prompt_api_guide_md": "exomonad/examples/persona/.exomonad/prompts/api-guide.md",
         "//exomonad/examples/persona:authored_prompt_base_md": "exomonad/examples/persona/.exomonad/prompts/base.md",
