@@ -3211,6 +3211,10 @@ fn prepare_cell_program_admitted_inner(
     let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
         .in_scope(|| bind_extract_cmd(&command))?;
     let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
+    let mut offer_timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
+        "cell_program.offer",
+        "select_offer",
+    );
     let offer = ModuleCandidateOffer::select_cell_program_with_catalog(
         &endpoint,
         admission.include_paths(),
@@ -3231,13 +3235,16 @@ fn prepare_cell_program_admitted_inner(
         &admission.retained_declaration_projections(),
         admission.catalog_selection(),
     )?;
+    offer_timing.advance("apply_offer");
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let offer = offer.apply_to(command, scratch.path())?;
     let command = offer.command();
+    offer_timing.advance("diagnostics_start");
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
+    offer_timing.finish(true);
     drop(offer_span);
     let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
         .in_scope(|| endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))).map_err(|error| {
