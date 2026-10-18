@@ -886,8 +886,12 @@ pub(crate) fn resolve_model(
     model: &exomonad_actor::Model,
 ) -> std::result::Result<String, String> {
     if let Some(catalog) = config.workspace_inputs.as_ref().and_then(|workspace| workspace.model_catalog.as_ref()) {
-        if model != &catalog.models[&catalog.primary].model {
-            return Err("the conversational model is fixed by the run profile; select helpers through Tidepool.Model".into());
+        let primary = &catalog.models[&catalog.primary].model;
+        if primary.backend() == exomonad_actor::Backend::GeminiInteractions && model != primary {
+            return Err("the Argon conversational model is fixed; select helpers through Tidepool.Model".into());
+        }
+        if !catalog.models.values().any(|selected| &selected.model == model) {
+            return Err("model is not admitted by the run profile".into());
         }
     }
     if model.backend() != config.model.backend() {

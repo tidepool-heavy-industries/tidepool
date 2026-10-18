@@ -1,4 +1,4 @@
-//! The run fixes one admitted provider; clones share its transport allowance.
+//! Each admitted provider owns its credentials and shared transport allowance.
 
 use harness::transport::{
     auth::{

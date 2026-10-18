@@ -154,6 +154,6 @@ Optional inherited compositions and ancestor suggestions are ordinary files:
 `Files.readFile` when useful. They are possibilities, not standing direction.
 
 The root notebook admits `ModelCall`; helpers retain their separately declared
-effect row. `doc model-call` gives the complete NoTools Luna example and a Sol
-variant. Typed selection resolves against frozen workspace policy; credentials
+effect row. `doc model-call` gives a complete NoTools example parameterized by
+the generated `Exomonad.Models` choices. Selection resolves against frozen workspace policy; credentials
 and an actual successful provider receipt remain separate observations.
