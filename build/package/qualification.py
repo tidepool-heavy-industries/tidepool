@@ -785,6 +785,14 @@ def offline_compilers(selection: dict) -> dict:
     return result
 
 
+def browser_node_executable(path: Path) -> Path:
+    """The browser process executes Node; its driver script is a data argument."""
+    selected = nix_path(path)
+    if not selected.is_file() or not os.access(selected, os.X_OK):
+        raise ValueError(f"browser Node is not an executable file: {selected}")
+    return selected
+
+
 def native_runtime_tools(path: Path) -> Path:
     """Validate the executable closure used by the supported native runtime."""
     tools = nix_path(path)
@@ -1926,6 +1934,7 @@ def assemble(args) -> None:
         verify_native_builtin_entries(root, contract["native_catalog"])
 
 def freeze(args) -> Path:
+    browser_node = browser_node_executable(args.browser_node)
     tools = native_runtime_tools(args.bundle / "share/exomonad/runtime-tools")
     source = args.source_root.resolve(strict=True)
     oid = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
@@ -1990,7 +1999,7 @@ def freeze(args) -> Path:
         raise ValueError("assembled fixture resources differ from recorded source")
     verify_fixture_source_contract(fixture_record, contract)
     environment = native_environment(root)
-    environment.update(TIDEPOOL_BROWSER_NODE=str(nix_path(args.browser_node)),
+    environment.update(TIDEPOOL_BROWSER_NODE=str(browser_node),
                        TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
                        PLAYWRIGHT_BROWSERS_PATH=str(nix_path(args.playwright_browsers)))
     compiler = root / "share/exomonad/compiler-deployment.json"
@@ -2079,6 +2088,8 @@ def verify(path: Path) -> dict:
         path = nix_path(Path(item["path"]))
         if str(store_root(path)) != item["store_path"]:
             raise ValueError(f"declared Nix selection changed: {path}")
+    browser_node = browser_node_executable(
+        Path(descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"]))
     selected_compilers = offline_compilers(contract.get("offline_compilers"))
     if any(descriptor["external_inputs"][name]["path"] != selected_compilers[name]
            for name in OFFLINE_COMPILERS):
@@ -2109,7 +2120,7 @@ def verify(path: Path) -> dict:
     verify_registered_gc_roots(tools, descriptor["gc_roots"], registered_roots)
     expected_environment = _native_environment(root, verified_catalog, tools)
     expected_environment.update(
-        TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],
+        TIDEPOOL_BROWSER_NODE=str(browser_node),
         TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
         PLAYWRIGHT_BROWSERS_PATH=descriptor["external_inputs"]["PLAYWRIGHT_BROWSERS_PATH"]["path"],
     )
