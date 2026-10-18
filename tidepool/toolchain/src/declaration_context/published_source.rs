@@ -330,15 +330,27 @@ impl ExactDeclarationContext {
             .collect()
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.source_publications.for_target",
+        level = "debug", skip_all,
+        fields(inclusive = true, target_groups = groups.len(), target_imports = imports.len())
+    )]
     pub(crate) fn published_source_original_selections_for_target(
         &self,
         groups: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
         imports: &[crate::certified_products::PendingImportOwner],
     ) -> Result<Vec<Arc<PublishedSourceOriginalSelection>>, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.source_publications.for_target",
+            "construct_publications",
+        );
         let publications = self.published_source_original_selections()?;
         if publications.is_empty() {
+            timing.finish(true);
             return Ok(publications);
         }
+        let candidate_count = publications.len();
+        timing.advance("target_lexical_selection");
         let compiler = self.compiler_metadata_snapshot()?;
         let mut lexical = BTreeSet::new();
         for import in imports {
@@ -370,7 +382,8 @@ impl ExactDeclarationContext {
                 );
             }
         }
-        Ok(publications
+        timing.advance("filter_exact_issuers");
+        let selected = publications
             .into_iter()
             .filter(|selection| {
                 let issuer = selection.context.artifact_view();
@@ -394,7 +407,15 @@ impl ExactDeclarationContext {
                         .filter(|group| originals.contains(&group.binding.artifact()))
                         .all(|group| issuer.contains_issued_native_group(*group))
             })
-            .collect())
+            .collect::<Vec<_>>();
+        timing.advance("assemble_selection");
+        tracing::debug!(
+            target: "exomonad_harness::timing",
+            candidate_count, selected_count = selected.len(),
+            "source publication target selection"
+        );
+        timing.finish(true);
+        Ok(selected)
     }
 
     fn published_context_for_root(

@@ -2495,6 +2495,16 @@ impl SelectedModuleCandidateOffer {
                     ))
                 }
             };
+            let _capture_span = tracing::debug_span!(
+                target: "exomonad_harness::timing", "products.cell_program.capture_item",
+                inclusive = true, ordinal = index, generation,
+                turn_bytes = output.turn.len(), metadata_bytes = output.metadata.len(),
+            )
+            .entered();
+            let mut capture_timing = timing::InvocationTiming::start_scoped(
+                "products.cell_program.capture_item",
+                "capture_call",
+            );
             let prepared = checked_cell::PreparedCheckedItemOutput::capture(
                 &cell.item(index)?,
                 generation,
@@ -2503,7 +2513,9 @@ impl SelectedModuleCandidateOffer {
                 output,
                 &initial.request_sha256,
             )?;
+            capture_timing.advance("insert_prepared_owner");
             prepared_items.insert(index, prepared);
+            capture_timing.finish(true);
         }
         preparation_timing.advance("assemble_prepared_owner");
         let prepared = PreparedCellProgram {
@@ -3133,8 +3145,14 @@ impl SealedTurnProducts {
     pub(crate) fn resolve_native_execution(
         &self,
     ) -> Result<crate::artifact_inventory::ResolvedNativeTarget<'_>, CompileError> {
+        let mut timing = timing::InvocationTiming::start_scoped(
+            "products.native_execution.resolve",
+            "full_target_resolution",
+        );
         let resolved = self.target.resolve()?;
+        timing.advance("original_execution_custody");
         resolved.ensure_original_execution_custody(self.original_execution()?)?;
+        timing.finish(true);
         Ok(resolved)
     }
     fn original_compiler_inputs(

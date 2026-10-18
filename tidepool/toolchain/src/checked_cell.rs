@@ -3638,6 +3638,11 @@ pub(crate) struct PreparedCheckedItemOutput {
 
 impl PreparedCheckedItemOutput {
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "products.checked_item.capture",
+        level = "debug", skip_all,
+        fields(inclusive = true, ordinal = item.index, generation, is_program)
+    )]
     pub(crate) fn capture(
         item: &ExactCheckedItem,
         generation: u64,
@@ -3646,6 +3651,10 @@ impl PreparedCheckedItemOutput {
         output: &crate::artifacts::ProgramNativeOutput,
         request: &str,
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "products.checked_item.capture",
+            "receipt_read_decode",
+        );
         let sealed = output.sealed_products()?;
         let original_execution = Arc::clone(sealed.original_execution()?);
         let program_entry = sealed.typed_entry();
@@ -3654,6 +3663,7 @@ impl PreparedCheckedItemOutput {
         let target = output.target();
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if is_program { 9 } else { 8 })?;
+        timing.advance("validate_item_receipt");
         validate_item_receipt(
             fields,
             request,
@@ -3663,6 +3673,7 @@ impl PreparedCheckedItemOutput {
             source,
             is_program,
         )?;
+        timing.advance("validate_typed_entry");
         let item_index = item.index;
         let typed_entry = if is_program {
             let issued =
@@ -3686,10 +3697,13 @@ impl PreparedCheckedItemOutput {
                 || issued.origin.unit != owner.unit
                 || issued.origin.module != owner.module
                 || !issued.matches_receipt(proof)?
-                || !original_execution
-                    .artifact_view()
-                    .selected_native_groups()
-                    .contains(&issued.native_group_key())
+                || {
+                    timing.advance("original_selected_membership");
+                    !original_execution
+                        .artifact_view()
+                        .selected_native_groups()
+                        .contains(&issued.native_group_key())
+                }
             {
                 return Err(typed_entry_failure());
             }
@@ -3700,8 +3714,10 @@ impl PreparedCheckedItemOutput {
             }
             None
         };
+        timing.advance("turn_read_decode");
         let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
         let turn = row(&turn, 2)?;
+        timing.advance("binder_and_site_observations");
         let expected_binders = if let Some(observation) = observation_name {
             vec![observation.to_owned()]
         } else {
@@ -3742,15 +3758,19 @@ impl PreparedCheckedItemOutput {
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
+        timing.advance("resolve_target_and_original_custody");
         let resolved = sealed.resolve_native_execution()?;
         let groups = resolved.groups();
+        timing.advance("select_source_publications");
         let source_originals = original_execution
             .published_source_original_selections_for_target(groups, resolved.imports())?;
+        timing.advance("select_native_sites");
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
                     .artifact_view()
                     .native_sites_for_groups(&groups)?;
+                timing.advance("entry_native_requirements");
                 let native_requirements = resolved.requirements_for_entry()?;
                 Ok::<_, CompileError>(SealedTypedEntry {
                     entry,
@@ -3759,8 +3779,10 @@ impl PreparedCheckedItemOutput {
                 })
             })
             .transpose()?;
+        timing.advance("decode_metadata");
         let (table, warnings) = output.decode_metadata()?;
-        Ok(Self {
+        timing.advance("assemble_prepared_item");
+        let prepared = Self {
             item: item.clone(),
             generation,
             observation_name: observation_name.map(str::to_owned),
@@ -3774,7 +3796,9 @@ impl PreparedCheckedItemOutput {
             typed_entry,
             source_originals,
             has_interface: !expected_binders.is_empty(),
-        })
+        };
+        timing.finish(true);
+        Ok(prepared)
     }
 }
 
