@@ -1785,20 +1785,66 @@ mod tests {
             vec![
                 ExactInterfaceOwner {
                     owner: owner.clone(),
-                    requirements: vec![ExactModuleIdentity {
-                        unit: "fixture".into(),
-                        module: "B".into(),
-                    }],
+                    requirements: vec![]
                 },
                 ExactInterfaceOwner {
                     owner: ExactModuleIdentity {
                         unit: "fixture".into(),
-                        module: "B".into(),
+                        module: "B".into()
                     },
                     requirements: vec![],
                 },
             ],
-            "the authored A receipt requires B independently of physical projection"
+            "native group dependencies do not invent source interface imports"
+        );
+        let b_owner = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "B".into(),
+        };
+        let mut imported_evidence = evidence.clone();
+        imported_evidence
+            .iter_mut()
+            .find(|row| row.module == "A")
+            .unwrap()
+            .imports
+            .push(crate::cache::ModuleImportEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                selected: Some(root.path().join("B.hs")),
+            });
+        let imports = BTreeMap::from([
+            (owner.clone(), vec![b_owner.clone()]),
+            (b_owner.clone(), vec![]),
+        ]);
+        let mut imported_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let imported = ValidatedAuthoredClosure::admit(
+            &originals,
+            &owner,
+            [1; 32],
+            &imported_evidence,
+            None,
+            &imports,
+            None,
+            &[],
+            &[root.path().to_path_buf()],
+            &mut imported_validation,
+        )
+        .unwrap();
+        assert_eq!(
+            imported.interfaces,
+            vec![
+                ExactInterfaceOwner {
+                    owner: owner.clone(),
+                    requirements: vec![b_owner.clone()]
+                },
+                ExactInterfaceOwner {
+                    owner: b_owner,
+                    requirements: vec![]
+                },
+            ],
+            "exact selected source-import evidence adds its required interface owner"
         );
         let (observation, (_, physical_copied)) =
             crate::recovery_artifacts::observe_native_materialization(|| admit(&products));
