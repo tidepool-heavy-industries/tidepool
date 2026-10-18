@@ -7380,7 +7380,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
 
 #[test]
 fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
-    use crate::artifact_inventory::{ArtifactSelectionId, ScopeProofV3};
+    use crate::artifact_inventory::{ArtifactSelectionId, NativeArtifactDemand, ScopeProofV3};
     use crate::exact_context::{hydrate_context, ImmutableScopeProofRef, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 
@@ -7404,19 +7404,18 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             let id = entry.descriptor.id;
             let inventory = ArtifactInventory::default();
             let initial = inventory
-                .admit_recovery_selection(
+                .admit_shared_with_demand(
                     &inventory.empty_view(),
                     vec![entry.clone()],
-                    &BTreeSet::from([NativeGroupKey {
-                        artifact: id,
-                        original_ordinal: 7,
-                    }]),
+                    NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
+            assert!(initial.selected_native_groups().is_empty());
+            assert!(initial.capture_graph_selection().native_groups.is_empty());
             let full = inventory
                 .admit_recovery_selection(
                     &initial,
-                    vec![entry.clone()],
+                    vec![],
                     &BTreeSet::from([
                         NativeGroupKey {
                             artifact: id,
@@ -7444,11 +7443,10 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                     .any(|(group, carrier)| group.binding.selection() != carrier.selection),
                 "the fixture must issue a native group separately from its carrier"
             );
-            let carrier_only = full.select_roots(vec![id]).unwrap();
             let chosen = inventory
                 .admit_recovery_selection(
-                    &carrier_only,
-                    vec![entry],
+                    &initial,
+                    vec![],
                     &ordinals
                         .iter()
                         .map(|ordinal| NativeGroupKey {
@@ -7458,15 +7456,34 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                         .collect(),
                 )
                 .unwrap();
-            let support = fixture_compiler_support(projection.clone(), chosen)
-                .retain_offers(full_support.native_offers().iter().cloned())
-                .unwrap();
-            let canonical = projection.roles()[0].interface();
-            let support = support
-                .select_support_roots(vec![canonical])
+            let available = fixture_compiler_support(projection.clone(), chosen);
+            let initial_graph = initial.capture_graph_selection();
+            assert_eq!(
+                available.artifacts().capture_graph_selection().namespace,
+                initial_graph.namespace
+            );
+            assert_eq!(
+                full_support.artifacts().capture_graph_selection().namespace,
+                initial_graph.namespace
+            );
+            // Only the checked availability owner transfers permission. Raw Full
+            // custody independently preserves proof scopes without selecting groups.
+            let baseline = fixture_compiler_support(projection, initial);
+            let support = baseline
+                .retain_offers(
+                    full_support
+                        .native_offers()
+                        .iter()
+                        .chain(available.native_offers().iter())
+                        .cloned(),
+                )
                 .unwrap()
-                .finalize_namespace()
+                .retain_normalized_availability(available.native_availability())
                 .unwrap();
+            assert_eq!(
+                support.recorded_input_decisions(),
+                baseline.recorded_input_decisions()
+            );
             let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
                 producer: producer.sha256(),
                 compiler_support: support,
