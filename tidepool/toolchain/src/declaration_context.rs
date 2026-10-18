@@ -498,8 +498,10 @@ impl OriginalCompilerInputs {
             support.artifacts(),
             support.projection(),
             producer,
-            products,
-            CompleteAvailabilitySource::Candidate(support),
+            CompleteAvailabilitySource::Candidate {
+                source: support,
+                products,
+            },
         )
     }
 
@@ -710,8 +712,10 @@ impl OriginalCompilerInputs {
             context.owner.facts.compiler_support.artifacts(),
             context.owner.facts.compiler_support.projection(),
             producer.sha256(),
-            &fresh,
-            CompleteAvailabilitySource::Candidate(&context.owner.facts.compiler_support),
+            CompleteAvailabilitySource::Candidate {
+                source: &context.owner.facts.compiler_support,
+                products: &fresh,
+            },
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -745,10 +749,8 @@ impl OriginalCompilerInputs {
             }
         }
         let artifacts = retain_native_offers(artifacts, &native_offers)?;
-        let complete = selection
-            .complete_native_products(&artifacts)
-            .map_err(compiler_evidence_failure)?;
-        let artifacts = if let Some(product) = complete.first() {
+        let complete = continuation.complete_products(&artifacts)?;
+        let artifacts = if let Some(product) = complete.products.first() {
             let producer = product
                 .module_interface()
                 .ok_or_else(|| failure("complete native product has no canonical owner"))?
@@ -757,8 +759,7 @@ impl OriginalCompilerInputs {
                 &artifacts,
                 &projection,
                 producer,
-                &complete,
-                CompleteAvailabilitySource::Request(&continuation),
+                CompleteAvailabilitySource::Request(complete),
             )?;
             native_offers.extend(issued.native_offers);
             issued.artifacts
@@ -806,9 +807,12 @@ impl OriginalCompilerInputs {
         inventory: &ArtifactView,
         baseline: &CompilerInputProjection,
         producer_sha256: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
         source: CompleteAvailabilitySource<'_>,
     ) -> Result<Self, CompileError> {
+        let products = match &source {
+            CompleteAvailabilitySource::Candidate { products, .. } => *products,
+            CompleteAvailabilitySource::Request(completed) => completed.products.as_slice(),
+        };
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
@@ -829,12 +833,16 @@ impl OriginalCompilerInputs {
                             "private native availability competes with selected original",
                         ));
                     }
-                } else if retained.ambiguous_native_owners.contains(&owner) {
+                } else if matches!(&source, CompleteAvailabilitySource::Candidate { .. })
+                    && retained.ambiguous_native_owners.contains(&owner)
+                {
                     return Err(failure(
                         "private native availability has ambiguous retained originals",
                     ));
                 }
-            } else if retained.ambiguous_native_owners.contains(&owner) {
+            } else if matches!(&source, CompleteAvailabilitySource::Candidate { .. })
+                && retained.ambiguous_native_owners.contains(&owner)
+            {
                 return Err(failure(
                     "private native availability has ambiguous retained originals",
                 ));
@@ -846,8 +854,8 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let (native_original_requirements, dependency_offers) = match source {
-            CompleteAvailabilitySource::Candidate(source) => {
+        let (native_original_requirements, dependency_offers) = match &source {
+            CompleteAvailabilitySource::Candidate { source, .. } => {
                 // Candidate issuance consumes exact selected external demand.
                 // An explicit empty decision cannot fall back to role policy.
                 let preferred = baseline
@@ -884,17 +892,19 @@ impl OriginalCompilerInputs {
             CompleteAvailabilitySource::Request(_) => (Vec::new(), Vec::new()),
         };
         let effective = baseline.merge(&projection)?;
-        let dependencies = match source {
-            CompleteAvailabilitySource::Candidate(source) => {
+        let dependencies = match &source {
+            CompleteAvailabilitySource::Candidate { source, .. } => {
                 crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
             }
-            CompleteAvailabilitySource::Request(inputs) => {
-                crate::artifact_inventory::NativeDependencyCatalog::from_request(inputs)
+            CompleteAvailabilitySource::Request(completed) => {
+                crate::artifact_inventory::NativeDependencyCatalog::from_request(
+                    completed.continuation,
+                )
             }
         };
         // Physical request permissions are already frozen in its row catalog.
         // Raw parent proofs cannot become namespace grants during reissuance.
-        let namespace_offers = match source {
+        let namespace_offers = match &source {
             CompleteAvailabilitySource::Request(_) => &[][..],
             _ => dependency_offers.as_slice(),
         };
@@ -911,8 +921,8 @@ impl OriginalCompilerInputs {
             namespace_offers,
             &dependencies,
         )?;
-        let native_offers = match source {
-            CompleteAvailabilitySource::Candidate(_) => {
+        let native_offers = match &source {
+            CompleteAvailabilitySource::Candidate { .. } => {
                 let qualifications = native_original_requirements
                     .iter()
                     .map(|proof| proof.qualify_availability(&artifacts))
@@ -1048,7 +1058,7 @@ enum NativeTransportMode {
 /// One validated continuation supplies both physical availability and choices.
 /// No caller can combine rows from one request with another request's decisions.
 pub(crate) struct ContinuationNativeInputs<'a> {
-    _selection: &'a crate::certified_products::CertifiedSourceSelection,
+    selection: &'a crate::certified_products::CertifiedSourceSelection,
     projection: CompilerInputProjection,
     rows: Vec<Arc<NativeTransportAvailability>>,
     decisions: crate::artifact_inventory::IssuedInputNativeDecisions,
@@ -1060,13 +1070,27 @@ impl<'a> ContinuationNativeInputs<'a> {
         projection: &CompilerInputProjection,
     ) -> Result<Self, CompileError> {
         Ok(Self {
-            _selection: selection,
+            selection: selection,
             projection: projection.clone(),
             rows: selection.issued_native_availability().cloned().collect(),
             decisions:
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
                     selection, projection,
                 )?,
+        })
+    }
+
+    fn complete_products(
+        &self,
+        artifacts: &ArtifactView,
+    ) -> Result<CompletedRequestNativeProducts<'_>, CompileError> {
+        let products = self
+            .selection
+            .complete_native_products(artifacts)
+            .map_err(compiler_evidence_failure)?;
+        Ok(CompletedRequestNativeProducts {
+            continuation: self,
+            products,
         })
     }
 
@@ -1082,10 +1106,19 @@ impl<'a> ContinuationNativeInputs<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Exact completed products and dependency choices come from the same receipt.
+/// Only its NewProduct rows can authorize issuing complete native availability.
+struct CompletedRequestNativeProducts<'a> {
+    continuation: &'a ContinuationNativeInputs<'a>,
+    products: Vec<CertifiedRecoveryProduct>,
+}
+
 enum CompleteAvailabilitySource<'a> {
-    Candidate(&'a crate::artifact_inventory::CompilerSourceSupport),
-    Request(&'a ContinuationNativeInputs<'a>),
+    Candidate {
+        source: &'a crate::artifact_inventory::CompilerSourceSupport,
+        products: &'a [CertifiedRecoveryProduct],
+    },
+    Request(CompletedRequestNativeProducts<'a>),
 }
 
 impl NativeTransportAvailability {
