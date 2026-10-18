@@ -12199,12 +12199,13 @@ pub(crate) mod tests {
             ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
         };
         let producer_bytes = b"completed-request-input-permissions";
-        let producer =
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_bytes,
+        );
         let dependency = fixture_finalized_product(
             original_groups_fixture_with_interface(
                 "RequestInput",
-                vec![(3, vec![]), (7, vec![])],
+                vec![(7, vec![]), (9001, vec![])],
                 21,
                 &BTreeMap::new(),
                 b"RequestInput interface".to_vec(),
@@ -12215,11 +12216,11 @@ pub(crate) mod tests {
             original_groups_fixture_with_interface(
                 "RequestFresh",
                 vec![(
-                    11,
+                    3,
                     vec![PendingImportOwner::Source {
                         owner: dependency.owner().clone(),
-                        original_ordinal: 3,
-                        binder: testing::identity("RequestInput", "entry_3"),
+                        original_ordinal: 7,
+                        binder: testing::identity("RequestInput", "entry_7"),
                     }],
                 )],
                 22,
@@ -12231,15 +12232,27 @@ pub(crate) mod tests {
         let products = recovered_witness_fixtures(&[dependency, fresh]);
         let dependency = &products[0].product;
         let fresh = &products[1].product;
-        let input = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
-        let fresh_entry = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+        let input =
+            Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+        let fresh_entry =
+            Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
         for (ordinals, permitted) in [
-            (vec![3, 7], true),
-            (vec![3], true),
-            (vec![7], false),
+            (vec![7, 9001], true),
+            (vec![7], true),
+            (vec![9001], false),
             (vec![], false),
         ] {
             let inventory = ArtifactInventory::default();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[input.clone()]).unwrap();
+            let full = inventory
+                .admit_shared(&inventory.empty_view(), vec![input.clone()])
+                .unwrap();
+            let full_support = crate::declaration_context::issue_fixture_compiler_support(
+                projection.clone(),
+                full,
+            )
+            .unwrap();
             let selected = ordinals
                 .iter()
                 .map(|ordinal| NativeGroupKey {
@@ -12254,11 +12267,13 @@ pub(crate) mod tests {
             let context = ExactDeclarationContext::from_authenticated_execution(
                 producer.sha256(),
                 &view,
-                CompilerInputProjection::from_issued_entries(&[input.clone()]).unwrap(),
+                projection,
                 vec![],
                 owner,
                 &[],
             )
+            .unwrap()
+            .retain_issued_native_offers(full_support.native_offers().iter().cloned())
             .unwrap();
             let root = tempfile::tempdir().unwrap();
             let exact_request = ExactCompileContext::new(Arc::new(context))
@@ -12266,26 +12281,39 @@ pub(crate) mod tests {
                 .unwrap();
             let request = exact_request.compiler_inputs();
             let row = request.native_availability(input.descriptor.id).unwrap();
-            assert_eq!(row.permits(3), permitted);
+            assert_eq!(row.permits(7), permitted);
             assert_eq!(
                 row.offers().any(|offer| offer.is_full()),
                 ordinals.len() == 2
             );
+            assert!(
+                request
+                    .shared_compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .any(|offer| offer.is_full()),
+                "broader Full proof custody must not widen the normalized input row"
+            );
+            assert_eq!(row.permits(9001), ordinals.contains(&9001));
             let operation = InventoryOperation::new(Default::default());
-            let mut selection =
-                CertifiedSourceSelection::from_compiler_inputs(&request, &request.metadata, &operation)
-                    .unwrap();
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+                &request,
+                &request.metadata,
+                &operation,
+            )
+            .unwrap();
             let input_only =
                 OriginalCompilerInputs::from_selection(&selection, request.artifacts()).unwrap();
-            let source =
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&input_only)
-                    .unwrap();
+            let source = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                &input_only,
+            )
+            .unwrap();
             let source_row = source
                 .native_availability()
                 .rows()
                 .find(|row| row.original_owner() == dependency.owner())
                 .unwrap();
-            assert_eq!(source_row.permits(3), permitted);
+            assert_eq!(source_row.permits(7), permitted);
             assert_eq!(
                 source.artifacts().selected_native_groups(),
                 input_only.issued_artifacts().selected_native_groups()
@@ -12325,6 +12353,14 @@ pub(crate) mod tests {
                     assert!(completed.native_offers().iter().any(|offer| {
                         offer.original() == fresh_entry.descriptor.id && offer.is_full()
                     }));
+                    let dependency_row = completed
+                        .native_availability()
+                        .rows()
+                        .find(|row| row.original_owner() == dependency.owner())
+                        .unwrap();
+                    assert!(dependency_row.permits(7));
+                    assert_eq!(dependency_row.permits(9001), consumer == "request" && ordinals.contains(&9001),
+                        "fresh source rows contain B7 only; request rows preserve actual input grants");
                     assert!(completed
                         .issued_artifacts()
                         .selected_native_groups()
@@ -12335,9 +12371,9 @@ pub(crate) mod tests {
                         matches!(result, Err(crate::CompileError::ArtifactInventory(error))
                         if matches!(error.failure,
                             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                                artifact, original_ordinal: 3,
+                                artifact, original_ordinal: 7,
                             } if artifact == input.descriptor.id)),
-                        "{consumer} must refuse unavailable input group 3"
+                        "{consumer} must refuse unavailable input group 7"
                     );
                 }
             }
