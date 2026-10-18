@@ -43,6 +43,15 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Vec<ArtifactId>, CompileError> {
+        self.published_artifact_roots_and_lexical(root, original)
+            .map(|(roots, _)| roots)
+    }
+
+    fn published_artifact_roots_and_lexical(
+        &self,
+        root: &ExactModuleIdentity,
+        original: ArtifactId,
+    ) -> Result<(Vec<ArtifactId>, Vec<ExactLexicalNode>), CompileError> {
         let metadata = self
             .owner
             .facts
@@ -72,7 +81,8 @@ impl ExactDeclarationContext {
             .artifacts()
             .select_issued(vec![original], &issued)?;
         let mut roots = BTreeSet::from([original]);
-        for node in self.published_lexical_closure(root)? {
+        let lexical = self.published_lexical_closure(root)?;
+        for node in &lexical {
             let role = roles
                 .iter()
                 .find(|role| {
@@ -94,7 +104,7 @@ impl ExactDeclarationContext {
                 roots.insert(dependency);
             }
         }
-        Ok(roots.into_iter().collect())
+        Ok((roots.into_iter().collect(), lexical))
     }
     fn published_lexical_closure(
         &self,
@@ -371,8 +381,7 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Self, CompileError> {
-        let roots = self.published_artifact_roots(root, original)?;
-        let lexical = self.published_lexical_closure(root)?;
+        let (roots, lexical) = self.published_artifact_roots_and_lexical(root, original)?;
         let owners = lexical.iter().map(|node| node.owner.clone()).collect();
         let compiler_support = self
             .owner
@@ -382,11 +391,7 @@ impl ExactDeclarationContext {
         Self::from_facts(DeclarationContextFacts {
             producer: self.owner.facts.producer,
             compiler_support,
-            lexical: self
-                .owner
-                .facts
-                .lexical
-                .replace(self.published_lexical_closure(root)?)?,
+            lexical: self.owner.facts.lexical.replace(lexical)?,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             // Checked values retain their own template custody in the caller's
             // context. A source publication carries its selected source graph.
