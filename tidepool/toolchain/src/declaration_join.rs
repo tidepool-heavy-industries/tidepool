@@ -1663,20 +1663,6 @@ mod tests {
         .is_err());
     }
 
-    fn join_spec(input: &DeclarationJoinInput) -> DeclarationJoinSpec {
-        DeclarationJoinSpec {
-            expected_public_version: input.expected_public_version.clone(),
-            public_module: input.public_module.clone(),
-            private_base: input.private_base.clone(),
-            private_tip: input.private_tip.clone(),
-            writes: input.writes.clone(),
-            reserved: input.reserved.clone(),
-            family_closure: input.family_closure.clone(),
-            expected_exports: input.expected_exports.clone(),
-            expected_instances: input.expected_instances.clone(),
-        }
-    }
-
     fn input() -> DeclarationJoinInput {
         DeclarationJoinInput {
             expected_public_version: "paired-snapshot".into(),
@@ -2125,6 +2111,20 @@ pub fn decode_declaration_inventory_outcome(
 
 #[cfg(test)]
 mod authored_tests {
+    fn join_spec(input: &DeclarationJoinInput) -> DeclarationJoinSpec {
+        DeclarationJoinSpec {
+            expected_public_version: input.expected_public_version.clone(),
+            public_module: input.public_module.clone(),
+            private_base: input.private_base.clone(),
+            private_tip: input.private_tip.clone(),
+            writes: input.writes.clone(),
+            reserved: input.reserved.clone(),
+            family_closure: input.family_closure.clone(),
+            expected_exports: input.expected_exports.clone(),
+            expected_instances: input.expected_instances.clone(),
+        }
+    }
+
     fn certify_recovered_declaration_tip_in_context(
         context: Arc<ExactDeclarationContext>,
         selection: RecoveryDeclarationSelection,
@@ -2737,16 +2737,9 @@ mod authored_tests {
             .artifacts()
             .iter()
             .all(|artifact| artifact.product.is_none()));
-        let materialized = crate::declaration_context::MaterializedExactDeclarationContext {
-            artifacts: join_inputs.artifacts().to_vec(),
-            lexical: Vec::new(),
-        };
-        assert!(materialized
-            .artifacts
-            .iter()
-            .all(|row| row.interface.module != "Expr"));
-        let original = materialized
-            .artifacts
+        let artifacts = join_inputs.artifacts().to_vec();
+        assert!(artifacts.iter().all(|row| row.interface.module != "Expr"));
+        let original = artifacts
             .iter()
             .find(|row| row.interface.module == owner.module)
             .unwrap();
@@ -2765,7 +2758,7 @@ mod authored_tests {
                 module: "SelectedInputJoin".into(),
                 path: worker_root.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
+            artifacts,
             family_closure: certificate.family_closure().to_vec(),
             expected_exports: certificate.lexical_exports().to_vec(),
             expected_instances: certificate.instances().clone(),
@@ -3051,12 +3044,8 @@ mod authored_tests {
             .artifacts()
             .iter()
             .all(|artifact| artifact.product.is_none()));
-        let materialized = crate::declaration_context::MaterializedExactDeclarationContext {
-            artifacts: join_inputs.artifacts().to_vec(),
-            lexical: Vec::new(),
-        };
-        let original = materialized
-            .artifacts
+        let artifacts = join_inputs.artifacts().to_vec();
+        let original = artifacts
             .iter()
             .find(|artifact| artifact.interface.module == owner.module)
             .unwrap();
@@ -3082,7 +3071,7 @@ mod authored_tests {
                 module: joined_module.clone(),
                 path: worker_root.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
+            artifacts,
             family_closure: certificate.family_closure().to_vec(),
             expected_exports: certificate.lexical_exports().to_vec(),
             expected_instances: certificate.instances().clone(),
@@ -3434,13 +3423,9 @@ mod authored_tests {
         let next_join_inputs = next_context
             .declaration_join_inputs(next_worker.clone())
             .unwrap();
-        let next_anchors = crate::declaration_context::MaterializedExactDeclarationContext {
-            artifacts: next_join_inputs.artifacts().to_vec(),
-            lexical: Vec::new(),
-        };
+        let next_artifacts = next_join_inputs.artifacts().to_vec();
         let snapshot = |owner: &ExactModuleIdentity| {
-            let artifact = next_anchors
-                .artifacts
+            let artifact = next_artifacts
                 .iter()
                 .find(|artifact| {
                     artifact.interface.unit == owner.unit
@@ -3469,7 +3454,7 @@ mod authored_tests {
                 module: SessionModule::lib(Generation(4)).module_name(),
                 path: next_worker.path().join("joined-next.hi"),
             },
-            artifacts: next_anchors.artifacts,
+            artifacts: next_artifacts,
             family_closure: fresh_certificate.family_closure().to_vec(),
             expected_exports: fresh_certificate.lexical_exports().to_vec(),
             expected_instances: selected_instances,
