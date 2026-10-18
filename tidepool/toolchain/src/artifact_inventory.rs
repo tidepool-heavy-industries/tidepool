@@ -15028,7 +15028,7 @@ mod tests {
             matches!(selected.native_requirements_from_roots(&[NativeRequirementRoot::Group {
             artifact: hidden.descriptor.id, original_ordinal: 7,
         }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-            ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == hidden.descriptor.id))
+            ArtifactInventoryFailure::NativeRootOutsideView { artifact } if artifact == hidden.descriptor.id))
         );
         let recovered_inventory = ArtifactInventory::default();
         let recovered = recovered_inventory
