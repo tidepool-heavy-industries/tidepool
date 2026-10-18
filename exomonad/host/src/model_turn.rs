@@ -1,4 +1,4 @@
-//! Host-bound, per-cell adapter for the Engine's bounded invocation profile.
+//! Host-bound retained service for the Engine's bounded invocation profile.
 use exomonad_tool::ModelFamily;
 use harness::{
     engine::{EngineConfig, ResponsesTransport},
@@ -204,7 +204,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             }
         }
     }
-    /// The cell owner calls this after its native callback can no longer resume.
+    /// The execution owner calls this after its native callback can no longer resume.
     /// Signal-only cancellation cannot abandon a handed-out callback safely.
     pub fn settle(&self) -> Result<(), ModelBoundaryError> {
         self.cancel();
@@ -367,7 +367,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
     ) -> Result<Value, ModelBoundaryError> {
         self.authorize(caller)?;
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(rejected("calling cell's model service was cancelled"));
+            return Err(rejected("model service admission was cancelled"));
         }
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
@@ -415,7 +415,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         // miss an invocation between its creation and registry publication.
         let mut registry = self.registry.lock().unwrap();
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(rejected("calling cell's model service was cancelled"));
+            return Err(rejected("model service admission was cancelled"));
         }
         let invocation = {
             let _entered = self.runtime.enter();
