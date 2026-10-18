@@ -16500,7 +16500,16 @@ mod tests {
             .all(|role| role.original().is_none()));
         assert_eq!(type_only.interface_owners(), context.interface_owners());
         assert_eq!(type_only.owner.facts.lexical, context.owner.facts.lexical);
-        assert!(type_only.recovery_products().is_empty());
+        let type_support = type_only.compiler_source_support();
+        assert!(type_support.native_offers().is_empty());
+        assert_eq!(
+            type_support.native_availability(),
+            &RequestNativeAvailability::default()
+        );
+        assert!(type_only
+            .artifact_view()
+            .selected_native_groups()
+            .is_empty());
         assert!(!context.recovery_products().is_empty());
         assert_ne!(type_only.semantic_sha256(), expected);
     }
