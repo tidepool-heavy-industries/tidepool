@@ -3049,16 +3049,6 @@ impl RecoveredArtifactInventory {
         bindings: &[ArtifactBinding],
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<Self, RecoveryInventoryError> {
-        crate::certified_products::validate_recovery_original_owners(
-            captured
-                .entries
-                .values()
-                .filter_map(|entry| match &entry.payload {
-                    ArtifactPayload::Original(product) => Some(product.owner()),
-                    _ => None,
-                }),
-        )
-        .map_err(failure)?;
         let actual = captured
             .entries
             .iter()
@@ -11271,7 +11261,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_payload_acquisition_preserves_batch_original_owner_uniqueness() {
+    fn recovery_payload_acquisition_preserves_distinct_certificates_without_selecting_both() {
         let raw = support_product_in_unit("main", "Tidepool.Session.Lib.G11");
         let products = [
             crate::certified_products::fixture_finalized_product(raw.clone(), [2; 32]),
@@ -11331,7 +11321,7 @@ mod tests {
             .iter()
             .map(|reference| reference.module_interface.clone().unwrap())
             .collect::<Vec<_>>();
-        assert!(RecoveredArtifactInventory::capture_bound(
+        let combined = RecoveredArtifactInventory::capture_bound(
             directory.path(),
             &references,
             &interfaces,
@@ -11339,9 +11329,74 @@ mod tests {
             &[],
             &descriptors,
             &bindings,
-            &edges
+            &edges,
         )
-        .is_err());
+        .unwrap();
+        let original_ids = views
+            .iter()
+            .map(|view| {
+                view.entries()
+                    .into_iter()
+                    .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+                    .unwrap()
+                    .descriptor
+                    .id
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(original_ids[0], original_ids[1]);
+        for index in 0..2 {
+            let projection =
+                CompilerInputProjection::from_issued_entries(&views[index].entries()).unwrap();
+            let context = combined
+                .context_with_graph_selection(
+                    selections[index].clone(),
+                    &projection.roles(),
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(context.compiler_input_projection(), &projection);
+            assert!(context
+                .compiler_input_projection()
+                .roles()
+                .iter()
+                .any(|role| role.original() == Some(original_ids[index])));
+        }
+        let projections = views
+            .iter()
+            .map(|view| CompilerInputProjection::from_issued_entries(&view.entries()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            projections[0].merge(&projections[1]).is_err(),
+            "combined custody cannot select incompatible source originals"
+        );
+        assert!(
+            RecoveredArtifactInventory::capture_bound(
+                directory.path(),
+                &[references[0].clone(), references[0].clone()],
+                std::slice::from_ref(&interfaces[0]),
+                &[],
+                &[],
+                &views[0].descriptors(),
+                &selections[0].bindings,
+                &views[0].binding_dependencies(),
+            )
+            .is_err(),
+            "duplicate exact recovery references still refuse"
+        );
+        assert!(
+            RecoveredArtifactInventory::capture_bound(
+                directory.path(),
+                &references,
+                &interfaces,
+                &[],
+                &[],
+                &descriptors[1..],
+                &bindings,
+                &edges,
+            )
+            .is_err(),
+            "bound descriptors must still match every certified payload"
+        );
         let mut acquisition = RecoveredArtifactAcquisition::new(directory.path());
         acquisition
             .capture_bound(
@@ -11355,7 +11410,7 @@ mod tests {
             )
             .unwrap();
         let before = acquisition.payloads.len();
-        assert!(acquisition
+        acquisition
             .capture_bound(
                 &references,
                 &interfaces,
@@ -11363,10 +11418,10 @@ mod tests {
                 &[],
                 &descriptors,
                 &bindings,
-                &edges
+                &edges,
             )
-            .is_err());
-        assert_eq!(acquisition.payloads.len(), before);
+            .unwrap();
+        assert!(acquisition.payloads.len() > before);
         acquisition
             .capture_bound(
                 std::slice::from_ref(&references[1]),
@@ -11378,9 +11433,8 @@ mod tests {
                 &views[1].binding_dependencies(),
             )
             .unwrap();
-        assert!(acquisition.payloads.len() > before);
         let all_held = acquisition.work();
-        assert!(acquisition
+        acquisition
             .capture_bound(
                 &references,
                 &interfaces,
@@ -11388,9 +11442,9 @@ mod tests {
                 &[],
                 &descriptors,
                 &bindings,
-                &edges
+                &edges,
             )
-            .is_err());
+            .unwrap();
         assert_eq!(acquisition.work(), all_held);
         acquisition
             .capture_bound(
