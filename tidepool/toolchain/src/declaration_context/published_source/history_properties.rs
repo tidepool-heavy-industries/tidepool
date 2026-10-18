@@ -272,12 +272,13 @@ fn restored_graph_roles(
         &selection.bindings,
         &edges,
     )
-    .unwrap();
-    let authenticated = inventory.context_with_graph_selection(
-        &selection,
-        roles,
-        context.owner.facts.lexical.to_vec(),
-    )?;
+    .expect("history recovery: certificate acquisition");
+    let authenticated = inventory
+        .context_with_graph_selection(&selection, roles, context.owner.facts.lexical.to_vec())
+        .map_err(|error| {
+            eprintln!("history recovery stage=graph-role-authentication error={error:?}");
+            error
+        })?;
     Ok((scratch, inventory, authenticated))
 }
 
@@ -286,21 +287,28 @@ fn restored(
     roles: &[CompilerInputRole],
 ) -> Result<ExactDeclarationContext, CompileError> {
     // Authenticate the supplied wire before restoring the complete recorded owner.
-    let (_scratch, inventory, authenticated) = restored_graph_roles(context, roles)?;
-    authenticated
-        .compiler_source_support()
-        .restore_snapshot_evidence(&context.snapshot())?;
+    let (_scratch, inventory, _authenticated) = restored_graph_roles(context, roles)?;
     use fvm_ipld_blockstore::Blockstore;
     let store = fvm_ipld_blockstore::MemoryBlockstore::default();
     let mut writer = crate::exact_context::Materializer::new(&store);
     let persisted = writer
         .materialize_context(None, &context.snapshot())
-        .unwrap();
-    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        .expect("history recovery: materialize complete v5 owner");
+    for (cid, bytes) in writer
+        .finish()
+        .expect("history recovery: finish v5 blocks")
+        .into_blocks()
+    {
         store.put_keyed(&cid, &bytes).unwrap();
     }
-    let acquired = crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
-    inventory.context_for_expected_snapshot(persisted.root(), &acquired)
+    let acquired = crate::exact_context::hydrate_context(&store, persisted.root())
+        .expect("history recovery: hydrate complete v5 owner");
+    inventory
+        .context_for_expected_snapshot(persisted.root(), &acquired)
+        .map_err(|error| {
+            eprintln!("history recovery stage=expected-root-full-owner error={error:?}");
+            error
+        })
 }
 
 fn property_config() -> proptest::test_runner::Config {
@@ -455,15 +463,18 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         original_ordinal: ordinal,
                         binder: binding.identity.clone(),
                     };
-                    let root_binding = *context.artifact_view().capture_graph_selection().namespace.iter()
-                        .find(|binding| binding.artifact == root.descriptor.id).unwrap();
                     let row = context.compiler_source_support().native_availability().rows()
                         .find(|row| row.original.descriptor.id == root.descriptor.id).unwrap();
                     prop_assert!(row.permits(ordinal));
-                    let permitted_groups = row.dependency_support(NativeGroupKey {
+                    let dependency = row.dependency_support(NativeGroupKey {
                         artifact: root.descriptor.id, original_ordinal: ordinal,
-                    }, product.owner()).unwrap().groups().collect::<BTreeSet<_>>();
-                    prop_assert!(!permitted_groups.is_empty());
+                    }, product.owner()).unwrap();
+                    let permitted_carriers = dependency.groups().map(|group| {
+                        let offer = dependency.offer_for_group(group).unwrap();
+                        let carriers = offer.issued_group_carriers().unwrap();
+                        (group, carriers[&group])
+                    }).collect::<BTreeMap<_, _>>();
+                    prop_assert!(!permitted_carriers.is_empty());
                     let module = format!("HistoryOutput{ordinal}");
                     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
                         crate::certified_products::fixture_finalized_product_with_requirements(
@@ -487,16 +498,15 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             crate::artifact_inventory::ArtifactBindingNode::Group(required),
                         ) if dependent.binding.artifact() == output.descriptor.id
                             && dependent.original_ordinal == 0
-                            && permitted_groups.contains(required)
-                            && edges.iter().any(|(source, target, edge)| {
+                            && permitted_carriers.get(required).is_some_and(|carrier| edges.iter().any(|(source, target, edge)| {
                                 source == &crate::artifact_inventory::ArtifactBindingNode::Group(*required)
-                                    && target == &crate::artifact_inventory::ArtifactBindingNode::Artifact(root_binding)
+                                    && target == &crate::artifact_inventory::ArtifactBindingNode::Artifact(*carrier)
                                     && matches!(edge, crate::artifact_inventory::ArtifactDependency::Interface)
-                            }))
+                            })))
                             && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
                                 dependent_ordinal: 0, required_ordinal,
                             } if *required_ordinal == ordinal)
-                    }), "the issued output requires a previously permitted Root group with its exact carrier edge");
+                    }), "the issued output requires a previously permitted Root group with its issuing carrier edge: expected={:?}, actual={:?}", permitted_carriers, edges);
                     if outputs.insert(ordinal, output.descriptor.id).is_none() {
                         expected_roles.extend(output_role);
                         expected_artifacts.extend([output.descriptor.id, canonical.descriptor.id]);
