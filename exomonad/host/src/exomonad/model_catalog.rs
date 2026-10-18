@@ -663,4 +663,156 @@ mod tests {
         aliases.insert("local_fast".into(), Model::DeepSeekFlash);
         assert!(InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded).is_err());
     }
+
+    fn persona_argon_config() -> super::super::ExomonadConfig {
+        toml::from_str(include_str!(
+            "../../../examples/persona/.exomonad/config.argon.toml"
+        ))
+        .expect("the shipped Argon profile must use the production config schema")
+    }
+
+    #[test]
+    fn shipped_argon_profile_applies_and_renders_exact_admitted_choices() {
+        use exomonad_actor::{ArgonEffort, DeepSeekReasoning};
+        let mut config = persona_argon_config();
+        config.launch.embedded = Some(
+            toml::from_str(
+                "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
+            )
+            .unwrap(),
+        );
+        config.apply_inference().unwrap();
+        let embedded = config.launch.embedded.as_ref().unwrap();
+        assert_eq!(embedded.provider, Backend::GeminiInteractions);
+        assert!(embedded.credential_file.as_os_str().is_empty());
+        assert_eq!(config.defaults.model, Model::GeminiArgon);
+        assert_eq!(
+            config.defaults.reasoning,
+            Reasoning::ArgonReasoning(ArgonEffort::EffortHigh)
+        );
+        let catalog = config.resolved_catalog().unwrap().unwrap();
+        assert_eq!(catalog.primary, "argon");
+        assert_eq!(
+            catalog
+                .models
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["argon", "flash", "pro"]
+        );
+        assert_eq!(catalog.providers.len(), 2);
+        assert_eq!(catalog.models["flash"].model, Model::DeepSeekFlash);
+        assert_eq!(catalog.models["pro"].model, Model::DeepSeekPro);
+        let source = catalog.render_haskell_models().unwrap();
+        assert!(source.contains(
+            "data Model = Argon ArgonOptions | Flash DeepSeekOptions | Pro DeepSeekOptions"
+        ));
+        assert!(source.contains("primaryModel = Argon (ArgonOptions EffortHigh)"));
+        assert!(source.contains("setNextEffort :: Member Context.ContextReadWrite effects => ArgonEffort -> Eff effects ()"));
+        assert_eq!(
+            catalog.models["flash"].reasoning,
+            Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
+        );
+        assert_eq!(
+            catalog.models["pro"].reasoning,
+            Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh)
+        );
+        for key in ["argon", "flash", "pro"] {
+            assert!(source.contains(&format!(
+                "ModelSelectionEnvelope \"{}\" \"{key}\"",
+                catalog.identity
+            )));
+        }
+    }
+
+    #[test]
+    fn shipped_argon_profile_rejects_invalid_effort_before_applying_defaults() {
+        let mut config = persona_argon_config();
+        let original = config.defaults.clone();
+        config
+            .inference
+            .as_mut()
+            .unwrap()
+            .models
+            .get_mut("argon")
+            .unwrap()
+            .effort = "max".into();
+        assert!(config.apply_inference().is_err());
+        assert_eq!(config.defaults, original);
+        let mut config = persona_argon_config();
+        config
+            .inference
+            .as_mut()
+            .unwrap()
+            .models
+            .get_mut("flash")
+            .unwrap()
+            .effort = "medium".into();
+        assert!(config.apply_inference().is_err());
+    }
+
+    #[test]
+    fn selected_catalog_identity_binds_primary_keys_providers_options_and_limits() {
+        let base = persona_argon_config().inference.unwrap();
+        let identity = base.resolve().unwrap().identity;
+        let mut variants = Vec::new();
+
+        let mut primary = base.clone();
+        primary.profiles.get_mut("argon").unwrap().default = "flash".into();
+        variants.push(primary);
+
+        let mut key = base.clone();
+        let model = key.models.remove("argon").unwrap();
+        key.models.insert("renamed".into(), model);
+        let profile = key.profiles.get_mut("argon").unwrap();
+        profile.default = "renamed".into();
+        profile.allowed[0] = "renamed".into();
+        variants.push(key);
+
+        let mut binding = base.clone();
+        binding
+            .providers
+            .insert("gemini-copy".into(), binding.providers["gemini"].clone());
+        binding.models.get_mut("argon").unwrap().provider = "gemini-copy".into();
+        variants.push(binding);
+
+        let mut options = base.clone();
+        options.models.get_mut("argon").unwrap().effort = "medium".into();
+        variants.push(options);
+
+        let mut limits = base.clone();
+        limits
+            .providers
+            .get_mut("gemini")
+            .unwrap()
+            .inference_limits
+            .max_output_tokens = Some(1234);
+        variants.push(limits);
+
+        let mut constructor = base.clone();
+        constructor.models.get_mut("argon").unwrap().constructor = "SelectedArgon".into();
+        variants.push(constructor);
+
+        let mut membership = base.clone();
+        membership
+            .profiles
+            .get_mut("argon")
+            .unwrap()
+            .allowed
+            .retain(|key| key != "pro");
+        variants.push(membership);
+
+        for variant in variants {
+            assert_ne!(variant.resolve().unwrap().identity, identity);
+        }
+        let mut unselected = base;
+        unselected.profiles.insert(
+            "another-profile".into(),
+            ProfileConfig {
+                default: "flash".into(),
+                allowed: vec!["flash".into()],
+            },
+        );
+        assert_eq!(unselected.resolve().unwrap().identity, identity);
+    }
 }
