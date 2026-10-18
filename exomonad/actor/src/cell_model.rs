@@ -49,7 +49,7 @@ pub(crate) fn unavailable_model_work(request: ModelReq) -> DeferredEffect {
             "this execution has no admitted model service".into(),
         );
         Ok(match request {
-            ModelReq::ModelCloseWith(_) => Response::new(Err::<(), _>(error)),
+            ModelReq::ModelCloseWith(..) => Response::new(Err::<(), _>(error)),
             _ => Response::new(Err::<serde_json::Value, _>(error)),
         })
     })
@@ -95,24 +95,35 @@ mod tests {
                 .expect("valid fixture metadata");
         }
         let value = || HaskellValue::Con(DataConId(50), Vec::new());
-        for request in [
-            ModelReq::ModelStartWith(value()),
-            ModelReq::ModelResumeWith("invocation".into(), "call".into(), value()),
-            ModelReq::ModelAnnotateWith("invocation".into(), "operation".into(), value()),
-            ModelReq::ModelCloseWith("invocation".into()),
+        for family in [
+            tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+            tidepool_bridge_effects::ModelFamilyWitness::ArgonWitness,
+            tidepool_bridge_effects::ModelFamilyWitness::DeepSeekWitness,
         ] {
-            let DeferredEffect::Blocking(work) = unavailable_model_work(request) else {
-                panic!("unconfigured response is ordinary owned work")
-            };
-            let response = work.into_inner().unwrap()().unwrap();
-            let value = response.to_value(&table).unwrap();
-            let HaskellValue::Con(DataConId(0), fields) = &value else {
-                panic!("the unavailable response must be Left")
-            };
-            assert!(matches!(
-                ModelBoundaryError::from_value(&fields[0], &table).unwrap(),
-                ModelBoundaryError::ModelUnavailable(_)
-            ));
+            for request in [
+                ModelReq::ModelStartWith(family, value()),
+                ModelReq::ModelResumeWith(family, "invocation".into(), "call".into(), value()),
+                ModelReq::ModelAnnotateWith(
+                    family,
+                    "invocation".into(),
+                    "operation".into(),
+                    value(),
+                ),
+                ModelReq::ModelCloseWith(family, "invocation".into()),
+            ] {
+                let DeferredEffect::Blocking(work) = unavailable_model_work(request) else {
+                    panic!("unconfigured response is ordinary owned work")
+                };
+                let response = work.into_inner().unwrap()().unwrap();
+                let value = response.to_value(&table).unwrap();
+                let HaskellValue::Con(DataConId(0), fields) = &value else {
+                    panic!("the unavailable response must be Left")
+                };
+                assert!(matches!(
+                    ModelBoundaryError::from_value(&fields[0], &table).unwrap(),
+                    ModelBoundaryError::ModelUnavailable(_)
+                ));
+            }
         }
     }
 }

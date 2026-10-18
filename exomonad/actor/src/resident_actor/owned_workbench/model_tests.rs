@@ -25,10 +25,10 @@ impl crate::CellModelBinding for ModelOwner {
             Some(["original request table".to_owned()].as_slice())
         );
         let kind = match request {
-            crate::ModelReq::ModelStartWith(_) => "start",
+            crate::ModelReq::ModelStartWith(..) => "start",
             crate::ModelReq::ModelResumeWith(..) => "resume",
             crate::ModelReq::ModelAnnotateWith(..) => "annotate",
-            crate::ModelReq::ModelCloseWith(_) => "close",
+            crate::ModelReq::ModelCloseWith(..) => "close",
         };
         self.prepared.lock().push((kind, principal));
         let started = self.started.clone();
@@ -641,10 +641,26 @@ async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding_wi
     let principal = tidepool_repr::PrincipalId::from(execution.state.effects.context.actor);
     let value = || tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(73), Vec::new());
     let requests = [
-        crate::ModelReq::ModelStartWith(value()),
-        crate::ModelReq::ModelResumeWith("invocation".into(), "call".into(), value()),
-        crate::ModelReq::ModelAnnotateWith("invocation".into(), "operation".into(), value()),
-        crate::ModelReq::ModelCloseWith("invocation".into()),
+        crate::ModelReq::ModelStartWith(
+            tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+            value(),
+        ),
+        crate::ModelReq::ModelResumeWith(
+            tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+            "invocation".into(),
+            "call".into(),
+            value(),
+        ),
+        crate::ModelReq::ModelAnnotateWith(
+            tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+            "invocation".into(),
+            "operation".into(),
+            value(),
+        ),
+        crate::ModelReq::ModelCloseWith(
+            tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+            "invocation".into(),
+        ),
     ];
     let mut work = Vec::new();
     for (index, request) in requests.into_iter().enumerate() {
@@ -723,10 +739,10 @@ async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked_
             vec!["original request table".into()],
         );
         let tidepool_effect::DeferredEffect::Blocking(start) = binding.prepare(
-            crate::ModelReq::ModelStartWith(tidepool_bridge::HaskellValue::Con(
-                tidepool_repr::DataConId(73),
-                Vec::new(),
-            )),
+            crate::ModelReq::ModelStartWith(
+                tidepool_bridge_effects::ModelFamilyWitness::OpenAIWitness,
+                tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(73), Vec::new()),
+            ),
             tidepool_repr::PrincipalId::from(execution.state.effects.context.actor),
             table,
         ) else {
