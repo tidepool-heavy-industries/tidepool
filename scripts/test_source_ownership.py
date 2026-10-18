@@ -115,6 +115,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/toolchain/src/certified_products/tests/promotion_import_history.rs',
         'tidepool/toolchain/src/certified_products/tests/sparse_interface_selection_properties.rs',
         'tidepool/toolchain/src/declaration_context/native_availability_tests.rs',
+        'tidepool/toolchain/src/declaration_context/tests.rs',
         'tidepool/toolchain/src/module_candidates/codec_measurement.rs',
         'tidepool/toolchain/src/module_candidates/deployment/tests/product_carry.rs',
         'tidepool/toolchain/src/module_candidates/fixture_packets.rs',
