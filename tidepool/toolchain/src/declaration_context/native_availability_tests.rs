@@ -1640,7 +1640,14 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         let effective =
             CompilerInputProjection::from_issued_entries(&[a_interface, entries[1].clone()])
                 .unwrap();
-        assert!(receiver.selected_native_groups().is_empty());
+        let selected_groups = receiver.selected_native_groups();
+        assert!(selected_groups
+            .iter()
+            .any(|key| key.artifact == b_id && key.original_ordinal == 7));
+        assert!(
+            selected_groups.iter().all(|key| key.artifact == b_id),
+            "the actual B original selects its own groups; A stays canonical-only"
+        );
         assert!(
             ancestor_offer
                 .qualified_private_availability(&effective, &receiver)
@@ -8436,13 +8443,30 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             CompleteAvailabilitySource::Request(&continuation),
         )
     };
-    let carriers = inventory
-        .admit_shared_with_demand(
-            &inventory.empty_view(),
-            vec![entry.clone()],
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+    let mut carrier_graph = issued.capture_graph_selection();
+    carrier_graph
+        .roots
+        .retain(|node| matches!(node, ArtifactBindingNode::Artifact(_)));
+    carrier_graph
+        .custody_roots
+        .retain(|node| matches!(node, ArtifactBindingNode::Artifact(_)));
+    carrier_graph.native_groups.clear();
+    let carriers = issued
+        .select_issued(
+            carrier_graph
+                .namespace
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect(),
+            &ExactArtifactSelection::from_recovered_graph_selection(carrier_graph),
         )
         .unwrap();
+    assert!(carriers.selected_native_groups().is_empty());
+    assert!(
+        full.qualified_private_availability(context.compiler_input_projection(), &carriers)
+            .is_some(),
+        "the exact original canonical binding still qualifies the held Full owner"
+    );
     assert!(
         full.proof()
             .unwrap()
