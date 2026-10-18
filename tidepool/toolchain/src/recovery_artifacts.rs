@@ -2222,6 +2222,90 @@ fn materialize_owned_join(
     })
 }
 
+/// Checked interface/package bytes. This borrows the issuing payload and
+/// carries no filesystem, lexical or native authority.
+struct ValidatedInterfaceBytes<'a> {
+    bytes: &'a [u8],
+    packages: &'a [u8],
+    skinny_iface_sha256: [u8; 32],
+}
+
+impl<'a> ValidatedInterfaceBytes<'a> {
+    fn admit(
+        toolchain_identity_sha256: [u8; 32],
+        unit: &'a str,
+        module: &'a str,
+        bytes: &'a [u8],
+        package_imports: &'a [u8],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
+        if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let skinny_iface_sha256 = validation.digest(bytes);
+        validate_package_imports_with_validation(
+            package_imports,
+            unit,
+            module,
+            &skinny_iface_sha256,
+            Path::new("owned-join.hi.packages"),
+            validation,
+        )?;
+        Ok(Self {
+            bytes,
+            packages: package_imports,
+            skinny_iface_sha256,
+        })
+    }
+
+    fn materialize(
+        &self,
+        recovery_root: &Path,
+        validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
+    ) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
+        let bytes = self.bytes;
+        let package_imports = self.packages;
+        let skinny_iface_sha256 = self.skinny_iface_sha256;
+        let package_imports_sha256 = validation.digest(package_imports);
+        let owned = prepare_owned_directory(recovery_root, mode)?;
+        let interface_path =
+            PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
+        let package_imports_path = package_sidecar_path(&interface_path);
+        materialize_copy_with_validation(
+            &owned.join(
+                interface_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            bytes,
+            &skinny_iface_sha256,
+            mode,
+            validation,
+        )?;
+        materialize_copy_with_validation(
+            &owned.join(
+                package_imports_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            package_imports,
+            &package_imports_sha256,
+            mode,
+            validation,
+        )?;
+        if mode == MaterializationMode::Durable {
+            File::open(&owned)?.sync_all()?;
+        }
+        Ok(MaterializedInterfaceFiles {
+            skinny_iface_sha256,
+            interface_path,
+            package_imports_path,
+            package_imports_sha256,
+        })
+    }
+}
+
 fn materialize_owned_interface(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2232,54 +2316,15 @@ fn materialize_owned_interface(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
-    if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
-        return Err(RecoveryArtifactError::InvalidReference);
-    }
-    let skinny_iface_sha256 = validation.digest(bytes);
-    validate_package_imports_with_validation(
-        package_imports,
+    ValidatedInterfaceBytes::admit(
+        toolchain_identity_sha256,
         unit,
         module,
-        &skinny_iface_sha256,
-        Path::new("owned-join.hi.packages"),
-        validation,
-    )?;
-    let package_imports_sha256 = validation.digest(package_imports);
-    let owned = prepare_owned_directory(recovery_root, mode)?;
-    let interface_path =
-        PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
-    let package_imports_path = package_sidecar_path(&interface_path);
-    materialize_copy_with_validation(
-        &owned.join(
-            interface_path
-                .file_name()
-                .ok_or(RecoveryArtifactError::InvalidReference)?,
-        ),
         bytes,
-        &skinny_iface_sha256,
-        mode,
-        validation,
-    )?;
-    materialize_copy_with_validation(
-        &owned.join(
-            package_imports_path
-                .file_name()
-                .ok_or(RecoveryArtifactError::InvalidReference)?,
-        ),
         package_imports,
-        &package_imports_sha256,
-        mode,
         validation,
-    )?;
-    if mode == MaterializationMode::Durable {
-        File::open(&owned)?.sync_all()?;
-    }
-    Ok(MaterializedInterfaceFiles {
-        skinny_iface_sha256,
-        interface_path,
-        package_imports_path,
-        package_imports_sha256,
-    })
+    )?
+    .materialize(recovery_root, validation, mode)
 }
 
 pub(crate) fn materialize_module_interface(
@@ -2288,16 +2333,34 @@ pub(crate) fn materialize_module_interface(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<RecoveryModuleInterfaceRef, RecoveryArtifactError> {
-    let anchor = materialize_owned_join(
-        root,
+    let checked = ValidatedInterfaceBytes::admit(
         interface.producer_sha256(),
         interface.unit(),
         interface.module(),
         interface.interface_bytes(),
         interface.package_imports_bytes(),
         validation,
-        mode,
     )?;
+    materialize_module_interface_admitted(root, interface, &checked, validation, mode)
+}
+
+fn materialize_module_interface_admitted(
+    root: &Path,
+    interface: &crate::certified_products::CertifiedModuleInterface,
+    checked: &ValidatedInterfaceBytes<'_>,
+    validation: &mut PackageInterfaceValidation,
+    mode: MaterializationMode,
+) -> Result<RecoveryModuleInterfaceRef, RecoveryArtifactError> {
+    let files = checked.materialize(root, validation, mode)?;
+    let anchor = RecoveryJoinRef {
+        toolchain_identity_sha256: interface.producer_sha256(),
+        unit: interface.unit().to_owned(),
+        module: interface.module().to_owned(),
+        skinny_iface_sha256: files.skinny_iface_sha256,
+        interface_path: files.interface_path,
+        package_imports_path: files.package_imports_path,
+        package_imports_sha256: files.package_imports_sha256,
+    };
     let certificate_sha256 = validation.digest(interface.certificate_bytes());
     let certificate_path =
         PathBuf::from("artifacts").join(format!("{}.finalized.cbor", hex(&certificate_sha256)));
@@ -2526,6 +2589,255 @@ fn record_native_materialization(hashed: usize, copied: usize) {
     });
 }
 
+/// Shared semantic admission over actual immutable product owners. No output
+/// directory, recovery references or writer-only naming hashes are constructed.
+pub(crate) struct ValidatedCertifiedProducts<'a> {
+    producer: [u8; 32],
+    products: &'a [CertifiedRecoveryProduct],
+    source_graphs:
+        BTreeMap<[u8; 32], &'a Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    interfaces: Vec<ValidatedInterfaceBytes<'a>>,
+}
+
+impl<'a> ValidatedCertifiedProducts<'a> {
+    pub(crate) fn admit(
+        toolchain_identity_sha256: [u8; 32],
+        products: &'a [CertifiedRecoveryProduct],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
+        if toolchain_identity_sha256 == [0; 32] {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let mut source_graphs = BTreeMap::new();
+        for product in products {
+            crate::host_work::checkpoint()?;
+            if let Some(graph) = product.execution_source() {
+                if graph.producer_sha256() != toolchain_identity_sha256 {
+                    return Err(RecoveryArtifactError::ExecutionSourceProducerMismatch {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                        expected: toolchain_identity_sha256,
+                        actual: graph.producer_sha256(),
+                    });
+                }
+                if !graph.eligible_source_replay_root(product.owner()) {
+                    return Err(RecoveryArtifactError::InvalidReference);
+                }
+                if let Some(previous) = source_graphs.insert(graph.digest(), graph) {
+                    if !Arc::ptr_eq(previous, graph) && previous.bytes() != graph.bytes() {
+                        return Err(RecoveryArtifactError::InvalidReference);
+                    }
+                }
+            }
+        }
+        for (digest, graph) in &source_graphs {
+            crate::host_work::checkpoint()?;
+            if validation.digest(graph.bytes()) != *digest {
+                return Err(RecoveryArtifactError::DigestMismatch(
+                    execution_source_path(digest),
+                ));
+            }
+        }
+        let mut interfaces = Vec::with_capacity(products.len());
+        for product in products {
+            crate::host_work::checkpoint()?;
+            let owner = &product.owner;
+            if owner.unit.is_empty() || owner.module.is_empty() {
+                return Err(RecoveryArtifactError::InvalidReference);
+            }
+            if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256 || {
+                #[cfg(test)]
+                record_native_materialization(product.product_bytes.len(), 0);
+                validation.digest(&product.product_bytes)
+            }
+                != owner.product_sha256
+            {
+                return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
+                    owner,
+                )));
+            }
+            let interface_path = home_interface_path(owner);
+            let package_imports_path = package_sidecar_path(&interface_path);
+            if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
+                return Err(RecoveryArtifactError::InvalidPackageImports(
+                    package_imports_path,
+                ));
+            }
+            validate_package_imports_with_validation(
+                &product.package_imports_bytes,
+                &owner.unit,
+                &owner.module,
+                &owner.skinny_iface_sha256,
+                &package_imports_path,
+                validation,
+            )?;
+            if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
+                return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+                    certification_sidecar_path(&interface_path),
+                ));
+            }
+            let source_digest =
+                crate::certified_products::home_execution_source_digest_with_validation(
+                    &product.certification_bytes,
+                    owner,
+                    validation,
+                )
+                .map_err(|error| {
+                    recovery_validation_error(
+                        error,
+                        RecoveryArtifactError::InvalidCertifiedOwners(certified_owners_path(
+                            &validation.digest(&product.certification_bytes),
+                        )),
+                    )
+                })?;
+            if source_digest != product.execution_source().map(|graph| graph.digest()) {
+                return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+                    certified_owners_path(&validation.digest(&product.certification_bytes)),
+                ));
+            }
+            let interface = product
+                .module_interface()
+                .ok_or(RecoveryArtifactError::InvalidReference)?;
+            interfaces.push(ValidatedInterfaceBytes::admit(
+                interface.producer_sha256(),
+                interface.unit(),
+                interface.module(),
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+                validation,
+            )?);
+            crate::host_work::checkpoint()?;
+        }
+        Ok(Self {
+            producer: toolchain_identity_sha256,
+            products,
+            source_graphs,
+            interfaces,
+        })
+    }
+
+    pub(crate) fn materialize(
+        self,
+        recovery_root: &Path,
+        validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
+    ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+        let toolchain_identity_sha256 = self.producer;
+        let owned = prepare_owned_directory(recovery_root, mode)?;
+        for (digest, graph) in &self.source_graphs {
+            let path = execution_source_path(digest);
+            materialize_copy_with_validation(
+                &owned.join(
+                    path.file_name()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                ),
+                graph.bytes(),
+                digest,
+                mode,
+                validation,
+            )?;
+        }
+        let mut refs = Vec::with_capacity(self.products.len());
+        for (product, interface) in self.products.iter().zip(&self.interfaces) {
+            let owner = &product.owner;
+            let interface_path = home_interface_path(owner);
+            let package_imports_path = package_sidecar_path(&interface_path);
+            let product_path = home_product_path(owner);
+            let certification_sha256 = validation.digest(&product.certification_bytes);
+            let certification_path = certified_owners_path(&certification_sha256);
+            let execution_source =
+                product
+                    .execution_source()
+                    .map(|graph| graph.digest())
+                    .map(|sha256| RecoveryExecutionSourceRef {
+                        path: execution_source_path(&sha256),
+                        sha256,
+                    });
+            let package_imports_sha256: [u8; 32] =
+                validation.digest(&product.package_imports_bytes);
+            materialize_copy_with_validation(
+                &owned.join(
+                    interface_path
+                        .file_name()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                ),
+                &product.interface_bytes,
+                &owner.skinny_iface_sha256,
+                mode,
+                validation,
+            )?;
+            #[cfg(test)]
+            let native_written_before = validation.written_bytes;
+            materialize_copy_with_validation(
+                &owned.join(
+                    product_path
+                        .file_name()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                ),
+                &product.product_bytes,
+                &owner.product_sha256,
+                mode,
+                validation,
+            )?;
+            #[cfg(test)]
+            record_native_materialization(
+                0,
+                (validation.written_bytes - native_written_before) as usize,
+            );
+            materialize_copy_with_validation(
+                &owned.join(
+                    package_imports_path
+                        .file_name()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                ),
+                &product.package_imports_bytes,
+                &package_imports_sha256,
+                mode,
+                validation,
+            )?;
+            materialize_copy_with_validation(
+                &owned.join(
+                    certification_path
+                        .file_name()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                ),
+                &product.certification_bytes,
+                &certification_sha256,
+                mode,
+                validation,
+            )?;
+            refs.push(RecoveryArtifactRef {
+                toolchain_identity_sha256,
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: owner.module_version.0,
+                skinny_iface_sha256: owner.skinny_iface_sha256,
+                product_sha256: owner.product_sha256,
+                interface_path,
+                package_imports_path,
+                package_imports_sha256,
+                certification_path,
+                certification_sha256,
+                product_path,
+                module_interface: Some(materialize_module_interface_admitted(
+                    recovery_root,
+                    product
+                        .module_interface()
+                        .ok_or(RecoveryArtifactError::InvalidReference)?,
+                    interface,
+                    validation,
+                    mode,
+                )?),
+                execution_source,
+            });
+        }
+        if mode == MaterializationMode::Durable {
+            File::open(&owned)?.sync_all()?;
+        }
+        Ok(refs)
+    }
+}
+
 pub(crate) fn materialize_certified_products_with_validation(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2533,187 +2845,11 @@ pub(crate) fn materialize_certified_products_with_validation(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
-    if toolchain_identity_sha256 == [0; 32] {
-        return Err(RecoveryArtifactError::InvalidReference);
-    }
-    let owned = prepare_owned_directory(recovery_root, mode)?;
-    let mut source_graphs = BTreeMap::new();
-    for product in products {
-        if let Some(graph) = product.execution_source() {
-            if graph.producer_sha256() != toolchain_identity_sha256 {
-                return Err(RecoveryArtifactError::ExecutionSourceProducerMismatch {
-                    unit: product.owner().unit.clone(),
-                    module: product.owner().module.clone(),
-                    expected: toolchain_identity_sha256,
-                    actual: graph.producer_sha256(),
-                });
-            }
-            if !graph.eligible_source_replay_root(product.owner()) {
-                return Err(RecoveryArtifactError::InvalidReference);
-            }
-            if let Some(previous) = source_graphs.insert(graph.digest(), graph.clone()) {
-                if !Arc::ptr_eq(&previous, graph) && previous.bytes() != graph.bytes() {
-                    return Err(RecoveryArtifactError::InvalidReference);
-                }
-            }
-        }
-    }
-    for (digest, graph) in &source_graphs {
-        let path = execution_source_path(digest);
-        materialize_copy_with_validation(
-            &owned.join(
-                path.file_name()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-            ),
-            graph.bytes(),
-            digest,
-            mode,
-            validation,
-        )?;
-    }
-    let mut refs = Vec::with_capacity(products.len());
-    for product in products {
-        let owner = &product.owner;
-        if owner.unit.is_empty() || owner.module.is_empty() {
-            return Err(RecoveryArtifactError::InvalidReference);
-        }
-        if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256 || {
-            #[cfg(test)]
-            record_native_materialization(product.product_bytes.len(), 0);
-            validation.digest(&product.product_bytes)
-        } != owner
-            .product_sha256
-        {
-            return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
-                owner,
-            )));
-        }
-        let interface_path = home_interface_path(owner);
-        let package_imports_path = package_sidecar_path(&interface_path);
-        let product_path = home_product_path(owner);
-        if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
-            return Err(RecoveryArtifactError::InvalidPackageImports(
-                package_imports_path,
-            ));
-        }
-        validate_package_imports_with_validation(
-            &product.package_imports_bytes,
-            &owner.unit,
-            &owner.module,
-            &owner.skinny_iface_sha256,
-            &package_imports_path,
-            validation,
-        )?;
-        if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
-            return Err(RecoveryArtifactError::InvalidCertifiedOwners(
-                certification_sidecar_path(&interface_path),
-            ));
-        }
-        // One native owner can retain multiple authenticated source contexts.
-        // Its ownership certificates therefore have independent byte identity.
-        let certification_sha256: [u8; 32] = validation.digest(&product.certification_bytes);
-        let certification_path = certified_owners_path(&certification_sha256);
-        let source_digest =
-            crate::certified_products::home_execution_source_digest_with_validation(
-                &product.certification_bytes,
-                owner,
-                validation,
-            )
-            .map_err(|error| {
-                recovery_validation_error(
-                    error,
-                    RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
-                )
-            })?;
-        if source_digest != product.execution_source().map(|graph| graph.digest()) {
-            return Err(RecoveryArtifactError::InvalidCertifiedOwners(
-                certification_path,
-            ));
-        }
-        let execution_source = source_digest.map(|sha256| RecoveryExecutionSourceRef {
-            path: execution_source_path(&sha256),
-            sha256,
-        });
-        let package_imports_sha256: [u8; 32] = validation.digest(&product.package_imports_bytes);
-        materialize_copy_with_validation(
-            &owned.join(
-                interface_path
-                    .file_name()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-            ),
-            &product.interface_bytes,
-            &owner.skinny_iface_sha256,
-            mode,
-            validation,
-        )?;
-        #[cfg(test)]
-        let native_written_before = validation.written_bytes;
-        materialize_copy_with_validation(
-            &owned.join(
-                product_path
-                    .file_name()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-            ),
-            &product.product_bytes,
-            &owner.product_sha256,
-            mode,
-            validation,
-        )?;
-        #[cfg(test)]
-        record_native_materialization(
-            0,
-            (validation.written_bytes - native_written_before) as usize,
-        );
-        materialize_copy_with_validation(
-            &owned.join(
-                package_imports_path
-                    .file_name()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-            ),
-            &product.package_imports_bytes,
-            &package_imports_sha256,
-            mode,
-            validation,
-        )?;
-        materialize_copy_with_validation(
-            &owned.join(
-                certification_path
-                    .file_name()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-            ),
-            &product.certification_bytes,
-            &certification_sha256,
-            mode,
-            validation,
-        )?;
-        refs.push(RecoveryArtifactRef {
-            toolchain_identity_sha256,
-            unit: owner.unit.clone(),
-            module: owner.module.clone(),
-            module_version: owner.module_version.0,
-            skinny_iface_sha256: owner.skinny_iface_sha256,
-            product_sha256: owner.product_sha256,
-            interface_path,
-            package_imports_path,
-            package_imports_sha256,
-            certification_path,
-            certification_sha256,
-            product_path,
-            module_interface: Some(materialize_module_interface(
-                recovery_root,
-                product
-                    .module_interface()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?,
-                validation,
-                mode,
-            )?),
-            execution_source,
-        });
-    }
-    if mode == MaterializationMode::Durable {
-        File::open(&owned)?.sync_all()?;
-    }
-    Ok(refs)
+    ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?.materialize(
+        recovery_root,
+        validation,
+        mode,
+    )
 }
 
 /// Read captured path inputs into owned bundles, then use the same immutable
