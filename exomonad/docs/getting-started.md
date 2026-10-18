@@ -227,7 +227,9 @@ backend = "embedded"
 ```
 
 New workspaces select DeepSeekFlash with high reasoning. Choose the provider at
-startup in the same configuration:
+startup by updating the existing configuration. Preserve unrelated authored
+settings, including Haskell source roots and spec selection, model aliases and
+prompt paths:
 
 ```toml
 [defaults]

@@ -86,3 +86,12 @@ Recipe activation messages present the typed request; they are separate from
 the fresh context seed supplied during provider attachment. Assert payload
 fields through the checked actor's `sessionInput`. Assert seeded provider context
 at the real provider attachment consumer.
+
+Provider changes must preserve unrelated authored launch configuration, including
+Haskell source roots, the selected agent spec, model aliases and prompts. Compare
+the resulting configuration with the original at the semantic field boundary.
+Launch readiness must witness the selected spec and tool surface and publication
+of its declared startup context at the provider attachment consumer. A healthy
+host and zero operator inputs do not establish that identity. Missing a configured
+initializer is a launch failure; a spec that declares no initializer may
+legitimately start without a context seed.
