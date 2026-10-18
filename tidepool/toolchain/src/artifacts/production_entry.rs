@@ -561,7 +561,7 @@ impl EntryPreparation {
         &self,
         source_path: &Path,
         source: &str,
-        bundle: &invocation_output::InvocationOutputBundle,
+        bundle: &invocation_output::InvocationOutputBundle<invocation_output::OriginalOutput>,
         offer: &SelectedModuleCandidateOffer,
     ) -> Result<AdmittedOriginalEntry, CompileError> {
         let targets = bundle.targets();
@@ -571,6 +571,7 @@ impl EntryPreparation {
         if target.target != "__prepared" {
             return Err(invalid("original output requires its settled target"));
         }
+        checkpoint(EntryCheckpoint::OriginalAdmission)?;
         admit_original_entry(
             self.raw(),
             source_path,
@@ -581,6 +582,27 @@ impl EntryPreparation {
             offer,
             Arc::clone(bundle.operation()),
         )
+        .map_err(|error| {
+            if let CompileError::CompilerEvidence(cause) = &error {
+                if let certified_products::CertificationError::EvidenceRead {
+                    path,
+                    failure: certified_products::EvidenceReadFailure::Io { error: io, .. },
+                } = cause.as_ref()
+                {
+                    if io.kind() == std::io::ErrorKind::NotFound
+                        && [
+                            CompilerSidecar::ModuleProducts,
+                            CompilerSidecar::ModulePackageImports,
+                        ]
+                        .iter()
+                        .any(|member| path == &self.raw().join(member.filename()))
+                    {
+                        return CompileError::MissingOutput(path.clone());
+                    }
+                }
+            }
+            error
+        })
     }
 
     pub(super) fn seal(
@@ -700,6 +722,7 @@ fn require_absent_output(output: &Path) -> Result<(), CompileError> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EntryCheckpoint {
+    OriginalAdmission,
     AbsenceConfirmation,
     ReservationSync,
     ReleaseSync,

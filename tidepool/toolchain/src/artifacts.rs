@@ -5256,28 +5256,29 @@ fn compile_invocation_inner(
         invocation_timing.finish(portable.is_ok());
         return portable;
     }
-    let extracted = extract_and_read(
-        run,
-        output_owner.path(),
-        &layout,
-        &mut on_stage,
-        |stderr, success| {
-            if !success && !stderr.is_empty() {
-                tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
-            }
-        },
-    );
-    // Candidate admission misses are handled before source execution by the
-    // worker. A completed request is never replayed because of its response.
-    let bundle = extracted.map_err(|error| match &policy {
-        CompilationPolicy::BuildAction {
-            export: BuildActionExport::PreparedFixture { .. },
-            ..
-        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-    })?;
     if let CompilationOutputOwner::Original(preparation) = output_owner {
+        let original_layout = invocation_output::InvocationOutputLayout::original(inv.targets)?;
+        let extracted = extract_and_read(
+            run,
+            preparation.raw(),
+            &original_layout,
+            &mut on_stage,
+            |stderr, success| {
+                if !success && !stderr.is_empty() {
+                    tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
+                }
+            },
+        );
+        // Candidate admission misses are handled before source execution by the
+        // worker. A completed request is never replayed because of its response.
+        let bundle = extracted.map_err(|error| match &policy {
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::PreparedFixture { .. },
+                ..
+            } => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
+            CompilationPolicy::BuildAction { .. } => error,
+            _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
+        })?;
         let admitted = (|| {
             if let CompilationPolicy::BuildAction { source_path, .. } = &policy {
                 let evidence =
@@ -5343,6 +5344,27 @@ fn compile_invocation_inner(
         invocation_timing.finish(true);
         return Ok(CompilationOutput::Original(original));
     }
+    let extracted = extract_and_read(
+        run,
+        output_owner.path(),
+        &layout,
+        &mut on_stage,
+        |stderr, success| {
+            if !success && !stderr.is_empty() {
+                tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
+            }
+        },
+    );
+    // Candidate admission misses are handled before source execution by the
+    // worker. A completed request is never replayed because of its response.
+    let bundle = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+    })?;
     let meta_bytes = bundle.metadata();
     let raw = bundle.targets();
     let product_bytes = bundle.products();
@@ -8423,6 +8445,71 @@ mod module_product_tests {
                 original
             );
             previous_executions = executions;
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn retained_entry_deferred_products_preserve_missing_and_inaccessible_failures() {
+        use production_entry::EntryCheckpoint;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        for (index, (member, missing)) in [
+            (CompilerSidecar::ModuleProducts, true),
+            (CompilerSidecar::ModulePackageImports, true),
+            (CompilerSidecar::ModuleProducts, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = root.path().join(format!("entry-{index}"));
+            let path = output
+                .with_extension("preparing")
+                .join("raw")
+                .join(member.filename());
+            let changed = path.clone();
+            let error = production_entry::with_checkpoint_observer(
+                move |stage| {
+                    if stage == EntryCheckpoint::OriginalAdmission {
+                        if missing {
+                            std::fs::remove_file(&changed).unwrap();
+                        } else {
+                            std::fs::set_permissions(&changed, std::fs::Permissions::from_mode(0))
+                                .unwrap();
+                        }
+                    }
+                },
+                || {
+                    crate::artifacts::test_support::prepare_frozen_production_entry(
+                        &sources,
+                        root.path(),
+                        &output,
+                    )
+                },
+            )
+            .unwrap_err();
+            if missing {
+                assert!(
+                    matches!(error, CompileError::MissingOutput(ref actual) if actual == &path),
+                    "{error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&error, CompileError::CompilerEvidence(cause)
+                    if matches!(cause.as_ref(), certified_products::CertificationError::EvidenceRead {
+                        path: actual, failure: certified_products::EvidenceReadFailure::Io { error, .. },
+                    } if actual == &path && error.kind() == std::io::ErrorKind::PermissionDenied)),
+                    "{error:?}"
+                );
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            assert!(!output.exists());
         }
     }
 

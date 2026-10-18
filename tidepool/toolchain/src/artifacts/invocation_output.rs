@@ -37,6 +37,7 @@ impl Artifact {
 
 pub(crate) struct NativeOutput;
 pub(crate) struct PortableOutput;
+pub(crate) struct OriginalOutput;
 
 pub(crate) struct InvocationOutputLayout<P = NativeOutput> {
     artifacts: Vec<Artifact>,
@@ -52,6 +53,13 @@ impl InvocationOutputLayout<NativeOutput> {
     }
 }
 
+impl InvocationOutputLayout<OriginalOutput> {
+    /// Original product sidecars are acquired by their one semantic issuer.
+    pub(crate) fn original(targets: &[&str]) -> Result<Self, CompileError> {
+        Self::for_members(targets, [])
+    }
+}
+
 impl InvocationOutputLayout<PortableOutput> {
     pub(crate) fn portable(targets: &[&str]) -> Result<Self, CompileError> {
         Self::for_members(targets, [Artifact::PortableReceipt, Artifact::Dependencies])
@@ -59,7 +67,10 @@ impl InvocationOutputLayout<PortableOutput> {
 }
 
 impl<P> InvocationOutputLayout<P> {
-    fn for_members(targets: &[&str], members: [Artifact; 2]) -> Result<Self, CompileError> {
+    fn for_members<const N: usize>(
+        targets: &[&str],
+        members: [Artifact; N],
+    ) -> Result<Self, CompileError> {
         if targets.is_empty() {
             return Err(CompileError::ExtractFailed(
                 "invocation output requires a target".into(),
@@ -246,6 +257,27 @@ impl InvocationOutputBundle<PortableOutput> {
 #[cfg(test)]
 mod portable_tests {
     use super::*;
+
+    #[test]
+    fn original_acquisition_leaves_product_members_to_the_original_issuer() {
+        let layout = InvocationOutputLayout::original(&["__prepared"]).unwrap();
+        let mut observed = Vec::new();
+        let bundle = layout
+            .capture_members(
+                Arc::new(InventoryOperation::new(Default::default())),
+                |member| {
+                    observed.push(member.filename());
+                    Ok::<_, ()>(vec![1])
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            ["meta.cbor", "__prepared.prepared.cbor", "asks.json"]
+        );
+        assert_eq!(bundle.targets().len(), 1);
+        assert_eq!(bundle.bytes_len(), 3);
+    }
 
     #[test]
     fn portable_acquisition_refuses_wrong_mode_and_missing_members() {
