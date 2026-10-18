@@ -1349,6 +1349,34 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
             .count(),
         2
     );
+    for event in events
+        .iter()
+        .filter(|event| event.kind == "responses_transport")
+    {
+        let observation: harness::transport::TransportObservation =
+            serde_json::from_str(&event.payload).unwrap();
+        assert_eq!(
+            observation.backend,
+            Some(harness::transport::ResponsesRoute::DeepSeek)
+        );
+        assert_eq!(observation.returned_model, observation.requested_model);
+        assert_eq!(observation.usage.unwrap().cached_tokens, Some(0));
+        let contract = store
+            .native_transport_contract(event.request.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        let key = match observation.requested_model.as_deref().unwrap() {
+            "deepseek-flash" => "executor",
+            "deepseek-v4-pro" => "planner",
+            other => panic!("unselected model: {other}"),
+        };
+        assert_eq!(
+            contract.credential,
+            harness::transport::CredentialReference::File {
+                path: files.path().join(key)
+            }
+        );
+    }
     for (stop, task) in servers {
         stop.send(()).unwrap();
         task.await.unwrap();
