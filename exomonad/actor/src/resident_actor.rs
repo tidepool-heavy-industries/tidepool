@@ -5592,6 +5592,8 @@ where
             placement_registration.map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
+                requested_effects,
+                model_permissions,
                 lifetime,
                 mut descriptor,
                 spawn,
@@ -5627,50 +5629,32 @@ where
                     ))
                 })?;
             }
-            let effective_parent = effect_owner
-                .context_binding()
-                .map(|binding| binding.effective_inference())
-                .transpose()
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-                .flatten();
-            let parent_model = effective_parent
-                .as_ref()
-                .map(|(model, _)| model.clone())
-                .or_else(|| self.descriptor.model().cloned());
-            let parent_reasoning = effective_parent
-                .as_ref()
-                .map(|(_, reasoning)| *reasoning)
-                .or(self.descriptor.reasoning());
-            if descriptor.model().is_none() {
-                let checkpoint_model = checkpoint_lease
-                    .as_ref()
-                    .and_then(|lease| lease.issuer_model.clone());
-                descriptor = descriptor.with_model(checkpoint_model.or(parent_model.clone()));
+            let capabilities = match &spawn {
+                Some(spawn) => self.descriptor.capabilities().admit_model_child(
+                    spawn.permission,
+                    &spawn.selection,
+                    requested_effects.clone(),
+                    &model_permissions,
+                    descriptor.fork_budget(),
+                    checkpoint_lease,
+                ),
+                None => self.descriptor.capabilities().admit_record_child(
+                    requested_effects.clone(),
+                    &model_permissions,
+                    descriptor.fork_budget(),
+                ),
             }
-            if descriptor.reasoning().is_none() {
-                let checkpoint_effort = checkpoint_lease
-                    .as_ref()
-                    .and_then(|lease| lease.issuer_reasoning);
-                descriptor = descriptor.with_reasoning(checkpoint_effort.or(parent_reasoning));
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            if let Some(spawn) = &spawn {
+                let conversation = capabilities.conversation_permission().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "model child has no admitted conversation".into(),
+                    )
+                })?;
+                descriptor = descriptor
+                    .with_model(Some(conversation.model().model().clone()))
+                    .with_reasoning(Some(spawn.selection.reasoning));
             }
-            if let Some(parent_backend) = parent_model.as_ref().map(crate::Model::backend) {
-                if descriptor
-                    .model()
-                    .is_some_and(|model| model.backend() != parent_backend)
-                    || descriptor
-                        .reasoning()
-                        .is_some_and(|reasoning| reasoning.backend() != parent_backend)
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "child model and reasoning must match the run backend".into(),
-                    ));
-                }
-            }
-            let capabilities = self
-                .descriptor
-                .capabilities()
-                .preview_child(descriptor.capabilities().clone(), descriptor.fork_budget())
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_capabilities(capabilities);
             let mut checkpoint_admission = None;
             let mut spawn_admission = None;
@@ -5729,6 +5713,8 @@ where
             let inherited_source = Some(source);
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
+                    requested_effects,
+                    model_permissions,
                     lifetime,
                     descriptor,
                     spawn,
@@ -7080,9 +7066,29 @@ where
 
             ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint {
                 continuation,
+                family,
                 name,
             }) => Box::pin(async move {
                 let result: Result<String, crate::CheckpointRefusal> = async {
+                    let capabilities = self.descriptor.capabilities();
+                    let issued = capabilities
+                        .conversation_permission()
+                        .ok_or(crate::CheckpointRefusal::CaptureFailed)?;
+                    if issued.model().family() != family
+                        || !capabilities
+                            .model_permissions()
+                            .grants()
+                            .iter()
+                            .any(|grant| {
+                                grant.permission()
+                                    == crate::ModelPermission {
+                                        operation: crate::ModelOperation::ForkAgent,
+                                        family,
+                                    }
+                            })
+                    {
+                        return Err(crate::CheckpointRefusal::CaptureFailed);
+                    }
                     let effective = effect_owner
                         .context_binding()
                         .map(|binding| binding.effective_inference())

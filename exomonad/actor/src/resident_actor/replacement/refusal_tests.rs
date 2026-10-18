@@ -266,6 +266,8 @@ impl Fixture {
         (
             crate::ActorReplacementDefinition {
                 child: crate::start::CapturedChildLaunch {
+                    requested_effects: behavior.descriptor.capabilities().effect_keys().to_vec(),
+                    model_permissions: Vec::new(),
                     lifetime: crate::WorkerLifetime::ActorOwned,
                     descriptor: ActorDescriptor::new("replacement-refusal-candidate", placement),
                     spawn: None,

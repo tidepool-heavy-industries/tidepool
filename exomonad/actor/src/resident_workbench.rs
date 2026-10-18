@@ -4119,6 +4119,7 @@ pub(crate) enum ContextCheckpointBoundary {
     },
     Checkpoint {
         continuation: ResidentHole,
+        family: crate::ModelFamily,
         name: String,
     },
 }
@@ -4339,7 +4340,11 @@ macro_rules! resident_request_roster {
         enum ResidentRequest { $($variant($request),)* }
 
         pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
-            [$($key,)*].into_iter().flatten().collect()
+            let mut keys: Vec<_> = [$($key,)*].into_iter().flatten().collect();
+            keys.extend(exomonad_tool::ActorEffectKey::ALL.iter().copied()
+                .filter(|key| key.model_permission().is_some())
+                .map(exomonad_tool::ToolEffectKey::Actor));
+            keys
         }
     };
 }
@@ -4353,7 +4358,9 @@ resident_request_roster! {
     Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
     Notifications(crate::generated::notifications::NotificationsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Notifications)),
     Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
-    Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
+    Model(crate::generated::model_call::ModelReq) => None,
+    ForkAgent(crate::generated::fork_agent::ForkAgentReq) => None,
+    SpawnAgent(crate::generated::spawn_agent::SpawnAgentReq) => None,
     Context(crate::ContextReq) => None,
     Reload(crate::generated::reload::ReloadReq) => Some(exomonad_tool::ToolEffectKey::Reload),
     Source(crate::generated::source::SourceReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Source)),
@@ -4412,6 +4419,11 @@ impl ResidentRequest {
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
+        try_member!(Self::ForkAgent, crate::generated::fork_agent::ForkAgentReq);
+        try_member!(
+            Self::SpawnAgent,
+            crate::generated::spawn_agent::SpawnAgentReq
+        );
         try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Source, crate::generated::source::SourceReq);
         try_member!(Self::Reload, crate::generated::reload::ReloadReq);
@@ -4524,13 +4536,10 @@ impl ResidentRequest {
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
             ) => "replaceSpec",
-            Self::AgentLaunch(
-                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(..),
-            ) => "spawnSubagent",
+            Self::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentSpawnWith(..))
+            | Self::SpawnAgent(_) => "spawnSubagent",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchValidateSpecWith(..)) => "validateAgentSpec",
-            Self::AgentLaunch(
-                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(..),
-            ) => "checkpoint",
+            Self::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentCheckpointWith(..)) => "checkpoint",
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(..),
             ) => "checkCheckpoint",
@@ -9902,6 +9911,10 @@ where
                         });
                     }
                 }
+                let launch_operation = match &decoded {
+                    ResidentRequest::ForkAgent(_) => crate::ModelOperation::ForkAgent,
+                    _ => crate::ModelOperation::SpawnAgent,
+                };
                 match decoded {
                     ResidentRequest::Sleep(crate::generated::sleep::SleepReq::SleepWith(
                         duration,
@@ -9969,12 +9982,22 @@ where
                         metadata: tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0),
                         effects: effects.into_iter().map(Into::into).collect(),
                     }),
-                    ResidentRequest::AgentLaunch(
-                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
-                            spawn_context, _, workspace, effects, label, model, effort,
+                    ResidentRequest::ForkAgent(
+                        crate::generated::fork_agent::ForkAgentReq::ForkAgentSpawnWith(
+                            family, spawn_context, _, workspace, effects, permissions, label, selection,
+                            instructions, lifetime, limits, metadata,
+                        ),
+                    ) | ResidentRequest::SpawnAgent(
+                        crate::generated::spawn_agent::SpawnAgentReq::SpawnAgentSpawnWith(
+                            family, spawn_context, _, workspace, effects, permissions, label, selection,
                             instructions, lifetime, limits, metadata,
                         ),
                     ) => {
+                        let permission = crate::ModelPermission { operation: launch_operation, family: family.into() };
+                        let selection = serde_json::from_value(tidepool_runtime::value_to_json(&selection, session.data_con_table(), 0))
+                            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("invalid model selection: {error}")))?;
+                        let permissions = serde_json::from_value(tidepool_runtime::value_to_json(&permissions, session.data_con_table(), 0))
+                            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("invalid model permissions: {error}")))?;
                         let metadata = tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0);
                         let selected_effects = effects.iter().cloned().map(Into::into).collect::<Vec<_>>();
                         let mut support = source.installed_effect_support().to_vec();
@@ -9982,11 +10005,11 @@ where
                         crate::tool_contract::preflight_spec_metadata(metadata, &selected_effects, &support, source.tool_surface_validator.as_deref())
                             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
                         crate::ResidentActorStart::capture_spawn(
-                            session, hole, spawn_context, workspace, effects, label, model,
-                            effort, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
+                            session, hole, spawn_context, workspace, effects, label, permission,
+                            selection, permissions, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
                             .map_err(ResidentActorWorkbenchError::StartCapture)
                     },
-                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
+                    ResidentRequest::ForkAgent(crate::generated::fork_agent::ForkAgentReq::ForkAgentCheckpointWith(family, name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, family: family.into(), name })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { continuation: hole, token })),
                     ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(target, message)) => {

@@ -402,6 +402,8 @@ where
         // the behavior. There is no discard authority before publication.
         let mut child_session_startup = None;
         let crate::start::CapturedChildLaunch {
+            requested_effects: _,
+            model_permissions: _,
             lifetime,
             mut descriptor,
             spawn,

@@ -57,11 +57,14 @@ pub enum SpawnError {
 }
 
 pub(crate) struct SpawnDefinition {
+    pub permission: crate::ModelPermission,
+    pub selection: tidepool_bridge_effects::ModelSelectionEnvelope,
     pub context: SpawnContextWire,
     pub workspace: crate::fork_workspace::SpawnWorkspaceWire,
 }
 
 pub(crate) struct ActorStartRequest {
+    pub model_permissions: Vec<tidepool_bridge_effects::ModelGrantRequest>,
     pub label: String,
     pub profile: ActorEffectProfileWire,
     pub workspace: Option<tidepool_bridge_effects::WtWorkspaceHandle>,
@@ -95,6 +98,8 @@ pub struct ActorReplacementDefinition {
 }
 
 pub(crate) struct CapturedChildLaunch {
+    pub requested_effects: Vec<crate::ActorEffectKey>,
+    pub model_permissions: Vec<tidepool_bridge_effects::ModelGrantRequest>,
     pub lifetime: WorkerLifetime,
     pub descriptor: ActorDescriptor,
     pub spawn: Option<SpawnDefinition>,
@@ -145,6 +150,8 @@ pub enum ActorStartCaptureError {
     CompileView(#[from] crate::ActorCompileViewError),
     #[error("requested model must be a nonempty model identifier")]
     InvalidModel,
+    #[error("invalid model permission request: {0}")]
+    ModelPermissions(String),
 }
 
 impl ResidentActorStart {
@@ -167,13 +174,21 @@ impl ResidentActorStart {
     {
         let session_id = actor_context.placement.session;
         let parent_actor = actor_context.actor;
-        let (label, site, profile, workspace) = match ActorReq::from_value(request, table)? {
-            ActorReq::ActorStartWith(label, site, _, profile, workspace) => {
-                (label, site, profile, workspace)
-            }
-            ActorReq::ActorReplaceWith(_, site, _, label, profile) => (label, site, profile, None),
-            _ => return Err(ActorStartCaptureError::UnexpectedRequest),
-        };
+        let (label, site, profile, permissions, workspace) =
+            match ActorReq::from_value(request, table)? {
+                ActorReq::ActorStartWith(label, site, _, profile, permissions, workspace) => {
+                    (label, site, profile, permissions, workspace)
+                }
+                ActorReq::ActorReplaceWith(_, site, _, label, profile, permissions) => {
+                    (label, site, profile, permissions, None)
+                }
+                _ => return Err(ActorStartCaptureError::UnexpectedRequest),
+            };
+        let model_permissions =
+            serde_json::from_value(tidepool_runtime::value_to_json(&permissions, table, 0))
+                .map_err(|error: serde_json::Error| {
+                    ActorStartCaptureError::ModelPermissions(error.to_string())
+                })?;
         let site = u64::try_from(site).map_err(|_| ActorStartCaptureError::UnexpectedRequest)?;
         let witness = session.original_result_type_witness(site, &parent_hole)?;
         let destination = std::sync::Arc::new(crate::owned_result::RequestResultDestination::new(
@@ -186,6 +201,7 @@ impl ResidentActorStart {
             session,
             parent_hole,
             ActorStartRequest {
+                model_permissions,
                 label,
                 profile,
                 workspace,
@@ -205,8 +221,9 @@ impl ResidentActorStart {
         workspace: crate::fork_workspace::SpawnWorkspaceWire,
         effects: Vec<ActorEffectKeyWire>,
         label: Option<String>,
-        model: Option<Model>,
-        reasoning: Option<Reasoning>,
+        permission: crate::ModelPermission,
+        selection: tidepool_bridge_effects::ModelSelectionEnvelope,
+        model_permissions: Vec<tidepool_bridge_effects::ModelGrantRequest>,
         instructions: Option<String>,
         lifetime: WorkerLifetime,
         limits: Option<(i64, i64)>,
@@ -220,10 +237,14 @@ impl ResidentActorStart {
     {
         let session_id = actor_context.placement.session;
         let parent_actor = actor_context.actor;
-        if model.as_ref().is_some_and(|model| {
-            model.value().is_empty() || model.value().chars().any(char::is_whitespace)
-        }) {
-            return Err(ActorStartCaptureError::InvalidModel);
+        let captured = matches!(&context, SpawnContextWire::CapturedSpawn(_));
+        if !matches!(
+            (permission.operation, captured),
+            (crate::ModelOperation::ForkAgent, true) | (crate::ModelOperation::SpawnAgent, false)
+        ) {
+            return Err(ActorStartCaptureError::ModelPermissions(
+                "launch effect does not match captured/fresh context".into(),
+            ));
         }
         let declaration_high_water = session.declaration_generation_high_water()?;
         let child_realm = RealmId::fresh();
@@ -269,12 +290,10 @@ impl ResidentActorStart {
                 lexical_scope,
             },
         )
-        .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys))
+        .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys.clone()))
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades))
-        .with_model(model)
-        .with_reasoning(reasoning)
         .with_instructions(instructions)
         .with_fork_budget(limits);
         if lifetime != WorkerLifetime::RunOwned {
@@ -283,9 +302,16 @@ impl ResidentActorStart {
         Ok(Self {
             parent_hole,
             child: CapturedChildLaunch {
+                requested_effects: keys,
+                model_permissions,
                 lifetime,
                 descriptor,
-                spawn: Some(SpawnDefinition { context, workspace }),
+                spawn: Some(SpawnDefinition {
+                    permission,
+                    selection,
+                    context,
+                    workspace,
+                }),
                 entry: crate::MailboxValue::new(session_id, entry),
                 launch_worktrees: Vec::new(),
                 record_workspace: None,
@@ -308,15 +334,16 @@ impl ResidentActorStart {
         O: OutputSink + Sync,
     {
         let ActorStartRequest {
+            model_permissions,
             label,
             profile,
             workspace,
         } = request;
         let session_id = actor_context.placement.session;
         let parent_actor = actor_context.actor;
-        let effects = profile.resolve();
-        let capabilities = crate::ActorCapabilities::default()
-            .with_effect_keys(effects.into_iter().map(Into::into).collect());
+        let effects: Vec<crate::ActorEffectKey> =
+            profile.resolve().into_iter().map(Into::into).collect();
+        let capabilities = crate::ActorCapabilities::default().with_effect_keys(effects.clone());
         let declaration_high_water = session.declaration_generation_high_water()?;
         let child_realm = RealmId::fresh();
         let entry = session
@@ -362,6 +389,8 @@ impl ResidentActorStart {
         Ok(Self {
             parent_hole,
             child: CapturedChildLaunch {
+                requested_effects: effects,
+                model_permissions,
                 lifetime: WorkerLifetime::ActorOwned,
                 descriptor,
                 spawn: None,
