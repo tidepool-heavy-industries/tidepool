@@ -8029,6 +8029,10 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .artifacts()
                 .selected_native_groups()
                 .is_empty());
+            let incoming = retained
+                .compiler_support
+                .artifacts()
+                .capture_graph_selection();
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
             let (retained_again, _, _) = retained
                 .into_value_support(
@@ -8054,7 +8058,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .iter()
                 .all(|edge| retained_again.binding_dependencies().contains(edge)));
             let empty = original.artifact_view().inventory().empty_view();
-            let (custody_only, _, _) =
+            let (custody_only, custody_support, _) =
                 CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
                     .unwrap()
                     .unwrap()
@@ -8066,22 +8070,18 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             let custody_graph = custody_only.capture_graph_selection();
             assert!(custody_graph.namespace.is_empty());
             assert!(custody_graph.roots.is_empty());
-            let incoming = retained
-                .compiler_support
-                .artifacts()
-                .capture_graph_selection();
             assert!(incoming
                 .roots
                 .iter()
                 .chain(&incoming.custody_roots)
                 .all(|seed| custody_graph.custody_roots.contains(seed)));
-            assert_eq!(
-                retained
-                    .into_value_support(&custody_only)
+            let (repeated, _, _) =
+                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
                     .unwrap()
-                    .capture_graph_selection(),
-                custody_graph
-            );
+                    .unwrap()
+                    .into_value_support(custody_only, custody_support)
+                    .unwrap();
+            assert_eq!(repeated.capture_graph_selection(), custody_graph);
             let extended = original
                 .clone()
                 .extend_interface_context(&original)
