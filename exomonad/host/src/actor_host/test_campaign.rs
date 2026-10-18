@@ -162,6 +162,15 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
     let git = exomonad_worktree::GitCli::new();
     git.try_run(workspace, &["add", "--all", "--", "."])
         .unwrap();
+    if git
+        .stdout_bytes(workspace, &["diff", "--cached", "--name-only", "-z"])
+        .unwrap()
+        .is_empty()
+    {
+        git.try_read(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .unwrap();
+        return;
+    }
     git.try_run(
         workspace,
         &[
@@ -174,6 +183,43 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
         ],
     )
     .unwrap();
+}
+
+#[test]
+fn workspace_commit_preserves_head_until_authored_files_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path();
+    let git = exomonad_worktree::GitCli::new();
+    git.try_run(workspace, &["init", "--quiet"]).unwrap();
+    git.try_run(workspace, &["config", "user.name", "Campaign Test"])
+        .unwrap();
+    git.try_run(workspace, &["config", "user.email", "campaign@example.invalid"])
+        .unwrap();
+    let authored = workspace.join("config.toml");
+    std::fs::write(&authored, "model = 'test-model'\n").unwrap();
+    commit_workspace(workspace);
+    let head = || {
+        git.stdout_bytes(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .unwrap()
+    };
+    let first = head();
+    commit_workspace(workspace);
+    assert_eq!(
+        head(),
+        first,
+        "unchanged authored configuration keeps its commit"
+    );
+    std::fs::write(&authored, "model = 'other-model'\n").unwrap();
+    commit_workspace(workspace);
+    let changed = head();
+    assert_ne!(changed, first, "an authored edit creates a new commit");
+    assert_eq!(
+        git.stdout_bytes(workspace, &["rev-parse", "HEAD^"]).unwrap(),
+        first,
+        "the edit adds exactly one successor commit"
+    );
+    commit_workspace(workspace);
+    assert_eq!(head(), changed);
 }
 
 /// Commands use the tool directory supplied by the declared runtime resource.
