@@ -1,7 +1,7 @@
 //! Capture of a public Haskell actor launch or replacement entry.
 //!
 //! The child entry is an existentially row-typed Haskell closure. Rust never
-//! decodes that row: it claims the request's field-1 live payload and later
+//! decodes that row: it claims the request's declared live payload and later
 //! starts it through `ResidentSession::run_rooted_entry`, the same entry
 //! primitive used by green threads.
 
@@ -148,8 +148,6 @@ pub enum ActorStartCaptureError {
     NoCompileView,
     #[error(transparent)]
     CompileView(#[from] crate::ActorCompileViewError),
-    #[error("requested model must be a nonempty model identifier")]
-    InvalidModel,
     #[error("invalid model permission request: {0}")]
     ModelPermissions(String),
 }
