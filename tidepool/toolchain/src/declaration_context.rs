@@ -1368,8 +1368,8 @@ impl RequestNativeAvailability {
         projection: &CompilerInputProjection,
     ) -> Result<(), CompileError> {
         for original in projection
-            .roles()
-            .into_iter()
+            .snapshot_roles()
+            .values()
             .filter_map(|role| role.original())
         {
             if !self.0.contains_key(&original) {
