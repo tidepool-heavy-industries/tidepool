@@ -12317,7 +12317,8 @@ pub(crate) mod tests {
                 assert_eq!(
                     result.is_ok(),
                     permitted,
-                    "{consumer} permissions {ordinals:?}"
+                    "{consumer} permissions {ordinals:?}; actual_error={:?}",
+                    result.as_ref().err()
                 );
                 if permitted {
                     let completed = result.unwrap();
