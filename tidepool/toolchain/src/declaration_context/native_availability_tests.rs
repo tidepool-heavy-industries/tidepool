@@ -3048,17 +3048,190 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         let ArtifactPayload::Original(original) = &entry.payload else {
             unreachable!()
         };
-        assert!(
-            transport
-                .advertised
-                .receipt_original(
-                    &RequestNativeAvailability(Arc::clone(&transport.availability)),
-                    &original.owner().unit,
-                    &original.owner().module,
-                    &original.owner().module_version
-                )
+        assert!(transport
+            .advertised
+            .receipt_original(
+                &RequestNativeAvailability(Arc::clone(&transport.availability)),
+                &original.owner().unit,
+                &original.owner().module,
+                &original.owner().module_version
+            )
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
+fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let products = [
+        product("AdvertisedHistory", 71),
+        product("AdvertisedHistory", 72),
+    ];
+    assert_eq!(
+        products[0].module_interface(),
+        products[1].module_interface()
+    );
+    let entries = products
+        .iter()
+        .map(|product| Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap()))
+        .collect::<Vec<_>>();
+    assert_ne!(entries[0].descriptor.id, entries[1].descriptor.id);
+    let complete = entries
+        .iter()
+        .map(|entry| {
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                .unwrap();
+            fixture_compiler_support(
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+                view,
+            )
+        })
+        .collect::<Vec<_>>();
+    let owner = entries[0].descriptor.owner.clone();
+    let canonical = complete[0].projection().roles()[0].interface();
+    let binding = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+        support
+            .artifacts()
+            .capture_graph_selection()
+            .namespace
+            .into_iter()
+            .find(|binding| binding.artifact == canonical)
+            .unwrap()
+    };
+    assert_ne!(
+        binding(&complete[0]),
+        binding(&complete[1]),
+        "equal canonical bytes have distinct admitted bindings"
+    );
+    let interfaces = complete
+        .iter()
+        .map(|support| {
+            support
+                .selected_interfaces()
                 .unwrap()
-                .is_none()
+                .support_for_owners(vec![owner.clone()])
+                .unwrap()
+                .retain_template_availability(support)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for winner in 0..2 {
+        let joined = interfaces[winner].merge(&interfaces[1 - winner]).unwrap();
+        assert_eq!(binding(&joined), binding(&complete[winner]));
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&joined)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(root.path(), PRODUCER)
+            .unwrap();
+        let inputs = request.compiler_inputs();
+        assert_eq!(
+            inputs.metadata.entries[&owner].descriptor.id,
+            entries[winner].descriptor.id
+        );
+        assert!(
+            inputs
+                .projection()
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()),
+            "advertisement does not restore source authority"
+        );
+        for entry in &entries {
+            let row = inputs
+                .native_availability(entry.descriptor.id)
+                .expect("historical normalized row retained");
+            assert!(row.permits(7) && row.permits(9001));
+        }
+        let availability = inputs.private_native_availability();
+        let direct = inputs.advertised_native_originals();
+        for index in 0..2 {
+            let native = products[index].owner();
+            let row = direct
+                .receipt_original(
+                    &availability,
+                    &native.unit,
+                    &native.module,
+                    &native.module_version,
+                )
+                .unwrap();
+            assert_eq!(row.is_some(), index == winner);
+        }
+        let validation = PackageInterfaceValidation::default();
+        let receipt = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            receipt
+                .target_original(products[winner].owner())
+                .unwrap()
+                .unwrap()
+                .descriptor
+                .id,
+            entries[winner].descriptor.id
+        );
+        assert!(receipt
+            .target_original(products[1 - winner].owner())
+            .unwrap()
+            .is_none());
+        let canonical_only = ArtifactInventory::default();
+        let canonical_entry = Arc::new(ArtifactEntry::canonical(
+            products[0].module_interface().unwrap().clone(),
+        ));
+        let unrelated = canonical_only
+            .admit_shared(&canonical_only.empty_view(), vec![canonical_entry])
+            .unwrap()
+            .retain_custody(joined.artifacts())
+            .unwrap();
+        let projection = joined.projection();
+        let metadata = projection
+            .project_metadata(unrelated.metadata_snapshot())
+            .unwrap();
+        let transport = NativeCompilerTransport::receive(
+            projection,
+            &metadata,
+            &unrelated,
+            joined.native_availability(),
+            joined.native_offers(),
+        )
+        .unwrap();
+        assert!(matches!(
+            transport.metadata.entries[&owner].payload,
+            ArtifactPayload::Canonical(_)
+        ));
+        assert!(
+            transport.advertised.0.is_empty(),
+            "same canonical ID in another scope has no affine direct candidate"
+        );
+        assert_eq!(transport.availability.len(), 2);
+        let selected = complete[winner]
+            .artifacts()
+            .retain_custody(complete[1 - winner].artifacts())
+            .unwrap();
+        let selected_projection = complete[winner].projection();
+        let metadata = selected_projection
+            .project_metadata(selected.metadata_snapshot())
+            .unwrap();
+        let error = NativeCompilerTransport::receive(
+            selected_projection,
+            &metadata,
+            &selected,
+            joined.native_availability(),
+            joined.native_offers(),
+        )
+        .err()
+        .expect("explicit source Original cannot accept a competing historical Original");
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(_)),
+            "actual_error={error:?}"
         );
     }
 }
@@ -3121,6 +3294,26 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
     let metadata = projection
         .project_metadata(custody.metadata_snapshot())
         .unwrap();
+    let separate_rows = views
+        .iter()
+        .zip(&offers)
+        .map(|(view, offer)| {
+            RequestNativeAvailability::issue_checked(&projection, view, std::slice::from_ref(offer))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let normalized = separate_rows[0].merge(&separate_rows[1]).unwrap();
+    let error =
+        NativeCompilerTransport::receive(&projection, &metadata, &custody, &normalized, &offers)
+            .err()
+            .expect(
+                "two distinct IDs affine to the same exact canonical remain ambiguous at receive",
+            );
+    assert!(
+        matches!(error, CompileError::ArtifactInventory(ref error) if matches!(error.failure,
+        ArtifactInventoryFailure::NativeOwnerAmbiguity { ref owner } if owner == &entries[0].descriptor.owner)),
+        "actual_error={error:?}"
+    );
     for reversed in [false, true] {
         let selected = if reversed {
             vec![offers[1].clone(), offers[0].clone()]
@@ -9263,6 +9456,30 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         assert_eq!(row.mode == NativeTransportMode::Full, ordinals.len() == 2);
         assert_eq!(row.permits(7), ordinals.contains(&7));
         assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        assert_eq!(
+            wire_mode(&request, &owner.module),
+            if ordinals.len() == 2 {
+                full_mode()
+            } else {
+                issued_mode(&ordinals)
+            },
+            "capture must advertise the actual mode, including explicit Empty"
+        );
+        let inputs = request.compiler_inputs();
+        let private = inputs.private_native_availability();
+        let advertised = inputs.advertised_native_originals();
+        let receipt = advertised
+            .receipt_original(
+                &private,
+                &owner.unit,
+                &owner.module,
+                &row.original_owner().module_version,
+            )
+            .unwrap()
+            .expect("captured carrier identity remains advertised without granting groups");
+        assert_eq!(receipt.original.descriptor.id, entry.descriptor.id);
+        assert_eq!(receipt.permits(7), ordinals.contains(&7));
+        assert_eq!(receipt.permits(9001), ordinals.contains(&9001));
         let snapshot = exported.snapshot();
         let store = MemoryBlockstore::default();
         let mut writer = Materializer::new(&store);
