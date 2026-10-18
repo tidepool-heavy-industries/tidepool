@@ -2306,7 +2306,9 @@ fn serve_workers(
                             }
                         },
                     );
-                    resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
+                    if let Some(rss) = worker_rss_mb(worker.child.id()) {
+                        resources.worker_rss[slot].store(rss, Ordering::Release);
+                    }
                     match outcome {
                         Ok(ConnectionOutcome::Continue) => { drop(resource_permit); }
                         Ok(ConnectionOutcome::Quarantine(retirement)) => {
