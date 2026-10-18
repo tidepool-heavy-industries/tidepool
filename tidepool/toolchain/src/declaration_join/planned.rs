@@ -1276,7 +1276,7 @@ mod tests {
                     &crate::artifact_inventory::ExactArtifactSelection::capture(&projected),
                 )
                 .unwrap();
-            let view = full.retain_original_custody(&interfaces).unwrap();
+            let view = interfaces.retain_custody(&full).unwrap();
             assert!(view.selected_native_groups().is_empty());
             for dependency in ["NativeA", "NativeB"] {
                 let root = module("Authored");
@@ -1380,7 +1380,7 @@ mod tests {
                         ]),
                     )
                     .unwrap();
-                let first = first.retain_original_custody(&first).unwrap();
+                let first = first.retain_custody(&first).unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     issued.clone(),
                     first.clone(),

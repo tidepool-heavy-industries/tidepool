@@ -1,6 +1,7 @@
 //! Reexported quotation compiles across checked slots, and the fixture-owned
 //! runtime original preserves its durable source recipe before native execution.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::compiler_test_support::OwnedEnvironment;
@@ -133,12 +134,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         assert_eq!(reservation.observation_name(), Some(observation.as_str()));
         // Authored expressions execute through their compiler-issued singleton
         // capture; the sealed execution receipt is a Bind observation.
-        let TurnResult::Bind {
-            compiled,
-            binders,
-            bound,
-            ..
-        } = consume_cell_program_item(reservation).unwrap()
+        let TurnResult::Bind { binders, bound, .. } =
+            consume_cell_program_item(reservation).unwrap()
         else {
             panic!("the authored expression must retain its issued Bind observation");
         };
@@ -150,11 +147,6 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                 .collect::<Vec<_>>(),
             vec![observation.as_str()]
         );
-        let original_interfaces = first
-            .native()
-            .unwrap()
-            .original_interface_context(compiled.prepared(), compiled.table(), compiled.sites())
-            .unwrap();
         let products = &sealed.recovery_products;
         let originals = products
             .iter()
@@ -195,9 +187,36 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             products,
         )
         .unwrap();
-        let module_interfaces = original_interfaces
-            .materialize_module_interfaces(durable.path())
-            .unwrap();
+        // Recover only the canonical companions issued for these retained
+        // originals, rather than materializing the execution inventory.
+        let expected_owners = products
+            .iter()
+            .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
+            .collect::<BTreeSet<_>>();
+        let module_interfaces = references
+            .iter()
+            .map(|reference| {
+                reference
+                    .module_interface
+                    .clone()
+                    .expect("retained original owns its canonical companion")
+            })
+            .collect::<Vec<_>>();
+        let actual_owners = module_interfaces
+            .iter()
+            .map(|reference| {
+                (
+                    reference.interface.unit.clone(),
+                    reference.interface.module.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_owners, expected_owners);
+        assert_eq!(
+            module_interfaces.len(),
+            expected_owners.len(),
+            "one canonical companion per fixture owner"
+        );
         assert_original_durability(
             durable.path(),
             program.parsed_plan().producer_sha256(),

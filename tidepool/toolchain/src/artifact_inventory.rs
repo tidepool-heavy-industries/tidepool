@@ -7198,53 +7198,6 @@ impl ArtifactView {
         }
         Ok(retained)
     }
-    /// Preserve every source-owned original binding and already selected group
-    /// as byte/native custody, without resolving payload IDs into compiler roles.
-    pub(crate) fn retain_original_custody(&self, selected: &Self) -> Result<Self, CompileError> {
-        if !Arc::ptr_eq(&self.lease.inventory.0, &selected.lease.inventory.0) {
-            return Err(failure(
-                "original custody selection belongs to another inventory",
-            ));
-        }
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
-        let selected_nodes = &selected.read_projection(&state).nodes;
-        if !selected_nodes.is_subset(owned) {
-            return Err(failure("original custody selection exceeds retained graph"));
-        }
-        let roots = selected.roots().to_vec();
-        let mut custody = selected
-            .custody_roots()
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        custody.extend(
-            owned
-                .iter()
-                .filter(|node| {
-                    matches!(
-                        self.lease.payloads[&node.artifact()].payload,
-                        ArtifactPayload::Original(_)
-                    )
-                })
-                .copied(),
-        );
-        let namespace = selected.namespace();
-        drop(state);
-        let mut retained = self.lease.inventory.retain(
-            roots,
-            custody.into_iter().collect(),
-            Vec::new(),
-            Vec::new(),
-        );
-        retained.replace_namespace(&namespace);
-        let mut retained = self.retain_projected_materializations(retained)?;
-        // An empty selected namespace is also an issued fact, never a request
-        // to inherit the source's broader compiler roles.
-        retained.replace_namespace(&namespace);
-        Ok(retained)
-    }
-
     /// Narrow the compiler namespace using already-issued roles while retaining
     /// every exact historical binding and its physical custody independently.
     fn with_compiler_projection(
@@ -8253,6 +8206,132 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_custody_keeps_duplicate_native_bindings_without_namespace_roles() {
+        use super::*;
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, ArtifactPayload, CompilerInputProjection,
+        };
+        use crate::certified_products::{fixture_module_core, fixture_module_interface};
+        let producer = [2; 32];
+        let child = fixture_module_interface(producer, "fixture", "Child", BTreeMap::new());
+        let next = fixture_module_core(&child, b"different certified child Core".to_vec());
+        assert_eq!(child.interface_sha256(), next.interface_sha256());
+        let product = crate::certified_products::tests::original_groups_fixture(
+            "Root",
+            vec![(7, vec![])],
+            1,
+            &BTreeMap::new(),
+        );
+        let product = crate::certified_products::fixture_finalized_product_with_requirements(
+            product,
+            producer,
+            Some(BTreeMap::from([(
+                ("fixture".into(), "Child".into()),
+                child.interface_sha256(),
+            )])),
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let native = ArtifactEntry::original(producer, product).unwrap();
+        let native_id = native.descriptor.id;
+        let value = ArtifactEntry::canonical(fixture_module_interface(
+            producer,
+            "fixture",
+            "Value",
+            BTreeMap::new(),
+        ));
+        let inventory = ArtifactInventory::default();
+        let old = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![
+                    native.clone(),
+                    ArtifactEntry::canonical(child),
+                    value.clone(),
+                ],
+            )
+            .unwrap();
+        let new = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![native, ArtifactEntry::canonical(next), value.clone()],
+            )
+            .unwrap();
+        let old_body = old.select_roots(vec![native_id]).unwrap();
+        let old_body_selection =
+            crate::artifact_inventory::ExactArtifactSelection::capture(&old_body);
+        let old_body_graph = old_body.capture_graph_selection();
+        let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(value)]).unwrap();
+        let grown = old.merge_fixture_selected(&new, &projection).unwrap();
+        assert!(
+            matches!(grown.select_roots(vec![native_id]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity { .. }))
+        );
+        let original_graph = grown.capture_graph_selection();
+        let originals = original_graph
+            .bindings
+            .iter()
+            .filter(|binding| binding.artifact == native_id)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(originals.len(), 2);
+        let selected = grown.select_compiler_support(&projection).unwrap();
+        let captured = selected.retain_custody(&grown).unwrap();
+        let graph = captured.capture_graph_selection();
+        assert!(originals.is_subset(&graph.bindings.iter().copied().collect()));
+        assert_eq!(graph.native_groups, original_graph.native_groups);
+        assert!(selected
+            .capture_graph_selection()
+            .bindings
+            .iter()
+            .all(|binding| binding.artifact != native_id));
+        assert!(projection
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(captured
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
+        let edges = captured.binding_dependencies();
+        drop(old_body);
+        drop(old);
+        drop(new);
+        drop(grown);
+        drop(selected);
+        assert_eq!(captured.binding_dependencies(), edges);
+        let restored_inventory = ArtifactInventory::default();
+        let restored = restored_inventory
+            .recover_selection(
+                &restored_inventory.empty_view(),
+                captured.entries(),
+                &graph,
+                &edges,
+            )
+            .unwrap();
+        assert_eq!(restored.capture_graph_selection(), graph);
+        for view in [&captured, &restored] {
+            let old_body = view
+                .select_issued(vec![native_id], &old_body_selection)
+                .unwrap();
+            old_body
+                .native_requirements_from_roots(&[
+                    crate::artifact_inventory::NativeRequirementRoot::Group {
+                        artifact: native_id,
+                        original_ordinal: 7,
+                    },
+                ])
+                .unwrap();
+            assert_eq!(old_body.capture_graph_selection(), old_body_graph);
+        }
+        drop(captured);
+        drop(restored);
+        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(restored_inventory.node_count(), 0);
+    }
 
     #[test]
     fn graph_packets_project_selected_scope_ancestry_without_dropping_opaque_custody() {
@@ -13990,7 +14069,7 @@ mod tests {
                     ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id))
             );
 
-            let retained = joined.retain_original_custody(&joined).unwrap();
+            let retained = joined.retain_custody(&joined).unwrap();
             expected
                 .check(&retained)
                 .expect("retention preserves issuing groups");
@@ -14711,7 +14790,7 @@ mod tests {
             use crate::exact_context::{Materializer, hydrate_selection};
             let fixture = IndependentNativeClosures::new(depth, groups);
             let joined = fixture.join(false);
-            let mut view = joined.retain_original_custody(&joined.inventory().empty_view()).unwrap();
+            let mut view = joined.inventory().empty_view().retain_custody(&joined).unwrap();
             let mut selected_roots = BTreeSet::new();
             let mut operations = vec![0, 1, 2, 3, 4];
             operations.extend(history);
@@ -14720,7 +14799,7 @@ mod tests {
                 view = match operation {
                     0 => {
                         selected_roots.clear();
-                        view.retain_original_custody(&view.inventory().empty_view()).unwrap()
+                        view.inventory().empty_view().retain_custody(&view).unwrap()
                     },
                     1 | 2 => {
                         let source = &fixture.sources[usize::from(operation - 1)];
@@ -15021,8 +15100,9 @@ mod tests {
                 published.compiler_input_projection(),
             )
             .unwrap();
-        let current = available
-            .retain_original_custody(published.artifact_view())
+        let current = published
+            .artifact_view()
+            .retain_custody(&available)
             .unwrap();
         let current = ExactDeclarationContext::from_authenticated_execution(
             [2; 32],

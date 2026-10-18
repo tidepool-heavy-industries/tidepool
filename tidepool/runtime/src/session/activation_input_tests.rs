@@ -1578,7 +1578,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .original_compile_input
         .as_ref()
         .unwrap()
-        .original_interface_context(
+        .original_source(
             &fixture.producer.prepared(),
             &certification.groups,
             &certification.target_owners,
@@ -1595,14 +1595,14 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         name.module() == "Tidepool.Agent.Reply.Internal" && name.occurrence() == "ResponseResult"
     }));
     let package_types = compiler_context
-        .select_original_type_interfaces(&[input_witness], &[])
+        .project_type_interfaces(&[input_witness], &[])
         .unwrap();
     assert!(
         package_types.compiler_input_roles().is_empty(),
         "Int -> Int requires only package interfaces"
     );
     let expected_types = compiler_context
-        .select_original_type_interfaces(&[result_witness], &[])
+        .project_type_interfaces(&[result_witness], &[])
         .unwrap();
     assert!(
         !expected_types.compiler_input_roles().is_empty(),
@@ -1616,7 +1616,9 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     assert_interface_only_roles_without_native_selection(&retained_context);
     assert!(retained_context.lexical_graph().is_empty());
-    let producer = compiler_context.toolchain_identity_sha256();
+    let producer = compiler_context
+        .execution_context()
+        .toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
     assert_eq!(retained_context.toolchain_identity_sha256(), producer);
     assert_eq!(
@@ -2853,7 +2855,7 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
         .as_ref()
         .expect("real original input proof");
     let context = original
-        .original_interface_context(
+        .original_execution_context(
             &fixture.producer.prepared(),
             &certification.groups,
             &certification.target_owners,
@@ -3570,6 +3572,73 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         compiled.proof().disposition(),
         ActivationPreviewDisposition::Rendered
     );
+    let code = compiled.renderer.compiled.code();
+    assert!(code.sites().is_empty(), "the genuine renderer is pure");
+    let source = compiled
+        .proof()
+        .original_source(code.prepared(), code.table(), code.sites())
+        .unwrap();
+    assert!(Arc::ptr_eq(&source.execution_context(), &original_context));
+    assert!(
+        source.project_type_interfaces(&[], &[]).is_err(),
+        "a renderer cannot substitute its original display execution for an input type source"
+    );
+    let plan = CompiledProvenancePlan::build(&code).unwrap();
+    assert!(plan.authenticated_inputs.is_empty());
+    let other_target = tidepool_repr::execution_schema::testing::prepare(
+        tidepool_repr::execution_schema::testing::wire_program(),
+    )
+    .unwrap();
+    assert!(!compiled.proof().matches_target(&other_target));
+    assert!(compiled
+        .proof()
+        .original_source(&other_target, code.table(), code.sites())
+        .is_err());
+    let mut edited_table = code.table().clone();
+    edited_table
+        .insert_checked(tidepool_repr::DataCon {
+            identity: {
+                let mut symbol =
+                    tidepool_repr::execution_schema::testing::identity("PreviewEdited", "Value");
+                symbol.namespace = "constructor".into();
+                let mut family = symbol.clone();
+                family.namespace = "type".into();
+                tidepool_repr::execution_schema::testing::constructor_identity(symbol, family)
+            },
+            id: tidepool_repr::DataConId(99999),
+            name: "PreviewEdited".into(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: "PreviewEdited".into(),
+        })
+        .unwrap();
+    assert!(compiled
+        .proof()
+        .original_source(code.prepared(), &edited_table, code.sites())
+        .is_err());
+    let mut edited_code = code.clone();
+    edited_code.sites.to_mut().push(YieldSite {
+        site: 99999,
+        origin: "PreviewEdited".into(),
+        ordinal: 0,
+        ty: "Int".into(),
+        modules: vec![],
+        heads: vec![],
+        inputs: vec![],
+        input_type_witnesses: vec![],
+        reply_declaration: None,
+        request_type_signatures: None,
+    });
+    assert!(
+        CompiledProvenancePlan::build(&edited_code).is_err(),
+        "zero authenticated inputs cannot skip exact output-site validation"
+    );
+    drop(edited_code);
+    drop(plan);
+    drop(source);
+    drop(code);
     let ActivationRendererNative::Renderable(bundle) = &compiled.renderer.native else {
         panic!("renderable native custody")
     };
@@ -4911,6 +4980,44 @@ fn activation_input_staging_does_not_publish_a_reserved_interface() {
     );
     mount_original(&mut resident, owner, interface);
     assert!(path.exists());
+    let repeated = resident
+        .state
+        .stage_checked_value_interface(certificate.clone())
+        .expect("the installed certificate remains an idempotent admission");
+    resident
+        .state
+        .validate_staged_value_interface(&repeated)
+        .unwrap();
+    drop(repeated);
+
+    let independent_root = tempfile::tempdir().unwrap();
+    let mut independent =
+        InputFixture::fresh_in(SessionId(1739), &independent_root, &fixture.recipe);
+    let (independent_owner, independent_interface) = parked_input_owner(&fixture, &mut independent);
+    let independent_certificate = independent_interface.value_interface_certificate();
+    assert_eq!(independent_certificate.owner(), certificate.owner());
+    assert_eq!(
+        independent_certificate.bytes_owned(),
+        certificate.bytes_owned()
+    );
+    mount_original(&mut independent, independent_owner, independent_interface);
+    assert!(matches!(
+        resident
+            .state
+            .stage_checked_value_interface(independent_certificate),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(Arc::ptr_eq(
+        resident
+            .state
+            .retained_checked_value_artifact(certificate.owner())
+            .unwrap(),
+        &certificate
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        certificate.bytes_owned().as_ref()
+    );
 }
 
 #[test]

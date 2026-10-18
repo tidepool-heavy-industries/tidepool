@@ -186,7 +186,6 @@ impl ActivationPreviewOffer {
         request: &str,
         source: &str,
         target: &Arc<PreparedProgram>,
-        artifact_context: &Arc<ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledActivationPreview>, CompileError> {
         self.validate()?;
         let receipt = decode(&read(root.join("activation-preview.cbor"), 4 << 20)?)?;
@@ -239,7 +238,6 @@ impl ActivationPreviewOffer {
             table: read_table(root, target)?,
             yield_sites_digest: crate::artifacts::yield_sites_metadata_digest(&sites)?,
             disposition,
-            original_interfaces: Arc::new(artifact_context.original_interface_context()?),
             original_execution: self.original_execution.clone(),
             display_context: self.display_context.clone(),
         }))
@@ -298,7 +296,6 @@ pub struct ExactCompiledActivationPreview {
     table: DataConTable,
     yield_sites_digest: [u8; 32],
     disposition: ActivationPreviewDisposition,
-    original_interfaces: Arc<ExactDeclarationContext>,
     original_execution: Arc<ExactDeclarationContext>,
     display_context: Arc<OriginalDisplayContext>,
 }
@@ -350,12 +347,14 @@ impl ExactCompiledActivationPreview {
         }
         Ok(())
     }
-    pub fn original_interface_context(
+    /// A pure renderer has no input-type source. Its original display execution
+    /// is distinct from the renderer's admitted compilation context.
+    pub fn original_source(
         &self,
         target: &PreparedProgram,
         table: &DataConTable,
         sites: &[crate::YieldSite],
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+    ) -> Result<crate::declaration_context::ValidatedOriginalSource<'_>, CompileError> {
         if !self.matches_target(target) {
             return Err(failure(
                 "activation preview belongs to another prepared target",
@@ -363,7 +362,11 @@ impl ExactCompiledActivationPreview {
         }
         self.validate_table(table)?;
         self.validate_yield_sites(sites)?;
-        Ok(self.original_interfaces.clone())
+        Ok(
+            crate::declaration_context::ValidatedOriginalSource::pure_preview(
+                &self.original_execution,
+            ),
+        )
     }
     pub fn original_execution_context(
         &self,
@@ -371,19 +374,9 @@ impl ExactCompiledActivationPreview {
         table: &DataConTable,
         sites: &[crate::YieldSite],
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.original_interface_context(target, table, sites)?;
-        Ok(self.original_execution.clone())
-    }
-
-    /// Validate the exact output once before transferring both original contexts.
-    pub fn original_contexts(
-        &self,
-        target: &PreparedProgram,
-        table: &DataConTable,
-        sites: &[crate::YieldSite],
-    ) -> Result<(Arc<ExactDeclarationContext>, Arc<ExactDeclarationContext>), CompileError> {
-        let interfaces = self.original_interface_context(target, table, sites)?;
-        Ok((interfaces, self.original_execution.clone()))
+        Ok(self
+            .original_source(target, table, sites)?
+            .execution_context())
     }
 }
 

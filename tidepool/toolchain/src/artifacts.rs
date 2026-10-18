@@ -3827,7 +3827,7 @@ fn seal_turn_outputs_with_validation(
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
     let checked = if let Some(preview) = &offer.activation_preview {
-        let context = activation_preview_output_context(
+        validate_activation_preview_output_context(
             offer,
             &artifact_view,
             exact_source
@@ -3846,7 +3846,6 @@ fn seal_turn_outputs_with_validation(
                     .request_sha256,
                 source,
                 prepared,
-                &context,
             )?,
         ))
     } else {
@@ -3915,27 +3914,27 @@ fn program_support_artifacts(
     Ok(support)
 }
 
-fn activation_preview_output_context(
+fn validate_activation_preview_output_context(
     offer: &SelectedModuleCandidateOffer,
     artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     selection: &certified_products::CertifiedSourceSelection,
-) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+) -> Result<(), CompileError> {
     let exact = offer.exact.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
     let generated = source_admission.generated_source_owner()?;
     let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.program_admission();
-    let context = request.admit_program_support_with_selection(
+    request.admit_program_support_with_selection(
         exact.context().clone(),
         &support,
         std::slice::from_ref(source_admission),
         produced_types,
         selection,
     )?;
-    Ok(context)
+    Ok(())
 }
 
 struct PackageInterfaceCatalog<'a> {

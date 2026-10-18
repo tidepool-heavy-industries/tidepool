@@ -13798,10 +13798,17 @@ pub(crate) mod tests {
                 let custody = if broaden {
                     // A separately issued complete carrier is legitimate new custody;
                     // it cannot rewrite this earlier request's availability choice.
-                    inventory
-                        .admit_shared(request.compiler_inputs().artifacts(), vec![entry.clone()])
-                        .unwrap()
-                        .retain_original_custody(request.compiler_inputs().artifacts())
+                    request
+                        .compiler_inputs()
+                        .artifacts()
+                        .retain_custody(
+                            &inventory
+                                .admit_shared(
+                                    request.compiler_inputs().artifacts(),
+                                    vec![entry.clone()],
+                                )
+                                .unwrap(),
+                        )
                         .unwrap()
                 } else {
                     request.compiler_inputs().artifacts().clone()
@@ -18159,7 +18166,13 @@ pub(crate) mod tests {
         let mut historical_child = None;
         let mut current_child = None;
         for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
-            context = context.original_interface_context().unwrap();
+            context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    context.toolchain_identity_sha256(),
+                    context.artifact_view(),
+                    context.compiler_input_projection().clone(),
+                )
+                .unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");

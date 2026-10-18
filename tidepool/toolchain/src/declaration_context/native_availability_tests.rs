@@ -1013,11 +1013,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         right_proof.selection.graph_selection().namespace,
         "the distinct group scopes share one original carrier"
     );
-    let view = left
-        .merge_fixture_selections(&right)
-        .unwrap()
-        .retain_original_custody(&right)
-        .unwrap();
+    let view = right.retain_custody(&left).unwrap();
     let baseline = CompilerInputProjection::from_issued_entries(&[native_entry.clone()]).unwrap();
     assert!(left_proof.qualify_availability(&view).unwrap().is_some());
     let selected_proof =
@@ -1072,11 +1068,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     });
     let broad = partial_views
         .iter()
-        .try_fold(view.clone(), |view, partial| {
-            view.merge_fixture_selections(partial)
-        })
-        .unwrap()
-        .retain_original_custody(&view)
+        .try_fold(view.clone(), |view, partial| view.retain_custody(partial))
         .unwrap();
     for (proof, ordinal) in partial_proofs.iter().zip([7, 9001]) {
         assert!(proof.qualify_availability(&broad).unwrap().is_none());
@@ -6186,11 +6178,9 @@ fn replay_native_transport_history(
             NativeCustodyOp::Expand => {
                 let before = expanded.capture_graph_selection();
                 expanded = expanded
-                    .merge_fixture_selections(&sources[1])
+                    .retain_custody(&sources[1])
                     .unwrap()
-                    .merge_fixture_selections(&ambient)
-                    .unwrap()
-                    .retain_original_custody(&sources[0])
+                    .retain_custody(&ambient)
                     .unwrap();
                 let after = expanded.capture_graph_selection();
                 assert_eq!(before.namespace, after.namespace);
@@ -6228,11 +6218,7 @@ fn replay_native_transport_history(
                 .unwrap();
                 // Restore this source's complete selected namespace, including
                 // its marker payload, before comparing custody-only additions.
-                let receiving = expanded
-                    .merge_fixture_selections(&sources[index])
-                    .unwrap()
-                    .retain_original_custody(&sources[index])
-                    .unwrap();
+                let receiving = sources[index].retain_custody(&expanded).unwrap();
                 assert_eq!(
                     receiving.capture_graph_selection().namespace,
                     sources[index].capture_graph_selection().namespace
@@ -6827,11 +6813,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                     .collect(),
             )
             .unwrap();
-        let custody = full
-            .merge_fixture_selections(&selected)
-            .unwrap()
-            .retain_original_custody(&selected)
-            .unwrap();
+        let custody = selected.retain_custody(&full).unwrap();
         let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
             &projection,
             &selected,
@@ -7321,11 +7303,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         left_offer.snapshot_facts().restore(&right).is_err(),
         "a competing carrier cannot satisfy exact Empty custody"
     );
-    let artifacts = left
-        .merge_fixture_selections(&right)
-        .unwrap()
-        .retain_original_custody(&right)
-        .unwrap();
+    let artifacts = right.retain_custody(&left).unwrap();
     let restored_left = left_offer.snapshot_facts().restore(&artifacts).unwrap();
     assert_eq!(restored_left.snapshot_facts(), left_offer.snapshot_facts());
     assert!(restored_left.proof().is_none());
@@ -8578,22 +8556,16 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .artifacts()
                 .selected_native_groups()
                 .is_empty());
-            let incoming = retained
-                .compiler_support
-                .artifacts()
-                .capture_graph_selection();
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
             retained
                 .evidence
                 .validate(producer, retained.compiler_support.artifacts())
                 .unwrap();
             let evidence = retained.evidence.clone();
-            let (retained_again, _, _) = retained
-                .into_value_support(
-                    original.artifact_view().clone(),
-                    original.compiler_source_support().clone(),
-                )
+            let (retained_support, _) = retained
+                .into_value_support(original.compiler_source_support().clone())
                 .unwrap();
+            let retained_again = retained_support.artifacts();
             assert_eq!(
                 retained_again.capture_graph_selection().namespace,
                 before.namespace
@@ -8611,31 +8583,6 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .binding_dependencies()
                 .iter()
                 .all(|edge| retained_again.binding_dependencies().contains(edge)));
-            let empty = original.artifact_view().inventory().empty_view();
-            let (custody_only, custody_support, _) =
-                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
-                    .unwrap()
-                    .unwrap()
-                    .into_value_support(
-                        empty,
-                        crate::artifact_inventory::CompilerSourceSupport::empty(),
-                    )
-                    .unwrap();
-            let custody_graph = custody_only.capture_graph_selection();
-            assert!(custody_graph.namespace.is_empty());
-            assert!(custody_graph.roots.is_empty());
-            assert!(incoming
-                .roots
-                .iter()
-                .chain(&incoming.custody_roots)
-                .all(|seed| custody_graph.custody_roots.contains(seed)));
-            let (repeated, _, _) =
-                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
-                    .unwrap()
-                    .unwrap()
-                    .into_value_support(custody_only, custody_support)
-                    .unwrap();
-            assert_eq!(repeated.capture_graph_selection(), custody_graph);
             let extended = original
                 .clone()
                 .extend_interface_context(&original)
@@ -10165,12 +10112,8 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .artifacts()
             .selected_native_groups()
             .is_empty());
-        let empty = ArtifactInventory::default().empty_view();
-        let (_, support, evidence) = captured
-            .into_value_support(
-                empty,
-                crate::artifact_inventory::CompilerSourceSupport::empty(),
-            )
+        let (support, evidence) = captured
+            .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
             .unwrap();
         let exported = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()

@@ -93,6 +93,17 @@ impl RetainedValueInterface {
     }
 }
 
+/// A repeated Val module may retain the same issued authority, never replace
+/// it with equal interface bytes from another receipt or dependency selection.
+/// CheckedValueArtifact equality includes its certificate, receipt, exact
+/// compiler support, template/lexical evidence and original path/prototype.
+fn same_issued_value_authority(
+    retained: &Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    candidate: &Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+) -> bool {
+    Arc::ptr_eq(retained, candidate) || retained == candidate
+}
+
 impl BindingIndex {
     pub(super) fn new() -> Self {
         Self::default()
@@ -138,7 +149,7 @@ impl BindingIndex {
             .get(&interface.owner().module_name())
             .is_none_or(|existing| {
                 matches!(existing, RetainedValueInterface::Certified(old)
-                if Arc::ptr_eq(old, interface) || old == interface)
+                if same_issued_value_authority(old, interface))
             })
     }
 

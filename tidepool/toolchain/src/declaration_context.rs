@@ -48,6 +48,54 @@ pub struct ExactDeclarationContext {
     owner: Arc<DeclarationContextOwner>,
 }
 
+/// Requested type evidence and execution custody from one validated compiler output.
+/// The borrowed source cannot outlive its issuing output proof.
+pub struct ValidatedOriginalSource<'a> {
+    types: OriginalTypeSource<'a>,
+    execution: &'a Arc<ExactDeclarationContext>,
+}
+
+enum OriginalTypeSource<'a> {
+    InputsFrom(&'a ExactDeclarationContext),
+    PurePreview,
+}
+
+impl<'a> ValidatedOriginalSource<'a> {
+    pub(crate) fn inputs_from(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            types: OriginalTypeSource::InputsFrom(execution),
+            execution,
+        }
+    }
+
+    pub(crate) fn pure_preview(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            types: OriginalTypeSource::PurePreview,
+            execution,
+        }
+    }
+
+    pub fn project_type_interfaces(
+        &self,
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        match self.types {
+            OriginalTypeSource::InputsFrom(context) => {
+                context.select_original_type_interfaces(witnesses, signatures)
+            }
+            OriginalTypeSource::PurePreview => Err(failure(
+                "pure activation preview cannot supply original input type evidence",
+            )),
+        }
+    }
+
+    /// Execution custody remains separate from the interface-only projection.
+    pub fn execution_context(&self) -> Arc<ExactDeclarationContext> {
+        self.execution.clone()
+    }
+}
+
 struct DeclarationContextOwner {
     facts: DeclarationContextFacts,
     observations: OnceLock<ContextObservation>,
@@ -123,10 +171,8 @@ impl PartialEq for ExactDeclarationContext {
 }
 impl Eq for ExactDeclarationContext {}
 
-/// Value and lexical roots issue compiler selection; additional native carriers
-/// remain independently owned byte custody for future execution.
+/// Value and lexical roots select compiler support with its required native custody.
 pub(crate) struct RetainedValueSourceSurface {
-    pub(crate) artifacts: ArtifactView,
     pub(crate) compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     pub(crate) lexical: Vec<ExactLexicalNode>,
 }
@@ -257,14 +303,8 @@ impl PreparedValueSourceSupport {
             .source_support(&source_owners)?;
         timing.advance("retain_value_custody");
         let compiler_support = support.retain_custody(value)?;
-        timing.advance("retain_original_custody");
-        let artifacts = self
-            .context
-            .artifact_view()
-            .retain_original_custody(compiler_support.artifacts())?;
         timing.advance("assemble_surface");
         let surface = RetainedValueSourceSurface {
-            artifacts,
             compiler_support,
             lexical,
         };
@@ -4957,11 +4997,9 @@ impl CapturedTemplateImports {
     )]
     pub(crate) fn into_value_support(
         self,
-        artifacts: ArtifactView,
         support: crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<
         (
-            ArtifactView,
             crate::artifact_inventory::CompilerSourceSupport,
             Arc<TemplateImportEvidence>,
         ),
@@ -4969,13 +5007,11 @@ impl CapturedTemplateImports {
     > {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.template_imports.into_value_support",
-            "retain_template_custody",
+            "merge_template_support",
         );
-        let artifacts = artifacts.retain_custody(self.compiler_support.artifacts())?;
-        timing.advance("merge_template_support");
         let support = support.merge(&self.compiler_support)?;
         timing.advance("assemble_value_support");
-        let result = (artifacts, support, Arc::new(self.evidence));
+        let result = (support, Arc::new(self.evidence));
         timing.finish(true);
         Ok(result)
     }
@@ -7675,30 +7711,6 @@ impl ExactDeclarationContext {
         let support = self.owner.facts.compiler_support.merge(support)?;
         self = self.rebuild(|facts| facts.compiler_support = support);
         self.finish()
-    }
-
-    /// Retain the interface evidence admitted by an original compiler proof.
-    /// Only compiler-owned issuers may supply the producer identity.
-    pub(crate) fn original_interface_context(&self) -> Result<Self, CompileError> {
-        let support = self
-            .owner
-            .facts
-            .compiler_support
-            .selected_interfaces()?
-            .support_for_owners(
-                self.compiler_input_projection()
-                    .snapshot_roles()
-                    .keys()
-                    .cloned()
-                    .collect(),
-            )?;
-        Ok(Self::from_facts(DeclarationContextFacts {
-            compiler_support: support,
-            producer: self.owner.facts.producer,
-            lexical: Default::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-            template_imports: None,
-        }))
     }
 
     #[cfg(test)]
@@ -14175,11 +14187,8 @@ mod tests {
                     let updated = CapturedTemplateImports::capture(&issued, &[template.clone()])
                         .unwrap()
                         .map(|captured| {
-                            let (_, support, evidence) = captured
-                                .into_value_support(
-                                    issued.artifact_view().clone(),
-                                    issued.compiler_source_support().clone(),
-                                )
+                            let (support, evidence) = captured
+                                .into_value_support(issued.compiler_source_support().clone())
                                 .unwrap();
                             issued = issued
                                 .clone()
@@ -16820,12 +16829,6 @@ mod tests {
                 .and_then(CompilerInputRole::original),
             demands_epoch.then_some(old_original),
         );
-        assert!(surface
-            .artifacts
-            .descriptors()
-            .iter()
-            .any(|row| row.owner == identity("fixture", "Epoch")
-                && row.kind == ArtifactKind::OriginalModule));
         assert_eq!(
             surface
                 .compiler_support
@@ -16858,20 +16861,24 @@ mod tests {
             )),
             Err(error) => panic!("expected the compiler's typed original conflict: {error}"),
         }
-        // Retiring the issuing source cannot revoke byte custody owned by the value.
-        let old_ids = surface.artifacts.artifact_ids();
         drop(old);
-        assert_eq!(surface.artifacts.artifact_ids(), old_ids);
-        let retained = surface.artifacts.entries();
+        drop(value);
+        let retained = surface.compiler_support.artifacts().entries();
         let retained_epoch = retained
             .iter()
-            .find(|entry| entry.descriptor.id == old_original)
-            .unwrap();
-        let ArtifactPayload::Original(product) = &retained_epoch.payload else {
-            panic!("retained historical Epoch remains an original byte owner");
-        };
-        assert_eq!(product.interface_bytes(), old_interface.as_slice());
-        assert_eq!(product.product_bytes(), old_product.as_slice());
+            .find(|entry| entry.descriptor.id == old_original);
+        if demands_epoch {
+            let ArtifactPayload::Original(product) = &retained_epoch.unwrap().payload else {
+                panic!("selected historical Epoch remains an original byte owner");
+            };
+            assert_eq!(product.interface_bytes(), old_interface.as_slice());
+            assert_eq!(product.product_bytes(), old_product.as_slice());
+        } else {
+            assert!(
+                retained_epoch.is_none(),
+                "unused Epoch is not retained by the value"
+            );
+        }
     }
 
     #[test]
@@ -16892,7 +16899,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_value_keeps_nonlexical_originals_and_projected_file_custody() {
+    fn retained_custody_keeps_nonlexical_originals_and_projected_file_custody() {
         let (initial, producer) = metadata_fixture();
         let native = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_witness_fixture(
@@ -17018,11 +17025,11 @@ mod tests {
                 value_entry[&identity("fixture", "Value")].descriptor.id,
             ])
             .unwrap();
-        let RetainedValueSourceSurface {
-            artifacts: retained,
-            lexical,
-            ..
-        } = context.retain_value_source_surface(&value, &[]).unwrap();
+        let retained = value.retain_custody(context.artifact_view()).unwrap();
+        let lexical = context
+            .retain_value_source_surface(&value, &[])
+            .unwrap()
+            .lexical;
         assert!(lexical
             .iter()
             .all(|node| node.owner.module != "HiddenNative"));
@@ -17051,16 +17058,12 @@ mod tests {
             .iter()
             .all(|descriptor| descriptor.kind
                 != crate::artifact_inventory::ArtifactKind::OriginalModule));
-        assert!(retained
-            .descriptors()
-            .iter()
-            .all(|descriptor| descriptor.owner.module != "Joined"));
         assert!(
             matches!(recover_fixture_compiler_support(
             context.compiler_input_projection().clone(), retained.clone(), [],
         ), Err(CompileError::ExtractFailed(detail))
             if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
-            "the former Joined compiler role cannot outlive its retained interface"
+            "retained custody cannot restore the unselected Joined compiler role"
         );
         let hidden_original = retained
             .descriptors()
@@ -19513,7 +19516,7 @@ mod tests {
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
         assert!(context.lexical_graph().is_empty());
         let RetainedValueSourceSurface {
-            artifacts: retained,
+            compiler_support: retained_support,
             lexical,
             ..
         } = context
@@ -19528,6 +19531,7 @@ mod tests {
                 &[],
             )
             .unwrap();
+        let retained = retained_support.artifacts();
         assert!(support
             .artifact_ids()
             .iter()
@@ -19536,7 +19540,7 @@ mod tests {
             .descriptors()
             .iter()
             .any(|entry| entry.owner == identity("fixture", "Hidden")
-                && entry.kind == ArtifactKind::OriginalModule));
+                && entry.kind == ArtifactKind::CanonicalModuleInterface));
         assert!(lexical.is_empty());
     }
 
@@ -19611,12 +19615,13 @@ mod tests {
                 .all(|node| node.owner != identity("fixture", "Hidden")));
         }
         let RetainedValueSourceSurface {
-            artifacts: view,
+            compiler_support: view_support,
             lexical,
             ..
         } = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
+        let view = view_support.artifacts();
         assert!(lexical
             .iter()
             .all(|node| node.owner != identity("fixture", "Hidden")));
@@ -19630,7 +19635,6 @@ mod tests {
             owners
         };
         let expected_owners = vec![
-            (identity("fixture", "Hidden"), ArtifactKind::OriginalModule),
             (
                 identity("fixture", "Hidden"),
                 ArtifactKind::CanonicalModuleInterface,
@@ -19664,17 +19668,20 @@ mod tests {
             imports: vec![],
         });
         let RetainedValueSourceSurface {
-            artifacts: earlier_view,
+            compiler_support: earlier_support,
             lexical: earlier_lexical,
             ..
         } = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
-        assert!(earlier_view
-            .descriptors()
-            .iter()
-            .any(|entry| entry.owner == identity("fixture", "LaterSupport")
-                && entry.kind == ArtifactKind::OriginalModule));
+        let earlier_view = earlier_support.artifacts();
+        assert!(
+            earlier_view
+                .descriptors()
+                .iter()
+                .all(|entry| { entry.owner != identity("fixture", "LaterSupport") }),
+            "unrelated later support is not retained by an earlier value"
+        );
         assert_eq!(
             typed_owners(&view),
             expected_owners,
@@ -22248,7 +22255,13 @@ mod tests {
         // The recipe keeps its certificate while the declaration baseline is
         // narrowed to types. Its original arrives through the private issuer,
         // after baseline native choices have been captured independently.
-        let type_baseline = context.original_interface_context().unwrap();
+        let type_baseline =
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                context.toolchain_identity_sha256(),
+                context.artifact_view(),
+                context.compiler_input_projection().clone(),
+            )
+            .unwrap();
         type_baseline.normalize().unwrap();
         assert!(!type_baseline
             .artifact_view()
