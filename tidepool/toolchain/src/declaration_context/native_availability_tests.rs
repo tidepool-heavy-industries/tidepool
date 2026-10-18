@@ -5594,7 +5594,6 @@ fn replay_native_transport_history(
         actual_request.projection(),
         producer.sha256(),
         std::slice::from_ref(&dependent),
-        &native_requirement_facts(actual_request.compiler_source_support().native_offers()),
         CompleteAvailabilitySource::Request(&continuation),
     )
     .unwrap();
@@ -8396,7 +8395,6 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             &request.projection(),
             producer.sha256(),
             &candidates.native_availability,
-            &[],
             CompleteAvailabilitySource::Request(&continuation),
         )
     };

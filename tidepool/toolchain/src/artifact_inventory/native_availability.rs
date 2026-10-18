@@ -49,6 +49,49 @@ impl<'a> NativeDependencyCatalog<'a> {
         }
     }
 
+    /// Borrow historical qualifications only when this request's actual rows
+    /// permit every exact binding. A retained Full offer alone grants nothing.
+    pub(crate) fn qualified_availability(
+        &self,
+        projection: &CompilerInputProjection,
+        namespace: &ArtifactView,
+    ) -> Result<Vec<QualifiedNativeAvailability>, CompileError> {
+        let DependencyGrantSource::Request(inputs) = &self.0 else {
+            return Err(failure("request qualifications require a request catalog"));
+        };
+        let mut qualifications = Vec::new();
+        for row in inputs.availability_rows() {
+            for offer in row.offers() {
+                let Some(qualification) =
+                    offer.qualified_private_availability(projection, namespace)
+                else {
+                    continue;
+                };
+                let mut permitted = true;
+                for group in qualification.groups() {
+                    let key = NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    };
+                    let Some(entry) = offer.0.custody.lease.payloads.get(&key.artifact) else {
+                        return Err(failure("qualified native group lacks its issued payload"));
+                    };
+                    let ArtifactPayload::Original(product) = &entry.payload else {
+                        return Err(failure("qualified native group lacks original payload"));
+                    };
+                    if !self.groups(key, product.owner())?.contains(group) {
+                        permitted = false;
+                        break;
+                    }
+                }
+                if permitted && !qualifications.contains(qualification) {
+                    qualifications.push(qualification.clone());
+                }
+            }
+        }
+        Ok(qualifications)
+    }
+
     fn groups(
         &self,
         key: NativeGroupKey,
@@ -742,9 +785,8 @@ impl CheckedNativeAvailability {
 
     pub(crate) fn validate(
         self,
-        baseline: &ArtifactView,
         baseline_groups: &BTreeSet<NativeGroupKey>,
-        preferred: &[NativeOriginalRequirement],
+        preferred: &[QualifiedNativeAvailability],
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
         let originals = self
@@ -757,18 +799,16 @@ impl CheckedNativeAvailability {
             .collect::<BTreeMap<_, _>>();
         let mut advertised = baseline_groups.clone();
         let mut qualifications = BTreeMap::new();
-        for proof in preferred {
-            if let Some(qualification) = proof.qualify_availability(baseline)? {
-                if qualifications
-                    .insert(qualification.original(), qualification.clone())
-                    .is_some_and(|prior| prior != qualification)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: qualification.original(),
-                        },
-                    ));
-                }
+        for qualification in preferred {
+            if qualifications
+                .insert(qualification.original(), qualification.clone())
+                .is_some_and(|prior| prior != *qualification)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: qualification.original(),
+                    },
+                ));
             }
         }
         for offer in &self.offers {

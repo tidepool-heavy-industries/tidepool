@@ -360,6 +360,7 @@ pub(crate) struct OriginalCompilerInputs {
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
 }
 
+#[cfg(test)]
 fn native_requirement_facts(
     offers: &[crate::artifact_inventory::IssuedNativeOffer],
 ) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
@@ -463,7 +464,6 @@ impl OriginalCompilerInputs {
             support.projection(),
             producer,
             products,
-            &native_requirement_facts(support.native_offers()),
             CompleteAvailabilitySource::Candidate(support),
         )
     }
@@ -674,7 +674,6 @@ impl OriginalCompilerInputs {
             context.owner.facts.compiler_support.projection(),
             producer.sha256(),
             &fresh,
-            &[],
             CompleteAvailabilitySource::Candidate(&context.owner.facts.compiler_support),
         )?;
         Ok(Some(match carried {
@@ -700,10 +699,6 @@ impl OriginalCompilerInputs {
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
         let continuation = ContinuationNativeInputs::from_selection(selection, &projection)?;
-        let preferred = selection
-            .native_original_requirements()
-            .cloned()
-            .collect::<Vec<_>>();
         let mut native_offers = Vec::new();
         for issued in continuation.availability_rows() {
             for offer in issued.offers() {
@@ -726,7 +721,6 @@ impl OriginalCompilerInputs {
                 &projection,
                 producer,
                 &complete,
-                &preferred,
                 CompleteAvailabilitySource::Request(&continuation),
             )?;
             native_offers.extend(issued.native_offers);
@@ -776,13 +770,8 @@ impl OriginalCompilerInputs {
         baseline: &CompilerInputProjection,
         producer_sha256: [u8; 32],
         products: &[CertifiedRecoveryProduct],
-        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
         source: CompleteAvailabilitySource<'_>,
     ) -> Result<Self, CompileError> {
-        let selected_source = match source {
-            CompleteAvailabilitySource::Candidate(source) => Some(source),
-            _ => None,
-        };
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
@@ -820,51 +809,44 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let mut preferred = if let Some(source) = selected_source {
-            // Candidate issuance consumes exact selected external demand. An
-            // explicit empty selection cannot fall back to published policy.
-            baseline
-                .roles()
-                .into_iter()
-                .filter_map(|role| role.original())
-                .map(|original| {
-                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original,
-                        source.artifacts(),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect()
-        } else {
-            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-                baseline,
-                inventory,
-                availability,
-            )?
-        };
-        if selected_source.is_none() {
-            for proof in availability {
-                if !preferred.contains(proof) {
-                    preferred.push(proof.clone());
+        let (native_original_requirements, dependency_offers) = match source {
+            CompleteAvailabilitySource::Candidate(source) => {
+                // Candidate issuance consumes exact selected external demand.
+                // An explicit empty decision cannot fall back to role policy.
+                let preferred = baseline
+                    .roles()
+                    .into_iter()
+                    .filter_map(|role| role.original())
+                    .map(|original| {
+                        crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                            original,
+                            source.artifacts(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                let requirements =
+                    capture_native_original_requirements(&projection, inventory, &preferred)?;
+                let mut offers = Vec::new();
+                for proof in preferred.iter().chain(&requirements) {
+                    let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
+                        proof.original,
+                        inventory,
+                        Some(proof.clone()),
+                    )?;
+                    if !offers.contains(&offer) {
+                        offers.push(offer);
+                    }
                 }
+                (requirements, offers)
             }
-        }
-        let native_original_requirements =
-            capture_native_original_requirements(&projection, inventory, &preferred)?;
+            // The request already owns checked physical rows and their opaque
+            // offers. Its selected view deliberately need not own their Groups.
+            CompleteAvailabilitySource::Request(_) => (Vec::new(), Vec::new()),
+        };
         let effective = baseline.merge(&projection)?;
-        let mut dependency_offers = Vec::new();
-        for proof in preferred.iter().chain(&native_original_requirements) {
-            let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-                proof.original,
-                inventory,
-                Some(proof.clone()),
-            )?;
-            if !dependency_offers.contains(&offer) {
-                dependency_offers.push(offer);
-            }
-        }
         let dependencies = match source {
             CompleteAvailabilitySource::Candidate(source) => {
                 crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
@@ -886,6 +868,18 @@ impl OriginalCompilerInputs {
             namespace_offers,
             &dependencies,
         )?;
+        let qualifications = match source {
+            CompleteAvailabilitySource::Candidate(_) => native_original_requirements
+                .iter()
+                .map(|proof| proof.qualify_availability(&artifacts))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
+            CompleteAvailabilitySource::Request(_) => {
+                dependencies.qualified_availability(&effective, &artifacts)?
+            }
+        };
         let native_offers = effective
             .issue_complete_native_availability(
                 &artifacts,
@@ -894,9 +888,8 @@ impl OriginalCompilerInputs {
                 &dependencies,
             )?
             .validate(
-                &artifacts,
                 &selected.retained.selected_native_groups,
-                &native_original_requirements,
+                &qualifications,
                 &mut validation,
             )?;
         artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
