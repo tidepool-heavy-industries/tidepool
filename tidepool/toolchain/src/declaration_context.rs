@@ -1800,10 +1800,21 @@ impl NativeCompilerTransport {
                 Some(original) => original == row.original.descriptor.id,
                 None => {
                     role.interface() == row.canonical
-                        && offers.iter().any(|offer| {
-                            offer.original() == row.original.descriptor.id
-                                && offer.matches_direct_canonical_binding(artifacts)
-                        })
+                        && (row.contributions.iter().any(|contribution| {
+                            contribution.matches_direct_canonical_binding(
+                                row.original.descriptor.id,
+                                row.canonical,
+                                artifacts,
+                            )
+                        }) || (row.mode == NativeTransportMode::IssuedGroups
+                            && row.issued_ordinals().is_empty()
+                            && offers.iter().any(|offer| {
+                                offer.matches_direct_canonical_binding(
+                                    row.original.descriptor.id,
+                                    row.canonical,
+                                    artifacts,
+                                )
+                            })))
                 }
             };
             if direct
