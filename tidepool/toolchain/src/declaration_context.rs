@@ -18999,6 +18999,42 @@ mod tests {
             type_only.compiler_input_roles(),
             dependent_context.compiler_input_roles()
         );
+        let required_support_ordinals =
+            crate::certified_products::original_available_groups(changed.product())
+                .unwrap()
+                .flat_map(|group| {
+                    crate::certified_products::original_native_group_imports(
+                        changed.product(),
+                        group.original_ordinal(),
+                    )
+                    .unwrap()
+                })
+                .filter_map(|import| match import {
+                    crate::certified_products::PendingImportOwner::Source {
+                        owner: required_owner,
+                        original_ordinal,
+                        binder,
+                    } if required_owner == configured_support[0].owner()
+                        && binder.occurrence == "selected" =>
+                    {
+                        assert!(
+                            crate::certified_products::authenticates_original_native_entry(
+                                &configured_support[0],
+                                *original_ordinal,
+                                binder
+                            )
+                        );
+                        Some(*original_ordinal)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+        assert_eq!(
+            required_support_ordinals.len(),
+            1,
+            "changed fixture must require one exact selected support group"
+        );
+        let required_support_ordinal = *required_support_ordinals.first().unwrap();
         let missing_support = OriginalCompilerInputs::from_native_availability(
             &type_only,
             producer,
@@ -19006,8 +19042,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&missing_support, CompileError::CompilerEvidence(cause)
-            if matches!(cause.as_ref(), crate::certified_products::CertificationError::Mismatch("source binder/group closure"))),
+            matches!(&missing_support, CompileError::ArtifactInventory(error)
+            if matches!(&error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact, original_ordinal,
+            } if *artifact == support_entry.descriptor.id && *original_ordinal == required_support_ordinal)),
             "unexpected absent-offer refusal: {missing_support:#?}"
         );
         let conflicting_support = OriginalCompilerInputs::from_selected_authored_declarations(
