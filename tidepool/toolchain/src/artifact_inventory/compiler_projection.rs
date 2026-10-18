@@ -1698,7 +1698,7 @@ impl CompilerInputProjection {
             projection.admit_role(owner, role)?;
         }
         let artifacts = view.select_compiler_support(&projection)?;
-        CompilerSourceSupport::new(projection, artifacts, [])
+        CompilerSourceSupport::new(projection, artifacts, [], Default::default())
     }
 
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
@@ -2175,7 +2175,7 @@ mod tests {
             let view = inventory.admit_shared(&inventory.empty_view(), entries.clone()).unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
             type_query_work::take();
-            let support = CompilerSourceSupport::new(projection.clone(), view.clone(), []).unwrap();
+            let support = CompilerSourceSupport::new(projection.clone(), view.clone(), [], Default::default()).unwrap();
             let admission_work = type_query_work::take();
             proptest::prop_assert_eq!(admission_work.census_rows, entries.len());
             proptest::prop_assert_eq!(support.selected.home_units.as_ref(), &expected_home_units);
@@ -2201,7 +2201,7 @@ mod tests {
             let oracle_view = support.selected_interfaces().unwrap().select_owners(expected.keys().cloned().collect()).unwrap();
             let oracle = CompilerSourceSupport::new(
                 CompilerInputProjection::from_issued_entries(&expected.values().cloned().collect::<Vec<_>>()).unwrap(),
-                oracle_view, [],
+                oracle_view, [], Default::default(),
             ).unwrap();
             for result in &narrowed {
                 let actual = result.compiler_source_support();
@@ -2274,7 +2274,7 @@ mod tests {
             let projection =
                 CompilerInputProjection::from_issued_entries(&[selected.clone(), required])
                     .unwrap();
-            let support = CompilerSourceSupport::new(projection, view, []).unwrap();
+            let support = CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap();
             let before = inventory.metrics();
             let interfaces = support.selected_interfaces().unwrap();
             let owner = selected.descriptor.owner.clone();
@@ -2302,7 +2302,7 @@ mod tests {
                 .select_owners(narrowed.projection.roles.keys().cloned().collect())
                 .unwrap();
             let baseline =
-                CompilerSourceSupport::new(narrowed.projection.clone(), baseline_view, []).unwrap();
+                CompilerSourceSupport::new(narrowed.projection.clone(), baseline_view, [], Default::default()).unwrap();
             let after = inventory.metrics();
             assert_eq!(narrowed.projection, baseline.projection);
             assert_eq!(narrowed.selected, baseline.selected);
@@ -2421,7 +2421,7 @@ mod tests {
                 IssuedNativeOffer::issue_context_offers(&historical_projection, &view, &[])
                     .unwrap();
             assert!(!offers.is_empty());
-            let support = CompilerSourceSupport::new(projection, view, offers).unwrap();
+            let support = CompilerSourceSupport::new(projection, view, offers, Default::default()).unwrap();
             assert!(
                 support.artifacts.reads.read_projection.get().is_none(),
                 "the real offer retention must leave a cold returned view for this control"
@@ -2492,6 +2492,7 @@ mod tests {
                 historical_projection,
                 support.artifacts.clone(),
                 support.native_offers.iter().cloned(),
+                support.native_availability.clone(),
             )
             .unwrap();
             let original_graph = reusable.artifacts.capture_graph_selection();
@@ -2585,7 +2586,7 @@ mod tests {
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
             let refusal =
-                CompilerSourceSupport::new(missing, support.artifacts.clone(), []).unwrap_err();
+                CompilerSourceSupport::new(missing, support.artifacts.clone(), [], Default::default()).unwrap_err();
             assert!(matches!(refusal, CompileError::ArtifactInventory(error)
                 if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { dependent, required: dependency, .. }
                     if dependent == &selected.descriptor.owner && dependency == &required.descriptor.owner)));
