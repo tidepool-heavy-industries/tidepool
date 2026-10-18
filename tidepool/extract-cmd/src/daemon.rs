@@ -2631,7 +2631,7 @@ fn serve_workers(
                             }
                         },
                     );
-                    if let Some(rss) = worker_rss_mb(worker.child.id()) {
+                    if let Ok(rss) = worker_rss_mb(worker.child.id()) {
                         resources.worker_rss[slot].store(rss, Ordering::Release);
                     }
                     match outcome {
