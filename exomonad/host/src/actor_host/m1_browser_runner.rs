@@ -1033,7 +1033,8 @@ fn browser_request(input: Vec<harness::item::Item>) -> ResponsesRequest {
         tools: vec![
             json!({"type":"custom", "name":"haskell"}),
             json!({"type":"function", "name":"probe", "strict":true}),
-        ],
+        ]
+        .into(),
         tools_allowed: None,
         prompt_cache_comparison: None,
         model: "test-model".into(),
@@ -1136,7 +1137,7 @@ async fn browser_transport_protocol_failures_reach_runner_without_fabricated_ope
             request
                 .input
                 .push(harness::item::Item(json!({"content":RAW_INPUT})));
-            request.tools.clear();
+            request.tools = Default::default();
         }
         let result = transport
             .create_for_request(request, Some(&harness::model::RequestId("current".into())))
