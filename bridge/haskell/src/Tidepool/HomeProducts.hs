@@ -4,7 +4,7 @@
 module Tidepool.HomeProducts
   ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals, hydrateCandidateHomeProductsWithOriginalsUsing
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
-  , materializeCandidateCompilerView, materializeAdmittedCompilerView
+  , validateCandidateCompilerViewProfile, materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
@@ -255,13 +255,18 @@ materializeAdmittedCompilerView
   :: FilePath -> Int -> HscEnv -> CanonicalInterfaceAdmission -> ModSummary
   -> IO ModSummary
 materializeAdmittedCompilerView directory index env proof summary = do
+  validateCandidateCompilerViewProfile summary
   let flags = ms_hspp_opts summary
-  unless (not (gopt Opt_BuildDynamicToo flags) && not (dynamicNow flags))
-    (throwIO CandidateCompilerViewUnsupportedProfile)
   interface <- if backendGeneratesCode (backend flags)
     then admittedCompilerInterface env proof (ms_mod summary)
     else set_mi_extra_decls Nothing . hm_iface <$> admittedHomeInterface env proof (ms_mod summary)
   materializeInterfaceView directory index interface summary
+
+validateCandidateCompilerViewProfile :: ModSummary -> IO ()
+validateCandidateCompilerViewProfile summary = do
+  let flags = ms_hspp_opts summary
+  unless (not (gopt Opt_BuildDynamicToo flags) && not (dynamicNow flags))
+    (throwIO CandidateCompilerViewUnsupportedProfile)
 
 -- Exact executable demand can consume this interface through GHC's native
 -- interface-to-bytecode API without reconstructing an authored source summary.

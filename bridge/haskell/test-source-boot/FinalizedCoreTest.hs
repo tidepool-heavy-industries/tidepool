@@ -1101,6 +1101,11 @@ mixedCandidateLoads = withTiming $ withScratch $ \work -> do
     ("mixed graph did not admit both certified candidate kinds: " ++ diagnostics)
   assert ("tidepool-count name=candidate_executable_required count=1 " `isInfixOf` diagnostics)
     ("mixed graph did not require exactly its helper executable: " ++ diagnostics)
+  forM_ ["candidate_compiler_view_attempt", "candidate_compiler_view_complete"] $ \counter ->
+    assert (length [() | line <- lines diagnostics
+        , ("tidepool-count name=" ++ counter ++ " count=1 ") `isInfixOf` line] == length selected
+      && any (("tidepool-count name=" ++ counter ++ " count=0 ") `isInfixOf`) (lines diagnostics))
+      ("mixed graph did not stage every actual candidate make view: " ++ diagnostics)
   forM_ selected $ \name -> assert (not (any (\phase ->
       ("tidepool-canonical-" ++ phase ++ " module=" ++ name) `elem` lines diagnostics)
       ["frontend","finalization"])) "mixed graph replayed a certified candidate frontend"

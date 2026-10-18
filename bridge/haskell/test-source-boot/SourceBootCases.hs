@@ -5876,7 +5876,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       restoredCore <- doesFileExist corePath
       unless (resultType metadataOnly == Just "Int" && not restoredCore
           && counterValues "candidate_admission.CandidateAccepted" metadataDiagnostics == [1]
-          && counterValues "candidate_executable_required" metadataDiagnostics == [0]) $
+          && counterValues "candidate_executable_required" metadataDiagnostics == [0]
+          && counterValues "candidate_compiler_view_attempt" metadataDiagnostics == [0]
+          && counterValues "candidate_compiler_view_complete" metadataDiagnostics == [0]) $
         fail "metadata-only candidate required or restored executable Core"
       putStrLn ("metadata-only candidate evidence: accepted_count="
         ++ show (counterValues "candidate_admission.CandidateAccepted" metadataDiagnostics)

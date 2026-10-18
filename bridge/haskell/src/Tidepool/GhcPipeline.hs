@@ -204,7 +204,7 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
   , matchesCapturedFinalization )
 import Tidepool.HomeProducts
-  ( hydrateCandidateHomeProductsWithOriginalsUsing, materializeCandidateCompilerView, admittedCompilerInterface
+  ( hydrateCandidateHomeProductsWithOriginalsUsing, validateCandidateCompilerViewProfile, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -2603,7 +2603,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
-        compilerViewDirectory (compilerProducerFor variant) selectedExact
+        (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw targetName
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
         exactCanonicalInterfaces = maybe Map.empty scopeCanonicalInterfaces selectedExact
@@ -2826,7 +2826,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
           (Map.elems acceptedCandidates)
-        candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateView candidate))
+        candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateSummary candidate))
           | candidate <- Map.elems acceptedCandidates]
         deferred = if loadRequired then Set.empty else
           reverseDependencyClosure (sourceLoadDependencyGraph modGraphRaw) candidateKeys
@@ -2878,13 +2878,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- 'load'' needs those to provision splice bytecode. The bytecode choice is
     -- still session-wide in 'canonicalizeDFlags'
     -- (Opt_UseBytecodeRatherThanObjects).
-    let canonicalizeLoadSummary summary =
-          let original = ms_hspp_opts summary
-              selected = maybe summary admittedCandidateView
-                (Map.lookup (ms_mod_name summary) acceptedCandidates)
-              flags = (canonicalizeDFlags original)
-                { backend = backend original, ghcLink = ghcLink original }
-          in forceFreshSource selected { ms_hspp_opts = flags }
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
           CheckOnly ->
@@ -2908,6 +2901,39 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (mkModule (toUnitId (moduleUnit targetOwner)) targetName))
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
+    -- Only the closed final make graph needs disposable physical interfaces.
+    -- Interface-only peers still need views when another candidate needs make.
+    liftIO (emitCount timing "candidate_compiler_view_attempt" 0)
+    liftIO (emitCount timing "candidate_compiler_view_complete" 0)
+    let loadedCandidateOwners = Set.fromList
+          [ms_mod summary | ModuleNode _ summary <- mgModSummaries' loadGraph
+            , ms_hsc_src summary == HsSrcFile]
+    candidateViews <- fmap Map.fromList $ forM
+      [(index,candidate) | (index,(_,candidate)) <- zip [0..] (Map.toAscList acceptedCandidates)
+        , ms_mod (admittedCandidateSummary candidate) `Set.member` loadedCandidateOwners] $ \(index,candidate) -> do
+          let summary = admittedCandidateSummary candidate
+              originalFlags = ms_hspp_opts summary
+              canonicalSummary = summary {ms_hspp_opts =
+                (canonicalizeDFlags originalFlags)
+                  {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
+          liftIO (emitCount timing "candidate_compiler_view_attempt" 1)
+          view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
+            index certifiedEnv (admittedCandidateProof candidate) canonicalSummary
+          liftIO (emitCount timing "candidate_compiler_view_complete" 1)
+          when (admittedCandidateLoading candidate == CandidateLoadForExecution) $ liftIO $
+            emitCount timing "candidate_finalized_core_make_view" 1
+          pure (ms_mod summary,view)
+    let canonicalizeLoadSummary summary =
+          let original = ms_hspp_opts summary
+              selected
+                | ms_hsc_src summary == HsSrcFile
+                , Just candidate <- Map.lookup (ms_mod_name summary) acceptedCandidates
+                , ms_mod summary == ms_mod (admittedCandidateSummary candidate) =
+                    candidateViews Map.! ms_mod summary
+                | otherwise = summary
+              flags = (canonicalizeDFlags original)
+                { backend = backend original, ghcLink = ghcLink original }
+          in forceFreshSource selected { ms_hspp_opts = flags }
     targetLoadFailure <- liftIO (newIORef Nothing)
     targetInstanceFailure <- liftIO (newIORef Nothing)
     canonicalFailureRef <- liftIO (newIORef Nothing)
@@ -3158,7 +3184,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- interfaces may enter Make through its cache; an unowned disk interface
     -- cannot stand in for a fresh canonical finalization.
     let candidateOwners = Set.fromList
-          [ms_mod (admittedCandidateView candidate) | candidate <- Map.elems acceptedCandidates]
+          [ms_mod (admittedCandidateSummary candidate) | candidate <- Map.elems acceptedCandidates]
         currentMemoInterfaces = Map.map (hm_iface . finalizedHomeModInfo .
           loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo
         sourceSummaries = Map.fromList [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
@@ -4156,7 +4182,7 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
   , admittedCandidateRoots :: PackageImportEvidence
   , admittedCandidateLoading :: CandidateLoading
   , admittedCandidateProof :: CanonicalInterfaceProof
-  , admittedCandidateView :: ModSummary
+  , admittedCandidateSummary :: ModSummary
   }
 
 data CandidateAdmissionReason
@@ -4180,9 +4206,9 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
+  :: Word64 -> (HscEnv -> IO HscEnv) -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
+certifyModuleCandidates requestIdentity forkContext expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let boundedDetail detail = case splitAt 192 detail of
@@ -4549,24 +4575,13 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                         Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
                         Right hydrated -> do
                           setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
-                          views <- fmap Map.fromList $ forM
-                            (zip [0..] (Map.toAscList admitted)) $ \(index,(name,(_,summary,_,_))) -> do
-                              currentEnvironment <- getSession
-                              let originalFlags = ms_hspp_opts summary
-                                  executable = backendGeneratesCode (backend originalFlags)
-                                  canonicalSummary' = summary {ms_hspp_opts =
-                                    (canonicalizeDFlags originalFlags)
-                                      {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
-                              view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
-                                index currentEnvironment (proofs Map.! name) canonicalSummary'
-                              when executable $ liftIO $
-                                emitCount timing "candidate_finalized_core_make_view" 1
-                              pure (name,view)
+                          liftIO $ forM_ (Map.elems admitted) $ \(_,summary,_,_) ->
+                            validateCandidateCompilerViewProfile summary
                           recordAdmitted CandidateAccepted Nothing
                           pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
                             candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
                               then CandidateLoadForExecution else CandidateInterfaceOnly)
-                            (proofs Map.! name) (views Map.! name)) admitted)
+                            (proofs Map.! name) summary) admitted)
   when timing $ liftIO $ do
     observed <- readIORef observations
     let counts = Map.fromListWith (+)
