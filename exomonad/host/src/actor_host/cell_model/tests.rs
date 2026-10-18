@@ -742,7 +742,7 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
         endpoint: None,
         inference_limits: Default::default(),
     };
-    let configurations = BTreeMap::from([
+    let configurations: BTreeMap<String, ProviderConfig> = BTreeMap::from([
         ("deepseek".into(), provider(Backend::DeepSeek)),
         ("argon".into(), provider(Backend::GeminiInteractions)),
     ]);
