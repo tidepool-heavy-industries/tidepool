@@ -14060,8 +14060,6 @@ pub(crate) mod request_tests {
                 .with_spec("Fixture.agentSpec")
                 .with_installed_effect_support([exomonad_tool::ToolEffectKey::Actor(
                     crate::ActorEffectKey::FsRead,
-                    crate::ActorEffectKey::Source,
-                    crate::ActorEffectKey::ModelCallOpenAI,
                 )]);
             with_test_bound_source(config, move |source| async move {
                 let startup =
