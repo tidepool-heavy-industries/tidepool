@@ -528,14 +528,24 @@ impl SelectedCompilerInterfaces<'_> {
 }
 
 impl CompilerSourceSupport {
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.compiler_support.new",
+        level = "debug", skip_all, fields(inclusive = true, role_count = projection.roles.len())
+    )]
     fn new(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
         native_availability: crate::declaration_context::RequestNativeAvailability,
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.new",
+            "validate_projection",
+        );
         projection.validate(&artifacts)?;
+        timing.advance("resolve_associations");
         let mut selected = projection.resolve_associations(&artifacts)?;
+        timing.advance("retain_issued_offer_custody");
         let mut offers = Vec::new();
         let retained = artifacts.retain_issued_offer_custody(
             native_offers.into_iter().filter_map(|offer| {
@@ -549,19 +559,24 @@ impl CompilerSourceSupport {
         )?;
         // Custody-only retention preserves these exact selected bindings while
         // it may acquire additional immutable sources for their payloads.
+        timing.advance("retain_selected_acquisitions");
         for row in selected.values_mut() {
             row.retain_acquisitions(&retained)?;
         }
+        timing.advance("qualify_canonical_availability");
         let native_availability =
             native_availability.for_canonical_roles(&projection, &retained)?;
-        Ok(Self {
+        timing.advance("assemble_support");
+        let support = Self {
             native_availability,
             projection,
             artifacts: retained,
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
-        })
+        };
+        timing.finish(true);
+        Ok(support)
     }
 
     fn rebuild(
@@ -1513,7 +1528,17 @@ impl CompilerSourceSupport {
         self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.compiler_support.merge",
+        level = "debug", skip_all,
+        fields(inclusive = true, left_roles = self.projection.roles.len(), right_roles = other.projection.roles.len(),
+            left_offers = self.native_offers.len(), right_offers = other.native_offers.len())
+    )]
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.merge",
+            "merge_compiler_inputs_with_demand",
+        );
         let (artifacts, projection, decisions) = self.artifacts.merge_compiler_inputs_with_demand(
             &self.projection,
             &other.artifacts,
@@ -1524,19 +1549,24 @@ impl CompilerSourceSupport {
             },
             CompilerInputValidation::Closed,
         )?;
-        self.rebuild(
+        timing.advance("rebuild_support");
+        let support = self.rebuild(
             projection,
             artifacts,
             self.native_offers
                 .iter()
                 .chain(other.native_offers.iter())
                 .cloned(),
-        )
-        .and_then(|support| support.retain_normalized_availability(other.native_availability()))
-        .map(|mut support| {
+        )?;
+        timing.advance("retain_normalized_availability");
+        let result = support.retain_normalized_availability(other.native_availability());
+        drop(support);
+        let result = result.map(|mut support| {
             support.input_decisions = decisions;
             support
-        })
+        });
+        timing.finish(result.is_ok());
+        result
     }
 
     /// Lifetime custody includes authored private helpers, independently of
