@@ -9270,3 +9270,90 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         }
     }
 }
+
+#[test]
+fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
+    let baseline_product = product("BaselineNativePermission", 93);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), baseline_product.clone()).unwrap());
+    let owner = entry.descriptor.owner.clone();
+    let fresh = crate::certified_products::fixture_finalized_product_with_requirements(
+        original_groups_fixture_with_interface(
+            "FreshOnlyPermission",
+            vec![(3, vec![])],
+            94,
+            &BTreeMap::new(),
+            b"fresh-only canonical".to_vec(),
+        ),
+        producer.sha256(),
+        Some(BTreeMap::from([(
+            (owner.unit.clone(), owner.module.clone()),
+            baseline_product
+                .module_interface()
+                .unwrap()
+                .interface_sha256(),
+        )])),
+    );
+    let fresh = recovered_witness_fixtures(&[fresh]).remove(0).product;
+    let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
+        .unwrap()
+        .descriptor
+        .id;
+    for ordinals in [vec![7, 9001], vec![7], vec![]] {
+        let inventory = ArtifactInventory::default();
+        let selected = ordinals
+            .iter()
+            .map(|ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            })
+            .collect();
+        let view = inventory
+            .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
+            .unwrap();
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_execution(
+                producer.sha256(),
+                &view,
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+                vec![ExactLexicalNode {
+                    owner: owner.clone(),
+                    imports: vec![],
+                }],
+                owner.clone(),
+                std::slice::from_ref(&owner),
+            )
+            .unwrap(),
+        );
+        let fragment = OriginalCompilerInputs::from_native_availability(
+            &baseline,
+            producer,
+            std::slice::from_ref(&fresh),
+        )
+        .unwrap();
+        assert_eq!(fragment.role_projection().snapshot_roles().len(), 1);
+        assert_eq!(
+            fragment
+                .native_availability
+                .rows()
+                .map(|row| row.original.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([fresh_id])
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(baseline)
+            .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, Some(fragment))
+            .unwrap();
+        let inherited = request
+            .compiler_inputs()
+            .native_availability(entry.descriptor.id)
+            .expect("baseline explicit Empty remains issued by its input owner");
+        assert_eq!(
+            inherited.mode == NativeTransportMode::Full,
+            ordinals.len() == 2
+        );
+        assert_eq!(inherited.permits(7), ordinals.contains(&7));
+        assert_eq!(inherited.permits(9001), ordinals.contains(&9001));
+    }
+}

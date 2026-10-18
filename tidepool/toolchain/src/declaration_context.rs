@@ -960,8 +960,12 @@ impl OriginalCompilerInputs {
             )?,
         };
         artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
-        let native_availability =
-            RequestNativeAvailability::issue_checked(&effective, &artifacts, &native_offers)?;
+        let native_availability = RequestNativeAvailability::issue_checked_fragment(
+            &effective,
+            &projection,
+            &artifacts,
+            &native_offers,
+        )?;
         Ok(Self {
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
@@ -1645,6 +1649,26 @@ impl RequestNativeAvailability {
         Ok(Self(Arc::new(rows)))
     }
 
+    fn issue_checked_fragment(
+        namespace: &CompilerInputProjection,
+        fragment: &CompilerInputProjection,
+        artifacts: &ArtifactView,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+    ) -> Result<Self, CompileError> {
+        let metadata = namespace.project_metadata(artifacts.metadata_snapshot())?;
+        let roots = fragment
+            .snapshot_roles()
+            .values()
+            .filter_map(|role| role.original())
+            .collect();
+        Ok(Self(
+            NativeCompilerTransport::issue_checked_with_roots(
+                namespace, &metadata, artifacts, offers, &roots,
+            )?
+            .availability,
+        ))
+    }
+
     pub(crate) fn issue_checked(
         roles: &CompilerInputProjection,
         artifacts: &ArtifactView,
@@ -1796,6 +1820,23 @@ impl NativeCompilerTransport {
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
+        let roots = projection
+            .entries
+            .values()
+            .filter_map(|entry| {
+                matches!(entry.payload, ArtifactPayload::Original(_)).then_some(entry.descriptor.id)
+            })
+            .collect();
+        Self::issue_checked_with_roots(roles, projection, artifacts, offers, &roots)
+    }
+
+    fn issue_checked_with_roots(
+        roles: &CompilerInputProjection,
+        projection: &CompilerArtifactMetadata,
+        artifacts: &ArtifactView,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+        roots: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
         let mut metadata = CompilerArtifactMetadata {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
@@ -1804,12 +1845,28 @@ impl NativeCompilerTransport {
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         >::new();
-        for entry in projection
-            .entries
-            .values()
-            .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
-        {
-            availability.insert(entry.descriptor.id, Vec::new());
+        let namespace_originals = roles
+            .snapshot_roles()
+            .iter()
+            .filter_map(|(owner, role)| {
+                let id = role.original()?;
+                projection
+                    .entries
+                    .get(owner)
+                    .filter(|entry| {
+                        entry.descriptor.id == id
+                            && matches!(entry.payload, ArtifactPayload::Original(_))
+                    })
+                    .map(|_| id)
+            })
+            .collect::<BTreeSet<_>>();
+        if !roots.is_subset(&namespace_originals) {
+            return Err(failure(
+                "native issuance root is outside its exact namespace role",
+            ));
+        }
+        for id in roots {
+            availability.insert(*id, Vec::new());
         }
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
         let mut full = BTreeSet::new();
