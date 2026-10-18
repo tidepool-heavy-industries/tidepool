@@ -245,7 +245,11 @@ DeepSeek reads `DEEPSEEK_API_KEY` at dispatch, or an absolute protected
 Optional `[launch.embedded.inference_limits]` overrides `max_output_tokens`
 (default 65536), `connect_timeout_secs` (15), `total_timeout_secs` (300), and
 `max_inflight` (4). These inference limits are separate from tool budgets.
-The provider remains fixed for the run; changing it requires a new run.
+For the legacy configuration above, model aliases share that declared provider.
+An explicit `[inference]` profile instead admits its named providers and models;
+its selected primary supplies the default model and reasoning. A catalog-only
+configuration does not need a second `[defaults]` selection. A legacy configuration
+without `[inference]` must declare `[defaults]`; credentials never select a model.
 
 For an OpenAI run, select an explicit OpenAI model and reasoning pair instead.
 For native ChatGPT plan authentication, sign in with a separate Exomonad record:
@@ -314,8 +318,16 @@ For secret-based access, omit `browser_auth` and supply an absolute
 `session_secret_file`; the browser signs in with that file's contents.
 Typed model and reasoning selections remain in `[defaults]`. The workspace's
 `[models]` role aliases resolve once at startup; authored children use typed
-choices within the run backend or inherit their parent's current selection. Backend selection is a config setting; `init`
+choices from their admitted family and model grants or inherit their parent's
+current selection. A selected inference profile can include several providers;
+the frozen catalog and each actor's permissions govern those choices. Changing
+that catalog requires a new run. Backend selection is configuration; `init`
 has no `--backend` flag.
+
+Provider usage observations retain missing and explicit-null counters separately
+from reported zero, including cache hits. The legacy SQL cost field is not a bill;
+its zero value does not establish free inference. No price or missing token count
+is inferred. Live cache effectiveness and cost require actual provider evidence.
 
 ```bash
 just exomonad-init "$DESCRIPTOR" "$INIT_REPORT" \

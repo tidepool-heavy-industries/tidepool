@@ -223,7 +223,7 @@ pub(super) fn admitted_runtime_factory(
     runtime: &super::embedded_harness::EmbeddedHarnessRuntime,
     settings: &EmbeddedLaunchConfig,
     config: &ActorHostConfig,
-) -> Arc<dyn CellModelFactory> {
+) -> Arc<EmbeddedCellModelFactory<RunAuth, harness::transport::ResponsesClient<RunAuth>>> {
     let _ = settings;
     let catalog = config
         .workspace_inputs

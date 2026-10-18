@@ -229,35 +229,78 @@ pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::E
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ExomonadConfigInput")]
 pub(crate) struct ExomonadConfig {
-    #[serde(default)]
     pub(crate) launch: LaunchConfig,
-    #[serde(default)]
     compiler: CompilerConfig,
-    #[serde(default)]
     pub(crate) resources: exomonad_node::command_resources::CommandResourcePolicy,
-    #[serde(default = "ExomonadAgentDefaults::deepseek_default")]
     pub(crate) defaults: ExomonadAgentDefaults,
-    #[serde(default)]
     pub(crate) inference: Option<model_catalog::InferenceConfig>,
-    #[serde(default, with = "inference_selection::models_config")]
+    #[serde(with = "inference_selection::models_config")]
     pub(crate) models: std::collections::BTreeMap<String, Model>,
-    #[serde(default)]
     pub(crate) haskell: workspace::HaskellConfig,
-    #[serde(default)]
     pub(crate) prompts: workspace::PromptConfig,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExomonadConfigInput {
+    #[serde(default)]
+    launch: LaunchConfig,
+    #[serde(default)]
+    compiler: CompilerConfig,
+    #[serde(default)]
+    resources: exomonad_node::command_resources::CommandResourcePolicy,
+    defaults: Option<ExomonadAgentDefaults>,
+    inference: Option<model_catalog::InferenceConfig>,
+    #[serde(default, with = "inference_selection::models_config")]
+    models: std::collections::BTreeMap<String, Model>,
+    #[serde(default)]
+    haskell: workspace::HaskellConfig,
+    #[serde(default)]
+    prompts: workspace::PromptConfig,
+}
+
+impl TryFrom<ExomonadConfigInput> for ExomonadConfig {
+    type Error = String;
+
+    fn try_from(input: ExomonadConfigInput) -> Result<Self, Self::Error> {
+        let defaults = match input.defaults {
+            Some(defaults) => defaults,
+            None => {
+                let inference = input.inference.as_ref().ok_or(
+                    "declare [defaults] model/reasoning or select an [inference] profile; provider credentials do not select a default model",
+                )?;
+                Self::catalog_defaults(&inference.resolve()?)
+            }
+        };
+        Ok(Self {
+            launch: input.launch,
+            compiler: input.compiler,
+            resources: input.resources,
+            defaults,
+            inference: input.inference,
+            models: input.models,
+            haskell: input.haskell,
+            prompts: input.prompts,
+        })
+    }
+}
+
 impl ExomonadConfig {
+    fn catalog_defaults(catalog: &model_catalog::ResolvedCatalog) -> ExomonadAgentDefaults {
+        let primary = &catalog.models[&catalog.primary];
+        ExomonadAgentDefaults {
+            model: primary.model.clone(),
+            reasoning: primary.reasoning,
+        }
+    }
+
     pub(crate) fn apply_inference(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(inference) = &self.inference {
             let catalog = inference.resolve().map_err(runtime_error)?;
             let primary = &catalog.models[&catalog.primary];
-            self.defaults = ExomonadAgentDefaults {
-                model: primary.model.clone(),
-                reasoning: primary.reasoning,
-            };
+            self.defaults = Self::catalog_defaults(&catalog);
             let provider = &catalog.providers[&primary.provider];
             if let Some(embedded) = &mut self.launch.embedded {
                 embedded.provider = provider.backend;
@@ -3413,6 +3456,37 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn config_default_comes_from_the_selected_profile_or_explicit_legacy_model() {
+        let mut authored: toml::Value = toml::from_str(include_str!(
+            "../../../exomonad/examples/persona/.exomonad/config.argon.toml"
+        ))
+        .unwrap();
+        for (key, expected) in [
+            ("argon", Model::GeminiArgon),
+            ("flash", Model::DeepSeekFlash),
+            ("pro", Model::DeepSeekPro),
+        ] {
+            authored["inference"]["profiles"]["argon"]["default"] = key.into();
+            let config: ExomonadConfig =
+                toml::from_str(&toml::to_string(&authored).unwrap()).unwrap();
+            assert_eq!(config.defaults.model, expected);
+            assert_eq!(config.defaults.reasoning.backend(), expected.backend());
+            let round_trip: ExomonadConfig =
+                toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(round_trip.defaults, config.defaults);
+        }
+        for source in ["", "[launch.embedded]\nprovider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\ncontext_capacity_tokens = 4096\n"] {
+            let error = toml::from_str::<ExomonadConfig>(source).unwrap_err();
+            assert!(error.to_string().contains("declare [defaults]"), "{error}");
+        }
+        let config: ExomonadConfig =
+            toml::from_str("[defaults]\nmodel = 'gpt-6-astra'\neffort = 'medium'\n").unwrap();
+        assert_eq!(config.defaults.model.backend(), Backend::OpenAIPlan);
+        assert_eq!(config.defaults.model.value(), "gpt-6-astra");
+        assert_eq!(config.defaults.reasoning.value(), "medium");
+    }
+
     /// A lock step that produces what `nix flake lock` would, so scaffolding
     /// is exercised on a machine with neither `nix` nor a network.
     struct StubLock;
@@ -4688,7 +4762,8 @@ mod tests {
                 "excluded": {"provider": "excluded", "model": "deepseek-flash", "effort": "high"}
             },
             "profiles": {"work": {"default": "primary", "allowed": ["primary", "other"]}}
-        })).unwrap();
+        }))
+        .unwrap();
         let catalog = config.resolve().unwrap();
         let (environment, unset) =
             provider_credential_environment_from(Some(&catalog), |name| match name {
