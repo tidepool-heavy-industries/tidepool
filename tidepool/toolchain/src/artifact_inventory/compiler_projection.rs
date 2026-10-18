@@ -781,13 +781,25 @@ impl CompilerSourceSupport {
         &self.input_decisions.facts
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.template_availability",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(crate) fn retain_template_availability(
         &self,
         original: &Self,
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.template_availability",
+            "qualify_original_availability",
+        );
         let availability = original
             .native_availability
             .for_canonical_roles(&self.projection, &original.artifacts)?;
+        timing.advance("collect_offers");
         let mut offers = Vec::new();
         for row in availability.rows() {
             for offer in row.offers() {
@@ -796,11 +808,16 @@ impl CompilerSourceSupport {
                 }
             }
         }
+        timing.advance("retain_offer_custody");
         let retained = self
             .artifacts
             .retain_issued_offer_custody(offers.iter().cloned())?;
-        Self::new(self.projection.clone(), retained, offers, availability)
-            .and_then(|support| support.with_additional_decisions(Some(&original.input_decisions)))
+        timing.advance("construct_support");
+        let support = Self::new(self.projection.clone(), retained, offers, availability)?;
+        timing.advance("carry_input_decisions");
+        let result = support.with_additional_decisions(Some(&original.input_decisions));
+        timing.finish(result.is_ok());
+        result
     }
 
     pub(crate) fn native_availability(
@@ -1285,10 +1302,18 @@ impl CompilerSourceSupport {
         })
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.value_interface_admission",
+        level = "debug", skip_all, fields(inclusive = true, value_count = values.len())
+    )]
     pub(crate) fn admit_value_interfaces(
         &self,
         values: &[Arc<crate::recovery_artifacts::CertifiedValueInterface>],
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.value_interface_admission",
+            "create_entries",
+        );
         let entries = values
             .iter()
             .map(|value| {
@@ -1299,16 +1324,22 @@ impl CompilerSourceSupport {
                 ))
             })
             .collect::<Vec<_>>();
+        timing.advance("merge_projection");
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.projection.merge(&issued)?;
+        timing.advance("native_dependency_catalog");
         let catalog = NativeDependencyCatalog::from_source(self)?;
+        timing.advance("admit_interfaces");
         let artifacts = projection.admit_interfaces_with_native_offers(
             &self.artifacts,
             entries,
             &self.native_offers,
             &catalog,
         )?;
-        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+        timing.advance("rebuild_support");
+        let result = self.rebuild(projection, artifacts, self.native_offers.iter().cloned());
+        timing.finish(result.is_ok());
+        result
     }
 
     pub(crate) fn without_value_roots(

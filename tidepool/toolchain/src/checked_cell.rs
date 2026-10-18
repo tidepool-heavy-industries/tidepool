@@ -2004,6 +2004,13 @@ impl CheckedValueInputs {
         )
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.value_capture",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true, generation)
+    )]
     fn capture_output(
         &self,
         generation: u64,
@@ -2013,6 +2020,10 @@ impl CheckedValueInputs {
         original_execution: &crate::declaration_context::ExactDeclarationContext,
         capture: CheckedValueCaptureInput<'_>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "products.value_capture",
+            "resolve_interface",
+        );
         let (produced, support) = match capture {
             CheckedValueCaptureInput::Ordinary { produced } => (produced, None),
             CheckedValueCaptureInput::Prepared { support, produced } => {
@@ -2052,6 +2063,7 @@ impl CheckedValueInputs {
                 )
             }
         };
+        timing.advance("capture_context");
         let context = match support {
             Some(support) => {
                 if !Arc::ptr_eq(context, support.context()) {
@@ -2064,6 +2076,7 @@ impl CheckedValueInputs {
                 context.lexical_graph().to_vec(),
             )?),
         };
+        timing.advance("retain_output_surface");
         let crate::declaration_context::RetainedValueSourceSurface {
             artifacts: artifact_view,
             compiler_support: retained_support,
@@ -2076,11 +2089,13 @@ impl CheckedValueInputs {
             )?
             .retain_output(&certificate)?,
         };
+        timing.advance("capture_templates");
         let templates = cell.specification.template_sources();
         let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
             original_execution,
             &templates,
         )?;
+        timing.advance("admit_template_support");
         let (artifact_view, compiler_support, template_imports) = match template_imports {
             Some(captured) => {
                 let (artifacts, support, evidence) =
@@ -2089,7 +2104,8 @@ impl CheckedValueInputs {
             }
             None => (artifact_view, retained_support, None),
         };
-        Ok(Arc::new(CheckedValueArtifact {
+        timing.advance("assemble_value_artifact");
+        let artifact = Arc::new(CheckedValueArtifact {
             interface: input,
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
@@ -2099,7 +2115,9 @@ impl CheckedValueInputs {
             template_imports,
             directory: self.directory.clone(),
             original_interface_prototype: None,
-        }))
+        });
+        timing.finish(true);
+        Ok(artifact)
     }
 }
 
@@ -3547,6 +3565,10 @@ pub(crate) struct CheckedItemOffer {
 }
 
 impl CheckedItemOffer {
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "products.checked_item.seal",
+        level = "debug", skip_all, fields(inclusive = true, generation = self.generation, has_interface = output.has_interface)
+    )]
     pub(crate) fn seal_prepared(
         &self,
         output: PreparedCheckedItemOutput,
@@ -3554,6 +3576,10 @@ impl CheckedItemOffer {
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         capture: CheckedValueCaptureInput<'_>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "products.checked_item.seal",
+            "validate_offer",
+        );
         if !Arc::ptr_eq(&output.item.cell, &self.item.cell)
             || output.item.index != self.item.index
             || output.generation != self.generation
@@ -3574,6 +3600,7 @@ impl CheckedItemOffer {
             has_interface,
             ..
         } = output;
+        timing.advance("capture_value");
         let value_interface = if has_interface {
             Some(self.item.cell.value_inputs.capture_output(
                 self.generation,
@@ -3586,8 +3613,11 @@ impl CheckedItemOffer {
         } else {
             None
         };
-        Ok(Arc::new(ExactCompiledItem {
-            original_interfaces: Arc::new(original_execution.original_interface_context()?),
+        timing.advance("original_interface_context");
+        let original_interfaces = Arc::new(original_execution.original_interface_context()?);
+        timing.advance("assemble_item");
+        let item = Arc::new(ExactCompiledItem {
+            original_interfaces,
             original_execution,
             item: self.item.clone(),
             target,
@@ -3606,7 +3636,9 @@ impl CheckedItemOffer {
             settled_values: self.settled_values.clone(),
             typed_entry,
             source_originals,
-        }))
+        });
+        timing.finish(true);
+        Ok(item)
     }
 }
 
