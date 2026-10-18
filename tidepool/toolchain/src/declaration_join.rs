@@ -2139,6 +2139,7 @@ mod authored_tests {
     }
 
     use super::*;
+    use crate::recovery_artifacts::PackageInterfaceValidation;
     use tidepool_repr::Generation;
 
     #[test]
@@ -2662,7 +2663,10 @@ mod authored_tests {
         let producer = context.toolchain_identity_sha256();
         // Independent issuances can have the same GHC interface observation
         // while retaining different exact native carrier and Group bindings.
-        let mut branch_groups = Vec::new();
+        let mut branch_groups: Vec<(
+            crate::artifact_inventory::ArtifactBinding,
+            BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        )> = Vec::new();
         let mut branch_joins = Vec::new();
         let mut interface_observation = None;
         for marker in ["JoinScopeLeft", "JoinScopeRight"] {
