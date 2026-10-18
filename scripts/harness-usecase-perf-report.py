@@ -67,6 +67,7 @@ def workload_assessment(report, record):
     coverage = report["phase_coverage"]
     physical = report["whole_physical_stream_reconciliation"]
     expected = KNOWN_ROSTERS.get(coverage.get("cohort"))
+    prepared_workspace = coverage.get("cohort") in ("persona-workbench", "notebook-a-a-b-a")
     prerequisites = {
         "workload_contract_matches_selected_cohort": expected is not None
             and coverage.get("expected_order") == list(expected),
@@ -80,6 +81,11 @@ def workload_assessment(report, record):
         "applicable_execution_observations_complete": report["execution_observations"]["status"] == "complete",
         "phase_measurements_complete": report["phase_measurements"]["status"] == "complete",
         "phase_coverage_complete": coverage.get("complete") is True,
+        "selected_workspace_route_consumed": not prepared_workspace or (
+            report["workspace_route"]["selected"] == "prepared-workspace"
+            and report["workspace_route"]["verified"] is True),
+        "whole_case_wall_complete": not prepared_workspace
+            or report["whole_case_wall"]["status"] == "complete",
         "workload_request_service_joins_complete": report["workload_request_service_joins"]["status"] == "complete",
         "whole_physical_stream_reconciled": physical["status"] == "complete",
         "all_physical_services_succeeded": physical["physical_service_outcome_status"] == "all_successful",

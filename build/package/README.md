@@ -726,7 +726,10 @@ Schema2 observations carry an explicit `assessment.kind` and `assessment.status`
 The raw reporter can issue `workload_timing` with `valid_workload_timing`,
 `failed_workload_diagnostics` or `insufficient_observations`. The scope comes from
 the owning named workload roster, including every required phase. Valid source
-timing does not require a prepared frozen root. The central qualification owner
+timing does not require a prepared frozen root. Persona and A/A/B/A scopes still
+require their actual consumed prepared-workspace entry and complete whole-case
+ledger; those are workload premises, independent of frozen-bundle matching.
+The central qualification owner
 alone adds `frozen_workload_timing` with `qualified_frozen_timing` after matching
 the verified descriptor/catalog/root/profile. Missing observations are
 insufficient evidence; a cohort with no selected measurement has `not_applicable`.

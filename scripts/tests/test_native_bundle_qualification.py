@@ -1542,17 +1542,44 @@ class NativeQualificationTests(unittest.TestCase):
             "publication-stat-failed": "stat", "failed-publication-stat": "stat",
             "publication-hash-failed": "hash", "failed-publication-hash": "hash",
         }
-        for mutation in ("control", "source-backed", "partial", "missing", "failed", "cleanup-failed",
-                         *publication_faults, "historical", "missing-api"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+        scenarios = [("harness-eight-phase", mutation) for mutation in (
+            "control", "source-backed", "partial", "missing", "failed", "cleanup-failed",
+            *publication_faults, "historical", "missing-api")]
+        scenarios.extend((scope, mutation) for scope in ("persona-workbench", "notebook-a-a-b-a")
+                         for mutation in ("control", "wrong-route", "missing-summary", "failed-publication"))
+        for scope, mutation in scenarios:
+            cohort_name = {"harness-eight-phase": "harness-performance",
+                           "persona-workbench": "harness-performance-persona",
+                           "notebook-a-a-b-a": "harness-performance-notebook-reuse"}[scope]
+            with self.subTest(scope=scope, mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 fixture = HarnessUsecasePerfReportTests()
                 fixture.root = root / "case"
                 fixture.root.mkdir()
-                runner_path = fixture.make_complete_case(trace_profile="minimal")
+                runner_path = fixture.make_complete_case(scope, trace_profile="minimal")
                 fixture.add_owner_summaries()
                 phase_path = fixture.root / "artifacts/phases.jsonl"
                 phases = reporter.read_jsonl(phase_path)
+                if scope in ("persona-workbench", "notebook-a-a-b-a"):
+                    phases[0]["workspace_route"] = "prepared-workspace"
+                    phases[0]["deployment"]["TIDEPOOL_PREPARED_BUILTIN_ENTRIES"] = "/fixture/builtins"
+                    activation = phases[1]
+                    activation.update(start_ns=10, end_ns=10 + activation["wall_ns"],
+                                      prepared_workspace_entry="/issued/workspace/entry")
+                    activation.update(installation_verification_start_ns=activation["end_ns"] + 1,
+                                      installation_verification_end_ns=activation["end_ns"] + 11,
+                                      installation_verification_ns=10)
+                    cursor = activation["installation_verification_end_ns"] + 1
+                    for phase in phases[2:]:
+                        phase.update(start_ns=cursor, end_ns=cursor + phase["wall_ns"])
+                        cursor = phase["end_ns"] + 1
+                    phases.append({"schema": 1, "phase": "measurement-summary", "completed": True,
+                                   "start_ns": cursor, "end_ns": cursor + 10, "wall_ns": 10,
+                                   "case_wall_ns": cursor + 10, "logical_compiler_requests": 0})
+                    if mutation == "wrong-route":
+                        phases[0]["workspace_route"] = "unprepared-workspace"
+                    elif mutation == "missing-summary":
+                        phases.pop()
                 environment = dict(phases[0]["deployment"])
                 if mutation == "source-backed":
                     phases[0]["prepared_root_entry_supplied"] = False
@@ -1562,7 +1589,7 @@ class NativeQualificationTests(unittest.TestCase):
                 if mutation == "missing":
                     phase_path.unlink()
                 payload = json.loads(runner_path.read_text())
-                payload["test"] = qualification.HARNESS_PERFORMANCE_TESTS[0]
+                payload["test"] = qualification.cohorts()[cohort_name]["tests"][0]
                 failed_body = mutation == "failed" or mutation.startswith("failed-publication")
                 if failed_body or mutation == "cleanup-failed":
                     payload["passed"] = False
@@ -1632,7 +1659,7 @@ class NativeQualificationTests(unittest.TestCase):
                      patch.object(Path, "stat", stat), \
                      patch.object(qualification, "sha256", side_effect=digest), \
                      contextlib.redirect_stderr(io.StringIO()):
-                    code = qualification.main(["run", str(descriptor_path), "--cohort", "harness-performance",
+                    code = qualification.main(["run", str(descriptor_path), "--cohort", cohort_name,
                                                "--output", str(output), "--jobs", "1"])
                 launch.assert_called_once()
                 self.assertEqual(json.loads((output / "tests/case.json").read_text())["execution"]["executed_test_count"], 1)
@@ -1659,9 +1686,18 @@ class NativeQualificationTests(unittest.TestCase):
                             "insufficient_observations")
                 self.assertEqual(measurement["assessment"]["status"], expected, measurement["assessment"])
                 if mutation == "source-backed":
-                    reporter.require_claim(measurement, "workload_timing", scope="harness-eight-phase")
+                    reporter.require_claim(measurement, "workload_timing", scope=scope)
                     with self.assertRaises(ValueError):
-                        reporter.require_claim(measurement, "frozen_workload_timing", scope="harness-eight-phase")
+                        reporter.require_claim(measurement, "frozen_workload_timing", scope=scope)
+                if scope in ("persona-workbench", "notebook-a-a-b-a"):
+                    if mutation == "control":
+                        reporter.require_claim(measurement, "workload_timing", scope=scope)
+                        reporter.require_claim(measurement, "frozen_workload_timing", scope=scope)
+                    else:
+                        self.assertEqual(measurement["workload_assessment"]["status"], "insufficient_observations")
+                        for kind in ("workload_timing", "frozen_workload_timing"):
+                            with self.assertRaises(ValueError):
+                                reporter.require_claim(measurement, kind, scope=scope)
                 self.assertNotIn("phases", report["measurement"])
                 sidecar = output / report["measurement"]["observation_report"]["path"]
                 original = sidecar.read_bytes()
@@ -1951,13 +1987,21 @@ class NativeQualificationTests(unittest.TestCase):
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance-persona"],
                     True, descriptor_path, requested_trace_profile="full")
-                self.assertEqual(measured["completed"], mutation is None, measured["qualification"])
+                self.assertEqual(measured["assessment"]["status"], "qualified_frozen_timing" if mutation is None
+                                 else "insufficient_observations", measured["assessment"])
+                if mutation is None:
+                    reporter.require_claim(measured, "workload_timing", scope="persona-workbench")
+                    reporter.require_claim(measured, "frozen_workload_timing", scope="persona-workbench")
+                else:
+                    for kind in ("workload_timing", "frozen_workload_timing"):
+                        with self.assertRaises(ValueError):
+                            reporter.require_claim(measured, kind, scope="persona-workbench")
                 if mutation in ("missing_route", "wrong_route", "missing_entry", "empty_entry"):
-                    self.assertFalse(measured["qualification"]["prerequisites"]["selected_workspace_route_consumed"])
+                    self.assertFalse(measured["assessment"]["prerequisites"]["selected_workspace_route_consumed"])
                 elif mutation == "missing_phase":
-                    self.assertFalse(measured["qualification"]["prerequisites"]["phase_coverage_complete"])
+                    self.assertFalse(measured["assessment"]["prerequisites"]["phase_coverage_complete"])
                 elif mutation == "missing_summary":
-                    self.assertFalse(measured["qualification"]["prerequisites"]["whole_case_wall_complete"])
+                    self.assertFalse(measured["assessment"]["prerequisites"]["whole_case_wall_complete"])
 
     def test_offline_compiler_selection_is_exact_immutable_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
