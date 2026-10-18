@@ -743,13 +743,13 @@ mod tests {
         ) {
             use super::ActorEffectKeyWire as Wire;
             use crate::ActorEffectKey as Key;
-            let keys = [Key::Actor, Key::Commands, Key::Jev, Key::ModelCall, Key::Reflect];
+            let keys = [Key::Actor, Key::Commands, Key::Jev, Key::Source, Key::Reflect];
             let expected = selected.iter().map(|index| keys[*index]).collect::<Vec<_>>();
             let wire = selected.iter().map(|index| match index {
                 0 => Wire::EffectActor,
                 1 => Wire::EffectCommands,
                 2 => Wire::EffectJev,
-                3 => Wire::EffectModelCall,
+                3 => Wire::EffectSource,
                 _ => Wire::EffectReflect,
             }).collect();
             let actual = super::ActorEffectProfileWire::ActorSelectedProfile(wire).resolve();
