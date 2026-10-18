@@ -498,8 +498,8 @@ mod tests {
             ModelConfig {
                 provider: provider.into(),
                 model: format!("gpt-{key}"),
-                constructor: format!("OpenAI{key}"),
                 effort: "low".into(),
+                allowed_efforts: Vec::new(),
             },
         );
     }
@@ -541,7 +541,6 @@ mod tests {
         );
         let mut second = config.models["One"].clone();
         second.model = "gpt-two".into();
-        second.constructor = "OpenAITwo".into();
         config.models.insert("Two".into(), second);
         let profile = config.profiles.get_mut("work").unwrap();
         profile.default = "One".into();
