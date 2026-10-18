@@ -421,29 +421,57 @@ pub struct DeploymentModulePackage {
 pub(super) struct DecodedDeploymentRecord {
     record: Record,
     product: Arc<tidepool_repr::execution_schema::RawModuleProduct>,
-    artifacts: std::sync::OnceLock<Arc<DeploymentArtifactPaths>>,
+    artifacts: std::sync::OnceLock<Arc<CapturedCatalogInputs>>,
     original: std::sync::OnceLock<crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
-/// Compiler paths issued once from acquired original bytes. Cloned canonical
-/// owners retain these paths after the run or an earlier offer is released.
+/// Immutable catalog parts and their receiving names. A name is only a key in
+/// ContinueOwnedOriginals; it never promises a readable filesystem payload.
 #[derive(Debug)]
-pub(crate) struct DeploymentArtifactPaths {
-    _directories: Vec<Arc<tempfile::TempDir>>,
-    pub(crate) owned_inputs: BTreeMap<
+pub(crate) struct CapturedCatalogInputs {
+    _namespace: Arc<tempfile::TempDir>,
+    parts: BTreeMap<
         crate::declaration_context::original_inputs::OriginalInputKind,
-        crate::owned_input_arena::OwnedInputSlice,
+        CapturedCatalogPart,
     >,
-    pub(super) interface: PathBuf,
-    pub(super) packages: PathBuf,
-    pub(super) product: PathBuf,
-    pub(super) canonical_root: PathBuf,
-    pub(super) canonical: crate::recovery_artifacts::RecoveryModuleInterfaceRef,
-    pub(super) graph: Option<([u8; 32], PathBuf)>,
     pub(crate) origins: crate::declaration_context::original_inputs::OwnedOriginalInputOrigins,
 }
 
-impl DeploymentArtifactPaths {
+#[derive(Debug, Clone)]
+struct CapturedCatalogPart {
+    receiving_alias: PathBuf,
+    transport: crate::owned_input_arena::OwnedInputSlice,
+}
+
+impl CapturedCatalogInputs {
+    pub(crate) fn transport(
+        &self,
+        kind: crate::declaration_context::original_inputs::OriginalInputKind,
+    ) -> Option<&crate::owned_input_arena::OwnedInputSlice> {
+        self.parts.get(&kind).map(|part| &part.transport)
+    }
+
+    pub(crate) fn transports(
+        &self,
+    ) -> BTreeMap<
+        crate::declaration_context::original_inputs::OriginalInputKind,
+        crate::owned_input_arena::OwnedInputSlice,
+    > {
+        self.parts
+            .iter()
+            .map(|(kind, part)| (*kind, part.transport.clone()))
+            .collect()
+    }
+
+    pub(super) fn receiving_alias(
+        &self,
+        kind: crate::declaration_context::original_inputs::OriginalInputKind,
+    ) -> Option<&Path> {
+        self.parts
+            .get(&kind)
+            .map(|part| part.receiving_alias.as_path())
+    }
+
     pub(crate) fn merge(
         first: &Arc<Self>,
         second: &Arc<Self>,
@@ -481,19 +509,9 @@ impl DeploymentArtifactPaths {
                 "original input custody exceeds origin bound".into(),
             ));
         }
-        let mut directories = BTreeMap::new();
-        for directory in first._directories.iter().chain(&second._directories) {
-            directories.insert(directory.path().to_path_buf(), Arc::clone(directory));
-        }
         Ok(Arc::new(Self {
-            _directories: directories.into_values().collect(),
-            owned_inputs: first.owned_inputs.clone(),
-            interface: first.interface.clone(),
-            packages: first.packages.clone(),
-            product: first.product.clone(),
-            canonical_root: first.canonical_root.clone(),
-            canonical: first.canonical.clone(),
-            graph: first.graph.clone(),
+            _namespace: Arc::clone(&first._namespace),
+            parts: first.parts.clone(),
             origins: crate::declaration_context::original_inputs::OwnedOriginalInputOrigins::from_authenticated_acquisition(
                 origins.into_values().collect(),
             )?,
@@ -534,7 +552,7 @@ impl DecodedDeploymentRecord {
         self.original.get()
     }
 
-    pub(super) fn artifacts(&self) -> Option<&Arc<DeploymentArtifactPaths>> {
+    pub(super) fn artifacts(&self) -> Option<&Arc<CapturedCatalogInputs>> {
         self.artifacts.get()
     }
 }
@@ -740,7 +758,7 @@ impl DeploymentModulePackage {
         let mut package = Self::read_catalog_with_inventory(path, authority, policy, &inventory)?;
         // Validate configured products before candidate admission.
         package.records = package.read_records(package.producer_identity(), inventory)?;
-        package.materialize_originals()?;
+        package.capture_original_inputs()?;
         crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
         Ok(package)
     }
@@ -868,6 +886,37 @@ impl DeploymentModulePackage {
             .collect())
     }
 
+    #[cfg(test)]
+    pub(crate) fn assert_no_catalog_payload_files(&self) {
+        let mut namespaces = BTreeSet::new();
+        let mut parts = 0;
+        for record in &self.records {
+            let inputs = record
+                .artifacts()
+                .expect("complete acquired catalog inputs");
+            namespaces.insert(inputs._namespace.path().to_owned());
+            for part in inputs.parts.values() {
+                assert!(
+                    !part.receiving_alias.try_exists().unwrap(),
+                    "catalog alias became a payload file"
+                );
+                parts += 1;
+            }
+        }
+        let files = namespaces
+            .iter()
+            .map(|root| fs::read_dir(root).unwrap().count())
+            .sum::<usize>();
+        assert_eq!(files, 0, "catalog acquisition wrote duplicate payloads");
+        eprintln!(
+            "catalog captured inputs: records={} parts={} namespaces={} payload_files={}",
+            self.records.len(),
+            parts,
+            namespaces.len(),
+            files
+        );
+    }
+
     pub(super) fn candidates(
         &self,
         producer: &[u8],
@@ -879,21 +928,16 @@ impl DeploymentModulePackage {
             .records
             .iter()
             .map(|record| {
-                let artifacts = record
-                    .artifacts()
-                    .expect("acquired catalog materialization");
+                record.artifacts().expect("acquired catalog inputs");
                 (
                     CandidateRecord::Deployment(Arc::clone(record)),
-                    super::CandidateOrigin::Deployment {
-                        interface: artifacts.interface.clone(),
-                        packages: artifacts.packages.clone(),
-                    },
+                    super::CandidateOrigin::Deployment,
                 )
             })
             .collect())
     }
 
-    fn materialize_originals(&self) -> Result<(), ModulePackageError> {
+    fn capture_original_inputs(&self) -> Result<(), ModulePackageError> {
         use crate::declaration_context::original_inputs::{
             OriginalInputKind as Kind, OriginalInputOrigin, OwnedOriginalInputOrigins,
         };
@@ -986,40 +1030,53 @@ impl DeploymentModulePackage {
             if let Some(graph) = &record.execution_source {
                 owned_inputs.insert(Kind::Graph, graphs[&graph.digest()].clone());
             }
-            let native_directory =
-                PathBuf::from("native").join(super::hex(&record.original_owner.module_version));
-            let interface = write_ref(
-                root,
-                native_directory.join("original.hi"),
-                &record.interface,
-                RECORD_LIMIT,
-                &inventory,
-            )?;
-            let packages = write_ref(
-                root,
-                native_directory.join("original.packages"),
-                &record.package_imports,
-                RECORD_LIMIT,
-                &inventory,
-            )?;
-            let product = write_ref(
-                root,
-                native_directory.join("original.tpmod"),
-                &record.products,
-                super::PRODUCT_MODULE_MAX_BYTES,
-                &inventory,
-            )?;
             let canonical_owner = record
                 .module_interface_proof
                 .as_ref()
                 .ok_or(ModulePackageError::Format("canonical input custody"))?;
-            let canonical = crate::recovery_artifacts::materialize_module_interface(
-                root,
-                canonical_owner,
-                &mut validation,
-                crate::recovery_artifacts::MaterializationMode::Scratch,
-            )
-            .map_err(canonical_error)?;
+            if record.interface.as_slice() != canonical_owner.interface_bytes()
+                || record.package_imports.as_slice() != canonical_owner.package_imports_bytes()
+            {
+                return Err(ModulePackageError::Format(
+                    "canonical native input identity",
+                ));
+            }
+            // Preserve the former native write_ref acquisition bounds. The
+            // captured part table below owns metadata allocation; no file is read
+            // back merely to authenticate bytes already certified by the loader.
+            for (bytes, limit) in [
+                (record.interface.as_slice(), RECORD_LIMIT),
+                (record.package_imports.as_slice(), RECORD_LIMIT),
+                (record.products.as_slice(), super::PRODUCT_MODULE_MAX_BYTES),
+            ] {
+                if bytes.len() > limit.min(inventory.limits().max_bytes) {
+                    return Err(ModulePackageError::Bounds);
+                }
+                inventory
+                    .charge(bytes.len())
+                    .map_err(|_| ModulePackageError::Bounds)?;
+            }
+            let mut parts = BTreeMap::new();
+            for (kind, transport) in owned_inputs {
+                if transport.len() == 0 || transport.len() > kind.byte_limit() {
+                    return Err(ModulePackageError::Bounds);
+                }
+                inventory
+                    .reserve::<CapturedCatalogPart>(1)
+                    .map_err(|_| ModulePackageError::Bounds)?;
+                let receiving_alias = root.join(format!(
+                    "{}-{}",
+                    super::hex(&record.original_owner.module_version),
+                    kind.wire_tag()
+                ));
+                parts.insert(
+                    kind,
+                    CapturedCatalogPart {
+                        receiving_alias,
+                        transport,
+                    },
+                );
+            }
             let mut origins = Vec::new();
             let mut origin = |kind, relative: &Path, digest, bytes| {
                 origins.push(OriginalInputOrigin {
@@ -1083,29 +1140,13 @@ impl DeploymentModulePackage {
                     .ok_or(ModulePackageError::Format("execution input custody"))?;
                 origin(Kind::Graph, &reference.path, digest, reference.length);
             }
-            let graph = record
-                .execution_source
-                .as_ref()
-                .map(|graph| {
-                    graph
-                        .capture_descriptor(root)
-                        .map(|path| (graph.digest(), path))
-                        .map_err(|error| io(root, error))
-                })
-                .transpose()?;
             let origins = OwnedOriginalInputOrigins::from_authenticated_acquisition(origins)
                 .map_err(|_| ModulePackageError::Format("original input origins"))?;
             record
                 .artifacts
-                .set(Arc::new(DeploymentArtifactPaths {
-                    _directories: vec![Arc::clone(&directory)],
-                    owned_inputs,
-                    interface: root.join(interface.path),
-                    packages: root.join(packages.path),
-                    product: root.join(product.path),
-                    canonical_root: root.to_owned(),
-                    canonical,
-                    graph,
+                .set(Arc::new(CapturedCatalogInputs {
+                    _namespace: Arc::clone(&directory),
+                    parts,
                     origins,
                 }))
                 .map_err(|_| ModulePackageError::Format("original inputs already materialized"))?;
@@ -2226,18 +2267,29 @@ mod tests {
         );
 
         let candidates = relocated.candidates(&[3; 32]).unwrap();
-        let super::super::CandidateOrigin::Deployment {
-            interface,
-            packages,
-        } = &candidates[0].1
-        else {
-            panic!("deployment candidate");
-        };
-        assert_eq!(fs::read(interface).unwrap(), after[0].interface);
-        assert_eq!(fs::read(packages).unwrap(), after[0].package_imports);
+        assert!(matches!(
+            candidates[0].1,
+            super::super::CandidateOrigin::Deployment
+        ));
+        use crate::declaration_context::original_inputs::OriginalInputKind as Kind;
+        let inputs = relocated.records[0].artifacts().unwrap();
+        let interface = inputs.receiving_alias(Kind::Interface).unwrap();
+        assert!(!interface.exists());
+        assert_eq!(
+            inputs.transport(Kind::Interface).unwrap().len(),
+            after[0].interface.len() as u64
+        );
+        assert_eq!(
+            inputs.transport(Kind::Interface).unwrap().sha256(),
+            &super::super::parse_sha(&sha(&after[0].interface)).unwrap()
+        );
+        assert_eq!(
+            inputs.transport(Kind::Packages).unwrap().len(),
+            after[0].package_imports.len() as u64
+        );
         assert!(
             !interface.starts_with(&other),
-            "compiler receives acquired private bytes"
+            "compiler receiving aliases differ from protected origins"
         );
         let origins = &relocated.records[0].artifacts().unwrap().origins;
         assert!(
@@ -2247,18 +2299,14 @@ mod tests {
                 .any(|origin| origin.path.starts_with(&other)),
             "protected origin paths follow the authenticated relocated catalog"
         );
-        let before_paths = original.candidates(&[3; 32]).unwrap();
-        let super::super::CandidateOrigin::Deployment {
-            interface: before_interface,
-            ..
-        } = &before_paths[0].1
-        else {
-            unreachable!()
-        };
-        assert_ne!(before_interface, interface);
+        let before_inputs = original.records[0].artifacts().unwrap();
+        assert_ne!(
+            before_inputs.receiving_alias(Kind::Interface).unwrap(),
+            interface
+        );
         assert_eq!(
-            fs::read(before_interface).unwrap(),
-            fs::read(interface).unwrap()
+            before_inputs.transport(Kind::Interface).unwrap().sha256(),
+            inputs.transport(Kind::Interface).unwrap().sha256()
         );
 
         let alias = fixture._root.path().join("product-alias");

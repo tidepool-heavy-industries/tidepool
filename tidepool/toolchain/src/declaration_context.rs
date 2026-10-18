@@ -8401,7 +8401,7 @@ impl ExactDeclarationContext {
             };
             if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
             {
-                acquired_inputs.insert(entry.descriptor.id, custody.owned_inputs.clone());
+                acquired_inputs.insert(entry.descriptor.id, custody.transports());
                 continue;
             }
             for (kind, bytes) in original_inputs::entry_payloads(entry) {
@@ -8542,8 +8542,7 @@ impl ExactDeclarationContext {
                             .and_then(|canonical| canonical.catalog_input_custody())
                             .and_then(|custody| {
                                 custody
-                                    .owned_inputs
-                                    .get(&original_inputs::OriginalInputKind::Graph)
+                                    .transport(original_inputs::OriginalInputKind::Graph)
                                     .cloned()
                             })
                         {

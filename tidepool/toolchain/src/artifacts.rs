@@ -7816,6 +7816,7 @@ mod module_product_tests {
         let package = crate::toolchain::configured_module_package()
             .unwrap()
             .expect("requires the matched native runtime catalog");
+        package.assert_no_catalog_payload_files();
         let source_selection = package.source_selection().clone();
         let roots = source_selection.include_roots();
         let catalog_path =

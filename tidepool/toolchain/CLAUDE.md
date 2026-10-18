@@ -216,8 +216,12 @@ New acquisition validates the catalog, every artifact, canonical companion and
 source observation. Borrowing uses the captured original bytes and single decoded
 products until release or reload; it checks current source/import witnesses,
 package interfaces and exact declaration compatibility without reauthenticating
-the static acquired image. Private compiler paths are materialized once by that
-owner, and certified originals retain their custody after a run is released.
+the static acquired image. Catalog receiving aliases name sealed captured parts and never promise readable
+payload files. Catalog acquisition keeps one eager arena, including native Census
+and execution graphs, and creates no duplicate payload tree. Continued requests
+consume those parts strictly; selected exact-context writers and GHC mutable
+interface views remain separate materializers. Certified originals retain their
+captured custody after a run is released.
 Deployment records share a dependency proof only after every distinct physical
 evidence file authenticates its exact SHA-256 and length. Each fresh source
 validation stage walks shared proofs once, including negative import witnesses.

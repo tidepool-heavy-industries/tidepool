@@ -1683,6 +1683,20 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_catalog_captured_inputs_test", unit=True)
+            env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
+            resources.append("//build/package:native_catalog")
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_catalog_captured_inputs_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "artifacts::module_product_tests::real_deployment_package_reuses_cohort_and_invalidates_source_shadow",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_linked_entry_reopen_test", unit=True)
             env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
             resources.append("//build/package:native_catalog")
