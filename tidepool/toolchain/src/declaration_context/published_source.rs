@@ -208,8 +208,15 @@ impl ExactDeclarationContext {
                 _ => false,
             };
             if !compatible {
+                let current_kind = current_role.map(|role| match role {
+                    CompilerInputRole::InterfaceOnly { .. } => "interface-only",
+                    CompilerInputRole::ReusableOriginal { .. } => "reusable-original",
+                    CompilerInputRole::PublishedSourceOriginal { .. } => "published-original",
+                });
+                let current_original = current_role.and_then(CompilerInputRole::original);
+                let current_interface = current_role.map(CompilerInputRole::interface);
                 return Err(failure(format!(
-                    "published selection changes a selected original dependency: owner={:?} issued_original={:?} issued_interface={canonical:?} issued_canonical_binding={issued_binding:?} current_role={current_role:?} current_canonical_binding={current_binding:?}",
+                    "published selection changes a selected original dependency: owner={:?} issued_original={:?} issued_interface={canonical:?} issued_canonical_binding={issued_binding:?} current_role={current_kind:?} current_original={current_original:?} current_interface={current_interface:?} current_canonical_binding={current_binding:?}",
                     entry.descriptor.owner, entry.descriptor.id,
                 )));
             }
