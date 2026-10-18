@@ -1704,6 +1704,12 @@ impl ModuleCandidateOffer {
         )
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "products.cell_program.select_offer",
+        level = "debug", skip_all,
+        fields(inclusive = true, include_paths = include.len(), value_count = values.len(),
+            retained_interfaces = retained_interfaces.len(), retained_projections = retained_projections.len())
+    )]
     pub fn select_cell_program_with_catalog(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
@@ -1716,7 +1722,12 @@ impl ModuleCandidateOffer {
         retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
         catalog: &crate::toolchain::CatalogSelection,
     ) -> Result<Self, CompileError> {
+        let mut timing = timing::InvocationTiming::start_scoped(
+            "products.cell_program.select_offer",
+            "catalog_deployment",
+        );
         let catalog = catalog.for_deployment(endpoint.deployment())?;
+        timing.advance("validate_injected_inventory");
         let producer = endpoint.identity().producer_bytes();
         let expected = specification
             .injected_modules
@@ -1732,20 +1743,27 @@ impl ModuleCandidateOffer {
                 "compiled initial interface inventory differs from injected owners".into(),
             ));
         }
+        timing.advance("planned_authorization");
         let extension = planned.authorization(&specification, producer, include, scratch)?;
+        timing.advance("manifest_authorization");
         let mut authorization = specification
             .manifest_value(crate::checked_cell::CheckedCellManifestPurpose::Program)?;
+        timing.advance("publication_context");
         let compile_context = context;
         let publication_context = checked_offer_context(
             compile_context
                 .as_ref()
                 .map(|context| context.declarations().clone()),
         )?;
+        timing.advance("capture_checked_values");
         let inputs =
             crate::checked_cell::CheckedValueInputs::capture_checked(values, retained_interfaces)?;
+        timing.advance("retained_value_context");
         let context = checked_value_context(Some(publication_context), &inputs)?;
+        timing.advance("retain_projection_inputs");
         let checked_projections =
             crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
+        timing.advance("extend_authorization");
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
         };
@@ -1762,6 +1780,7 @@ impl ModuleCandidateOffer {
                 .map(|path| Value::Text(path.to_string_lossy().into_owned()))
                 .collect(),
         ));
+        timing.advance("candidate_selection");
         let selected = immutable_candidates_in_context_with_catalog(
             &context,
             producer,
@@ -1770,32 +1789,37 @@ impl ModuleCandidateOffer {
             checked_candidate_reservations(&specification, Some(&planned)),
             &catalog,
         )?;
+        timing.advance("private_native_availability");
         let private = private_native_availability(&context, producer, selected.as_deref())?;
-        Ok(Self {
+        let producer_bytes = producer.to_vec();
+        let include_paths = include.to_vec();
+        timing.advance("prepare_exact_input");
+        let exact = compile_context_with_declarations(compile_context, context.clone())
+            .prepare_compilation_with_private_input(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+                private,
+            )?;
+        timing.advance("initial_template_interfaces");
+        let exact = exact
+            .with_source_search_context(include)
+            .with_checked_value_imports(inputs.import_authority())
+            .with_initial_template_interfaces(context.clone(), &specification.template_sources())?;
+        timing.advance("assemble_offer");
+        let offer = Self {
             selected,
-            producer: producer.to_vec(),
-            include: include.to_vec(),
-            exact: Some(
-                compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_private_input(
-                        &scratch.join("exact-scope"),
-                        producer,
-                        Some(authorization),
-                        private,
-                    )?
-                    .with_source_search_context(include)
-                    .with_checked_value_imports(inputs.import_authority())
-                    .with_initial_template_interfaces(
-                        context.clone(),
-                        &specification.template_sources(),
-                    )?,
-            ),
+            producer: producer_bytes,
+            include: include_paths,
+            exact: Some(exact),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
             checked_values: Some(inputs),
             checked_projections,
             activation_preview: None,
-        })
+        };
+        timing.finish(true);
+        Ok(offer)
     }
 
     /// Specialize a pure renderer against its compiler-issued display facts.
@@ -1959,7 +1983,10 @@ impl ModuleCandidateOffer {
         mut command: ExtractCmd,
         preparation_directory: &Path,
     ) -> Result<AppliedModuleCandidateOffer, CompileError> {
+        let mut timing =
+            timing::InvocationTiming::start_scoped("products.offer.apply", "diagnostics_preparing");
         let capture = CompilerDiagnosticCapture::preparing(preparation_directory, &command);
+        timing.advance("apply_exact_input");
         let result = (|| {
             if let Some(exact) = &self.exact {
                 let retained_policy = if self.activation_preview.is_some() {
@@ -1969,6 +1996,7 @@ impl ModuleCandidateOffer {
                 };
                 exact.apply_to(&mut command, retained_policy)?;
             }
+            timing.advance("select_session_value_owners");
             if let Some(manifest) = self.manifest_path() {
                 command.module_candidates(manifest);
             }
@@ -1976,7 +2004,9 @@ impl ModuleCandidateOffer {
         })();
         match result {
             Ok(selected_session_values) => {
+                timing.advance("diagnostics_prepared");
                 capture.prepared(preparation_directory, &command);
+                timing.finish(true);
                 Ok(AppliedModuleCandidateOffer {
                     selected: SelectedModuleCandidateOffer {
                         offer: self,
@@ -1987,6 +2017,7 @@ impl ModuleCandidateOffer {
                 })
             }
             Err(error) => {
+                timing.advance("retain_refusal");
                 capture.admission_refused(preparation_directory, &command, &error);
                 Err(self.retain_execution_failure(preparation_directory, &command, error))
             }

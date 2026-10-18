@@ -8277,21 +8277,41 @@ impl ExactDeclarationContext {
         self.finish()
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing", name = "exact.retained_value_extension",
+        level = "debug", skip_all, fields(inclusive = true, value_count = values.len())
+    )]
     pub(crate) fn extend_retained_value_artifacts(
         mut self,
         values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.retained_value_extension",
+            "copy_lexical_baseline",
+        );
         let mut lexical = self.owner.facts.lexical.to_vec();
-        for value in values {
+        timing.advance("merge_value_support");
+        for (index, value) in values.iter().enumerate() {
+            let _item_span = tracing::debug_span!(
+                target: "exomonad_harness::timing", "exact.retained_value_extension.item",
+                inclusive = true, index, has_template_imports = value.template_imports().is_some(),
+            )
+            .entered();
+            let mut item_timing = crate::timing::InvocationTiming::start_scoped(
+                "exact.retained_value_extension.item",
+                "lexical_and_producer",
+            );
             let interface = value.certified_interface();
             lexical.extend_from_slice(value.source_lexical());
             self = self.admit_producer(interface.interface().toolchain_identity_sha256())?;
+            item_timing.advance("merge_compiler_support");
             let support = self
                 .owner
                 .facts
                 .compiler_support
                 .merge(value.compiler_source_support())?;
             self = self.rebuild(|facts| facts.compiler_support = support);
+            item_timing.advance("retain_template_custody");
             if let Some(retained) = value.template_imports() {
                 let updated = self
                     .owner
@@ -8299,6 +8319,7 @@ impl ExactDeclarationContext {
                     .compiler_support
                     .retain_custody(retained.compiler_support.artifacts())?;
                 self = self.rebuild(|facts| facts.compiler_support = updated);
+                item_timing.advance("merge_template_imports");
                 {
                     let updated = Some(match &self.owner.facts.template_imports {
                         Some(existing) => RetainedTemplateImports::merge(existing, retained)?,
@@ -8307,7 +8328,9 @@ impl ExactDeclarationContext {
                     self = self.rebuild(|facts| facts.template_imports = updated);
                 }
             }
+            item_timing.finish(true);
         }
+        timing.advance("compose_lexical");
         {
             let updated = self
                 .owner
@@ -8320,7 +8343,10 @@ impl ExactDeclarationContext {
             let updated = OriginalInstanceEnvironment::Unknown;
             self = self.rebuild(|facts| facts.original_instance_environment = updated);
         }
-        self.finish()
+        timing.advance("normalize_context");
+        let result = self.finish();
+        timing.finish(result.is_ok());
+        result
     }
 
     #[cfg(test)]
