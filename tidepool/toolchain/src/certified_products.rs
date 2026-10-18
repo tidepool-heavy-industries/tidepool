@@ -18077,15 +18077,13 @@ None,
                     ])),
                 )
                 .unwrap();
-                let complete =
-                    CompletedSourceEvidence::from_normalized(cached_complete, source).unwrap();
                 let certify_cached = |packet: &CertifiedReceipt| {
                     certify_products(
                         Some(&candidate),
                         packet,
                         &empty,
                         &crate::artifacts::SourceEvidenceAdmission::from_exact(
-                            exact
+                            cached_exact
                                 .source
                                 .match_product(
                                     cached_exact.request,

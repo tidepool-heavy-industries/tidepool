@@ -451,8 +451,9 @@ fn source_boot_candidate_packet_producer() {
         let product_bytes = fs::read(capture.join("module-products.cbor")).unwrap();
         let package_bytes = fs::read(capture.join("module-package-imports.cbor")).unwrap();
         let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bytes).unwrap();
+        let operation = std::sync::Arc::clone(parsed.operation());
         let source_admission = crate::artifacts::admit_compiler_source(
-            parsed.operation(),
+            &operation,
             &evidence_bytes,
             &source_path,
             &source,
