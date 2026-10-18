@@ -7450,6 +7450,18 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
     assert!(!b_groups.contains(&historical_child));
     let support = fixture_compiler_support(projection.clone(), right.clone());
     let original_graph = support.artifacts().capture_graph_selection();
+    let assert_retained_offer = |support: &crate::artifact_inventory::CompilerSourceSupport,
+                                 expected: &IssuedNativeOffer| {
+        let retained = support
+            .native_offers()
+            .iter()
+            .find(|retained| retained.same_issuance(expected))
+            .expect("the same opaque issuance retains its exact historical custody");
+        assert_eq!(
+            retained.custody_snapshot().binding_dependencies().unwrap(),
+            expected.custody_snapshot().binding_dependencies().unwrap()
+        );
+    };
     let fresh = product("FreshAlongsideSelectedIssuer", 135);
     for (extra, mixed_fresh) in [
         (vec![b.clone()], false),
@@ -7473,18 +7485,15 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         );
         assert_eq!(exact_groups(carried.artifacts()), b_groups);
         if includes_parent {
-            assert!(carried
-                .artifacts()
-                .binding_dependencies()
-                .contains(&historical_edge));
-        }
-        if includes_a {
-            assert!(a
+            assert_retained_offer(&carried, &parent_offer);
+            assert!(parent_offer
                 .custody_snapshot()
                 .binding_dependencies()
                 .unwrap()
-                .iter()
-                .all(|edge| carried.artifacts().binding_dependencies().contains(edge)));
+                .contains(&historical_edge));
+        }
+        if includes_a {
+            assert_retained_offer(&carried, &a);
         }
         assert_eq!(
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, carried.artifacts())
@@ -7541,6 +7550,9 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             2,
             "fresh availability cannot add executable demand beside selected B"
         );
+        if includes_a {
+            assert_retained_offer(request.compiler_inputs().compiler_source_support(), &a);
+        }
         if includes_parent {
             assert!(
                 request
@@ -7557,13 +7569,17 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
                     }),
                 "historical parent availability cannot become a current root"
             );
+            assert_retained_offer(
+                request.compiler_inputs().compiler_source_support(),
+                &parent_offer,
+            );
             assert!(
-                request
-                    .compiler_inputs()
-                    .artifacts()
+                parent_offer
+                    .custody_snapshot()
                     .binding_dependencies()
+                    .unwrap()
                     .contains(&historical_edge),
-                "historical parent must retain its A child, never rebind to current B"
+                "historical parent retains its exact child without becoming selected demand"
             );
         }
     }

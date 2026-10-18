@@ -683,7 +683,7 @@ impl IssuedNativeOffer {
 
     /// The same immutable issuance also retains the same acquisition owners.
     /// Semantic offer equality alone does not establish this relationship.
-    pub(super) fn same_issuance(&self, other: &Self) -> bool {
+    pub(crate) fn same_issuance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
