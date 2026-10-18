@@ -1850,9 +1850,9 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
 }
 
 // ---------------------------------------------------------------------------
-// A parent's watchdog: `Project.Watchdog` (the shipped worked example, read
-// verbatim from this repository's own `exomonad/examples/workspace/.exomonad`,
-// exactly as `Jev.Operators` is) asks one packet of heuristics about a
+// A parent's watchdog: `Project.Watchdog` (the shipped worked example, selected
+// with `Jev.Operators` from the scaffold's recorded shared source) asks one
+// packet of heuristics about a
 // child's finished tool call. A tripped `Nudge` writes advice straight onto
 // the child's own result and sends nothing; a tripped `Escalate` sends the
 // parent one message naming the reason and the child's actor address and

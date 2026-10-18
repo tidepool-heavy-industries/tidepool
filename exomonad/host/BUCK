@@ -4578,6 +4578,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f776f726b73706163655f7175616e7469746965732e6873",
+    src = "src/actor_host/fixtures/workspace_quantities.hs",
+    out = "workspace_quantities.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f657869745f726561642e6873",
     src = "src/actor_host/fresh_callable_exit_read.hs",
     out = "fresh_callable_exit_read.hs",

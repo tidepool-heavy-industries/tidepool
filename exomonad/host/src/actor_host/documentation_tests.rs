@@ -3179,8 +3179,8 @@ async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects(
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs"
+        &tidepool_testing::fixture_source(
+            "exomonad/host/src/actor_host/fixtures/workspace_quantities.hs",
         ),
     )
     .await;
