@@ -20,6 +20,8 @@ pub fn render_child_budget(maximum_active_children: Option<u16>) -> String {
 pub struct ActorCapabilities {
     descendants: DescendantBudget,
     effect_keys: Vec<ActorEffectKey>,
+    model_permissions: crate::ModelPermissions,
+    conversation_permission: Option<crate::ConversationPermission>,
 }
 
 impl Default for ActorCapabilities {
@@ -29,7 +31,13 @@ impl Default for ActorCapabilities {
                 maximum_depth: 8,
                 maximum_active_children: None,
             },
-            effect_keys: exomonad_tool::DEFAULT_ACTOR_EFFECTS.to_vec(),
+            effect_keys: exomonad_tool::DEFAULT_ACTOR_EFFECTS
+                .iter()
+                .copied()
+                .filter(|key| key.model_permission().is_none())
+                .collect(),
+            model_permissions: crate::ModelPermissions::default(),
+            conversation_permission: None,
         }
     }
 }
@@ -37,8 +45,109 @@ impl Default for ActorCapabilities {
 impl ActorCapabilities {
     #[must_use]
     pub fn with_effect_keys(mut self, effect_keys: Vec<ActorEffectKey>) -> Self {
-        self.effect_keys = effect_keys;
+        self.effect_keys = effect_keys
+            .into_iter()
+            .filter(|key| key.model_permission().is_none())
+            .collect();
+        self.effect_keys
+            .extend(self.model_permissions.effect_keys());
         self
+    }
+
+    /// Admission checks the authored row before constructing its derived projection.
+    pub fn admit(
+        effect_keys: Vec<ActorEffectKey>,
+        model_permissions: crate::ModelPermissions,
+        conversation_permission: Option<crate::ConversationPermission>,
+    ) -> Result<Self, crate::ModelPermissionError> {
+        model_permissions.validate_declared_effects(&effect_keys)?;
+        Ok(Self::default()
+            .with_model_permissions(model_permissions)
+            .with_effect_keys(effect_keys)
+            .with_conversation_permission(conversation_permission))
+    }
+
+    #[must_use]
+    pub fn with_model_permissions(mut self, model_permissions: crate::ModelPermissions) -> Self {
+        self.effect_keys
+            .retain(|key| key.model_permission().is_none());
+        self.effect_keys.extend(model_permissions.effect_keys());
+        self.model_permissions = model_permissions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_conversation_permission(
+        mut self,
+        permission: Option<crate::ConversationPermission>,
+    ) -> Self {
+        self.conversation_permission = permission;
+        self
+    }
+
+    pub fn model_permissions(&self) -> &crate::ModelPermissions {
+        &self.model_permissions
+    }
+    pub fn conversation_permission(&self) -> Option<&crate::ConversationPermission> {
+        self.conversation_permission.as_ref()
+    }
+
+    /// Admit one model child before allocating its workspace or provider session.
+    pub fn admit_model_child(
+        &self,
+        permission: crate::ModelPermission,
+        selection: &tidepool_bridge_effects::ModelSelectionEnvelope,
+        effects: Vec<ActorEffectKey>,
+        requests: &[tidepool_bridge_effects::ModelGrantRequest],
+        requested_budget: Option<(i64, i64)>,
+    ) -> Result<Self, String> {
+        use crate::{ModelOperation, ModelPermissionError};
+        if !matches!(
+            permission.operation,
+            ModelOperation::ForkAgent | ModelOperation::SpawnAgent
+        ) {
+            return Err(ModelPermissionError::InvalidChildOperation.to_string());
+        }
+        let conversation = self
+            .model_permissions
+            .conversation(permission.operation, selection)
+            .map_err(|e| e.to_string())?;
+        if conversation.model().family() != permission.family {
+            return Err(ModelPermissionError::FamilyMismatch.to_string());
+        }
+        if permission.operation == ModelOperation::ForkAgent {
+            let source = self
+                .conversation_permission
+                .as_ref()
+                .ok_or_else(|| ModelPermissionError::IncompatibleHistory.to_string())?;
+            if source.model().catalog_identity() != conversation.model().catalog_identity()
+                || source.model().provider() != conversation.model().provider()
+                || source.model().family() != conversation.model().family()
+            {
+                return Err(ModelPermissionError::IncompatibleHistory.to_string());
+            }
+        }
+        let permissions = self
+            .model_permissions
+            .admit_child_requests(requests)
+            .map_err(|e| e.to_string())?;
+        let child =
+            Self::admit(effects, permissions, Some(conversation)).map_err(|e| e.to_string())?;
+        self.preview_child(child, requested_budget)
+    }
+
+    pub fn admit_record_child(
+        &self,
+        effects: Vec<ActorEffectKey>,
+        requests: &[tidepool_bridge_effects::ModelGrantRequest],
+        requested_budget: Option<(i64, i64)>,
+    ) -> Result<Self, String> {
+        let permissions = self
+            .model_permissions
+            .admit_child_requests(requests)
+            .map_err(|e| e.to_string())?;
+        let child = Self::admit(effects, permissions, None).map_err(|e| e.to_string())?;
+        self.preview_child(child, requested_budget)
     }
 
     #[must_use]
@@ -136,7 +245,14 @@ impl ActorCapabilities {
             maximum_depth: 0,
             maximum_active_children: Some(0),
         };
-        if child.effect_keys.contains(&ActorEffectKey::AgentLaunch) {
+        if child.effect_keys.contains(&ActorEffectKey::AgentLaunch)
+            || child.model_permissions.grants().iter().any(|grant| {
+                matches!(
+                    grant.permission().operation,
+                    crate::ModelOperation::ForkAgent | crate::ModelOperation::SpawnAgent
+                )
+            })
+        {
             child.descendants = DescendantBudget {
                 maximum_depth: self.descendants.maximum_depth.saturating_sub(1),
                 maximum_active_children: self.descendants.maximum_active_children,
@@ -170,6 +286,9 @@ impl ActorCapabilities {
                         .is_some_and(|child_limit| child_limit <= limit)
                 })
             && self.accepts_effect_keys(&child.effect_keys)
+            && child
+                .model_permissions
+                .is_subset_of(&self.model_permissions)
     }
 }
 

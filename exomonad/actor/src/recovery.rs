@@ -13,9 +13,8 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{JsonlReadError, SyncPolicy, TailPolicy};
 
-// V10 distinguishes resumable host interruption from actor cancellation.
-// Earlier runs require their matching binaries.
-const VERSION: u32 = 11;
+// V12 retains exact immutable model authority. Earlier runs require their matching binaries.
+const VERSION: u32 = 12;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -202,6 +201,8 @@ pub struct DurableActorAdmission {
     pub context_parent: Option<ActorRef>,
     pub actor_path: Option<String>,
     pub effect_keys: Vec<crate::ActorEffectKey>,
+    pub model_permissions: crate::ModelPermissions,
+    pub conversation_permission: Option<crate::ConversationPermission>,
     #[serde(default)]
     pub descendant_depth: u16,
     #[serde(default)]
@@ -233,6 +234,8 @@ impl DurableActorAdmission {
             context_parent: descriptor.context_parent(),
             actor_path: descriptor.actor_path().map(ToString::to_string),
             effect_keys: capabilities.effect_keys().to_vec(),
+            model_permissions: capabilities.model_permissions().clone(),
+            conversation_permission: capabilities.conversation_permission().cloned(),
             descendant_depth: descendants.maximum_depth,
             descendant_active_children: descendants.maximum_active_children,
             model: descriptor.model_name().map(str::to_owned),
