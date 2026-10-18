@@ -562,7 +562,10 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
     };
     assert!(CompilerInputProjection::restore(&view, &[missing_type_dependency]).is_err());
     let type_projection = selected.interface_only();
-    let issued = view.with_compiler_projection(&type_projection).unwrap();
+    let issued = view
+        .with_compiler_projection(&type_projection)
+        .map(std::borrow::Cow::into_owned)
+        .unwrap();
     let support =
         crate::declaration_context::recover_fixture_compiler_support(type_projection, issued, [])
             .unwrap();

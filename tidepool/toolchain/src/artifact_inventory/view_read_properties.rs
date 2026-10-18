@@ -631,7 +631,7 @@ proptest! {
                 let projection = CompilerInputProjection::from_issued_entries(&entries)
                     .unwrap()
                     .within_view(&selected);
-                let issued_namespace = selected.with_compiler_projection(&projection).unwrap();
+                let issued_namespace = selected.with_compiler_projection(&projection).map(std::borrow::Cow::into_owned).unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection,
                     issued_namespace,
@@ -685,7 +685,7 @@ proptest! {
             let projection = CompilerInputProjection::from_issued_entries(&entries)
                 .unwrap()
                 .interface_only();
-            let issued_namespace = extended.with_compiler_projection(&projection).unwrap();
+            let issued_namespace = extended.with_compiler_projection(&projection).map(std::borrow::Cow::into_owned).unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
                 issued_namespace,
@@ -970,7 +970,10 @@ fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
         let projection = CompilerInputProjection::from_issued_entries(&entries)
             .unwrap()
             .interface_only();
-        let issued_namespace = extended.with_compiler_projection(&projection).unwrap();
+        let issued_namespace = extended
+            .with_compiler_projection(&projection)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap();
         let support = crate::declaration_context::recover_fixture_compiler_support(
             projection,
             issued_namespace,

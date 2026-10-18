@@ -676,7 +676,10 @@ fn run_history(
                         .collect::<Vec<_>>();
                     let projection =
                         CompilerInputProjection::from_issued_entries(&issued_entries).unwrap();
-                    let issued = actual.with_compiler_projection(&projection).unwrap();
+                    let issued = actual
+                        .with_compiler_projection(&projection)
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap();
                     let support = crate::declaration_context::recover_fixture_compiler_support(
                         projection,
                         issued,
