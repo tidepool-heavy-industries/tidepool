@@ -11255,8 +11255,11 @@ mod tests {
         assert!(acquisition.payloads[&join_id].entry.requirements.is_empty());
     }
 
-    #[test]
-    fn recovery_payload_acquisition_preserves_distinct_certificates_without_selecting_both() {
+    fn recovery_original_certificate_pair_fixture() -> (
+        tempfile::TempDir,
+        [RecoveryArtifactRef; 2],
+        Vec<ArtifactView>,
+    ) {
         let raw = support_product_in_unit("main", "Tidepool.Session.Lib.G11");
         let products = [
             crate::certified_products::fixture_finalized_product(raw.clone(), [2; 32]),
@@ -11289,6 +11292,12 @@ mod tests {
                     .unwrap()
             })
             .collect::<Vec<_>>();
+        (directory, references, views)
+    }
+
+    #[test]
+    fn recovery_payload_acquisition_preserves_distinct_certificates_without_selecting_both() {
+        let (directory, references, views) = recovery_original_certificate_pair_fixture();
         let selections = views
             .iter()
             .map(ArtifactView::capture_graph_selection)
@@ -11455,6 +11464,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(acquisition.work(), all_held);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn recovery_original_acquisition_histories_preserve_per_context_selection(
+            history in proptest::collection::vec(
+                (1u8..4, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY),
+                0..13,
+            ),
+        ) {
+            let (directory, references, views) = recovery_original_certificate_pair_fixture();
+            let selections = views.iter().map(ArtifactView::capture_graph_selection).collect::<Vec<_>>();
+            let projections = views.iter().map(|view| {
+                CompilerInputProjection::from_issued_entries(&view.entries()).unwrap()
+            }).collect::<Vec<_>>();
+            let originals = projections.iter().map(|projection| {
+                let originals = projection.roles().iter().filter_map(CompilerInputRole::original)
+                    .collect::<Vec<_>>();
+                assert_eq!(originals.len(), 1);
+                originals[0]
+            }).collect::<Vec<_>>();
+            proptest::prop_assert_ne!(originals[0], originals[1]);
+            for (left, right) in [(0, 1), (1, 0)] {
+                let conflict = projections[left].merge(&projections[right]).unwrap_err();
+                proptest::prop_assert!(matches!(&conflict,
+                    CompileError::ArtifactInventory(error) if matches!(error.failure,
+                        ArtifactInventoryFailure::CompilerOriginalOfferConflict { existing, incoming, .. }
+                            if existing == originals[left] && incoming == originals[right]
+                    )
+                ), "actual_error={conflict:?}");
+            }
+            let mut acquisition = RecoveredArtifactAcquisition::new(directory.path());
+            let mut expected_held = BTreeSet::new();
+            let mut phases = [0usize; 3];
+            // Every generated history crosses fresh, delta, and all-held physical admission.
+            let prefix = [
+                (1, false, false, false),
+                (3, true, false, true),
+                (3, false, false, false),
+                (3, false, true, false),
+                (3, true, false, true),
+            ];
+            for (mask, staged, reset, reversed) in prefix.into_iter().chain(history) {
+                if reset {
+                    acquisition = RecoveredArtifactAcquisition::new(directory.path());
+                    expected_held.clear();
+                }
+                let mut indices = (0..2).filter(|index| mask & (1 << index) != 0).collect::<Vec<_>>();
+                if reversed { indices.reverse(); }
+                let products = indices.iter().map(|index| references[*index].clone()).collect::<Vec<_>>();
+                let interfaces = products.iter().map(|reference| reference.module_interface.clone().unwrap())
+                    .collect::<Vec<_>>();
+                let descriptors = indices.iter().flat_map(|index| views[*index].descriptors())
+                    .map(|descriptor| (descriptor.id, descriptor)).collect::<BTreeMap<_, _>>()
+                    .into_values().collect::<Vec<_>>();
+                let bindings = indices.iter().flat_map(|index| selections[*index].bindings.iter().copied())
+                    .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+                let edges = indices.iter().flat_map(|index| views[*index].binding_dependencies())
+                    .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+                // This oracle uses the issued fixture descriptors, independently of acquisition.
+                let requested_ids = descriptors.iter().map(|descriptor| descriptor.id).collect::<BTreeSet<_>>();
+                let before = acquisition.work();
+                let all_held = requested_ids.is_subset(&expected_held);
+                phases[if all_held { 2 } else if expected_held.is_empty() { 0 } else { 1 }] += 1;
+                let captured = if staged {
+                    let mut stage = acquisition.stage_inputs(&products, &interfaces, &[], &[]).unwrap();
+                    let captured = stage.capture_bound(&products, &interfaces, &[], &[], &descriptors, &bindings, &edges).unwrap();
+                    proptest::prop_assert_eq!(acquisition.work(), before);
+                    proptest::prop_assert_eq!(acquisition.payloads.keys().copied().collect::<BTreeSet<_>>(), expected_held.clone());
+                    acquisition.append(stage).unwrap();
+                    captured
+                } else {
+                    acquisition.capture_bound(&products, &interfaces, &[], &[], &descriptors, &bindings, &edges).unwrap()
+                };
+                proptest::prop_assert_eq!(captured.entries.keys().copied().collect::<BTreeSet<_>>(), requested_ids.clone());
+                expected_held.extend(requested_ids);
+                proptest::prop_assert_eq!(acquisition.payloads.keys().copied().collect::<BTreeSet<_>>(), expected_held.clone());
+                if all_held {
+                    proptest::prop_assert_eq!(acquisition.work(), before);
+                } else {
+                    proptest::prop_assert!(acquisition.work().read_bytes > before.read_bytes);
+                }
+                for index in indices {
+                    let context = captured.context_with_graph_selection(&selections[index], &projections[index].roles(), vec![]).unwrap();
+                    proptest::prop_assert_eq!(context.compiler_input_projection(), &projections[index]);
+                    proptest::prop_assert_eq!(context.artifact_view().capture_graph_selection(), selections[index].clone());
+                    let selected = context.compiler_input_projection().roles().iter()
+                        .filter_map(CompilerInputRole::original).collect::<Vec<_>>();
+                    proptest::prop_assert_eq!(selected, vec![originals[index]]);
+                }
+            }
+            proptest::prop_assert!(phases.iter().all(|count| *count > 0));
+            eprintln!("original acquisition history: fresh={} delta={} all_held={}", phases[0], phases[1], phases[2]);
+        }
     }
 
     #[test]
