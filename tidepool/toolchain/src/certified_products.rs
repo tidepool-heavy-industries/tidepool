@@ -2416,15 +2416,15 @@ pub(crate) struct CertifiedSourceSelection {
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
     // Input body availability is separate from this selection's namespace roles.
     // These shared receipts come only from the authenticated physical request.
-    request_native_availability: Arc<
-        BTreeMap<
-            crate::artifact_inventory::ArtifactId,
-            (
-                CachedHomeOwner,
-                Arc<crate::declaration_context::NativeTransportAvailability>,
-            ),
-        >,
-    >,
+    request_native_availability:
+        Arc<BTreeMap<crate::artifact_inventory::ArtifactId, RequestNativeAvailability>>,
+}
+
+#[derive(Clone, Debug)]
+struct RequestNativeAvailability {
+    owner: CachedHomeOwner,
+    canonical: crate::artifact_inventory::ArtifactId,
+    availability: Arc<crate::declaration_context::NativeTransportAvailability>,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -2591,7 +2591,16 @@ impl CertifiedSourceSelection {
         selected.request_native_availability = Arc::new(
             inputs
                 .native_availability_entries()
-                .map(|(id, owner, availability)| (id, (owner.clone(), Arc::clone(availability))))
+                .map(|(id, owner, canonical, availability)| {
+                    (
+                        id,
+                        RequestNativeAvailability {
+                            owner: owner.clone(),
+                            canonical,
+                            availability: Arc::clone(availability),
+                        },
+                    )
+                })
                 .collect(),
         );
         for role in inputs.projection.roles() {
@@ -2637,7 +2646,7 @@ impl CertifiedSourceSelection {
             .chain(
                 self.request_native_availability
                     .values()
-                    .map(|(_, availability)| availability),
+                    .map(|issued| &issued.availability),
             )
     }
 
@@ -2684,10 +2693,14 @@ impl CertifiedSourceSelection {
             .chain(
                 self.request_native_availability
                     .values()
-                    .flat_map(|(_, availability)| {
-                        availability
+                    .flat_map(|issued| {
+                        // Dependency-only partial offers need not bind their own
+                        // original. Preserve them as availability, not root intent.
+                        issued
+                            .availability
                             .offers()
                             .iter()
+                            .filter(|offer| offer.is_full())
                             .filter_map(|offer| offer.proof())
                     }),
             )
@@ -3023,9 +3036,10 @@ impl CertifiedSourceSelection {
         {
             return selected.availability.permits(ordinal);
         }
-        if let Some((issued_owner, availability)) = self.request_native_availability.get(&original)
-        {
-            return issued_owner == owner && availability.permits(ordinal);
+        if self.request_native_availability.contains_key(&original) {
+            return self
+                .request_native_body(original, owner)
+                .is_some_and(|availability| availability.permits(ordinal));
         }
         self.native_original_requirements().any(|proof| {
             proof
@@ -3037,6 +3051,27 @@ impl CertifiedSourceSelection {
                     group.binding.artifact() == original && group.original_ordinal == ordinal
                 })
         })
+    }
+
+    fn request_native_body(
+        &self,
+        original: crate::artifact_inventory::ArtifactId,
+        owner: &CachedHomeOwner,
+    ) -> Option<&crate::declaration_context::NativeTransportAvailability> {
+        let issued = self.request_native_availability.get(&original)?;
+        if issued.owner != *owner {
+            return None;
+        }
+        // A supplied historical body can be available without a namespace role;
+        // an explicit current canonical role must still match its certificate.
+        if self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+            .is_some_and(|selected| selected.interface() != issued.canonical)
+        {
+            return None;
+        }
+        Some(&issued.availability)
     }
 
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
@@ -3710,17 +3745,59 @@ fn resolve_receipt_owner_with_validation(
                             Some(sources),
                         )
                     })?
+            } else if let Some(selection) = selection {
+                let version = module_version.as_ref().ok_or(CertificationError::Mismatch(
+                    "unversioned source lacks compiler selection",
+                ))?;
+                let mut matches =
+                    selection
+                        .request_native_availability
+                        .iter()
+                        .filter_map(|(id, issued)| {
+                            (issued.owner.unit == unit
+                                && issued.owner.module == module
+                                && &issued.owner.module_version == version)
+                                .then(|| {
+                                    selection
+                                        .request_native_body(*id, &issued.owner)
+                                        .map(|availability| (&issued.owner, availability))
+                                })
+                                .flatten()
+                        });
+                let (owner, availability) = matches.next().ok_or(CertificationError::Mismatch(
+                    "source outside compiler selection",
+                ))?;
+                if matches.next().is_some() {
+                    return Err(CertificationError::Mismatch(
+                        "ambiguous issued source original identity",
+                    ));
+                }
+                if !availability.permits(original_ordinal) {
+                    return Err(CertificationError::OriginalAvailability(Box::new(
+                        OriginalAvailabilityRefusal {
+                            owner: owner.clone(),
+                            original_ordinal,
+                        },
+                    )));
+                }
+                sources
+                    .get(&(owner.clone(), original_ordinal, binder.clone()))
+                    .map(|(owner, _)| owner)
+                    .ok_or_else(|| {
+                        source_closure_mismatch(
+                            "receipt_issued_source",
+                            Some(owner),
+                            original_ordinal,
+                            &binder,
+                            Some(sources),
+                        )
+                    })?
             } else {
                 // Versioned legacy/original receipts can identify their native
                 // generation; an unversioned receipt requires a request issuer.
                 let version = module_version.as_ref().ok_or(CertificationError::Mismatch(
                     "unversioned source lacks compiler selection",
                 ))?;
-                if selection.is_some() {
-                    return Err(CertificationError::Mismatch(
-                        "source outside compiler selection",
-                    ));
-                }
                 let mut matches = sources.iter().filter(|((owner, ordinal, candidate), _)| {
                     owner.unit == unit
                         && owner.module == module
@@ -12686,7 +12763,20 @@ pub(crate) mod tests {
             producer.sha256(),
             5,
         );
-        let products = recovered_witness_fixtures(&[schema, consumer])
+        let dependency_carrier = fixture_finalized_product(
+            original_groups_fixture_in_unit_with_sites(
+                "main",
+                "DependencyCarrier",
+                vec![(300, vec![])],
+                153,
+                &BTreeMap::new(),
+                b"carrier exact canonical".to_vec(),
+                &BTreeMap::new(),
+                &[],
+            ),
+            producer.sha256(),
+        );
+        let products = recovered_witness_fixtures(&[schema, consumer, dependency_carrier])
             .into_iter()
             .map(|row| row.product)
             .collect::<Vec<_>>();
@@ -12776,6 +12866,27 @@ pub(crate) mod tests {
             .iter()
             .find(|offer| offer.original() == consumer_entry.descriptor.id)
             .unwrap();
+        let dependency_entry = entries
+            .iter()
+            .find(|entry| entry.descriptor.owner.module == "DependencyCarrier")
+            .unwrap();
+        // This authentically issued partial offer contributes the Consumer's
+        // dependency closure without binding its own original as a root.
+        let dependency_only = crate::artifact_inventory::IssuedNativeOffer::issue(
+            dependency_entry.descriptor.id,
+            full.artifacts(),
+            Some(crate::artifact_inventory::NativeOriginalRequirement {
+                original: dependency_entry.descriptor.id,
+                selection: consumer_offer.proof().unwrap().selection.clone(),
+            }),
+        )
+        .unwrap();
+        assert!(!dependency_only.is_full());
+        assert!(dependency_only
+            .issued_group_carriers()
+            .unwrap()
+            .keys()
+            .all(|group| group.binding.artifact() != dependency_entry.descriptor.id));
         let historical_197 = consumer_offer
             .issued_group_carriers()
             .unwrap()
@@ -12787,18 +12898,17 @@ pub(crate) mod tests {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         for carry_full in [false, true] {
-            let support = if carry_full {
-                full.clone()
-            } else {
-                // The same broad physical custody remains, but this receipt
-                // carries only the Consumer's issued dependency group 197.
-                crate::declaration_context::recover_fixture_compiler_support(
-                    roles.clone(),
-                    full.artifacts().clone(),
-                    [consumer_offer.clone()],
-                )
-                .unwrap()
-            };
+            let mut offers = vec![consumer_offer.clone(), dependency_only.clone()];
+            if carry_full {
+                offers.push(schema_offer.clone());
+            }
+            // Broad physical custody is identical; only issued receipts differ.
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                roles.clone(),
+                full.artifacts().clone(),
+                offers,
+            )
+            .unwrap();
             let before = support.artifacts().selected_native_groups();
             assert!(before.contains(&NativeGroupKey {
                 artifact: schema_entry.descriptor.id,
@@ -12863,9 +12973,100 @@ pub(crate) mod tests {
                 .issued_group_carriers(&inputs.artifacts)
                 .unwrap()
                 .contains_key(&historical_197)));
-            let membership = inputs
-                .available_original_sources(std::slice::from_ref(schema), &validation.inventory)
+            assert!(selected
+                .issued_native_availability()
+                .any(|availability| availability.offers().contains(&dependency_only)));
+            assert!(selected
+                .native_original_requirements()
+                .all(|proof| proof.original != dependency_entry.descriptor.id));
+            let closure = selected
+                .selected_original_closure(&inputs.artifacts)
                 .unwrap();
+            assert!(closure.contains_original(consumer_entry.descriptor.id));
+            assert!(!closure.contains_original(schema_entry.descriptor.id));
+            assert!(!closure.contains_original(dependency_entry.descriptor.id));
+            let membership = inputs
+                .available_original_sources(&products, &validation.inventory)
+                .unwrap();
+            let sources = membership
+                .overlay(&request.groups, &validation.inventory)
+                .unwrap();
+            let PendingImportOwner::Source { binder, .. } = source(schema, 197) else {
+                unreachable!()
+            };
+            let receipt = ReceiptImportOwner::Source {
+                unit: schema.owner().unit.clone(),
+                module: schema.owner().module.clone(),
+                module_version: Some(schema.owner().module_version.clone()),
+                original_ordinal: 197,
+                binder,
+            };
+            let resolve = |receipt, selection: &CertifiedSourceSelection| {
+                resolve_receipt_owner_with_validation(
+                    receipt,
+                    &sources,
+                    Some(selection),
+                    &BTreeMap::<(String, String), PackageInterfaceWitness>::new(),
+                    &mut PackageInterfaceValidation::default(),
+                )
+            };
+            assert!(resolve(receipt.clone(), &selected).is_ok());
+            let mut unversioned = receipt.clone();
+            let ReceiptImportOwner::Source { module_version, .. } = &mut unversioned else {
+                unreachable!()
+            };
+            *module_version = None;
+            assert!(matches!(
+                resolve(unversioned, &selected),
+                Err(CertificationError::Mismatch(
+                    "unversioned source lacks compiler selection"
+                ))
+            ));
+            let mut wrong_version = receipt.clone();
+            let ReceiptImportOwner::Source { module_version, .. } = &mut wrong_version else {
+                unreachable!()
+            };
+            *module_version = Some(ModuleVersion([254; 32]));
+            assert!(matches!(
+                resolve(wrong_version, &selected),
+                Err(CertificationError::Mismatch(
+                    "source outside compiler selection"
+                ))
+            ));
+            let mut wrong_canonical = selected.clone();
+            Arc::make_mut(&mut wrong_canonical.modules).insert(
+                (schema.owner().unit.clone(), schema.owner().module.clone()),
+                ReceiptSourceSelection::InterfaceOnly {
+                    interface: ArtifactId([253; 32]),
+                },
+            );
+            assert!(!wrong_canonical.permits_native_group(
+                schema_entry.descriptor.id,
+                schema.owner(),
+                197
+            ));
+            assert!(matches!(
+                resolve(receipt.clone(), &wrong_canonical),
+                Err(CertificationError::Mismatch(
+                    "source outside compiler selection"
+                ))
+            ));
+            let mut ambiguous = selected.clone();
+            let mut competing =
+                ambiguous.request_native_availability[&schema_entry.descriptor.id].clone();
+            competing.owner.product_sha256 = [252; 32];
+            Arc::make_mut(&mut ambiguous.request_native_availability)
+                .insert(ArtifactId([252; 32]), competing);
+            assert!(matches!(
+                resolve(receipt.clone(), &ambiguous),
+                Err(CertificationError::Mismatch(
+                    "ambiguous issued source original identity"
+                ))
+            ));
+            let mut absent_namespace = selected.clone();
+            Arc::make_mut(&mut absent_namespace.modules)
+                .remove(&(schema.owner().unit.clone(), schema.owner().module.clone()));
+            assert!(resolve(receipt, &absent_namespace).is_ok());
             for ordinal in [191, 195] {
                 let PendingImportOwner::Source { binder, .. } = source(schema, ordinal) else {
                     unreachable!()
@@ -12923,7 +13124,8 @@ pub(crate) mod tests {
                     }));
                 } else {
                     assert!(
-                        matches!(admitted, Err(CertificationError::OriginalAvailability(refusal)) if refusal.original_ordinal == ordinal)
+                        matches!(&admitted, Err(CertificationError::OriginalAvailability(refusal)) if refusal.original_ordinal == ordinal),
+                        "ordinal={ordinal} actual refusal: {admitted:?}"
                     );
                 }
             }

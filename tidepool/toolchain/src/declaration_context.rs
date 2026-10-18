@@ -1427,6 +1427,7 @@ impl RequestCompilerInputs {
         Item = (
             ArtifactId,
             &tidepool_repr::execution_schema::CachedHomeOwner,
+            ArtifactId,
             &Arc<NativeTransportAvailability>,
         ),
     > {
@@ -1439,7 +1440,17 @@ impl RequestCompilerInputs {
                 else {
                     unreachable!("issued native availability has an authenticated original owner")
                 };
-                (*id, product.owner(), availability)
+                let canonical = ArtifactEntry::canonical(
+                    product
+                        .module_interface()
+                        .expect(
+                            "issued native availability has an authenticated canonical interface",
+                        )
+                        .clone(),
+                )
+                .descriptor
+                .id;
+                (*id, product.owner(), canonical, availability)
             })
     }
 
