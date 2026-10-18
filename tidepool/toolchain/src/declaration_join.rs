@@ -2697,10 +2697,20 @@ mod authored_tests {
             let groups = graph
                 .native_groups
                 .iter()
-                .filter(|group| group.artifact == original_id)
+                .filter(|group| group.binding.artifact() == original_id)
                 .copied()
                 .collect::<BTreeSet<_>>();
             assert!(!groups.is_empty());
+            if let Some((previous_carrier, previous_groups)) = branch_groups.first() {
+                assert_ne!(
+                    &carrier, previous_carrier,
+                    "independent scopes must differ before the second compiler operation"
+                );
+                assert!(
+                    groups.is_disjoint(previous_groups),
+                    "same-key Group issuers must differ before testing their retention"
+                );
+            }
             let scratch = Arc::new(tempfile::tempdir().unwrap());
             let join_inputs = branch.declaration_join_inputs(scratch.clone()).unwrap();
             let observation = join_inputs
@@ -2764,7 +2774,7 @@ mod authored_tests {
                 retained
                     .native_groups
                     .iter()
-                    .filter(|group| group.artifact == original_id)
+                    .filter(|group| group.binding.artifact() == original_id)
                     .copied()
                     .collect::<BTreeSet<_>>(),
                 groups
