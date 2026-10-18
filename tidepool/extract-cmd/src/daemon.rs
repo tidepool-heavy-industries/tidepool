@@ -11,12 +11,16 @@
 //! identity  ::= "TPDPI003" producer[32] consumed_worker[32] boot_epoch[32]
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR003" expected_epoch[32]
+//! transaction ::= "TPDTR004" expected_epoch[32] workload:u8
 //!                 (request-tag request)* end-tag
 //! stop      ::= "TPDST001"
 //! stop_ack  ::= 1u8
 //! decision  ::= accepted:u8 admission_id:u64-LE | rejected:u8 frame(reason) | busy:u8
-//! close_ack ::= accepted:u8
+//! transaction_event ::= output:0u8 response | end_ack:2u8
+//!                     | retired:1u8 epoch[32] admission_id:u64-LE slot:u32-LE
+//!                       parsed_requests:u64-LE emitted_outputs:u64-LE
+//!                       termination worker_retirement failure_cause
+//! retirement causes use the bounded typed failure-END cause codec.
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
 //!

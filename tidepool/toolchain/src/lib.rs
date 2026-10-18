@@ -67,8 +67,8 @@ pub enum CompileError {
     /// Transport failure with the endpoint's original submission classification.
     #[error("compiler endpoint: {0}")]
     CompilerEndpoint(#[source] tidepool_extract_cmd::SpawnError),
-    /// The action and its input descriptors remain owned by exact close
-    /// evidence. Neither a completed response nor this error permits replay.
+    /// An abnormal close preserves its action and retirement evidence.
+    /// Unconfirmed input use retains descriptors; neither abnormal outcome permits replay.
     #[error("compiler transaction did not finish cleanly")]
     CompilerCloseUnconfirmed(
         Box<
@@ -80,8 +80,8 @@ pub enum CompileError {
     /// A prepared runtime product cannot borrow another transaction's closure.
     #[error(transparent)]
     CompilerPublication(#[from] tidepool_extract_cmd::CompilerTransactionPublicationError),
-    /// Completed host preparation is unusable until its compiler END is
-    /// confirmed. Exact input directories remain with this close evidence.
+    /// Completed host preparation is unusable without a clean compiler END.
+    /// An uncertain close also retains the exact input directories.
     #[error("completed compiler preparation did not finish cleanly")]
     CompilerPreparationCloseUnconfirmed(
         Box<tidepool_extract_cmd::CompilerTransactionCloseEvidence>,
