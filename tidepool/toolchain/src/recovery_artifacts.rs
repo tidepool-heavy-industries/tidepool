@@ -2853,11 +2853,8 @@ pub(crate) fn materialize_certified_products_with_validation(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
-    ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?.materialize(
-        recovery_root,
-        validation,
-        mode,
-    )
+    ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?
+        .materialize(recovery_root, mode)
 }
 
 /// Read captured path inputs into owned bundles, then use the same immutable
