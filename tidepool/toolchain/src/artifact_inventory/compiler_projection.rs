@@ -2513,7 +2513,8 @@ mod tests {
             proptest::prop_assert!(mixed.artifacts.binding_dependencies().contains(&old_edge));
             let entry = Arc::new(ArtifactEntry::interface(value.interface().clone(), JoinedInterfaceRole::ValueInterface, value.requirements().to_vec()));
             proptest::prop_assert!(matches!(inventory.prepare_value_interface_append(&mixed, vec![entry]).unwrap(),
-                ValueInterfaceAdmission::General { reason: ValueInterfaceGeneralAdmission::DifferentRequirementBindings(_), .. }));
+                ValueInterfaceAdmission::General { reason: ValueInterfaceGeneralAdmission::DifferentRequirementBindings(_), .. }),
+                "repeating a value must check the exact requirement issuer");
             let repeated = mixed.admit_value_interfaces(&[value.clone()]).unwrap();
             let oracle = checked_value_admission(&mixed, &[value]).unwrap();
             proptest::prop_assert_eq!(repeated.artifacts.capture_graph_selection(), oracle.artifacts.capture_graph_selection());
