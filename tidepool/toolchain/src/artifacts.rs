@@ -9158,7 +9158,7 @@ mod module_product_tests {
                 .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(
-                    crate::declaration_context::RetainedTemplateImports::capture(
+                    crate::declaration_context::CapturedTemplateImports::capture(
                         &original, &template,
                     )
                     .unwrap()
@@ -9196,7 +9196,7 @@ mod module_product_tests {
                     "the negative exercises the owning constructor's pruned graph"
                 );
                 assert!(
-                    crate::declaration_context::RetainedTemplateImports::capture(
+                    crate::declaration_context::CapturedTemplateImports::capture(
                         &incomplete,
                         &template,
                     )

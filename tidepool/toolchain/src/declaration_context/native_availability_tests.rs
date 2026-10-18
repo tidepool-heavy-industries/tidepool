@@ -8006,10 +8006,10 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             let before = original.artifact_view().capture_graph_selection();
             let before_lexical = original.lexical_graph().to_vec();
             let retained =
-                RetainedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
+                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
                     .unwrap()
                     .unwrap();
-            assert_eq!(retained.graph[&owner].canonical, expected);
+            assert_eq!(retained.evidence.graph[&owner].canonical, expected);
             assert_eq!(
                 retained
                     .compiler_support
@@ -8030,7 +8030,12 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .selected_native_groups()
                 .is_empty());
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
-            let retained_again = retained.retain_in(original.artifact_view()).unwrap();
+            let (retained_again, _, _) = retained
+                .into_value_support(
+                    original.artifact_view().clone(),
+                    original.compiler_source_support().clone(),
+                )
+                .unwrap();
             assert_eq!(
                 retained_again.capture_graph_selection().namespace,
                 before.namespace
@@ -8049,7 +8054,15 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .iter()
                 .all(|edge| retained_again.binding_dependencies().contains(edge)));
             let empty = original.artifact_view().inventory().empty_view();
-            let custody_only = retained.retain_in(&empty).unwrap();
+            let (custody_only, _, _) =
+                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
+                    .unwrap()
+                    .unwrap()
+                    .into_value_support(
+                        empty,
+                        crate::artifact_inventory::CompilerSourceSupport::empty(),
+                    )
+                    .unwrap();
             let custody_graph = custody_only.capture_graph_selection();
             assert!(custody_graph.namespace.is_empty());
             assert!(custody_graph.roots.is_empty());
@@ -8064,7 +8077,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .all(|seed| custody_graph.custody_roots.contains(seed)));
             assert_eq!(
                 retained
-                    .retain_in(&custody_only)
+                    .into_value_support(&custody_only)
                     .unwrap()
                     .capture_graph_selection(),
                 custody_graph
@@ -9559,6 +9572,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         .native_offers()
         .iter()
         .any(|offer| offer.is_full()));
+    let mut previous: Option<(Arc<TemplateImportEvidence>, ExactDeclarationContext)> = None;
     for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
         let selected = ordinals
             .iter()
@@ -9586,7 +9600,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         )
         .unwrap();
         let captured =
-            RetainedTemplateImports::capture(&original, &[format!("import {}\n", owner.module)])
+            CapturedTemplateImports::capture(&original, &[format!("import {}\n", owner.module)])
                 .unwrap()
                 .unwrap();
         assert!(captured
@@ -9600,10 +9614,35 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .artifacts()
             .selected_native_groups()
             .is_empty());
+        let empty = ArtifactInventory::default().empty_view();
+        let (_, support, evidence) = captured
+            .into_value_support(
+                empty,
+                crate::artifact_inventory::CompilerSourceSupport::empty(),
+            )
+            .unwrap();
         let exported = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_issued_compiler_support(&captured.compiler_support)
+            .extend_issued_compiler_support(&support)
+            .unwrap()
+            .rebuild(|facts| facts.template_imports = Some(evidence.clone()))
+            .finish()
             .unwrap();
+        if let Some((prior_evidence, prior_context)) = &previous {
+            assert_eq!(
+                &evidence, prior_evidence,
+                "recipe evidence does not encode native permissions"
+            );
+            assert_ne!(
+                exported, *prior_context,
+                "equal template evidence cannot erase different compiler support"
+            );
+            assert_ne!(
+                exported.snapshot().native_availability,
+                prior_context.snapshot().native_availability
+            );
+        }
+        previous = Some((evidence, exported.clone()));
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(exported.clone()))
             .prepare_compilation(root.path(), PRODUCER)

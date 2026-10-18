@@ -1294,7 +1294,7 @@ pub struct CheckedValueArtifact {
     // Exact type/source selection; full native custody above grants no compiler role.
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
-    template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
+    template_imports: Option<Arc<crate::declaration_context::TemplateImportEvidence>>,
     directory: Arc<ValueInterfaceDirectory>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
@@ -2077,17 +2077,17 @@ impl CheckedValueInputs {
             .retain_output(&certificate)?,
         };
         let templates = cell.specification.template_sources();
-        let template_imports = crate::declaration_context::RetainedTemplateImports::capture(
+        let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
             original_execution,
             &templates,
         )?;
-        let artifact_view = match &template_imports {
-            Some(retained) => retained.retain_in(&artifact_view)?,
-            None => artifact_view,
-        };
-        let compiler_support = match &template_imports {
-            Some(retained) => retained_support.merge(retained.compiler_source_support())?,
-            None => retained_support,
+        let (artifact_view, compiler_support, template_imports) = match template_imports {
+            Some(captured) => {
+                let (artifacts, support, evidence) =
+                    captured.into_value_support(artifact_view, retained_support)?;
+                (artifacts, support, Some(evidence))
+            }
+            None => (artifact_view, retained_support, None),
         };
         Ok(Arc::new(CheckedValueArtifact {
             interface: input,
@@ -2134,7 +2134,7 @@ impl CheckedValueArtifact {
     }
     pub(crate) fn template_imports(
         &self,
-    ) -> Option<&Arc<crate::declaration_context::RetainedTemplateImports>> {
+    ) -> Option<&Arc<crate::declaration_context::TemplateImportEvidence>> {
         self.template_imports.as_ref()
     }
 }
@@ -6224,16 +6224,14 @@ mod tests {
             let mut edges = BTreeSet::new();
             let mut directories = Vec::new();
             for value in &values {
-                let template = value.template_imports().expect("actual template capture");
+                assert!(
+                    value.template_imports().is_some(),
+                    "actual template capture"
+                );
                 let support = value.compiler_source_support();
-                let template_view = template.compiler_source_support().artifacts();
+                let template_view = support.artifacts();
                 let graph = template_view.capture_graph_selection();
                 assert!(!graph.bindings.is_empty());
-                assert!(graph.bindings.iter().all(|binding| support
-                    .artifacts()
-                    .capture_graph_selection()
-                    .bindings
-                    .contains(binding)));
                 bindings.extend(graph.bindings);
                 edges.extend(template_view.binding_dependencies());
                 directories.push(value.directory.0.path().to_owned());
