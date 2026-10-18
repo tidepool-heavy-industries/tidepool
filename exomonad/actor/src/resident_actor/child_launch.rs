@@ -413,6 +413,9 @@ where
             seed,
             exit_destination,
         } = child;
+        descriptor
+            .validate_conversation_selection()
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let checkpoint_lease = checkpoint_admission
             .as_ref()
             .map(|(lease, _)| lease.clone());

@@ -99,7 +99,7 @@ Use ordinary functions for a straight pipeline and actors for ongoing interactio
 both can reuse the same data, functions and judgments. See `exomonad-workbench`,
 `exomonad-define-actors` and `exomonad-jev` for the composing vocabulary.
 
-Where the actor admits `ModelCall family`, `Tidepool.Model` provides
+Where the actor admits `ModelCall modelFamily`, `Tidepool.Model` provides
 `invokeModel turn input` with `textTurn model` or `typedTurn @Reply model` and supplied
 `AgentSpec` tools. Callbacks use your available effects; ambient tools and hooks
 are not inherited. Calls in one cell share its model budget. Match `modelOutcome`,
@@ -126,14 +126,14 @@ Create one idle child with `spawnSubagent context workspace
 (defaultSpawnOptions currentModel actualSpec)`. The context is a captured `ForkCtx checkpoint`
 or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
 `ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
-The options carry the actual typed `AgentSpec`, an explicit `Model family`,
+The options carry the actual typed `AgentSpec`, an explicit `Model modelFamily`,
 instructions, an optional ordinary text label, lifetime, and limits. Each actor's
 `currentModel` pins its admitted family and exact model/effort selection.
 `Exomonad.Models.primaryModel` is the root profile default. Construct other exact
 catalog selections with `openAI`, `argon`, or `deepSeek`, using
 `Exomonad.Models.catalogIdentity`, a catalog key, and that family's typed options.
-A captured context requires `ForkAgent family`; a fresh context requires
-`SpawnAgent family`. Capture with `checkpoint currentModel name`. Child model
+A captured context requires `ForkAgent modelFamily`; a fresh context requires
+`SpawnAgent modelFamily`. Capture with `checkpoint currentModel name`. Child model
 operations default to none; request each required operation explicitly through
 `spawnPermissions = modelPermissions [allowModelCall model, allowForkAgent model,
 allowSpawnAgent model]` and include its family effect in the child's effects.

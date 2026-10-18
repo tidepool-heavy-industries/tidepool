@@ -534,7 +534,7 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
                     ModelConfig {
                         provider: "offline".into(),
                         model: exomonad_actor::Model::DeepSeekFlash.value().into(),
-                        constructor: "Primary".into(),
+                        allowed_efforts: vec!["high".into()],
                         effort: "high".into(),
                     },
                 ),
@@ -543,7 +543,7 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
                     ModelConfig {
                         provider: "offline".into(),
                         model: exomonad_actor::Model::DeepSeekPro.value().into(),
-                        constructor: "Pro".into(),
+                        allowed_efforts: vec!["high".into()],
                         effort: "high".into(),
                     },
                 ),

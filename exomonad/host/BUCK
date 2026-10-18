@@ -805,7 +805,7 @@ rust_filegroup(
         "src/actor_host/fixtures/captured_context_original_owner_setup.hs": "exomonad/host/src/actor_host/fixtures/captured_context_original_owner_setup.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs",
-        "src/actor_host/fixtures/child_backend_refusal.hs": "exomonad/host/src/actor_host/fixtures/child_backend_refusal.hs",
+        "src/actor_host/fixtures/child_model_grant_refusal.hs": "exomonad/host/src/actor_host/fixtures/child_model_grant_refusal.hs",
         "src/actor_host/fixtures/choice_probe.hs": "exomonad/host/src/actor_host/fixtures/choice_probe.hs",
         "src/actor_host/fixtures/coherent_recovery_bind_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "src/actor_host/fixtures/coherent_recovery_extra_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs",
@@ -2775,7 +2775,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/captured_context_original_owner_setup.hs": "src/actor_host/fixtures/captured_context_original_owner_setup.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
-        "exomonad/host/src/actor_host/fixtures/child_backend_refusal.hs": "src/actor_host/fixtures/child_backend_refusal.hs",
+        "exomonad/host/src/actor_host/fixtures/child_model_grant_refusal.hs": "src/actor_host/fixtures/child_model_grant_refusal.hs",
         "exomonad/host/src/actor_host/fixtures/choice_probe.hs": "src/actor_host/fixtures/choice_probe.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs": "src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs": "src/actor_host/fixtures/coherent_recovery_extra_b.hs",
@@ -3497,9 +3497,9 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6261636b656e645f7265667573616c2e6873",
-    src = "src/actor_host/fixtures/child_backend_refusal.hs",
-    out = "child_backend_refusal.hs",
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6d6f64656c5f6772616e745f7265667573616c2e6873",
+    src = "src/actor_host/fixtures/child_model_grant_refusal.hs",
+    out = "child_model_grant_refusal.hs",
     visibility = ["PUBLIC"],
 )
 

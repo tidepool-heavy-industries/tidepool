@@ -377,7 +377,13 @@ where
                 "replacement must preserve the actor's immutable permissions",
             ));
         }
-        descriptor = descriptor.with_capabilities(self.descriptor.capabilities().clone());
+        descriptor = descriptor
+            .with_capabilities(self.descriptor.capabilities().clone())
+            .with_model(self.descriptor.model().cloned())
+            .with_reasoning(self.descriptor.reasoning());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| reject(&error))?;
         if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",

@@ -11,15 +11,16 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 `Tidepool.Model.invokeModel`, `textTurn`, `withModel` and `withLimits`. Its
 `noToolsTurn` uses `defaultSpec { specTools = NoTools }` and narrows
 `defaultLimits` to `requestLimit = Just 1` and `toolLimit = Just 0`.
-`flash input` selects `DeepSeekFlash` and returns `ModelResult Text`; `pro input`
-uses the same recipe with `DeepSeekPro`. Explicit model and reasoning choices
-must match the backend fixed when the run starts. Missing choices inherit the
-parent conversation's effective selection.
+`invokeWithModel model input` returns `ModelResult Text` using an explicit
+`Model modelFamily`. The library exports static `OpenAI`, `Argon` and `DeepSeek`
+family types. The effect row must contain `ModelCall modelFamily`; Rust checks
+the exact catalog entry and effort against the actor's immutable permissions.
+A bounded helper can use a different provider from its parent conversation.
 
-In an ordinary asynchronous program, call `ModelExample.flash input` or
-`ModelExample.pro input`. In a synchronous notebook, use the corresponding
-`synchronousFlash` or `synchronousPro` helper. They lift the ordinary program
-through `raiseSync` while retaining the caller's ambient effect row.
+In an ordinary asynchronous program, call
+`ModelExample.invokeWithModel model input`. In a synchronous notebook, use
+`synchronousWithModel model input`, which lifts the ordinary program through
+`raiseSync` while retaining the caller's ambient effect row.
 The shared source module lists its imports and extensions. Load it from the
 selected source root before running the registered cells. Each invocation is
 fresh model work; changing the model and invoking again makes another request.

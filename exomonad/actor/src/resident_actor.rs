@@ -15000,6 +15000,9 @@ where
     {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| refuse(&error))?;
         let journal = self
             .environment
             .recovery
@@ -15200,6 +15203,9 @@ where
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        descriptor
+            .validate_conversation_selection()
+            .map_err(|error| refuse(&error))?;
         if descriptor.placement().session != self.session
             || descriptor.supervisor_parent().is_some()
             || descriptor.context_parent().is_some()
