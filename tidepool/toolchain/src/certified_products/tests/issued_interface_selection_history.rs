@@ -151,12 +151,11 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
                 .unwrap(),
         );
         let request = public
-            .prepare_compilation(&root.path().join(format!("seed-{chosen}")), &[3; 32])
-            .unwrap()
-            .in_program_context_with_private_input(
+            .prepare_compilation_with_private_input(
                 &root.path().join(format!("private-{chosen}")),
-                public.clone(),
-                &private,
+                &[3; 32],
+                None,
+                Some(private.clone()),
             )
             .unwrap();
         assert!(request.context().interface_owners().is_empty());

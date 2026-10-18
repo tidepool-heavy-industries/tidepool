@@ -4041,14 +4041,6 @@ mod tests {
                 "request" => context
                     .prepare_compilation(&root.join("request"), producer)
                     .map(|_| ()),
-                "growth" => empty
-                    .prepare_compilation_with_authorization(
-                        &root.join("request"),
-                        producer,
-                        Some(ciborium::value::Value::Null),
-                    )
-                    .and_then(|request| request.in_program_context(&root.join("growth"), context))
-                    .map(|_| ()),
                 "public" => context.materialize(&root).map(|_| ()),
                 "inspection" => {
                     let directory = tempfile::tempdir_in(&root).unwrap();
@@ -4101,7 +4093,6 @@ mod tests {
             ("copy", "scratch", true, "directory", true, 0, 0),
             ("copy", "durable", true, "directory", false, 1, 1),
             ("request", "scratch", false, "file", true, 0, 0),
-            ("growth", "scratch", false, "file", true, 0, 0),
             ("public", "durable", false, "trace", true, 4, 6),
             ("public", "durable", false, "directory", false, 0, 1),
             ("inspection", "scratch", false, "directory", true, 0, 0),

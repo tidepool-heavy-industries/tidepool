@@ -2,7 +2,7 @@ use super::*;
 
 use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::declaration_context::{
-    ExactCompilationRequest, ExactDeclarationContext, ExactProductAdmission, ExactSourceAdmission,
+    ExactCompilationRequest, ExactDeclarationContext, ExactSourceAdmission,
 };
 use crate::declaration_join::NativeAuthoredDeclarationAdmission;
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
@@ -273,10 +273,7 @@ pub(super) fn issue_planned_original_with_retained_child(
     );
     let authored =
         NativeAuthoredDeclarationAdmission::from_planned(&module, &source_admission).unwrap();
-    let exact = ExactProductAdmission {
-        request: &request,
-        source: &source_admission,
-    };
+    let exact = (&request).product_admission(&source_admission);
     let bytes = planned_product_sidecar_with_historical_child(
         &module_name,
         defined_occurrence,
@@ -444,10 +441,7 @@ pub(super) fn issue_planned_original_with_source_value(
         .unwrap();
     let authored =
         NativeAuthoredDeclarationAdmission::from_planned(&module, &source_admission).unwrap();
-    let exact = ExactProductAdmission {
-        request: &request,
-        source: &source_admission,
-    };
+    let exact = (&request).product_admission(&source_admission);
     let bytes = planned_product_sidecar(&module_name, body_tag);
     let package_bytes =
         empty_package_bundle_for_interface(&module_name, &planned_interface(&module_name));
@@ -653,10 +647,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
                 "family_closure": []
             }
         });
-        let exact = ExactProductAdmission {
-            request: &current.request,
-            source: &current.source,
-        };
+        let exact = (&current.request).product_admission(&current.source);
         assert!(crate::declaration_context::IssuedOriginalOutput::issue(
             current.certified.source_selection.clone(), view.inventory().empty_view(),
         ).is_err(), "an issued output cannot pair this source selection with missing canonical/native custody");
@@ -831,10 +822,7 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                     "family_closure": []
                 }
             });
-            let exact = ExactProductAdmission {
-                request: &selected_issue.request,
-                source: &selected_issue.source,
-            };
+            let exact = (&selected_issue.request).product_admission(&selected_issue.source);
             let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
             let output = crate::declaration_context::IssuedOriginalOutput::issue(
                 selected_issue.certified.source_selection.clone(),

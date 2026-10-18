@@ -2,7 +2,7 @@ use super::*;
 
 use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::{ImportQualifier, ModuleEvidence, ModuleImportEvidence, ResolutionEvidence};
-use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+use crate::declaration_context::ExactDeclarationContext;
 use tidepool_repr::execution_schema::{Group, HeapRhs};
 
 const UNIT: &str = "main";
@@ -368,10 +368,7 @@ fn certify_promotion(
     let source_admission = request
         .admit_source(&input, target_source, &evidence_bytes)
         .unwrap();
-    let exact = ExactProductAdmission {
-        request: &request,
-        source: &source_admission,
-    };
+    let exact = (&request).product_admission(&source_admission);
     let mut packet = packet.clone();
     for module in &mut packet.modules {
         module.product_sha256 = sha(product_bytes);
@@ -531,10 +528,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     let source_admission = request
         .admit_source(&input, target_source, &evidence_bytes)
         .unwrap();
-    let exact = ExactProductAdmission {
-        request: &request,
-        source: &source_admission,
-    };
+    let exact = (&request).product_admission(&source_admission);
 
     let promoted_bytes = raw_products(0);
     let promoted = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
@@ -757,9 +751,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
     .unwrap();
     let inventory = validation.inventory.clone();
     let bound_source = exact
-        .source
+        .source()
         .match_product(
-            exact.request,
+            exact.physical_request(),
             &input,
             target_source,
             &evidence_bytes,

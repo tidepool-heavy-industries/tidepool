@@ -293,12 +293,11 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     );
     let public_hash = public.semantic_sha256();
     let request = public
-        .prepare_compilation(&directory.path().join("public-inputs"), &PRODUCER)
-        .unwrap()
-        .in_program_context_with_private_input(
+        .prepare_compilation_with_private_input(
             &directory.path().join("private-inputs"),
-            public.clone(),
-            &private,
+            &PRODUCER,
+            None,
+            Some(private.clone()),
         )
         .unwrap();
     assert!(public.recovery_products().is_empty());
@@ -466,12 +465,11 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let empty_private =
         OriginalCompilerInputs::from_selection(&issued.source_selection, &empty_view).unwrap();
     let late_request = public
-        .prepare_compilation(&directory.path().join("late-public-inputs"), &PRODUCER)
-        .unwrap()
-        .in_program_context_with_private_input(
+        .prepare_compilation_with_private_input(
             &directory.path().join("late-private-inputs"),
-            public.clone(),
-            &empty_private,
+            &PRODUCER,
+            None,
+            Some(empty_private.clone()),
         )
         .unwrap();
     assert!(late_request.groups.is_empty());

@@ -684,7 +684,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     let sealed_artifacts = output.artifacts();
     let source_selection = output.source_selection();
-    let source_admission = admission.source;
+    let source_admission = admission.source();
     let module_name = module.module_name();
     let source_path = source_admission.witness().source_path();
     let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
@@ -707,7 +707,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
             producer_identity,
         )
         .sha256();
-    let baseline = admission.request.context();
+    let baseline = admission.context();
     if baseline.toolchain_identity_sha256() != [0; 32]
         && baseline.toolchain_identity_sha256() != toolchain_identity_sha256
     {
@@ -797,7 +797,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         Some(source_admission),
         &source_admission.home_imports()?,
         Some(&artifact_context),
-        admission.request.program_source_lexical(),
+        admission.program_source_lexical(),
         includes,
         &mut validation,
     )?;

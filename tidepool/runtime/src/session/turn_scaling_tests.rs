@@ -2775,6 +2775,17 @@ fn simple_cell_vertical(
 }
 
 #[test]
+fn complete_cell_admits_native_segment_after_initial_declaration() {
+    let names = simple_cell_vertical(
+        "declaration_before_native",
+        include_str!("fixtures/compiled-cell-declaration-before-native.hs"),
+        1,
+        AuthorityChecks::RefusalBranches,
+    );
+    assert!(names.iter().any(|name| name == "admittedAfterDeclaration"));
+}
+
+#[test]
 fn complete_cell_consumes_native_items_without_compiler_requests() {
     simple_cell_vertical(
         "complete_cell",
