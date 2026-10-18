@@ -38,6 +38,7 @@ use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};

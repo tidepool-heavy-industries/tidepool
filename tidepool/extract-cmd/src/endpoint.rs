@@ -833,8 +833,9 @@ pub enum CompilerTermination {
     Failed(CompilerTransactionCloseFailure),
 }
 
-/// A bounded lease on one compiler worker. Requests execute in order against
-/// one resident GHC transaction and dropping the lease releases admission.
+/// A lease on one compiler worker. Requests execute in order against one
+/// resident GHC transaction. Dropping requests retirement; unresolved use may
+/// retain the daemon slot and its admission until the owning process settles.
 #[derive(Debug)]
 pub struct CompilerTransaction {
     workload: CompileWorkload,
@@ -4190,13 +4191,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let spec = direct_handshake_fixture(directory.path(), 5);
         let retained = RefCell::new(None);
-        let mut input = std::sync::Weak::new();
+        let input = RefCell::new(std::sync::Weak::new());
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_compiler_transaction(
                 |close| *retained.borrow_mut() = Some(close),
                 || {
                     let file = compiler_input_file(b"input surviving unwind");
-                    input = Arc::downgrade(&file);
+                    *input.borrow_mut() = Arc::downgrade(&file);
                     assert!(retain_compiler_input_file(file));
                     let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
                     let mut transaction = endpoint.transaction().unwrap();
@@ -4224,7 +4225,7 @@ mod tests {
             panic!("owning sink must survive unwind");
         };
         assert!(
-            input.upgrade().is_some(),
+            input.borrow().upgrade().is_some(),
             "unwind sink retains input custody"
         );
         assert_eq!(evidence.reason, CompilerTransactionCloseReason::Abandoned);
@@ -4243,7 +4244,7 @@ mod tests {
         );
         assert!(actual._retained_child.is_none());
         drop(evidence.input_custody);
-        assert!(input.upgrade().is_none());
+        assert!(input.borrow().upgrade().is_none());
     }
 
     #[test]
