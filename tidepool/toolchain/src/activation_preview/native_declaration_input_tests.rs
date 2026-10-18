@@ -381,6 +381,7 @@ pub(crate) fn with_irrelevant_values_named(
 
 pub(crate) fn admit_irrelevant_value_root(
     context: &Arc<ExactDeclarationContext>,
+    selection: &crate::certified_products::CertifiedSourceSelection,
     module: &str,
 ) -> Arc<ExactDeclarationContext> {
     let producer = context.toolchain_identity_sha256();
@@ -416,10 +417,10 @@ pub(crate) fn admit_irrelevant_value_root(
         )
         .unwrap();
     Arc::new(
-        ExactDeclarationContext::from_authenticated_execution(
+        ExactDeclarationContext::from_source_selection(
             producer,
+            selection,
             &view,
-            context.compiler_input_projection().clone(),
             context.lexical_graph().to_vec(),
             context.original_instance_target().unwrap().clone(),
             &[],
