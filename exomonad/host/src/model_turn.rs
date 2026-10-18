@@ -1390,6 +1390,55 @@ mod tests {
         ));
     }
     #[test]
+    fn invocation_continuations_refuse_other_effect_families() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        );
+        let caller = PrincipalId::new(1, 2);
+        assert!(service
+            .start(caller, ModelFamily::Argon, request(false))
+            .is_err());
+        assert!(service.store.events(None).unwrap().is_empty());
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        let operation = first["call_id"].as_str().unwrap();
+        assert!(service
+            .resume(
+                caller,
+                ModelFamily::Argon,
+                token,
+                operation,
+                callback_reply(json!("wrong family"))
+            )
+            .is_err());
+        assert!(service
+            .annotate(
+                caller,
+                ModelFamily::DeepSeek,
+                token,
+                operation,
+                json!({"kind":"none"})
+            )
+            .is_err());
+        assert!(service.close(caller, ModelFamily::Argon, token).is_err());
+        let finished = service
+            .resume(
+                caller,
+                ModelFamily::OpenAI,
+                token,
+                operation,
+                callback_reply(json!("original")),
+            )
+            .unwrap();
+        assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
+    }
+
+    #[test]
     fn foreign_cell_tokens_are_refused_even_for_the_same_actor_principal() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let owner = service(

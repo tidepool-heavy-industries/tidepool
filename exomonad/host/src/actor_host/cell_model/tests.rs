@@ -129,7 +129,6 @@ fn fixture_catalog() -> crate::exomonad::model_catalog::InferenceConfig {
             ModelConfig {
                 provider: "offline".into(),
                 model: "test-model".into(),
-                constructor: "Primary".into(),
                 effort: "low".into(),
                 allowed_efforts: Vec::new(),
             },
@@ -306,7 +305,7 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
                 let capability = displayed(
                     campaign,
                     endpoint.as_ref(),
-                    "display (case ModelFixture.modelCapabilityKeys of { [Tidepool.Effects.Core.EffectModelCall] -> True; _ -> False })",
+                    "display (case ModelFixture.modelCapabilityKeys of { [Tidepool.Effects.Core.EffectModelCallOpenAI] -> True; _ -> False })",
                 )
                 .await;
                 assert_eq!(committed_display_text(&capability), "True");
@@ -332,7 +331,7 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
                 }
                 let invalid = dispatch_haskell_script(
                     endpoint.as_ref(),
-                    "import qualified Exomonad.Models as Models\nlet invalidChoice = Models.Primary (Models.ArgonOptions Models.EffortLow)",
+                    "import qualified Exomonad.Models as Models\nlet invalidChoice = Models.openAI \"catalog\" \"primary\" (Models.ArgonOptions Models.EffortLow)",
                 ).await;
                 assert_eq!(invalid["status"], "rejected", "{invalid}");
                 assert_eq!(invalid["items"][0]["failureLayer"], "compile", "{invalid}");
@@ -710,7 +709,6 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
                 "flash".into(),
                 ResolvedModel {
                     provider: "deepseek".into(),
-                    constructor: "Flash".into(),
                     model: Model::DeepSeekFlash,
                     reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
                     allowed_efforts: vec![Reasoning::DeepSeekReasoning(
@@ -722,7 +720,6 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
                 "argon".into(),
                 ResolvedModel {
                     provider: "argon".into(),
-                    constructor: "Argon".into(),
                     model: Model::GeminiArgon,
                     reasoning: Reasoning::ArgonReasoning(ArgonEffort::EffortLow),
                     allowed_efforts: vec![
@@ -752,7 +749,6 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
     let flash = ModelSelectionEnvelope {
         key: "flash".into(),
         reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
-        allowed_efforts: vec![Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)],
         ..choice.clone()
     };
     assert_eq!(
@@ -780,6 +776,66 @@ fn catalog_transport_binds_selected_provider_and_rejects_foreign_choices() {
         assert!(catalog_transport(&catalog, &providers, &invalid).is_err());
     }
     assert!(catalog_transport(&catalog, &BTreeMap::new(), &choice).is_err());
+    let run = tempfile::tempdir().unwrap();
+    let runtime =
+        super::super::embedded_harness::EmbeddedHarnessRuntime::open(run.path(), 1).unwrap();
+    runtime
+        .configure_inference(providers["deepseek"].clone())
+        .unwrap();
+    runtime.configure_providers(providers).unwrap();
+    let (_storage, mut config) = policy_config();
+    config.model = Model::DeepSeekFlash;
+    config.reasoning = flash.reasoning;
+    config.workspace_inputs.as_mut().unwrap().model_catalog = Some(catalog.clone());
+    runtime.configure_context_models(&config).unwrap();
+    let permission = exomonad_actor::ConversationPermission::new(
+        AdmittedModelIdentity::new(
+            catalog.identity.clone(),
+            "argon".into(),
+            "argon".into(),
+            Model::GeminiArgon,
+        )
+        .unwrap(),
+        vec![choice.reasoning],
+    )
+    .unwrap();
+    let actor_auth = runtime.conversation_auth(&permission).unwrap();
+    assert_eq!(
+        harness::transport::ResponsesClient::new(actor_auth)
+            .response_contract()
+            .unwrap(),
+        (
+            ResponsesRoute::GeminiInteractions,
+            ResponsesProtocol::Interactions
+        )
+    );
+    for identity in [
+        AdmittedModelIdentity::new(
+            "stale".into(),
+            "argon".into(),
+            "argon".into(),
+            Model::GeminiArgon,
+        )
+        .unwrap(),
+        AdmittedModelIdentity::new(
+            catalog.identity.clone(),
+            "argon".into(),
+            "deepseek".into(),
+            Model::GeminiArgon,
+        )
+        .unwrap(),
+        AdmittedModelIdentity::new(
+            catalog.identity.clone(),
+            "flash".into(),
+            "argon".into(),
+            Model::GeminiArgon,
+        )
+        .unwrap(),
+    ] {
+        let forged =
+            exomonad_actor::ConversationPermission::new(identity, vec![choice.reasoning]).unwrap();
+        assert!(runtime.conversation_auth(&forged).is_err());
+    }
     assert!(
         store.events(None).unwrap().is_empty(),
         "selection checks must not issue provider work"

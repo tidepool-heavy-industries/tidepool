@@ -34,7 +34,6 @@ pub(crate) struct ProviderConfig {
 pub(crate) struct ModelConfig {
     pub provider: String,
     pub model: String,
-    pub constructor: String,
     pub effort: String,
     #[serde(default)]
     pub allowed_efforts: Vec<String>,
@@ -60,42 +59,9 @@ pub(crate) struct ResolvedCatalog {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolvedModel {
     pub provider: String,
-    pub constructor: String,
     pub model: Model,
     pub reasoning: Reasoning,
     pub allowed_efforts: Vec<Reasoning>,
-}
-
-fn constructor_valid(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_uppercase())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
-        && !matches!(
-            name,
-            "True"
-                | "False"
-                | "Just"
-                | "Nothing"
-                | "Left"
-                | "Right"
-                | "LT"
-                | "EQ"
-                | "GT"
-                | "ModelSelectionEnvelope"
-                | "ArgonOptions"
-                | "DeepSeekOptions"
-                | "OpenAIOptions"
-                | "EffortLow"
-                | "EffortMedium"
-                | "EffortHigh"
-                | "DeepSeekNone"
-                | "DeepSeekLow"
-                | "DeepSeekHigh"
-                | "DeepSeekMax"
-                | "OpenAILow"
-                | "OpenAIMedium"
-                | "OpenAIHigh"
-        )
 }
 
 impl ProviderConfig {
@@ -141,16 +107,9 @@ impl InferenceConfig {
                 .map_err(|e| format!("provider {name}: {e}"))?;
         }
         let mut resolved = BTreeMap::new();
-        let mut constructors = BTreeSet::new();
         for (name, model) in &self.models {
             if name.is_empty() || model.model.trim().is_empty() {
                 return Err("model name and ID must be nonempty".into());
-            }
-            if !constructor_valid(&model.constructor) || !constructors.insert(&model.constructor) {
-                return Err(format!(
-                    "invalid or colliding model constructor {}",
-                    model.constructor
-                ));
             }
             let provider = self
                 .providers
@@ -165,7 +124,6 @@ impl InferenceConfig {
                 name.clone(),
                 ResolvedModel {
                     provider: model.provider.clone(),
-                    constructor: model.constructor.clone(),
                     model: Model::for_backend(provider.backend, &model.model),
                     reasoning: Reasoning::for_backend(provider.backend, &model.effort)?,
                     allowed_efforts: {
@@ -257,7 +215,6 @@ impl InferenceConfig {
             ModelConfig {
                 provider: provider.clone(),
                 model: defaults.model.value().into(),
-                constructor: "Primary".into(),
                 effort: defaults.reasoning.value().into(),
                 allowed_efforts: Vec::new(),
             },
@@ -268,21 +225,12 @@ impl InferenceConfig {
                     "legacy alias {alias}: backend differs from provider"
                 ));
             }
-            let constructor = alias
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|s| !s.is_empty())
-                .map(|s| {
-                    let mut chars = s.chars();
-                    chars.next().unwrap().to_ascii_uppercase().to_string() + chars.as_str()
-                })
-                .collect::<String>();
             if models
                 .insert(
                     alias.clone(),
                     ModelConfig {
                         provider: provider.clone(),
                         model: model.value().into(),
-                        constructor,
                         effort: defaults.reasoning.value().into(),
                         allowed_efforts: Vec::new(),
                     },
@@ -489,7 +437,6 @@ mod tests {
                 ModelConfig {
                     provider: "deepseek".into(),
                     model: "deepseek-flash".into(),
-                    constructor: "Flash".into(),
                     effort: "high".into(),
                     allowed_efforts: Vec::new(),
                 },
@@ -511,7 +458,6 @@ mod tests {
         config.models.insert(
             "unused".into(),
             ModelConfig {
-                constructor: "Unused".into(),
                 ..config.models["flash"].clone()
             },
         );
@@ -523,6 +469,61 @@ mod tests {
         config.models.get_mut("flash").unwrap().effort = "high".into();
         config.providers.get_mut("deepseek").unwrap().credential_env = Some("OTHER_KEY".into());
         assert_ne!(initial.identity, config.resolve().unwrap().identity);
+    }
+
+    #[test]
+    fn root_grants_preserve_exact_catalog_provider_effort_and_capture_binding() {
+        use exomonad_actor::AdmittedModelIdentity;
+        use exomonad_tool::ModelOperation;
+        let mut config = fixture_config();
+        config.models.get_mut("flash").unwrap().allowed_efforts = vec!["low".into(), "high".into()];
+        let mut twin = config.models["flash"].clone();
+        twin.provider = "other".into();
+        config.models.insert("twin".into(), twin);
+        config
+            .providers
+            .insert("other".into(), config.providers["deepseek"].clone());
+        config
+            .profiles
+            .get_mut("work")
+            .unwrap()
+            .allowed
+            .push("twin".into());
+        let catalog = config.resolve().unwrap();
+        let caps = catalog
+            .root_capabilities(vec![exomonad_tool::ActorEffectKey::Console])
+            .unwrap();
+        let primary = &catalog.models["flash"];
+        let own = AdmittedModelIdentity::new(
+            catalog.identity.clone(),
+            "flash".into(),
+            primary.provider.clone(),
+            primary.model.clone(),
+        )
+        .unwrap();
+        let twin = AdmittedModelIdentity::new(
+            catalog.identity.clone(),
+            "twin".into(),
+            "other".into(),
+            primary.model.clone(),
+        )
+        .unwrap();
+        let low = Reasoning::for_backend(Backend::DeepSeek, "low").unwrap();
+        let max = Reasoning::for_backend(Backend::DeepSeek, "max").unwrap();
+        assert!(caps
+            .model_permissions()
+            .permits(ModelOperation::ForkAgent, &own, low));
+        assert!(!caps
+            .model_permissions()
+            .permits(ModelOperation::ForkAgent, &twin, low));
+        for op in [ModelOperation::ModelCall, ModelOperation::SpawnAgent] {
+            assert!(caps.model_permissions().permits(op, &twin, low));
+            assert!(!caps.model_permissions().permits(op, &twin, max));
+        }
+        let conversation = caps.conversation_permission().unwrap();
+        assert!(conversation.permits(&own, low));
+        assert!(!conversation.permits(&twin, low));
+        assert!(!conversation.permits(&own, max));
     }
 
     #[test]
@@ -541,21 +542,21 @@ mod tests {
     }
 
     #[test]
-    fn model_admission_refuses_bad_effort_provider_and_constructor() {
-        for constructor in ["lower", "9Bad", "A.B", "Just", "True", ""] {
-            let mut config = fixture_config();
-            config.models.get_mut("flash").unwrap().constructor = constructor.into();
-            assert!(config.resolve().is_err(), "{constructor}");
-        }
-        let mut config = fixture_config();
-        config
-            .models
-            .insert("other".into(), config.models["flash"].clone());
-        assert!(config.resolve().is_err());
+    fn model_admission_refuses_bad_effort_and_provider() {
         let mut config = fixture_config();
         config.models.get_mut("flash").unwrap().effort = "medium".into();
         assert!(config.resolve().is_err());
         config.models.get_mut("flash").unwrap().provider = "unknown".into();
+        assert!(config.resolve().is_err());
+        let mut config = fixture_config();
+        config.models.get_mut("flash").unwrap().allowed_efforts = vec!["low".into()];
+        assert!(config.resolve().is_err());
+        config
+            .models
+            .get_mut("flash")
+            .unwrap()
+            .allowed_efforts
+            .push("medium".into());
         assert!(config.resolve().is_err());
     }
 
@@ -629,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_registered_custom_alias_is_admitted_and_constructor_collision_refused() {
+    fn legacy_registered_custom_alias_preserves_distinct_catalog_keys() {
         let embedded: EmbeddedLaunchConfig = toml::from_str(
             "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
         )
@@ -643,13 +644,19 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap();
-        assert_eq!(catalog.models["local-fast"].constructor, "LocalFast");
         assert_eq!(
             catalog.models["local-fast"].model.value(),
             "registered-custom"
         );
         aliases.insert("local_fast".into(), Model::DeepSeekFlash);
-        assert!(InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded).is_err());
+        let distinct = InferenceConfig::synthesize_legacy(&defaults, &aliases, &embedded)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_ne!(
+            distinct.models["local-fast"].model,
+            distinct.models["local_fast"].model
+        );
     }
 
     fn persona_argon_fixture_config() -> super::super::ExomonadConfig {
@@ -770,9 +777,9 @@ mod tests {
             .max_output_tokens = Some(1234);
         variants.push(limits);
 
-        let mut constructor = base.clone();
-        constructor.models.get_mut("argon").unwrap().constructor = "SelectedArgon".into();
-        variants.push(constructor);
+        let mut efforts = base.clone();
+        efforts.models.get_mut("argon").unwrap().allowed_efforts = vec!["high".into()];
+        variants.push(efforts);
 
         let mut membership = base.clone();
         membership

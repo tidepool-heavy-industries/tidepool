@@ -14,19 +14,17 @@ credential_env = "DEEPSEEK_API_KEY"
 [inference.models.argon]
 provider = "gemini"
 model = "gemini-4-argon"
-constructor = "Argon"
 effort = "high"
+allowed_efforts = ["low", "medium", "high"]
 
 [inference.models.flash]
 provider = "deepseek"
 model = "deepseek-flash"
-constructor = "Flash"
 effort = "high"
 
 [inference.models.pro]
 provider = "deepseek"
 model = "deepseek-v4-pro"
-constructor = "Pro"
 effort = "high"
 
 [inference.profiles.argon]
