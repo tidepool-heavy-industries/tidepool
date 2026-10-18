@@ -1102,7 +1102,8 @@ fn require_owned_artifact_paths(
     Ok(())
 }
 
-/// Validate the exact owned implementation closure and retain a sealed result.
+/// Certify the owner's exact interface observation and retain its native context.
+/// The worker attests interface semantics, not unconsumed native bodies or scopes.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
 pub fn certify_declaration_join(
     spec: DeclarationJoinSpec,
