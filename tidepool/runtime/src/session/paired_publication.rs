@@ -2639,12 +2639,18 @@ mod tests {
 
     #[test]
     fn paired_independent_authored_rebase_preserves_originals_and_current_winners() {
+        use tidepool_toolchain::artifact_inventory::{ArtifactBindingNode, ArtifactKind};
+
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+            tidepool_mcp::actor_decl(),
+        ])
+        .unwrap();
         let mut lib =
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+                .with_validation_include(effects.include_paths().to_vec());
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
             .unwrap();
@@ -2684,6 +2690,88 @@ mod tests {
         }
         let original_a = session.lib().scope_tip(private_a);
         let original_b = session.lib().scope_tip(private_b);
+        // Observe each independently compiled body's exact dependency closure
+        // before a public namespace winner is chosen. Payload equality does
+        // not make the two issuing scopes interchangeable.
+        let branch_closures =
+            [(private_a, original_a), (private_b, original_b)].map(|(scope, generation)| {
+                let context = session.lib().current_exact_context_in(scope).unwrap();
+                let artifacts = context.artifact_view();
+                let graph = artifacts.capture_graph_selection();
+                let descriptors = artifacts.descriptors();
+                let original = descriptors
+                    .iter()
+                    .find(|descriptor| {
+                        descriptor.kind == ArtifactKind::OriginalModule
+                            && descriptor.owner.module
+                                == SessionModule::lib(generation).module_name()
+                    })
+                    .unwrap();
+                let actor_pair = [
+                    ArtifactKind::OriginalModule,
+                    ArtifactKind::CanonicalModuleInterface,
+                ]
+                .map(|kind| {
+                    let id = descriptors
+                        .iter()
+                        .find(|descriptor| {
+                            descriptor.kind == kind
+                                && descriptor.owner.unit == "main"
+                                && descriptor.owner.module == "Tidepool.Actor"
+                        })
+                        .unwrap()
+                        .id;
+                    *graph
+                        .namespace
+                        .iter()
+                        .find(|binding| binding.artifact == id)
+                        .unwrap()
+                });
+                let edges = artifacts.binding_dependencies();
+                let mut closure = graph
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact() == original.id)
+                    .copied()
+                    .map(ArtifactBindingNode::Group)
+                    .collect::<BTreeSet<_>>();
+                assert!(!closure.is_empty(), "authored body has native groups");
+                loop {
+                    let before = closure.len();
+                    for (source, target, _) in &edges {
+                        if closure.contains(source) {
+                            closure.insert(*target);
+                        }
+                    }
+                    if closure.len() == before {
+                        break;
+                    }
+                }
+                assert!(
+                    closure.iter().any(|node| matches!(node,
+                        ArtifactBindingNode::Group(group)
+                            if group.binding.artifact() == actor_pair[0].artifact
+                    )),
+                    "authored native body actually depends on Tidepool.Actor"
+                );
+                let required_edges = edges
+                    .into_iter()
+                    .filter(|(source, _, _)| closure.contains(source))
+                    .collect::<Vec<_>>();
+                (actor_pair, closure, required_edges)
+            });
+        assert_eq!(
+            branch_closures[0].0[0].artifact,
+            branch_closures[1].0[0].artifact
+        );
+        assert_eq!(
+            branch_closures[0].0[1].artifact,
+            branch_closures[1].0[1].artifact
+        );
+        assert_ne!(
+            branch_closures[0].0, branch_closures[1].0,
+            "rebase must encounter distinct exact Actor bindings, not a same-pair conflict"
+        );
         let authored_b = session
             .lib()
             .log
@@ -2780,7 +2868,7 @@ mod tests {
         let retry = accepted(
             session
                 .snapshot_declaration_publication(
-                    owner,
+                    owner.clone(),
                     &admitted,
                     private_b,
                     vec![value_b_id],
@@ -2906,6 +2994,57 @@ mod tests {
             &materialized.join,
         )
         .unwrap();
+        let assert_closures = |context: &ExactDeclarationContext| {
+            let graph = context.artifact_view().capture_graph_selection();
+            let edges = context.artifact_view().binding_dependencies();
+            for binding in branch_closures[0].0 {
+                assert!(
+                    graph.namespace.contains(&binding),
+                    "current public Actor binding remains the compiler namespace winner"
+                );
+            }
+            for (_, closure, required_edges) in &branch_closures {
+                for node in closure {
+                    assert!(
+                        match node {
+                            ArtifactBindingNode::Artifact(binding) =>
+                                graph.bindings.contains(binding),
+                            ArtifactBindingNode::Group(group) =>
+                                graph.native_groups.contains(group),
+                        },
+                        "publication lost exact historical dependency {node:?}"
+                    );
+                }
+                for edge in required_edges {
+                    assert!(
+                        edges.contains(edge),
+                        "publication lost exact native edge {edge:?}"
+                    );
+                }
+            }
+        };
+        assert_closures(context);
+        drop(view);
+        drop(graph);
+        drop(proof);
+        drop(materialized);
+        drop(authored_b);
+        drop(session);
+        let mut reopened_lib =
+            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+        let reopened_recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
+        tidepool_testing::with_settlement(|settlement| {
+            reopened_recovery.attach_root(&mut reopened_lib, settlement)
+        })
+        .unwrap();
+        let mut reopened = PersistentSession::new(Some(reopened_lib), 1024 * 1024);
+        let public = reopened.recover_public_scope(&owner).unwrap();
+        assert_eq!(reopened.lib().scope_tip(public), generation);
+        let cold_view = reopened.compile_view_in(public).unwrap();
+        assert_closures(cold_view.exact_declaration_context().unwrap());
     }
 
     #[test]
