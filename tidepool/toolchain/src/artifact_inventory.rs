@@ -2598,6 +2598,24 @@ enum BoundNativeGroup {
 }
 
 impl BoundArtifactSelection {
+    #[cfg(test)]
+    pub(crate) fn observed_binding_state(
+        &self,
+    ) -> (
+        ArtifactGraphSelection,
+        BTreeSet<ArtifactId>,
+        BTreeMap<NativeGroupKey, NativeGroupBinding>,
+    ) {
+        (
+            self.view.capture_graph_selection(),
+            self.entries.keys().copied().collect(),
+            self.groups
+                .iter()
+                .map(|(key, BoundNativeGroup::Issued(group))| (*key, *group))
+                .collect(),
+        )
+    }
+
     #[track_caller]
     fn resolve_binding(
         &self,
