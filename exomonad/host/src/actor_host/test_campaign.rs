@@ -187,14 +187,9 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
 
 #[test]
 fn workspace_commit_preserves_head_until_authored_files_change() {
-    let directory = tempfile::tempdir().unwrap();
-    let workspace = directory.path();
-    let git = exomonad_worktree::GitCli::new();
-    git.try_run(workspace, &["init", "--quiet"]).unwrap();
-    git.try_run(workspace, &["config", "user.name", "Campaign Test"])
-        .unwrap();
-    git.try_run(workspace, &["config", "user.email", "campaign@example.invalid"])
-        .unwrap();
+    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let workspace = repository.path();
+    let git = repository.git();
     let authored = workspace.join("config.toml");
     std::fs::write(&authored, "model = 'test-model'\n").unwrap();
     commit_workspace(workspace);
