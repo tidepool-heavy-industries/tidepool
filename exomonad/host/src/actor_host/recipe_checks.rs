@@ -880,11 +880,9 @@ impl Driver {
                     .get(&activation.id.actor())
                     .ok_or("activation without installation")?;
                 let model = actor
-                    .model
-                    .as_ref()
-                    .map(|model| super::resolve_model(&self.config, model))
-                    .transpose()
-                    .map_err(runtime_error)?;
+                    .capabilities
+                    .conversation_permission()
+                    .map(|permission| permission.model().model().value().to_owned());
                 cx.respond((
                     self.actor_key(actor.actor.identity())?,
                     (actor.label.clone(), activation.message, model),

@@ -892,55 +892,6 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
     }
 }
 
-/// Resolve an authored model only within the run's fixed backend.
-pub(crate) fn resolve_model(
-    config: &ActorHostConfig,
-    model: &exomonad_actor::Model,
-) -> std::result::Result<String, String> {
-    if let Some(catalog) = config
-        .workspace_inputs
-        .as_ref()
-        .and_then(|workspace| workspace.model_catalog.as_ref())
-    {
-        let primary = &catalog.models[&catalog.primary].model;
-        if primary.backend() == exomonad_actor::Backend::GeminiInteractions && model != primary {
-            return Err(
-                "the Argon conversational model is fixed; select helpers through Tidepool.Model"
-                    .into(),
-            );
-        }
-        if !catalog
-            .models
-            .values()
-            .any(|selected| &selected.model == model)
-        {
-            return Err("model is not admitted by the run profile".into());
-        }
-    }
-    if model.backend() != config.model.backend() {
-        return Err("model backend differs from the admitted run backend".into());
-    }
-    if model.value().trim().is_empty() {
-        return Err("model must be nonempty".into());
-    }
-    if model.backend() == exomonad_actor::Backend::GeminiInteractions
-        && model.value() != "gemini-4-argon"
-    {
-        return Err("Gemini Interactions supports only gemini-4-argon".into());
-    }
-    Ok(model.value().to_owned())
-}
-
-pub(crate) fn resolve_reasoning(
-    config: &ActorHostConfig,
-    reasoning: &exomonad_actor::Reasoning,
-) -> Result<harness::model::Effort, String> {
-    if reasoning.backend() != config.model.backend() {
-        return Err("reasoning backend differs from the admitted run backend".into());
-    }
-    Ok(reasoning_effort(reasoning))
-}
-
 fn reasoning_effort(reasoning: &exomonad_actor::Reasoning) -> harness::model::Effort {
     use exomonad_actor::{ArgonEffort, DeepSeekReasoning as DS, OpenAIReasoning as OAI, Reasoning};
     match reasoning {
