@@ -9499,12 +9499,13 @@ fn replay_fresh_fragment_obligations(
     let mut observations = BTreeMap::new();
     for (consumer, result) in [("candidate", candidate), ("request", completed)] {
         if !allowed {
+            let actual_error = format!("{:?}", result.as_ref().err());
             assert!(
                 matches!(result, Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
                     artifact, original_ordinal: 7,
                 } if artifact == input.descriptor.id)),
-                "{consumer}: broader proof cannot grant unavailable B7"
+                "{consumer}: broader proof cannot grant unavailable B7; actual_error={actual_error}"
             );
             continue;
         }
