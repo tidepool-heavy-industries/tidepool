@@ -137,8 +137,11 @@ pub(crate) struct PublishedRootPlacement {
     placement: crate::ActorPlacement,
 }
 
+#[derive(thiserror::Error)]
 pub(crate) enum RootPlacementPublicationError {
+    #[error("root placement cleanup handoff was refused")]
     SupervisorUnavailable(PublishedRootPlacement),
+    #[error("root placement cleanup was queued but observation publication was refused")]
     ControlUnavailable(PublishedRootPlacement),
 }
 impl RootPlacementPublicationError {
@@ -162,19 +165,6 @@ impl std::fmt::Debug for RootPlacementPublicationError {
         }
     }
 }
-impl std::fmt::Display for RootPlacementPublicationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SupervisorUnavailable(_) => {
-                f.write_str("root placement cleanup handoff was refused")
-            }
-            Self::ControlUnavailable(_) => f.write_str(
-                "root placement cleanup was queued but observation publication was refused",
-            ),
-        }
-    }
-}
-impl std::error::Error for RootPlacementPublicationError {}
 
 impl RootPlacementPublisher {
     pub(crate) fn into_mint(self) -> RootPlacementMint {
