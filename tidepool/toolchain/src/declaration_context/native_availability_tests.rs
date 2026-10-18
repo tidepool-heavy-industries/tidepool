@@ -8034,6 +8034,11 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .artifacts()
                 .capture_graph_selection();
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
+            retained
+                .evidence
+                .validate(producer, retained.compiler_support.artifacts())
+                .unwrap();
+            let evidence = retained.evidence.clone();
             let (retained_again, _, _) = retained
                 .into_value_support(
                     original.artifact_view().clone(),
@@ -8128,10 +8133,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .is_err(),
                 "the owning association validator refuses a mismatched raw role key"
             );
-            retained
-                .validate(producer, &retained.compiler_support.artifacts())
-                .unwrap();
-            let mut mismatched = retained.as_ref().clone();
+            let mut mismatched = evidence;
             mismatched
                 .graph
                 .get_mut(&owner)
