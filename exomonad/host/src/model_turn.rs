@@ -43,13 +43,14 @@ enum Pending {
     Hook { hook: Hook, handle: String },
 }
 struct Entry {
-    family: ModelFamily,
     invocation: Invocation,
     pending: Option<Pending>,
     calls: HashMap<OperationId, (String, Value)>,
     closing: Arc<AtomicBool>,
 }
 struct Registered {
+    // Family checks must not wait behind an executing provider operation.
+    family: ModelFamily,
     entry: Arc<Mutex<Entry>>,
     close: InvocationCloseHandle,
     closing: Arc<AtomicBool>,
@@ -252,8 +253,8 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             .lock()
             .unwrap()
             .get(token)
+            .filter(|registered| registered.family == family)
             .map(|registered| registered.entry.clone())
-            .filter(|entry| entry.lock().unwrap().family == family)
             .ok_or_else(|| rejected("unknown, finished or foreign-family model invocation"))
     }
     fn next(&self, token: &str, entry: &mut Entry) -> Result<Value, ModelBoundaryError> {
@@ -358,6 +359,9 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         request: Value,
     ) -> Result<Value, ModelBoundaryError> {
         self.authorize(caller)?;
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(rejected("calling cell's model service was cancelled"));
+        }
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
         let selected_family = match request.selection.reasoning.backend() {
@@ -368,7 +372,6 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         if selected_family != family {
             return Err(rejected("model selection differs from the effect family"));
         }
-        let (transport, model, effort) = (self.selection)(&request.selection).map_err(rejected)?;
         let limits = Limits {
             requests: request
                 .limits
@@ -382,6 +385,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
             seconds: request.limits.seconds.unwrap_or(self.policy.limits.seconds),
         };
         validate_tools(&request.tools)?;
+        let (transport, model, effort) = (self.selection)(&request.selection).map_err(rejected)?;
         let tools = request.tools.into_iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema,"strict":true})).collect();
         let config = EngineConfig {
             instructions: request.instructions,
@@ -425,7 +429,6 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         let close = invocation.close_handle();
         let closing = Arc::new(AtomicBool::new(false));
         let entry = Arc::new(Mutex::new(Entry {
-            family,
             invocation,
             pending: None,
             calls: HashMap::new(),
@@ -434,6 +437,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         registry.insert(
             token.clone(),
             Registered {
+                family,
                 entry: entry.clone(),
                 close,
                 closing,
@@ -539,7 +543,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         let registered = registry
             .get(token)
             .ok_or_else(|| rejected("unknown or finished model invocation"))?;
-        if registered.entry.lock().unwrap().family != family {
+        if registered.family != family {
             return Err(rejected(
                 "model invocation belongs to another effect family",
             ));
@@ -1389,6 +1393,64 @@ mod tests {
             harness::invocation::Outcome::Cancelled
         ));
     }
+    #[test]
+    fn family_checks_and_close_do_not_wait_for_provider_execution() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = Arc::new(service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        ));
+        let caller = PrincipalId::new(1, 2);
+        let first = service
+            .start(caller, ModelFamily::OpenAI, request(false))
+            .unwrap();
+        let token = first["invocation"].as_str().unwrap().to_owned();
+        let entry = service.entry(caller, &token, ModelFamily::OpenAI).unwrap();
+        let closing = service
+            .registry
+            .lock()
+            .unwrap()
+            .get(&token)
+            .unwrap()
+            .closing
+            .clone();
+        for (lookup, family, expected) in [
+            (true, ModelFamily::Argon, false),
+            (true, ModelFamily::OpenAI, true),
+            (false, ModelFamily::Argon, false),
+            (false, ModelFamily::OpenAI, true),
+        ] {
+            let held = entry.lock().unwrap();
+            let owner = service.clone();
+            let invocation = token.clone();
+            let (completed, observed) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let accepted = if lookup {
+                    owner.entry(caller, &invocation, family).is_ok()
+                } else {
+                    owner.close(caller, family, &invocation).is_ok()
+                };
+                completed.send(accepted).unwrap();
+            });
+            let outcome = observed.recv_timeout(std::time::Duration::from_secs(2));
+            let signalled = closing.load(Ordering::Acquire);
+            // Always release the execution owner and join, including the failing control.
+            drop(held);
+            worker.join().unwrap();
+            assert_eq!(
+                outcome.expect("family check blocked behind provider execution"),
+                expected
+            );
+            assert_eq!(
+                signalled,
+                !lookup && expected,
+                "foreign-family operations must not close the invocation"
+            );
+        }
+        service.settle().unwrap();
+    }
+
     #[test]
     fn invocation_continuations_refuse_other_effect_families() {
         let runtime = tokio::runtime::Runtime::new().unwrap();

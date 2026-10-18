@@ -156,6 +156,15 @@ impl EmbeddedHarnessRuntime {
         {
             return Err("conversation permission differs from the frozen catalog".into());
         }
+        if !permission
+            .efforts()
+            .iter()
+            .all(|effort| selected.allowed_efforts.contains(effort))
+        {
+            return Err(
+                "conversation permission exceeds the frozen catalog's reasoning efforts".into(),
+            );
+        }
         let auth = self
             .inference_providers()
             .and_then(|providers| providers.get(identity.provider()))
