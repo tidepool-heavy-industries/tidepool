@@ -1707,13 +1707,19 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
                         .message
                         .contains("`reportProgress` is unavailable"));
                     if label == "preview-text" {
-                        let unavailable = dispatch_lookup(
+                        let unavailable = dispatch_haskell_script(
                             child.as_ref().unwrap().policy.as_ref(),
-                            &["reportProgress"],
+                            "reportProgress",
                         )
                         .await;
+                        assert_eq!(unavailable["status"], "rejected", "{unavailable}");
+                        assert_eq!(
+                            unavailable["items"][0]["failureLayer"], "compile",
+                            "{unavailable}"
+                        );
                         assert!(
-                            unavailable.to_string().contains("no match"),
+                            unavailable.to_string().contains("reportProgress")
+                                && unavailable.to_string().contains("not in scope"),
                             "{unavailable}"
                         );
                     }
@@ -2000,8 +2006,15 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                                 exomonad_actor::OpenAIReasoning::OpenAIMedium
                             ))
                         );
-                        let missing = dispatch_lookup(child.policy.as_ref(), &["parentOnly"]).await;
-                        assert!(missing.to_string().contains("no match"), "{missing}");
+                        let missing =
+                            dispatch_haskell_script(child.policy.as_ref(), "parentOnly").await;
+                        assert_eq!(missing["status"], "rejected", "{missing}");
+                        assert_eq!(missing["items"][0]["failureLayer"], "compile", "{missing}");
+                        assert!(
+                            missing.to_string().contains("parentOnly")
+                                && missing.to_string().contains("not in scope"),
+                            "{missing}"
+                        );
                     }
                     let reply =
                         dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput")
