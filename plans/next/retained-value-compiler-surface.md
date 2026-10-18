@@ -303,7 +303,11 @@ normal/cfg compilation, execution and integration qualification remain pending.
 Step 3 narrowing, use handoff and recovery changes require a further review.
 The release candidate is untouched.
 
-`CompilerSourceComposition` borrows the ordered opaque input supports. It carries
+`CompilerSourceComposition` borrows the ordered opaque input supports. Its
+consuming `append` returns the next owner only on success; a refused prefix cannot
+be finalized or repaired by a later input. The same consuming rule applies to
+retained-template composition. The private fold may mutate only this consumed
+builder. It carries
 persistent roles and explicit decision domains, plus the exact selected row and
 input issuer for each winning role. Each contribution checks incoming roles;
 only the first actual merge also resolves untouched baseline roles. An absent

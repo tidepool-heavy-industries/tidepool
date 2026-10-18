@@ -193,7 +193,15 @@ impl<'a> CompilerSourceComposition<'a> {
         }
     }
 
-    pub(crate) fn push(&mut self, incoming: &'a CompilerSourceSupport) -> Result<(), CompileError> {
+    pub(crate) fn append(
+        mut self,
+        incoming: &'a CompilerSourceSupport,
+    ) -> Result<Self, CompileError> {
+        self.extend(incoming)?;
+        Ok(self)
+    }
+
+    fn extend(&mut self, incoming: &'a CompilerSourceSupport) -> Result<(), CompileError> {
         crate::host_work::checkpoint()?;
         let first_merge = self.sources.len() == 1;
         let previous = self.projection.clone();
@@ -2267,7 +2275,7 @@ mod tests {
             composition_work::take();
             let mut composition = CompilerSourceComposition::new(&baseline);
             for source in &sources {
-                composition.push(source).unwrap();
+                composition = composition.append(source).unwrap();
             }
             let batch = composition.finish().unwrap();
             let batch_work = composition_work::take();
@@ -2356,7 +2364,7 @@ mod tests {
             let mut composition = CompilerSourceComposition::new(&unissued);
             let mut reference = unissued.clone();
             for source in contributions {
-                composition.push(source).unwrap();
+                composition = composition.append(source).unwrap();
                 reference = reference.merge(source).unwrap();
             }
             let batch = composition.finish().unwrap();
@@ -2421,8 +2429,11 @@ mod tests {
         for order in [[0, 1], [1, 0]] {
             let baseline = CompilerSourceSupport::empty();
             let mut composition = CompilerSourceComposition::new(&baseline);
-            composition.push(&sources[order[0]]).unwrap();
-            let error = composition.push(&sources[order[1]]).unwrap_err();
+            composition = composition.append(&sources[order[0]]).unwrap();
+            let error = composition
+                .append(&sources[order[1]])
+                .err()
+                .expect("conflicting scope");
             assert!(matches!(error, CompileError::ArtifactInventory(error)
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
                     if artifact == original.descriptor.id)));
@@ -2477,15 +2488,15 @@ mod tests {
             } else {
                 [&later, &damaged]
             };
-            let mut batch = CompilerSourceComposition::new(&baseline);
             let mut visited = 0;
             let actual = inputs
                 .into_iter()
-                .try_for_each(|input| {
+                .try_fold(CompilerSourceComposition::new(&baseline), |batch, input| {
                     visited += 1;
-                    batch.push(input)
+                    batch.append(input)
                 })
-                .unwrap_err();
+                .err()
+                .expect("mixed invalid prefix must refuse");
             let expected = inputs
                 .into_iter()
                 .try_fold(baseline.clone(), |prefix, input| prefix.merge(input))
@@ -2592,7 +2603,6 @@ mod tests {
             let mut chosen_issuer = baseline_mode;
             let mut expected = fact(baseline_mode);
             let mut composition = CompilerSourceComposition::new(&sources[baseline_mode]);
-            let mut refused = false;
             for mode in modes {
                 let prior_original = has_original;
                 has_original |= mode != 0;
@@ -2609,18 +2619,20 @@ mod tests {
                         (None, None) => BTreeSet::from([u8::from(chosen_issuer == 4)]),
                     });
                 }
-                let result = composition.push(&sources[mode]);
+                let result = composition.append(&sources[mode]);
                 if expected.as_ref().is_some_and(|groups| groups.len() > 1) {
                     proptest::prop_assert!(matches!(result,
                         Err(CompileError::ArtifactInventory(error))
                             if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
                                 if artifact == original.descriptor.id)));
-                    refused = true;
-                    break;
+                    return Ok(());
                 }
-                proptest::prop_assert!(result.is_ok(), "lawful history refused: {:?}", result.err());
+                composition = match result {
+                    Ok(next) => next,
+                    Err(error) => return Err(proptest::test_runner::TestCaseError::fail(format!("lawful history refused: {error:?}"))),
+                };
             }
-            if !refused {
+            {
                 let batch = composition.finish().unwrap();
                 let actual = batch.input_decisions.facts.get(owner).map(|fact| {
                     fact.groups.values().map(|group| {

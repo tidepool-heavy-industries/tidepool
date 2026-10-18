@@ -3922,18 +3922,18 @@ impl<'a> RetainedTemplateComposition<'a> {
         }
     }
 
-    fn push(&mut self, incoming: &'a Arc<RetainedTemplateImports>) -> Result<(), CompileError> {
+    fn append(mut self, incoming: &'a Arc<RetainedTemplateImports>) -> Result<Self, CompileError> {
         let Some(first) = self.first else {
             self.first = Some(incoming);
-            return Ok(());
+            return Ok(self);
         };
         if self.joined.is_none() && Arc::ptr_eq(first, incoming) {
-            return Ok(());
+            return Ok(self);
         }
         if first.producer != incoming.producer {
             return Err(failure("template producers differ"));
         }
-        let (roots, graph, edges, support) = self.joined.get_or_insert_with(|| {
+        let (mut roots, mut graph, mut edges, support) = self.joined.take().unwrap_or_else(|| {
             (
                 first.roots.clone(),
                 first.graph.clone(),
@@ -3952,20 +3952,21 @@ impl<'a> RetainedTemplateComposition<'a> {
                 }
                 Some(_) => {}
                 None => {
-                    *edges += node.interface.imports.len();
+                    edges += node.interface.imports.len();
                     graph.insert(owner.clone(), node.clone());
                 }
             }
         }
         roots.extend(incoming.roots.iter().cloned());
-        support.push(&incoming.compiler_support)?;
+        let support = support.append(&incoming.compiler_support)?;
         // Union of individually closed, equal-on-overlap graphs remains closed.
         // The monotone resource limits still refuse at the same prefix, after
         // support compatibility, without walking that growing graph again.
-        if graph.len() > 4096 || *edges > 65536 {
+        if graph.len() > 4096 || edges > 65536 {
             return Err(failure("retained template roots or producer differ"));
         }
-        Ok(())
+        self.joined = Some((roots, graph, edges, support));
+        Ok(self)
     }
 
     fn finish(self) -> Result<Option<Arc<RetainedTemplateImports>>, CompileError> {
@@ -7800,12 +7801,12 @@ impl ExactDeclarationContext {
                 .interface()
                 .toolchain_identity_sha256();
             producer = Self::checked_producer(producer, incoming_producer)?;
-            support.push(value.compiler_source_support())?;
+            support = support.append(value.compiler_source_support())?;
             if let Some(retained) = value.template_imports() {
                 // Each private compiler surface was issued after this same
                 // template support entered it. Its custody need not be joined
                 // again merely to compose the protected template graph.
-                templates.push(retained)?;
+                templates = templates.append(retained)?;
             }
             lexical.extend_from_slice(value.source_lexical());
         }
@@ -13355,7 +13356,7 @@ mod tests {
         ] {
             let mut batch = CompilerSourceComposition::new(baseline.compiler_source_support());
             for input in inputs {
-                batch.push(input).unwrap();
+                batch = batch.append(input).unwrap();
             }
             let batch = batch.finish().unwrap();
             // Expected full policy/provenance comes from the actual publication
@@ -13364,8 +13365,8 @@ mod tests {
         }
         for (first, second) in [(published, changed), (changed, published)] {
             let mut batch = CompilerSourceComposition::new(baseline.compiler_source_support());
-            batch.push(first).unwrap();
-            assert!(batch.push(second).is_err());
+            batch = batch.append(first).unwrap();
+            assert!(batch.append(second).is_err());
             // The caller must stop at the refused prefix; another occurrence
             // of the original policy is not permitted to heal it.
         }
