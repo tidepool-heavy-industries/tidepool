@@ -14,11 +14,12 @@ pub fn render_child_budget(maximum_active_children: Option<u16>) -> String {
     maximum_active_children.map_or_else(|| "unbounded".to_owned(), |children| children.to_string())
 }
 
-/// Effect availability does not authorize access to concrete resources.
-/// Workspaces, processes and provider attachments retain their own grants.
+/// Model effects project immutable model permissions. Workspaces, processes and
+/// provider attachment credentials retain their own independent grants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorCapabilities {
     descendants: DescendantBudget,
+    /// Immutable projection; model keys are never an independent authority.
     effect_keys: Vec<ActorEffectKey>,
     model_permissions: crate::ModelPermissions,
     conversation_permission: Option<crate::ConversationPermission>,
@@ -43,6 +44,7 @@ impl Default for ActorCapabilities {
 }
 
 impl ActorCapabilities {
+    /// Trusted Rust composition of non-model effects; authored rows use `admit`.
     #[must_use]
     pub fn with_effect_keys(mut self, effect_keys: Vec<ActorEffectKey>) -> Self {
         self.effect_keys = effect_keys
