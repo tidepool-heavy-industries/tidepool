@@ -14163,6 +14163,10 @@ mod tests {
         let first = a
             .prepare_compilation(&scratch.path().join("a1"), &producer)
             .unwrap();
+        let a_owner = first.materialization.as_ref().unwrap();
+        let a_directory = a_owner._directory.as_ref().unwrap();
+        let a_directory_weak = Arc::downgrade(a_directory);
+        let a_files = private_directory_file_bytes(a_directory.path());
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
             a.owner.facts.producer,
@@ -14184,11 +14188,31 @@ mod tests {
         }
         assert_eq!(second.artifacts.len(), first.artifacts.len() + 1);
         let b_owner = second.materialization.as_ref().unwrap();
-        assert_eq!(b_owner._parents.len(), 1);
-        assert!(Arc::ptr_eq(
-            &b_owner._parents[0],
-            first.materialization.as_ref().unwrap()
+        assert_eq!(b_owner.rows.len(), 1, "B owns only its new physical row");
+        let b_metadata = b.compiler_metadata_snapshot().unwrap();
+        assert!(b_owner.rows.contains_key(
+            &b_metadata.entries[&identity("fixture", "Gamma")]
+                .descriptor
+                .id
         ));
+        let b_rows = b_owner.selected_rows(&b_metadata);
+        for artifact in &first.artifacts {
+            let entry = &b_metadata.entries
+                [&identity(&artifact.interface.unit, &artifact.interface.module)];
+            let inherited = b_rows[&entry.descriptor.id];
+            assert_eq!(inherited.artifact(), *artifact);
+            assert!(Arc::ptr_eq(&inherited._directory, a_directory));
+        }
+        assert_eq!(private_directory_file_bytes(a_directory.path()), a_files);
+        let new_file_bytes = private_directory_file_bytes(b_owner.directory().path())
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+        assert_eq!(
+            b_owner.payload_work.written_bytes, new_file_bytes,
+            "B writes its new files without rewriting inherited payloads"
+        );
+        assert!(new_file_bytes > 0);
         let gamma = second
             .artifacts
             .iter()
@@ -14216,9 +14240,12 @@ mod tests {
         drop(third);
         drop(a);
         assert!(root_a.exists(), "B retains borrowed A paths");
+        assert!(a_directory_weak.upgrade().is_some());
+        assert_eq!(private_directory_file_bytes(&root_a), a_files);
         drop(second);
         drop(b);
         assert!(!root_a.exists());
+        assert!(a_directory_weak.upgrade().is_none());
     }
 
     #[test]
@@ -14695,7 +14722,6 @@ mod tests {
                     assert!(request.artifacts.contains(artifact));
                 }
                 let retained = request.materialization.as_ref().unwrap();
-                assert_eq!(retained._parents.len(), 1);
                 assert_eq!(
                     retained.rows.len(),
                     1,
