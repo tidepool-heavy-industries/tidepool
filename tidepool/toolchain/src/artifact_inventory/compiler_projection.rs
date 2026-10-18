@@ -1675,11 +1675,10 @@ impl CompilerSourceSupport {
             "exact.compiler_support.merge",
             "merge_compiler_inputs_with_demand",
         );
-        let mut inputs = ArtifactView::merge_admitted_compiler_supports(self, other)?;
+        let inputs = ArtifactView::merge_admitted_compiler_supports(self, other)?;
         timing.advance("validate_carried_associations");
-        for row in inputs.selected.values_mut() {
-            row.retain_acquisitions(&inputs.artifacts)?;
-        }
+        // Merged custody preserves the checked payload facts; only its acquisition
+        // owner can change. Refresh those Arcs once, after offer retention below.
         inputs
             .projection
             .validate_resolved(&inputs.selected, &inputs.artifacts)?;
@@ -3096,7 +3095,7 @@ mod tests {
             let merge_work = type_query_work::take();
             assert_eq!(
                 merge_work.resolved_rows, 0,
-                "chosen bindings are not rediscovered"
+                "post-solver finalization does not rediscover chosen bindings"
             );
             assert_eq!(merge_work.census_rows, joined.projection.roles.len());
             assert!(!joined.selected.rows.is_empty());
