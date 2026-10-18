@@ -8132,6 +8132,8 @@ mod tests {
         retain_source: bool,
         test_display_projection: bool,
     ) {
+        let producer = b"target-prefix-issued-history";
+        let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
         let inventory = ArtifactInventory::default();
         let home_unit = if test_display_projection {
             "main"
@@ -8140,6 +8142,7 @@ mod tests {
         };
         let child = Arc::new(issued_native_groups_in_unit(
             home_unit,
+            producer_sha256,
             "TargetPrefixChild",
             vec![(7, Vec::new())],
             &[],
@@ -8147,6 +8150,7 @@ mod tests {
         ));
         let native = Arc::new(issued_native_groups_in_unit(
             home_unit,
+            producer_sha256,
             "TargetPrefix",
             vec![(7, vec![issued_source(&child, 7)])],
             &[&child],
@@ -8164,7 +8168,18 @@ mod tests {
             inventory
                 .admit_recovery_selection(
                     &base,
-                    vec![native.clone(), child.clone(), Arc::new(entry(name, &[]))],
+                    vec![
+                        native.clone(),
+                        child.clone(),
+                        Arc::new(ArtifactEntry::canonical(
+                            crate::certified_products::fixture_module_interface(
+                                producer_sha256,
+                                "unit",
+                                name,
+                                BTreeMap::new(),
+                            ),
+                        )),
+                    ],
                     &BTreeSet::from([
                         NativeGroupKey {
                             artifact: id,
@@ -8278,34 +8293,69 @@ mod tests {
             let projection =
                 CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
                     .unwrap();
-            let context =
+            // Issue the chosen source through its actual request owner before
+            // joining the broader prefix's independent execution histories.
+            let chosen_context = Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    [2; 32],
-                    &prefix,
+                    producer_sha256,
+                    selected,
                     projection,
                     lexical.clone(),
                     native.descriptor.owner.clone(),
                     &[],
                 )
+                .unwrap(),
+            );
+            let request_directory = tempfile::tempdir().unwrap();
+            let chosen_request = chosen_context
+                .prepare_compilation(request_directory.path(), producer)
                 .unwrap();
-            if test_display_projection {
-                let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
-                    &Arc::new(context.clone()),
-                    "Tidepool.Session.ProjectionAudit.G100",
-                );
-                let prototype_context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    [2; 32],
-                    selected,
-                    CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
-                        .unwrap(),
+            let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let source_selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    chosen_request.compiler_inputs(),
+                    &chosen_request.compiler_inputs().metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            assert!(source_selection
+                .continuation_input(&native.descriptor.owner)
+                .unwrap()
+                .is_some());
+            assert!(source_selection
+                .new_product_native_requirements()
+                .next()
+                .is_none());
+            let before_source_context = inventory.metrics().issued_scope_nodes;
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_source_selection(
+                    producer_sha256,
+                    &source_selection,
+                    &prefix,
                     lexical.clone(),
                     native.descriptor.owner.clone(),
                     &[],
                 )
                 .unwrap();
+            assert_eq!(
+                inventory.metrics().issued_scope_nodes,
+                before_source_context
+            );
+            assert_eq!(
+                context
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .native_groups,
+                prefix.capture_graph_selection().native_groups,
+            );
+            if test_display_projection {
+                let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
+                    &Arc::new(context.clone()),
+                    "Tidepool.Session.ProjectionAudit.G100",
+                );
                 let prototype =
                     crate::activation_preview::native_declaration_input_tests::display_prototype(
-                        &Arc::new(prototype_context),
+                        &chosen_context,
                     );
                 let before = expanded.artifact_view().capture_graph_selection();
                 let irrelevant_value = expanded
@@ -8445,19 +8495,23 @@ mod tests {
                 retained.compiler_support.artifacts().namespace()[&child.descriptor.id],
                 prefix.namespace()[&child.descriptor.id]
             );
-            let hidden = Arc::new(entry("UnselectedCompilerRole", &[]));
+            let hidden = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer_sha256,
+                    "unit",
+                    "UnselectedCompilerRole",
+                    BTreeMap::new(),
+                ),
+            ));
             let hidden_view = inventory
                 .admit_shared(&inventory.empty_view(), vec![hidden.clone()])
                 .unwrap();
             let expanded = prefix.merge_fixture_selections(&hidden_view).unwrap();
-            let projection =
-                CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
-                    .unwrap();
             let missing_role_context =
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    [2; 32],
+                crate::declaration_context::ExactDeclarationContext::from_source_selection(
+                    producer_sha256,
+                    &source_selection,
                     &expanded,
-                    projection,
                     lexical.clone(),
                     native.descriptor.owner.clone(),
                     &[],
@@ -10387,11 +10441,12 @@ mod tests {
         requirements: &[&ArtifactEntry],
         packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
     ) -> ArtifactEntry {
-        issued_native_groups_in_unit("fixture", name, groups, requirements, packages)
+        issued_native_groups_in_unit("fixture", [2; 32], name, groups, requirements, packages)
     }
 
     fn issued_native_groups_in_unit(
         unit: &str,
+        producer_sha256: [u8; 32],
         name: &str,
         groups: Vec<(u32, Vec<crate::certified_products::PendingImportOwner>)>,
         requirements: &[&ArtifactEntry],
@@ -10421,13 +10476,13 @@ mod tests {
             .collect();
         let product = crate::certified_products::fixture_finalized_product_with_requirements(
             product,
-            [2; 32],
+            producer_sha256,
             Some(requirements),
         );
         let issued = crate::certified_products::tests::recovered_witness_fixtures(&[product])
             .remove(0)
             .product;
-        ArtifactEntry::original([2; 32], issued).unwrap()
+        ArtifactEntry::original(producer_sha256, issued).unwrap()
     }
 
     fn issued_source(
