@@ -13,12 +13,16 @@ use super::test_campaign::{
 };
 use std::collections::VecDeque;
 
-pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
+fn scaffold_files(config: &super::ActorHostConfig) {
     crate::exomonad::new(crate::exomonad::NewOptions {
         path: Some(config.workspace.clone()),
         lock: Box::new(crate::exomonad::NixLock),
     })
     .expect("the shipped project must scaffold successfully");
+}
+
+pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
+    scaffold_files(config);
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -46,7 +50,7 @@ pub(super) fn prepared_scaffold(config: &mut super::ActorHostConfig) {
         defaults.model.backend(),
         "the hosted test transport and model select the same backend"
     );
-    scaffold(config);
+    scaffold_files(config);
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
         // The shipped scaffold's aliases belong to its default provider. A
         // hosted fixture owns the replacement provider and its matching aliases.
