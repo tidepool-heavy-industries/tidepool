@@ -1002,7 +1002,7 @@ impl HostedTestRuntime {
         assert_eq!(coverage.len(), 1);
         assert_eq!(
             coverage[0].requested_effects,
-            exomonad_actor::ActorCapabilities::default().effect_keys()
+            super::admitted_capabilities(Some(frozen)).unwrap().effect_keys()
         );
         let selection = installation
             .acquisition

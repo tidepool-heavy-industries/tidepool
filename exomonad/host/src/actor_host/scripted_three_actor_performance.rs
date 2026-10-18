@@ -541,7 +541,7 @@ async fn three_actor_capture(concurrent: bool) {
         let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
         let coverage = frozen.prepared_toolset_coverage().unwrap();
         assert_eq!(coverage.len(), 1, "one prepared root toolset");
-        assert_eq!(coverage[0].requested_effects, exomonad_actor::ActorCapabilities::default().effect_keys());
+        assert_eq!(coverage[0].requested_effects, super::admitted_capabilities(Some(frozen)).unwrap().effect_keys());
         let installation = host.context.observer.installation(root).await;
         assert!(matches!(installation.acquisition.as_ref(), Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })),
             "the unauthored default root uses its packaged built-in installer");

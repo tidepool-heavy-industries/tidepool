@@ -663,7 +663,7 @@ pub struct ActorHostConfig {
     pub jev: Option<exomonad_actor::JevBackendHandle>,
 }
 
-fn admitted_capabilities(
+pub(crate) fn admitted_capabilities(
     workspace: Option<&crate::exomonad::workspace::FrozenWorkspace>,
 ) -> Result<exomonad_actor::ActorCapabilities, String> {
     workspace

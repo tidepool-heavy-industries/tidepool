@@ -847,7 +847,8 @@ impl FrozenWorkspace {
 
     fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
         coverage_entries(coverage)?;
-        let capabilities = exomonad_actor::ActorCapabilities::default();
+        let capabilities = crate::actor_host::admitted_capabilities(Some(self))
+            .map_err(std::io::Error::other)?;
         let expected = capabilities.effect_keys();
         if coverage[0].requested_effects != expected {
             return Err(
@@ -2597,6 +2598,62 @@ mod tests {
         };
         config.prompts = PromptConfig::default();
         deployment_project(&toml::to_string(&config).unwrap())
+    }
+
+    #[test]
+    fn prepared_root_coverage_uses_its_admitted_catalog_effect_row() {
+        let project = catalog_project();
+        let (_libraries, selection) = deployment_fixture();
+        let run = tempfile::tempdir().unwrap();
+        let frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection),
+        )
+        .unwrap();
+        let requested = crate::actor_host::admitted_capabilities(Some(&frozen))
+            .unwrap()
+            .effect_keys()
+            .to_vec();
+        let default = exomonad_actor::ActorCapabilities::default()
+            .effect_keys()
+            .to_vec();
+        assert_ne!(requested, default);
+        assert!(requested.iter().any(|key| key.model_permission().is_some()));
+        let coverage = vec![PreparedToolsetCoverage {
+            requested_effects: requested.clone(),
+            effective_effects: vec![exomonad_actor::ActorEffectKey::Replies],
+            program: exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                recipe: "a".repeat(64),
+                original: uuid::Uuid::new_v4(),
+            },
+        }];
+        frozen.validate_toolset_coverage(&coverage).unwrap();
+        let mut wrong = coverage.clone();
+        wrong[0].requested_effects = default;
+        assert!(frozen.validate_toolset_coverage(&wrong).is_err());
+        wrong[0].requested_effects = requested.clone();
+        wrong[0].requested_effects.pop();
+        assert!(frozen.validate_toolset_coverage(&wrong).is_err());
+        wrong[0].requested_effects = requested.clone();
+        let other_family = exomonad_actor::ActorEffectKey::ALL
+            .iter()
+            .copied()
+            .find(|key| key.model_permission().is_some() && !requested.contains(key))
+            .unwrap();
+        wrong[0].requested_effects.push(other_family);
+        assert!(frozen.validate_toolset_coverage(&wrong).is_err());
+        let model_index = requested
+            .iter()
+            .position(|key| key.model_permission().is_some())
+            .unwrap();
+        wrong[0].requested_effects = requested.clone();
+        wrong[0].requested_effects[model_index] = other_family;
+        assert!(frozen.validate_toolset_coverage(&wrong).is_err());
+        wrong[0].requested_effects = requested;
+        wrong[0].requested_effects.reverse();
+        assert!(frozen.validate_toolset_coverage(&wrong).is_err());
+        frozen.validate_toolset_coverage(&coverage).unwrap();
     }
 
     #[test]

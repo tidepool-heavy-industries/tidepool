@@ -766,7 +766,7 @@ async fn prepared_children_execute_original_native_probe(
         let root_coverage = &coverage[0];
         assert_eq!(
             root_coverage.requested_effects,
-            exomonad_actor::ActorCapabilities::default().effect_keys()
+            super::admitted_capabilities(Some(frozen)).unwrap().effect_keys()
         );
         let root_installation = host.context.observer.installation(host.context.actor.identity()).await;
         let root_acquisition = root_installation.acquisition.as_ref()
