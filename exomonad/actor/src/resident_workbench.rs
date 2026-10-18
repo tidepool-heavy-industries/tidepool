@@ -333,7 +333,7 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
             "qualified Tidepool.Model.Selection as TidepoolModelSelection",
         );
         rendered.push_str(&format!(
-            "\ntype CurrentModelFamily = TidepoolModelSelection.{family}\n\ncurrentModel :: TidepoolModelSelection.Model CurrentModelFamily\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
+            "\ntype CurrentModelFamily = TidepoolModelSelection.{family}\n\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
             literal(identity.catalog_identity()), literal(identity.key()),
         ));
     }
