@@ -1613,8 +1613,8 @@ pub(super) async fn dispatch_status(
     dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
 }
 
-/// Return the package containing the declared authored workspace resource.
-pub(super) fn declared_workspace_package() -> std::path::PathBuf {
+/// Locate the declared test flake lock; shared modules come from the scaffold.
+fn declared_workspace_package() -> std::path::PathBuf {
     let authored = std::env::var_os("TIDEPOOL_RECIPE_WORKSPACE")
         .map(std::path::PathBuf::from)
         .expect("TIDEPOOL_RECIPE_WORKSPACE must name the declared authored workspace resource");
@@ -1622,6 +1622,42 @@ pub(super) fn declared_workspace_package() -> std::path::PathBuf {
         .parent()
         .expect("the declared authored workspace resource has a package parent")
         .to_path_buf()
+}
+
+struct DeclaredWorkspaceLock(std::path::PathBuf);
+
+impl crate::exomonad::FlakeLock for DeclaredWorkspaceLock {
+    fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::copy(&self.0, workspace.join("flake.lock"))?;
+        Ok(())
+    }
+}
+
+/// Construct the shipped workspace through the production scaffold owner.
+/// Local fixture modules may then shadow its recorded shared-source root.
+pub(super) fn scaffold_workspace(workspace: &Path) {
+    crate::exomonad::new(crate::exomonad::NewOptions {
+        path: Some(workspace.to_path_buf()),
+        lock: Box::new(DeclaredWorkspaceLock(
+            declared_workspace_package().join("flake.lock"),
+        )),
+    })
+    .unwrap();
+    let declared: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("EXOMONAD_WORKSPACE_GITLINK").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let revision = exomonad_worktree::GitCli::new()
+        .try_read(
+            &workspace.join(".exomonad/workspace"),
+            &["rev-parse", "HEAD"],
+        )
+        .unwrap();
+    assert_eq!(
+        revision.trimmed(),
+        declared["revision"].as_str().unwrap(),
+        "the hosted workspace must compile the recorded shared source"
+    );
 }
 
 /// Admit the exact model choices used by the model-free hosted fixtures.
@@ -1730,20 +1766,17 @@ pub(super) fn pinned_jev_workspace_with(
     config: &mut ActorHostConfig,
     configure: impl FnOnce(&mut crate::exomonad::ExomonadConfig),
 ) {
-    let package = declared_workspace_package();
+    scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![package.join(".exomonad")];
+        project.haskell.source_roots = vec!["workspace".into()];
         project
             .haskell
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
         configure(project);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(

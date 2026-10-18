@@ -246,7 +246,7 @@ impl JevBackend for LookupScoreJev {
 }
 
 fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
@@ -268,10 +268,10 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
         "checks/usage-examples.json",
         "Project/BackgroundCommandExample.hs",
     ] {
-        std::fs::copy(package.join(".exomonad").join(path), authored.join(path)).unwrap();
+        std::fs::copy(authored.join("workspace").join(path), authored.join(path)).unwrap();
     }
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["LookupFixture".into(), "Project.Lookup".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -279,9 +279,6 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -911,11 +908,11 @@ async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign
 }
 
 pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Shell".into(), "Project.Sift".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -923,9 +920,6 @@ pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
     });
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(
@@ -1723,16 +1717,12 @@ noted call result
 /// (this workspace's own `.exomonad`, and the pinned package's), so a module
 /// under either root can `import qualified Jev.Operators as J` itself.
 fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
-    // Everything `pinned_jev_workspace` does, inlined rather than called: that
-    // helper ends by calling `FrozenWorkspace::load`, which memoizes its
-    // result at `run_root/workspace/selection.json` and would otherwise hand
-    // a SECOND call here the stale pre-authored selection instead of
-    // re-reading the config and files written below. One workspace, one load.
-    let package = super::test_campaign::declared_workspace_package();
+    // Configure the local tool modules before capturing the workspace once.
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -1746,9 +1736,6 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     )
     .unwrap();
     std::fs::write(authored.join("AgentSpec.hs"), AGENT_SPEC_JEV_SPEC_MODULE).unwrap();
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     // `nix flake archive` reads only tracked files, and a child worktree
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
@@ -1977,11 +1964,11 @@ monitorsFor path
 /// a second source root, beside a per-test `AgentSpec.hs` and `Project/Tools.hs`
 /// that install `Watchdog.watchBy` as the after-tool slot.
 fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
-    let package = super::test_campaign::declared_workspace_package();
+    super::test_campaign::scaffold_workspace(&config.workspace);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.source_roots = vec![".".into(), "workspace".into()];
         project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
         project
@@ -1991,9 +1978,6 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
     });
     std::fs::write(authored.join("Project/Tools.hs"), WATCHDOG_TOOLS_MODULE).unwrap();
     std::fs::write(authored.join("AgentSpec.hs"), WATCHDOG_SPEC_MODULE).unwrap();
-    for name in ["flake.nix", "flake.lock"] {
-        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-    }
     // `nix flake archive` reads only tracked files, and a child worktree
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);

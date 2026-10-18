@@ -385,27 +385,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
             // The authored spec shadows a pinned shared package on a second
             // source root. The shared tool record still uses Project.Shell
             // after the root spec drops its Watchdog import.
-            let package = super::test_campaign::declared_workspace_package();
-            let shared = package.join(".exomonad");
-            fn copy_haskell_sources(source: &Path, destination: &Path) {
-                std::fs::create_dir_all(destination).unwrap();
-                for entry in std::fs::read_dir(source).unwrap() {
-                    let entry = entry.unwrap();
-                    let path = entry.path();
-                    let target = destination.join(entry.file_name());
-                    if entry.file_type().unwrap().is_dir() {
-                        copy_haskell_sources(&path, &target);
-                    } else if path.extension().is_some_and(|extension| extension == "hs") {
-                        std::fs::copy(path, target).unwrap();
-                    }
-                }
-            }
-            for directory in ["Project", "Jev", "Exomonad/Contrib"] {
-                copy_haskell_sources(
-                    &shared.join(directory),
-                    &authored.join("workspace").join(directory),
-                );
-            }
+            super::test_campaign::scaffold_workspace(&config.workspace);
             crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
                 project.haskell.source_roots = vec![".".into(), "workspace".into()];
                 project.haskell.modules = vec![
@@ -453,9 +433,6 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 ),
             )
             .unwrap();
-            for name in ["flake.nix", "flake.lock"] {
-                std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
-            }
             commit(&config.workspace, "capture reload fixture inputs");
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(

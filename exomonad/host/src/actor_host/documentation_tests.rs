@@ -2304,39 +2304,13 @@ async fn workspace_campaign() -> TestCampaign {
     workspace_campaign_with(|_| {}).await
 }
 
-struct DeclaredWorkspaceLock(PathBuf);
-
-impl crate::exomonad::FlakeLock for DeclaredWorkspaceLock {
-    fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        std::fs::copy(&self.0, workspace.join("flake.lock"))?;
-        Ok(())
-    }
-}
-
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
     TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
-            let package = super::test_campaign::declared_workspace_package();
-            crate::exomonad::new(crate::exomonad::NewOptions {
-                path: Some(config.workspace.clone()),
-                lock: Box::new(DeclaredWorkspaceLock(package.join("flake.lock"))),
-            })
-            .unwrap();
-            let declared: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(std::env::var_os("EXOMONAD_WORKSPACE_GITLINK").unwrap()).unwrap(),
-            )
-            .unwrap();
-            let revision = exomonad_worktree::GitCli::new()
-                .try_read(&authored.join("workspace"), &["rev-parse", "HEAD"])
-                .unwrap();
-            assert_eq!(
-                revision.trimmed(),
-                declared["revision"].as_str().unwrap(),
-                "the hosted workspace must compile the recorded shared source"
-            );
+            super::test_campaign::scaffold_workspace(&config.workspace);
             crate::exomonad::edit_fixture_project_config(&authored, |project| {
                 project.defaults.model = config.model.clone();
                 project.defaults.reasoning = config.reasoning;
@@ -2392,7 +2366,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                 let result = displayed(
                     campaign,
                     policy.as_ref(),
-                    "observed <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
+                    "import qualified Project.SkillChecks\nimport qualified Project.RecursiveSpec\nobserved <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
                 )
                 .await;
                 assert!(
@@ -2795,6 +2769,12 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 #[tokio::test]
 async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
     let campaign = workspace_campaign_with(|authored| {
+        std::fs::create_dir_all(authored.join("Fixture")).unwrap();
+        std::fs::write(
+            authored.join("Fixture/WorkflowExamplesChecks.hs"),
+            include_str!("fixtures/workflow_examples_checks.hs"),
+        )
+        .unwrap();
         crate::exomonad::edit_fixture_project_config(authored, |project| {
             project.haskell.modules = vec!["Project.Work".into()];
         });
@@ -2806,7 +2786,7 @@ async fn candidate_reports_preserve_admissions_receipts_and_observation_failures
                 let root = campaign.root_installation.policy.clone();
                 committed(
                     root.as_ref(),
-                    "import Project.WorkflowExamplesChecks\nworkflowContracts",
+                    "import Fixture.WorkflowExamplesChecks\nworkflowContracts",
                 )
                 .await;
             })
@@ -2994,11 +2974,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
         &["config", "user.email", "recipe-check@localhost"],
     )
     .unwrap();
-    crate::exomonad::workspace::copy_authored(
-        &super::test_campaign::declared_workspace_package(),
-        repository.path(),
-    )
-    .unwrap();
+    super::test_campaign::scaffold_workspace(repository.path());
     if let Some(checks) = checks {
         crate::exomonad::edit_fixture_project_config(
             &repository.path().join(".exomonad"),

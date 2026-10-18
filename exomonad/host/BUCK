@@ -912,6 +912,7 @@ rust_filegroup(
         "src/actor_host/fixtures/terminal_transfer_setup.hs": "exomonad/host/src/actor_host/fixtures/terminal_transfer_setup.hs",
         "src/actor_host/fixtures/three_actor_workload_roster.json": "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json",
         "src/actor_host/fixtures/watchdog_history_probe.hs": "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs",
+        "src/actor_host/fixtures/workflow_examples_checks.hs": "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs",
         "src/actor_host/form_output.rs": "exomonad/host/src/actor_host/form_output.rs",
         "src/actor_host/fresh_child_tests.rs": "exomonad/host/src/actor_host/fresh_child_tests.rs",
         "src/actor_host/harness_usecase_performance.rs": "exomonad/host/src/actor_host/harness_usecase_performance.rs",
@@ -2886,6 +2887,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/terminal_transfer_setup.hs": "src/actor_host/fixtures/terminal_transfer_setup.hs",
         "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json": "src/actor_host/fixtures/three_actor_workload_roster.json",
         "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs": "src/actor_host/fixtures/watchdog_history_probe.hs",
+        "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs": "src/actor_host/fixtures/workflow_examples_checks.hs",
         "exomonad/host/src/actor_host/form_output.rs": "src/actor_host/form_output.rs",
         "exomonad/host/src/actor_host/fresh_child_tests.rs": "src/actor_host/fresh_child_tests.rs",
         "exomonad/host/src/actor_host/harness_usecase_performance.rs": "src/actor_host/harness_usecase_performance.rs",
@@ -4565,6 +4567,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7761746368646f675f686973746f72795f70726f62652e6873",
     src = "src/actor_host/fixtures/watchdog_history_probe.hs",
     out = "watchdog_history_probe.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f776f726b666c6f775f6578616d706c65735f636865636b732e6873",
+    src = "src/actor_host/fixtures/workflow_examples_checks.hs",
+    out = "workflow_examples_checks.hs",
     visibility = ["PUBLIC"],
 )
 

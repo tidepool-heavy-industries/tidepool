@@ -461,6 +461,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/unconstrained_spec_later_helper.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f756e636f6e73747261696e65645f737065635f6c617465725f68656c7065722e6873",
         "exomonad/host/src/actor_host/fixtures/usage_comparisons.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f75736167655f636f6d70617269736f6e732e6873",
         "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7761746368646f675f686973746f72795f70726f62652e6873",
+        "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f776f726b666c6f775f6578616d706c65735f636865636b732e6873",
         "exomonad/host/src/actor_host/fresh_callable_exit_read.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f657869745f726561642e6873",
         "exomonad/host/src/actor_host/fresh_callable_exit_setup.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f657869745f73657475702e6873",
         "exomonad/host/src/actor_host/fresh_callable_result_read.hs": "//exomonad/host:haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f726573756c745f726561642e6873",

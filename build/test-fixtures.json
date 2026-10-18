@@ -332,6 +332,7 @@
     "exomonad/host/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
     "exomonad/host/src/actor_host/fixtures/usage_comparisons.hs",
     "exomonad/host/src/actor_host/fixtures/watchdog_history_probe.hs",
+    "exomonad/host/src/actor_host/fixtures/workflow_examples_checks.hs",
     "exomonad/host/src/actor_host/fresh_callable_exit_read.hs",
     "exomonad/host/src/actor_host/fresh_callable_exit_setup.hs",
     "exomonad/host/src/actor_host/fresh_callable_result_read.hs",
