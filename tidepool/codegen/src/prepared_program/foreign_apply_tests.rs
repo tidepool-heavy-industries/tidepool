@@ -179,6 +179,26 @@ fn owner(results: ResultContract) -> WireProgram {
     wire
 }
 
+fn compile_source_owner(wire: WireProgram, host_entries: HostEntries) -> CompiledProgram {
+    let code = CertifiedGroupCode::admit(
+        CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "ForeignApply".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        },
+        testing::projected_group(wire, 0).unwrap(),
+    )
+    .unwrap();
+    CompiledProgram::compile_group_code_with_literals(
+        &code,
+        &package_literals::GroupPackageLiterals::default(),
+        host_entries,
+    )
+    .unwrap()
+}
+
 #[test]
 fn foreign_pap_partial_again_and_exact_results_survive_gc() {
     foreign_pap_history(HostEntries::All);
@@ -196,23 +216,7 @@ fn foreign_pap_history(host_entries: HostEntries) {
         vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef],
     ] {
         let results = ResultContract::Returns(reps.clone());
-        let code = CertifiedGroupCode::admit(
-            CachedHomeOwner {
-                unit: "fixture".into(),
-                module: "ForeignApply".into(),
-                module_version: ModuleVersion([1; 32]),
-                skinny_iface_sha256: [2; 32],
-                product_sha256: [3; 32],
-            },
-            testing::projected_group(owner(results.clone()), 0).unwrap(),
-        )
-        .unwrap();
-        let image = CompiledProgram::compile_group_code_with_literals(
-            &code,
-            &package_literals::GroupPackageLiterals::default(),
-            host_entries,
-        )
-        .unwrap();
+        let image = compile_source_owner(owner(results.clone()), host_entries);
         assert_eq!(
             image.entries.len(),
             if host_entries == HostEntries::All {
@@ -514,8 +518,20 @@ fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
 
 #[test]
 fn foreign_signature_matching_preserves_void_positions_and_zero_application() {
+    foreign_signature_history(HostEntries::All);
+}
+
+#[test]
+fn definitions_only_foreign_signature_rejects_wrong_logical_void_positions() {
+    foreign_signature_history(HostEntries::DefinitionsOnly);
+}
+
+fn foreign_signature_history(host_entries: HostEntries) {
     let (mut machine, a) = PreparedMachine::new(
-        compile(owner(ResultContract::Returns(vec![RuntimeRep::Int(64)]))),
+        compile_source_owner(
+            owner(ResultContract::Returns(vec![RuntimeRep::Int(64)])),
+            host_entries,
+        ),
         PreparedMachineOptions { nursery_bytes: 128 },
     )
     .unwrap();
