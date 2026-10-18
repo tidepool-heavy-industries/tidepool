@@ -3190,6 +3190,36 @@ struct OwnedExecutionGraphFile {
     _directory: Arc<tempfile::TempDir>,
 }
 
+struct MaterializationFacts<'a> {
+    rows: BTreeMap<ArtifactId, &'a RetainedArtifactRow>,
+    groups: Vec<&'a PendingCertifiedGroup>,
+    graph_paths: BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile>,
+    complete: Option<Arc<RetainedArtifactMaterialization>>,
+}
+
+impl MaterializationFacts<'_> {
+    fn detach(self) -> Arc<RetainedArtifactMaterialization> {
+        Arc::new(RetainedArtifactMaterialization {
+            _directory: None,
+            _parents: Vec::new(),
+            rows: self
+                .rows
+                .into_iter()
+                .map(|(id, row)| (id, row.clone()))
+                .collect(),
+            groups: self.groups.into_iter().cloned().collect::<Vec<_>>().into(),
+            execution_scope: None,
+            graph_paths: self
+                .graph_paths
+                .into_iter()
+                .map(|(digest, file)| (digest, file.clone()))
+                .collect(),
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        })
+    }
+}
+
 impl RetainedArtifactMaterialization {
     /// Reuse a complete issued closure, or detach a narrower selection from
     /// historical delta owners. Each file retains its actual issuing directory.
@@ -3197,9 +3227,38 @@ impl RetainedArtifactMaterialization {
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Option<Arc<Self>> {
-        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata);
-        let selected_graphs = metadata
-            .artifacts
+        let selected = Self::select_custody_facts(
+            owners,
+            &metadata.artifacts,
+            &metadata.selected_native_groups,
+        )?;
+        if let Some(complete) = &selected.complete {
+            return Some(Arc::clone(complete));
+        }
+        Some(selected.detach())
+    }
+
+    /// Opaque availability retains physical files, not compilation cache history.
+    /// Checked available groups remain distinct from executable request roots.
+    pub(crate) fn capture_custody(
+        owners: &[Arc<Self>],
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        available_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Option<Arc<Self>> {
+        Some(Self::select_custody_facts(owners, artifacts, available_groups)?.detach())
+    }
+
+    fn select_custody_facts<'a>(
+        owners: &'a [Arc<Self>],
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        selected_native_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Option<MaterializationFacts<'a>> {
+        let groups = Self::selected_group_refs_in(
+            owners.iter().map(Arc::as_ref),
+            artifacts,
+            selected_native_groups,
+        );
+        let selected_graphs = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => {
@@ -3228,7 +3287,7 @@ impl RetainedArtifactMaterialization {
                     owner
                         .rows
                         .iter()
-                        .filter(|(id, _)| metadata.artifacts.contains_key(*id))
+                        .filter(|(id, _)| artifacts.contains_key(*id))
                         .map(|(id, row)| (*id, row)),
                 );
                 graph_paths.extend(
@@ -3246,6 +3305,7 @@ impl RetainedArtifactMaterialization {
         // A single actual source frontier owns these very borrowed facts.
         // Reuse only its entire closure, with no excluded or shadowed issuers.
         // Arc ancestry is operation-local ownership, never a digest/name match.
+        let mut complete = None;
         if row_count == rows.len()
             && group_count == groups.len()
             && graph_count == graph_paths.len()
@@ -3255,25 +3315,15 @@ impl RetainedArtifactMaterialization {
                 .filter(|owner| !ancestors.contains(&(Arc::as_ptr(owner) as usize)))
                 .collect::<Vec<_>>();
             if let [owner] = frontier.as_slice() {
-                return Some(Arc::clone(owner));
+                complete = Some(Arc::clone(owner));
             }
         }
-        Some(Arc::new(Self {
-            _directory: None,
-            _parents: Vec::new(),
-            rows: rows
-                .into_iter()
-                .map(|(id, row)| (id, row.clone()))
-                .collect(),
-            groups: groups.into_iter().cloned().collect::<Vec<_>>().into(),
-            execution_scope: None,
-            graph_paths: graph_paths
-                .into_iter()
-                .map(|(digest, file)| (digest, file.clone()))
-                .collect(),
-            #[cfg(test)]
-            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
-        }))
+        Some(MaterializationFacts {
+            rows,
+            groups,
+            graph_paths,
+            complete,
+        })
     }
 
     #[cfg(test)]
@@ -3325,8 +3375,19 @@ impl RetainedArtifactMaterialization {
         owners: impl IntoIterator<Item = &'a Self>,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Vec<&'a PendingCertifiedGroup> {
-        let available = metadata
-            .artifacts
+        Self::selected_group_refs_in(
+            owners,
+            &metadata.artifacts,
+            &metadata.selected_native_groups,
+        )
+    }
+
+    fn selected_group_refs_in<'a>(
+        owners: impl IntoIterator<Item = &'a Self>,
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        selected_native_groups: &BTreeSet<NativeGroupKey>,
+    ) -> Vec<&'a PendingCertifiedGroup> {
+        let available = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
@@ -3347,9 +3408,8 @@ impl RetainedArtifactMaterialization {
                                 artifact: *artifact,
                                 original_ordinal: group.group().original_ordinal(),
                             };
-                            (**selected == *native
-                                && metadata.selected_native_groups.contains(&key))
-                            .then_some(key)
+                            (**selected == *native && selected_native_groups.contains(&key))
+                                .then_some(key)
                         })
                         .is_some_and(|key| seen.insert(key))
                     {

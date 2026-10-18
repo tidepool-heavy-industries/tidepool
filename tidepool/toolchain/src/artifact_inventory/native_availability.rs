@@ -536,12 +536,12 @@ struct NativeOfferCustody {
 
 impl NativeOfferCustody {
     fn from_checked_nodes(
-        state: &InventoryState,
         lease: Arc<ViewLease>,
         reachable: imbl::OrdSet<ArtifactBindingNode>,
     ) -> Result<Self, CompileError> {
         let mut native_originals = BTreeSet::new();
         let mut artifact_carriers = BTreeSet::new();
+        let state = lease.inventory.0.lock().expect("inventory lock");
         for node in &reachable {
             let group = match node {
                 ArtifactBindingNode::Artifact(carrier) => {
@@ -576,6 +576,43 @@ impl NativeOfferCustody {
             }
             native_originals.insert(group.binding.artifact());
         }
+        drop(state);
+        // Availability is already checked. Capture only its physical facts,
+        // without holding the inventory lock or retaining broad source caches.
+        crate::host_work::checkpoint()?;
+        let artifacts = artifact_ids(&reachable)
+            .into_iter()
+            .map(|id| {
+                lease
+                    .payloads
+                    .get(&id)
+                    .cloned()
+                    .map(|entry| (id, entry))
+                    .ok_or_else(|| {
+                        failure("native offer physical payload is outside checked custody")
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let available_groups = native_groups(&reachable);
+        let mut materializations = Vec::new();
+        lease.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        let physical = crate::declaration_context::RetainedArtifactMaterialization::capture_custody(
+            &materializations,
+            &artifacts,
+            &available_groups,
+        );
+        let lease = Arc::new(ViewLease {
+            admission_roots: lease.admission_roots.clone(),
+            selection: Arc::clone(&lease.selection),
+            payloads: lease.payloads.clone(),
+            inventory: lease.inventory.clone(),
+            materialization_sources: Default::default(),
+            materialization: MaterializationSource {
+                cache: Arc::new(Mutex::new(BTreeMap::new())),
+                parents: Arc::from([]),
+                fixed: physical.into_iter().collect(),
+            },
+        });
         Ok(Self {
             lease,
             reachable,
@@ -913,15 +950,28 @@ impl IssuedNativeOffer {
                     },
                 }
             };
-            offers.push(Self(Arc::new(NativeOfferFacts {
+            offers.push((
                 original,
                 interface,
-                owner: entry.descriptor.owner.clone(),
+                entry.descriptor.owner.clone(),
                 body,
-                custody: NativeOfferCustody::from_checked_nodes(&state, lease, nodes)?,
-            })));
+                lease,
+                nodes,
+            ));
         }
-        Ok(offers)
+        drop(state);
+        offers
+            .into_iter()
+            .map(|(original, interface, owner, body, lease, nodes)| {
+                Ok(Self(Arc::new(NativeOfferFacts {
+                    original,
+                    interface,
+                    owner,
+                    body,
+                    custody: NativeOfferCustody::from_checked_nodes(lease, nodes)?,
+                })))
+            })
+            .collect()
     }
 
     pub(crate) fn full_qualification(&self) -> Option<&QualifiedNativeAvailability> {
@@ -1067,14 +1117,12 @@ impl IssuedNativeOffer {
                 (body, custody)
             }
         };
-        let custody = {
+        let reachable = {
             let state = custody.lease.inventory.0.lock().expect("inventory lock");
-            NativeOfferCustody::from_checked_nodes(
-                &state,
-                Arc::clone(&custody.lease),
-                custody.read_projection(&state).nodes.clone(),
-            )?
+            custody.read_projection(&state).nodes.clone()
         };
+        let custody =
+            NativeOfferCustody::from_checked_nodes(Arc::clone(&custody.lease), reachable)?;
         Ok(Self(Arc::new(NativeOfferFacts {
             original,
             interface,
@@ -1273,14 +1321,7 @@ impl IssuedNativeOffer {
             },
             BTreeSet::new(),
         );
-        let custody = {
-            let state = lease.inventory.0.lock().expect("inventory lock");
-            NativeOfferCustody::from_checked_nodes(
-                &state,
-                Arc::clone(&lease),
-                nodes.into_iter().collect(),
-            )?
-        };
+        let custody = NativeOfferCustody::from_checked_nodes(lease, nodes.into_iter().collect())?;
         Ok(Self(Arc::new(NativeOfferFacts {
             original: facts.original,
             interface,
