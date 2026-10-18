@@ -312,8 +312,82 @@ pub struct PendingCertifiedGroup {
     imports: Arc<[PendingImportOwner]>,
 }
 
+/// Candidate rows and their exact original descriptors share one certification owner.
+#[derive(Clone)]
+pub(crate) struct IssuedGroupCandidates {
+    groups: Arc<[PendingCertifiedGroup]>,
+    originals: Arc<BTreeMap<CachedHomeOwner, crate::artifact_inventory::ArtifactId>>,
+}
+
+impl IssuedGroupCandidates {
+    fn bind(
+        groups: Arc<[PendingCertifiedGroup]>,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    ) -> CertResult<Self> {
+        let mut originals = BTreeMap::new();
+        for product in products {
+            let canonical = product
+                .module_interface()
+                .ok_or(CertificationError::Mismatch(
+                    "candidate original lacks canonical interface",
+                ))?;
+            let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                canonical.producer_sha256(),
+                product,
+            );
+            if originals
+                .insert(product.owner().clone(), artifact)
+                .is_some()
+            {
+                return Err(CertificationError::Mismatch(
+                    "candidate original owner is ambiguous",
+                ));
+            }
+        }
+        if groups
+            .iter()
+            .any(|group| !originals.contains_key(group.owner()))
+        {
+            return Err(CertificationError::Mismatch(
+                "candidate group lacks its original owner",
+            ));
+        }
+        Ok(Self {
+            groups,
+            originals: Arc::new(originals),
+        })
+    }
+
+    pub(crate) fn artifact(
+        &self,
+        group: &PendingCertifiedGroup,
+    ) -> crate::artifact_inventory::ArtifactId {
+        self.originals[group.owner()]
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self {
+            groups: Arc::from([]),
+            originals: Arc::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl std::ops::Deref for IssuedGroupCandidates {
+    type Target = Arc<[PendingCertifiedGroup]>;
+    fn deref(&self) -> &Self::Target {
+        &self.groups
+    }
+}
+
+impl AsRef<[PendingCertifiedGroup]> for IssuedGroupCandidates {
+    fn as_ref(&self) -> &[PendingCertifiedGroup] {
+        &self.groups
+    }
+}
+
 pub(crate) struct CertifiedProducts {
-    pub groups: Arc<[PendingCertifiedGroup]>,
+    pub groups: IssuedGroupCandidates,
     pub recovery_products: Arc<[crate::recovery_artifacts::CertifiedRecoveryProduct]>,
     pub module_interfaces: Arc<[CertifiedModuleInterface]>,
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
@@ -9101,8 +9175,9 @@ pub(crate) fn certify_products_with_validation(
         fresh_modules = origin_counts[0][0], fresh_group_rows = origin_counts[0][1], fresh_original_bytes = origin_counts[0][2],
         cached_modules = origin_counts[1][0], cached_group_rows = origin_counts[1][1], cached_original_bytes = origin_counts[1][2],
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
+    let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
     Ok(CertifiedProducts {
-        groups: groups.into(),
+        groups,
         recovery_products: recovery_products.into(),
         module_interfaces: module_interfaces.into(),
         value_interfaces: value_interfaces.into(),
