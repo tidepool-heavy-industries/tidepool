@@ -2683,6 +2683,18 @@ mod tests {
             )
             .unwrap();
         let narrowed = full.select_roots(vec![selected.descriptor.id]).unwrap();
+        // Reuse the already issued narrow selection with its broad parent
+        // acquisition map, exactly as the production draft owner does. This
+        // changes no roots, namespace, proof, or binding authority.
+        let narrowed = ArtifactView::new(ViewDraft {
+            roots: vec![],
+            selection: Arc::clone(&narrowed.lease.selection),
+            inventory: inventory.clone(),
+            parents: vec![Arc::clone(&full.lease)],
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        });
         assert!(narrowed
             .lease
             .payloads

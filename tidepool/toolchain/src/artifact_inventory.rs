@@ -4933,10 +4933,6 @@ struct ViewReadCache {
         OnceLock<Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
 }
 
-/// Authenticated scope rows never change. Each view owns its reachable payloads,
-/// so this read projection needs no invalidation and copies no artifact bytes.
-/// Neither projection nor detached metadata retains a view or request
-/// materialization. Selected handles preserve their exact original custody.
 /// Borrowed payload membership of one exact retained view, independent of its
 /// broader acquisition map and of derived native/dependency metadata.
 pub(crate) struct RetainedArtifactPayloads<'a> {
@@ -4958,6 +4954,10 @@ impl RetainedArtifactPayloads<'_> {
     }
 }
 
+/// Authenticated scope rows never change. Each view owns its reachable payloads,
+/// so this read projection needs no invalidation and copies no artifact bytes.
+/// Neither projection nor detached metadata retains a view or request
+/// materialization. Selected handles preserve their exact original custody.
 struct ViewReadProjection {
     nodes: imbl::OrdSet<InventoryNodeKey>,
     entries: imbl::Vector<Arc<ArtifactEntry>>,
