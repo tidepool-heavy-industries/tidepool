@@ -889,7 +889,7 @@ impl SegmentNativePrefix {
     fn artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
         match self {
             Self::Initial(request) => request.compiler_inputs().artifacts(),
-            Self::Advanced(products) => &products.artifact_view,
+            Self::Advanced(products) => products.artifact_view(),
         }
     }
 
@@ -2754,15 +2754,8 @@ impl SelectedModuleCandidateOffer {
                 source_segment.admissions(),
                 &output.source,
             )?;
-        let support = program_support_artifacts(
-            &output
-                .products
-                .as_ref()
-                .expect("program output was sealed")
-                .artifact_view,
-            &generated,
-        )?;
         let sealed = output.products.as_ref().expect("program output was sealed");
+        let support = program_support_artifacts(sealed.artifact_view(), &generated)?;
         support_timing.advance("compiler_input_continuation");
         let private = sealed
             .original_compiler_inputs()?
@@ -2779,11 +2772,7 @@ impl SelectedModuleCandidateOffer {
             &support,
             source_segment,
             produced_types,
-            &output
-                .products
-                .as_ref()
-                .expect("program output was sealed")
-                .source_selection,
+            sealed.source_selection(),
         )?;
         support_timing.advance("replace_previous_request");
         *request = continued;
@@ -2901,9 +2890,9 @@ impl SelectedModuleCandidateOffer {
             return Err(fail());
         }
         let selected_originals = sealed
-            .source_selection
+            .source_selection()
             .selected_authored_original_closure(
-                &sealed.artifact_view,
+                sealed.artifact_view(),
                 &original_owner.unit,
                 &original_owner.module,
             )
@@ -2927,8 +2916,7 @@ impl SelectedModuleCandidateOffer {
             source,
             &self.producer,
             &selected_originals,
-            &sealed.artifact_view,
-            &sealed.source_selection,
+            sealed.planned_original_output()?,
             &crate::declaration_context::ExactProductAdmission {
                 request: exact,
                 source: &admission,
@@ -3082,8 +3070,6 @@ impl NativeTurnOutput {
 #[derive(Debug)]
 pub struct SealedTurnProducts {
     original: SealedOriginalEvidence,
-    pub artifact_view: crate::artifact_inventory::ArtifactView,
-    pub(crate) source_selection: certified_products::CertifiedSourceSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     target_native_selection: crate::artifact_inventory::IssuedTargetNativeSelection,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
@@ -3100,28 +3086,62 @@ pub struct SealedTurnProducts {
 #[derive(Debug)]
 enum SealedOriginalEvidence {
     Exact {
-        inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        output: crate::declaration_context::IssuedOriginalOutput,
         execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     },
-    Ordinary(Arc<crate::declaration_context::ExactDeclarationContext>),
-    Absent,
+    Ordinary {
+        execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+        artifacts: crate::artifact_inventory::ArtifactView,
+        selection: certified_products::CertifiedSourceSelection,
+    },
+    Absent {
+        artifacts: crate::artifact_inventory::ArtifactView,
+        selection: certified_products::CertifiedSourceSelection,
+    },
 }
 
 impl SealedOriginalEvidence {
     fn execution(&self) -> Option<&Arc<crate::declaration_context::ExactDeclarationContext>> {
         match self {
-            Self::Exact { execution, .. } | Self::Ordinary(execution) => Some(execution),
-            Self::Absent => None,
+            Self::Exact { execution, .. } | Self::Ordinary { execution, .. } => Some(execution),
+            Self::Absent { .. } => None,
         }
     }
 }
 
 impl SealedTurnProducts {
+    pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
+        match &self.original {
+            SealedOriginalEvidence::Exact { output, .. } => output.artifacts(),
+            SealedOriginalEvidence::Ordinary { artifacts, .. }
+            | SealedOriginalEvidence::Absent { artifacts, .. } => artifacts,
+        }
+    }
+
+    pub(crate) fn source_selection(&self) -> &certified_products::CertifiedSourceSelection {
+        match &self.original {
+            SealedOriginalEvidence::Exact { output, .. } => output.source_selection(),
+            SealedOriginalEvidence::Ordinary { selection, .. }
+            | SealedOriginalEvidence::Absent { selection, .. } => selection,
+        }
+    }
+
+    fn planned_original_output(
+        &self,
+    ) -> Result<&crate::declaration_context::IssuedOriginalOutput, CompileError> {
+        match &self.original {
+            SealedOriginalEvidence::Exact { output, .. } => Ok(output),
+            _ => Err(CompileError::ExtractFailed(
+                "planned output lacks exact original issuance".into(),
+            )),
+        }
+    }
+
     fn original_compiler_inputs(
         &self,
     ) -> Result<&crate::declaration_context::OriginalCompilerInputs, CompileError> {
         match &self.original {
-            SealedOriginalEvidence::Exact { inputs, .. } => Ok(inputs),
+            SealedOriginalEvidence::Exact { output, .. } => Ok(output.compiler_inputs()),
             _ => Err(CompileError::ExtractFailed(
                 "program output lacks exact compiler inputs".into(),
             )),
@@ -3798,25 +3818,31 @@ fn seal_turn_outputs_with_validation(
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original = match exact.as_ref() {
         Some(admission) => {
-            let inputs = tracing::debug_span!(
+            let output = tracing::debug_span!(
                 target: "exomonad_harness::timing",
                 "products.original_compiler_inputs",
                 inclusive = true,
             )
             .in_scope(|| {
-                crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &certified.source_selection,
-                    &artifact_view,
+                crate::declaration_context::IssuedOriginalOutput::issue(
+                    certified.source_selection.clone(),
+                    artifact_view.clone(),
                 )
-                .map(Arc::new)
             })?;
-            let execution = admission.original_execution_context(&inputs)?;
-            SealedOriginalEvidence::Exact { inputs, execution }
+            let execution = admission.original_execution_context(output.compiler_inputs())?;
+            SealedOriginalEvidence::Exact { output, execution }
         }
         None => original_compile_input
             .as_ref()
-            .map(|proof| SealedOriginalEvidence::Ordinary(proof.issued_original_execution()))
-            .unwrap_or(SealedOriginalEvidence::Absent),
+            .map(|proof| SealedOriginalEvidence::Ordinary {
+                execution: proof.issued_original_execution(),
+                artifacts: artifact_view.clone(),
+                selection: certified.source_selection.clone(),
+            })
+            .unwrap_or_else(|| SealedOriginalEvidence::Absent {
+                artifacts: artifact_view.clone(),
+                selection: certified.source_selection.clone(),
+            }),
     };
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
@@ -3883,7 +3909,6 @@ fn seal_turn_outputs_with_validation(
     }
     Ok(Some(SealedTurnProducts {
         original,
-        artifact_view,
         typed_entry,
         target_native_selection,
         original_compile_input,
@@ -3892,7 +3917,6 @@ fn seal_turn_outputs_with_validation(
         pending_imports,
         recovery_products: certified.recovery_products.clone(),
         retained_core_products: certified.retained_core_products,
-        source_selection: certified.source_selection,
         package_interfaces,
     }))
 }
@@ -8824,8 +8848,8 @@ mod module_product_tests {
         assert_eq!(first.target_owned(), reopened.target_owned());
         assert_eq!(first.source(), reopened.source());
         assert_eq!(
-            first.products().artifact_view.descriptors(),
-            reopened.products().artifact_view.descriptors()
+            first.products().artifact_view().descriptors(),
+            reopened.products().artifact_view().descriptors()
         );
         assert_eq!(
             first

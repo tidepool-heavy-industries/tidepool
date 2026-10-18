@@ -452,6 +452,41 @@ fn capture_native_original_requirements(
     Ok(requirements)
 }
 
+/// One strict output issuer binds source decisions and the target view to its
+/// completed compiler inputs. Publication borrows this owner without reissuance.
+#[derive(Debug)]
+pub(crate) struct IssuedOriginalOutput {
+    selection: crate::certified_products::CertifiedSourceSelection,
+    artifacts: ArtifactView,
+    inputs: Arc<OriginalCompilerInputs>,
+}
+
+impl IssuedOriginalOutput {
+    pub(crate) fn issue(
+        selection: crate::certified_products::CertifiedSourceSelection,
+        artifacts: ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let inputs = Arc::new(OriginalCompilerInputs::from_selection(
+            &selection, &artifacts,
+        )?);
+        Ok(Self {
+            selection,
+            artifacts,
+            inputs,
+        })
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.selection
+    }
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        &self.artifacts
+    }
+    pub(crate) fn compiler_inputs(&self) -> &OriginalCompilerInputs {
+        &self.inputs
+    }
+}
+
 impl OriginalCompilerInputs {
     #[cfg(test)]
     pub(crate) fn from_checked_support_products(
@@ -3052,6 +3087,26 @@ struct CertifiedInterfaceInputs {
 }
 
 pub(crate) struct RecoveryInspectionInputs(CertifiedInterfaceInputs);
+
+/// Owner-issued interface observation; native bindings remain in its context.
+pub struct DeclarationJoinInputs(CertifiedInterfaceInputs);
+impl DeclarationJoinInputs {
+    pub fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
+        self.0.interface(owner)
+    }
+    pub(crate) fn validate(&self) -> Result<(), CompileError> {
+        self.0.validate()
+    }
+    pub(crate) fn context(&self) -> &ExactDeclarationContext {
+        &self.0.context
+    }
+    pub(crate) fn artifacts(&self) -> &[DeclarationArtifact] {
+        &self.0.artifacts
+    }
+    pub(crate) fn directory(&self) -> Arc<tempfile::TempDir> {
+        self.0.directory.clone()
+    }
+}
 
 /// Inherited type inputs are selected by the context owner after the fresh
 /// authored originals have established which owners they replace.
@@ -8209,6 +8264,15 @@ impl ExactDeclarationContext {
             }
         }
         Ok(())
+    }
+
+    pub fn declaration_join_inputs(
+        &self,
+        directory: Arc<tempfile::TempDir>,
+    ) -> Result<DeclarationJoinInputs, CompileError> {
+        Arc::new(self.clone())
+            .materialize_interface_inputs(directory, self.compiler_metadata_snapshot()?)
+            .map(DeclarationJoinInputs)
     }
 
     pub(crate) fn recovery_inspection_inputs(

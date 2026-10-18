@@ -253,8 +253,8 @@ fn admit_original_entry(
                     .as_deref()
                     .map(|candidates| {
                         products
-                            .source_selection
-                            .entry_dependency_selection(&products.artifact_view, candidates)
+                            .source_selection()
+                            .entry_dependency_selection(products.artifact_view(), candidates)
                             .map_err(compiler_evidence_failure)
                     })
                     .transpose()?
@@ -1358,8 +1358,8 @@ mod source_selection_tests {
         .unwrap();
         let projection = fresh
             .products()
-            .source_selection
-            .compiler_projection(&fresh.products().artifact_view)
+            .source_selection()
+            .compiler_projection(fresh.products().artifact_view())
             .unwrap();
         assert!(
             candidates.by_owner.values().any(|candidate| {
@@ -1377,8 +1377,8 @@ mod source_selection_tests {
         );
         let issued = fresh
             .products()
-            .source_selection
-            .entry_dependency_selection(&fresh.products().artifact_view, &candidates)
+            .source_selection()
+            .entry_dependency_selection(fresh.products().artifact_view(), &candidates)
             .unwrap();
         assert!(
             !issued.has_linked_originals(),

@@ -788,6 +788,19 @@ fn certify_authored_declaration_inner(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclarationJoinSpec {
+    pub expected_public_version: String,
+    pub public_module: Option<ModuleSnapshot>,
+    pub private_base: Option<ModuleSnapshot>,
+    pub private_tip: Option<ModuleSnapshot>,
+    pub writes: Vec<DeclarationWrite>,
+    pub reserved: ReservedJoin,
+    pub family_closure: Vec<ExportIdentity>,
+    pub expected_exports: Vec<DeclarationExport>,
+    pub expected_instances: InstanceInventory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationJoinInput {
     pub expected_public_version: String,
     pub public_module: Option<ModuleSnapshot>,
@@ -854,7 +867,7 @@ pub struct DeclarationJoinOutcome {
     pub expected_public_version: String,
     pub request_sha256: String,
     pub reserved: ReservedJoin,
-    pub implementation_sha256: String,
+    pub interfaces_sha256: String,
     pub exports_sha256: String,
     pub instances_sha256: String,
     pub family_closure_sha256: String,
@@ -1092,15 +1105,28 @@ fn require_owned_artifact_paths(
 /// Validate the exact owned implementation closure and retain a sealed result.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
 pub fn certify_declaration_join(
-    input: DeclarationJoinInput,
-    context: &ExactDeclarationContext,
+    spec: DeclarationJoinSpec,
+    inputs: crate::declaration_context::DeclarationJoinInputs,
     includes: &[PathBuf],
     session_root: &Path,
-    input_directory: Arc<tempfile::TempDir>,
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedDeclarationJoin, CompileError> {
+    let context = inputs.context();
+    let input_directory = inputs.directory();
+    let input = DeclarationJoinInput {
+        expected_public_version: spec.expected_public_version,
+        public_module: spec.public_module,
+        private_base: spec.private_base,
+        private_tip: spec.private_tip,
+        writes: spec.writes,
+        reserved: spec.reserved,
+        artifacts: inputs.artifacts().to_vec(),
+        family_closure: spec.family_closure,
+        expected_exports: spec.expected_exports,
+        expected_instances: spec.expected_instances,
+    };
     require_owned_artifact_paths(&input.artifacts, &input_directory)?;
-    context.validate_artifacts(&input.artifacts)?;
+    inputs.validate()?;
     for (index, write) in input.writes.iter().enumerate() {
         if write.generation == 0
             || SessionModule::lib(tidepool_repr::Generation(write.generation)).module_name()
@@ -1123,7 +1149,7 @@ pub fn certify_declaration_join(
         settlement,
     )?;
     let outcome = decode_declaration_join_outcome(&input, &execution.receipt)?;
-    context.validate_artifacts(&input.artifacts)?;
+    inputs.validate()?;
     match outcome.decision {
         JoinDecision::Accepted => {
             let output = outcome
@@ -1148,7 +1174,7 @@ pub fn certify_declaration_join(
                     packages,
                 )
                 .map_err(|error| contract(format!("joined package witness rejected: {error}")))?;
-            context.validate_artifacts(&input.artifacts)?;
+            inputs.validate()?;
             let validated_inputs = ValidatedJoinInputs {
                 support: context.compiler_source_support().clone(),
                 owners: input
@@ -1209,10 +1235,19 @@ pub fn validate_declaration_join(
 /// ordered writes in this digest fences instance-only changes and retractions.
 pub fn encode_declaration_join(input: &DeclarationJoinInput) -> Result<Vec<u8>, CompileError> {
     validate_instance_inventory(&input.expected_instances)?;
+    if input
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.product.is_some())
+    {
+        return Err(contract(
+            "declaration joins consume interface observations only",
+        ));
+    }
     let mut writer = JoinEncoder(Vec::new());
     writer.array(12);
     writer.text("TPDJOIN");
-    writer.text("3");
+    writer.text("4");
     writer.text(&input.expected_public_version);
     writer.optional(input.public_module.as_ref())?;
     writer.optional(input.private_base.as_ref())?;
@@ -1253,11 +1288,11 @@ pub fn decode_declaration_join_outcome(
     instances.inventory(&input.expected_instances);
     let mut families = JoinEncoder(Vec::new());
     families.identities(&input.family_closure);
-    if outcome.version != 3
+    if outcome.version != 4
         || outcome.expected_public_version != input.expected_public_version
         || outcome.request_sha256 != sha256(&encode_declaration_join(input)?)
         || outcome.reserved != input.reserved
-        || outcome.implementation_sha256 != sha256(&implementation.0)
+        || outcome.interfaces_sha256 != sha256(&implementation.0)
         || outcome.exports_sha256 != sha256(&exports.0)
         || outcome.instances_sha256 != sha256(&instances.0)
         || outcome.family_closure_sha256 != sha256(&families.0)
@@ -1656,11 +1691,11 @@ mod tests {
         let mut families = JoinEncoder(Vec::new());
         families.identities(&input.family_closure);
         DeclarationJoinOutcome {
-            version: 3,
+            version: 4,
             expected_public_version: input.expected_public_version.clone(),
             request_sha256: sha256(&encode_declaration_join(input).unwrap()),
             reserved: input.reserved.clone(),
-            implementation_sha256: sha256(&implementation.0),
+            interfaces_sha256: sha256(&implementation.0),
             exports_sha256: sha256(&exports.0),
             instances_sha256: sha256(&instances.0),
             family_closure_sha256: sha256(&families.0),
@@ -1683,11 +1718,11 @@ mod tests {
         assert_eq!(
             encode_declaration_join(&input).unwrap(),
             include_bytes!(
-                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.cbor"
+                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v4.cbor"
             )
         );
         let receipt = include_bytes!(
-            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json"
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v4.json"
         );
         let accepted = decode_declaration_join_outcome(&input, receipt).unwrap();
         assert_eq!(accepted.decision, JoinDecision::Accepted);
@@ -1722,12 +1757,39 @@ mod tests {
         };
         input.family_closure = vec![selected, standalone, hidden];
         assert_eq!(encode_declaration_join(&input).unwrap(), include_bytes!(
-            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor"
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v4.cbor"
         ));
         let outcome = decode_declaration_join_outcome(&input, include_bytes!(
-            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json"
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v4.json"
         )).unwrap();
         assert_eq!(outcome.decision, JoinDecision::Accepted);
+    }
+
+    #[test]
+    fn join_refuses_legacy_receipt_and_native_file_inputs() {
+        let mut input = input();
+        assert!(decode_declaration_join_outcome(
+            &input,
+            include_bytes!(
+                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json"
+            )
+        )
+        .is_err());
+        input.artifacts.push(DeclarationArtifact {
+            interface: ExactIfaceArtifact {
+                unit: "main".into(),
+                module: "Missing".into(),
+                path: "/missing/interface.hi".into(),
+                sha256: "0".repeat(64),
+                requirements: vec![],
+            },
+            product: Some(ModuleSnapshot {
+                module: "Missing".into(),
+                path: "/missing/native.tpmod".into(),
+                sha256: "0".repeat(64),
+            }),
+        });
+        assert!(encode_declaration_join(&input).is_err());
     }
 
     #[test]
@@ -2049,6 +2111,20 @@ pub fn decode_declaration_inventory_outcome(
 
 #[cfg(test)]
 mod authored_tests {
+    fn join_spec(input: &DeclarationJoinInput) -> DeclarationJoinSpec {
+        DeclarationJoinSpec {
+            expected_public_version: input.expected_public_version.clone(),
+            public_module: input.public_module.clone(),
+            private_base: input.private_base.clone(),
+            private_tip: input.private_tip.clone(),
+            writes: input.writes.clone(),
+            reserved: input.reserved.clone(),
+            family_closure: input.family_closure.clone(),
+            expected_exports: input.expected_exports.clone(),
+            expected_instances: input.expected_instances.clone(),
+        }
+    }
+
     fn certify_recovered_declaration_tip_in_context(
         context: Arc<ExactDeclarationContext>,
         selection: RecoveryDeclarationSelection,
@@ -2647,13 +2723,23 @@ mod authored_tests {
             .collect::<Vec<_>>();
 
         let worker_root = Arc::new(tempfile::tempdir().unwrap());
-        let materialized = context.materialize_scratch(&worker_root).unwrap();
-        assert!(materialized
-            .artifacts
+        let (join_inputs, native_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                context.declaration_join_inputs(worker_root.clone())
+            });
+        let join_inputs = join_inputs.unwrap();
+        assert_eq!(
+            native_work,
+            (0, 0),
+            "join input copied or hashed native products"
+        );
+        assert!(join_inputs
+            .artifacts()
             .iter()
-            .all(|row| row.interface.module != "Expr"));
-        let original = materialized
-            .artifacts
+            .all(|artifact| artifact.product.is_none()));
+        let artifacts = join_inputs.artifacts().to_vec();
+        assert!(artifacts.iter().all(|row| row.interface.module != "Expr"));
+        let original = artifacts
             .iter()
             .find(|row| row.interface.module == owner.module)
             .unwrap();
@@ -2672,7 +2758,7 @@ mod authored_tests {
                 module: "SelectedInputJoin".into(),
                 path: worker_root.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
+            artifacts,
             family_closure: certificate.family_closure().to_vec(),
             expected_exports: certificate.lexical_exports().to_vec(),
             expected_instances: certificate.instances().clone(),
@@ -2691,11 +2777,10 @@ mod authored_tests {
         let CertifiedDeclarationJoin::Accepted(accepted) =
             crate::artifacts::test_support::with_settlement(|settlement| {
                 certify_declaration_join(
-                    input,
-                    &context,
+                    join_spec(&input),
+                    join_inputs,
                     &[source_root.path().to_path_buf()],
                     source_root.path(),
-                    worker_root.clone(),
                     settlement,
                 )
             })
@@ -2945,9 +3030,22 @@ mod authored_tests {
             ExactDeclarationContext::new(&[certificate.clone()], &[], Vec::new()).unwrap();
         assert_ne!(context.semantic_sha256(), unselected.semantic_sha256());
         assert_eq!(unselected.authored_native_root(1).unwrap(), original_root);
-        let materialized = context.materialize(worker_root.path()).unwrap();
-        let original = materialized
-            .artifacts
+        let (join_inputs, native_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                context.declaration_join_inputs(worker_root.clone())
+            });
+        let join_inputs = join_inputs.unwrap();
+        assert_eq!(
+            native_work,
+            (0, 0),
+            "join input copied or hashed native products"
+        );
+        assert!(join_inputs
+            .artifacts()
+            .iter()
+            .all(|artifact| artifact.product.is_none()));
+        let artifacts = join_inputs.artifacts().to_vec();
+        let original = artifacts
             .iter()
             .find(|artifact| artifact.interface.module == owner.module)
             .unwrap();
@@ -2973,7 +3071,7 @@ mod authored_tests {
                 module: joined_module.clone(),
                 path: worker_root.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
+            artifacts,
             family_closure: certificate.family_closure().to_vec(),
             expected_exports: certificate.lexical_exports().to_vec(),
             expected_instances: certificate.instances().clone(),
@@ -2990,11 +3088,12 @@ mod authored_tests {
         let CertifiedDeclarationJoin::Rejected(rejected) =
             crate::artifacts::test_support::with_settlement(|settlement| {
                 certify_declaration_join(
-                    rejected_input.clone(),
-                    &context,
+                    join_spec(&rejected_input),
+                    context
+                        .declaration_join_inputs(worker_root.clone())
+                        .unwrap(),
                     &[source_root.path().to_path_buf()],
                     source_root.path(),
-                    worker_root.clone(),
                     settlement,
                 )
             })
@@ -3012,11 +3111,10 @@ mod authored_tests {
         let CertifiedDeclarationJoin::Accepted(accepted) =
             crate::artifacts::test_support::with_settlement(|settlement| {
                 certify_declaration_join(
-                    input,
-                    &context,
+                    join_spec(&input),
+                    join_inputs,
                     &[source_root.path().to_path_buf()],
                     source_root.path(),
-                    worker_root.clone(),
                     settlement,
                 )
             })
@@ -3322,10 +3420,12 @@ mod authored_tests {
             assert_eq!(retained.interface_bytes(), original.interface_bytes());
         }
         let next_worker = Arc::new(tempfile::tempdir().unwrap());
-        let next_anchors = next_context.materialize(next_worker.path()).unwrap();
+        let next_join_inputs = next_context
+            .declaration_join_inputs(next_worker.clone())
+            .unwrap();
+        let next_artifacts = next_join_inputs.artifacts().to_vec();
         let snapshot = |owner: &ExactModuleIdentity| {
-            let artifact = next_anchors
-                .artifacts
+            let artifact = next_artifacts
                 .iter()
                 .find(|artifact| {
                     artifact.interface.unit == owner.unit
@@ -3354,7 +3454,7 @@ mod authored_tests {
                 module: SessionModule::lib(Generation(4)).module_name(),
                 path: next_worker.path().join("joined-next.hi"),
             },
-            artifacts: next_anchors.artifacts,
+            artifacts: next_artifacts,
             family_closure: fresh_certificate.family_closure().to_vec(),
             expected_exports: fresh_certificate.lexical_exports().to_vec(),
             expected_instances: selected_instances,
@@ -3362,11 +3462,10 @@ mod authored_tests {
         let CertifiedDeclarationJoin::Accepted(next_join) =
             crate::artifacts::test_support::with_settlement(|settlement| {
                 certify_declaration_join(
-                    next_input,
-                    &next_context,
+                    join_spec(&next_input),
+                    next_join_inputs,
                     &[fresh_root.path().to_path_buf()],
                     fresh_root.path(),
-                    next_worker.clone(),
                     settlement,
                 )
             })

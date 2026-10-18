@@ -140,6 +140,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             "join-v2.cbor", "join-v2.json", "inventory-v2.cbor", "inventory-v2.json",
             "join-v3.cbor", "join-v3.json", "join-typed-v3.cbor", "join-typed-v3.json",
             "inventory-v3.cbor", "inventory-v3.json",
+            "join-v4.cbor", "join-v4.json", "join-typed-v4.cbor", "join-typed-v4.json",
         )
         includes = "\n".join(
             f'const FIXTURE_{index}: &[u8] = include_bytes!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}");'
@@ -1367,7 +1368,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                 self.assertEqual(arguments["env"]["TIDEPOOL_KEEP_TEST_LOGS"], "1", name)
         self.assertIs(self.rule("tidepool/bridge-derive", "tidepool_bridge_derive")["proc_macro"], True)
 
-    def test_toolchain_unit_target_declares_legacy_and_v3_join_fixtures(self):
+    def test_toolchain_unit_target_declares_legacy_and_v4_join_fixtures(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         runner = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests", "tidepool_rust_isolated_test")
@@ -1389,6 +1390,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                 "//bridge/haskell:declaration_join_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json",
                 "//bridge/haskell:declaration_join_typed_v3_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor",
                 "//bridge/haskell:declaration_join_typed_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json",
+                "//bridge/haskell:declaration_join_v4_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v4.cbor",
+                "//bridge/haskell:declaration_join_v4_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v4.json",
+                "//bridge/haskell:declaration_join_typed_v4_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v4.cbor",
+                "//bridge/haskell:declaration_join_typed_v4_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v4.json",
                 "//bridge/haskell:declaration_inventory_v3_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor",
                 "//bridge/haskell:declaration_inventory_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
             },

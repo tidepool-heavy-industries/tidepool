@@ -11,9 +11,9 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
-    DeclarationJoinInput, DeclarationWrite, ExactDeclarationContext, ExactLexicalNode,
-    ExactModuleIdentity, ExportIdentity, ExportNamespace, InstanceInventory, JoinDecision,
-    JoinRejection, ModuleSnapshot, RejectedJoin, ReservedJoin,
+    DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
+    ExportIdentity, ExportNamespace, InstanceInventory, JoinDecision, JoinRejection,
+    ModuleSnapshot, RejectedJoin, ReservedJoin,
 };
 
 use super::persistent::PersistentSession;
@@ -1082,25 +1082,18 @@ impl DeclarationPublicationBase {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
         let scratch = Arc::new(tempfile::tempdir()?);
-        let materialized = context.materialize_scratch(&scratch)?;
+        let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
-            let module = identity.module.clone();
-            let artifact = materialized
-                .artifacts
-                .iter()
-                .find(|artifact| {
-                    artifact.interface.unit == identity.unit && artifact.interface.module == module
-                })
-                .ok_or_else(|| {
-                    invalid(
-                        &self.public,
-                        "owned context lacks a selected exact interface",
-                    )
-                })?;
+            let artifact = join_inputs.interface(identity).ok_or_else(|| {
+                invalid(
+                    &self.public,
+                    "owned context lacks a selected exact interface",
+                )
+            })?;
             Ok(ModuleSnapshot {
-                module,
-                path: artifact.interface.path.clone(),
-                sha256: artifact.interface.sha256.clone(),
+                module: identity.module.clone(),
+                path: artifact.path.clone(),
+                sha256: artifact.sha256.clone(),
             })
         };
         let mut writes = Vec::new();
@@ -1112,7 +1105,7 @@ impl DeclarationPublicationBase {
                 retractions: write.retractions.clone(),
             });
         }
-        let input = DeclarationJoinInput {
+        let input = tidepool_toolchain::declaration_join::DeclarationJoinSpec {
             expected_public_version: self.expected_public_version.clone(),
             public_module: self
                 .current_public
@@ -1145,17 +1138,15 @@ impl DeclarationPublicationBase {
                 module: SessionModule::lib(self.reservation.generation).module_name(),
                 path: scratch.path().join("joined.hi"),
             },
-            artifacts: materialized.artifacts,
             family_closure: selection.families,
             expected_exports: selection.exports,
             expected_instances: selection.instances,
         };
         match tidepool_toolchain::declaration_join::certify_declaration_join(
             input,
-            &context,
+            join_inputs,
             &self.includes,
             &self.session_root,
-            Arc::clone(&scratch),
             settlement,
         )? {
             CertifiedDeclarationJoin::Accepted(receipt) => Ok(
@@ -3007,18 +2998,19 @@ mod tests {
         )
         .unwrap();
         let scratch = Arc::new(tempfile::tempdir().unwrap());
-        let artifacts = context.materialize(scratch.path()).unwrap().artifacts;
-        let original = artifacts
-            .iter()
-            .find(|artifact| artifact.interface.module == authored.product().owner().module)
+        let join_inputs = context.declaration_join_inputs(scratch.clone()).unwrap();
+        let original = join_inputs
+            .interface(&ExactModuleIdentity {
+                unit: authored.product().owner().unit.clone(),
+                module: authored.product().owner().module.clone(),
+            })
             .unwrap();
         let anchor = ModuleSnapshot {
-            module: original.interface.module.clone(),
-            path: original.interface.path.clone(),
-            sha256: original.interface.sha256.clone(),
+            module: original.module.clone(),
+            path: original.path.clone(),
+            sha256: original.sha256.clone(),
         };
         let mut input = first.receipt.input().clone();
-        input.artifacts = artifacts;
         input.private_tip = Some(anchor.clone());
         input.writes[0].module = anchor;
         input.reserved.path = scratch.path().join("rejected.hi");
@@ -3029,11 +3021,20 @@ mod tests {
         let CertifiedDeclarationJoin::Rejected(receipt) =
             tidepool_testing::with_settlement(|settlement| {
                 tidepool_toolchain::declaration_join::certify_declaration_join(
-                    input,
-                    &context,
+                    tidepool_toolchain::declaration_join::DeclarationJoinSpec {
+                        expected_public_version: input.expected_public_version,
+                        public_module: input.public_module,
+                        private_base: input.private_base,
+                        private_tip: input.private_tip,
+                        writes: input.writes,
+                        reserved: input.reserved,
+                        family_closure: input.family_closure,
+                        expected_exports: input.expected_exports,
+                        expected_instances: input.expected_instances,
+                    },
+                    join_inputs,
                     &first.base.includes,
                     &first.base.session_root,
-                    scratch.clone(),
                     settlement,
                 )
             })
