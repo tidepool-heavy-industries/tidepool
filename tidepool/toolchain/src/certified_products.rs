@@ -430,7 +430,7 @@ impl CertifiedSegmentOriginals {
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Self> {
-        let request = source.exact().request;
+        let compiler_inputs = source.exact().compiler_inputs();
         let source = crate::artifacts::SourceEvidenceAdmission::from_exact(source);
         if !receipt.targets.is_empty() {
             return Err(CertificationError::Receipt(
@@ -535,7 +535,7 @@ impl CertifiedSegmentOriginals {
         let _ =
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
-                request.compiler_inputs().artifacts(),
+                compiler_inputs.artifacts(),
                 artifact_entries
                     .iter()
                     .chain(&value_entries)
@@ -8166,7 +8166,7 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let compiler_inputs = exact.map(|admission| admission.request.compiler_inputs());
+    let compiler_inputs = exact.map(|admission| admission.compiler_inputs());
     let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
@@ -8244,11 +8244,11 @@ pub(crate) fn certify_products_with_validation(
         validate_exact_cached_closure_with_validation(
             candidates,
             receipt,
-            admission.request.context(),
+            admission.context(),
             projected_metadata
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?,
             final_evidence,
-            admission.source.exact_imports(),
+            admission.source().exact_imports(),
             validation,
         )?;
     }
@@ -8366,7 +8366,7 @@ pub(crate) fn certify_products_with_validation(
                 let version = if let Some(admission) = exact {
                     crate::module_candidates::exact_module_version_for_product(
                         endpoint_identity,
-                        &admission.request.semantic_sha256,
+                        &admission.physical_request().semantic_sha256,
                         &key.0,
                         &key.1,
                         &source_sha,
@@ -8746,7 +8746,7 @@ pub(crate) fn certify_products_with_validation(
         &inherited_seals,
         authored,
         exact.map_or(&BTreeMap::new(), |admission| {
-            admission.source.exact_source_imports()
+            admission.source().exact_source_imports()
         }),
         validation,
     )?;
@@ -8761,12 +8761,13 @@ pub(crate) fn certify_products_with_validation(
         }
     }
     if let Some(admission) = exact {
-        for artifact in &admission.request.artifacts {
+        // Interface membership follows selected compiler roles, not retained payload custody.
+        for entry in admission.compiler_inputs().metadata.entries.values() {
             let key = (
-                artifact.interface.unit.clone(),
-                artifact.interface.module.clone(),
+                entry.descriptor.owner.unit.clone(),
+                entry.descriptor.owner.module.clone(),
             );
-            let seal = digest(&value_text(&artifact.interface.sha256))?;
+            let seal = entry.descriptor.interface_sha256;
             if admitted_interfaces
                 .insert(key, seal)
                 .is_some_and(|previous| previous != seal)
@@ -8839,10 +8840,9 @@ pub(crate) fn certify_products_with_validation(
     let available_originals = inherited_products;
     let mut source_groups = match exact {
         Some(admission) => admission
-            .request
             .compiler_inputs()
             .available_original_sources(&available_originals, &validation.inventory)?
-            .overlay(&admission.request.groups, &validation.inventory)?,
+            .overlay(admission.groups(), &validation.inventory)?,
         None => SourceGroupMap::new(),
     };
     for (origin, owner, group, _) in &groups {
@@ -9123,13 +9123,15 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                             &raw_producer,
                         ),
-                    semantic_sha256: exact.map(|admission| admission.request.semantic_sha256),
+                    semantic_sha256: exact
+                        .map(|admission| admission.physical_request().semantic_sha256),
                     include,
                     source_path: fresh_input_path,
                     source: final_target_source,
                     evidence: final_evidence,
-                    exact_imports: exact
-                        .map_or(&empty_imports, |admission| admission.source.exact_imports()),
+                    exact_imports: exact.map_or(&empty_imports, |admission| {
+                        admission.source().exact_imports()
+                    }),
                     owners: &owners,
                     fresh_owners: &fresh_execution_owners,
                     retained_sources: &retained_sources,
@@ -9354,7 +9356,7 @@ pub(crate) fn certify_products_with_validation(
     if let Some(admission) = exact {
         append_original_selection(
             &mut groups,
-            &admission.request.groups,
+            admission.groups(),
             &validation.inventory,
             &sharing,
         )?;
@@ -17466,18 +17468,14 @@ pub(crate) mod tests {
                 .admit_source(&input, source, &evidence_bytes)
                 .unwrap()
         });
-        let exact =
-            exact_source
-                .as_ref()
-                .map(|source| crate::declaration_context::ExactProductAdmission {
-                    request: &request,
-                    source,
-                });
+        let exact = exact_source
+            .as_ref()
+            .map(|source| (&request).product_admission(source));
         let version_origin = exact
             .as_ref()
             .map_or(CandidateVersionOrigin::Ordinary, |admission| {
                 CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.request.semantic_sha256,
+                    semantic_sha256: admission.physical_request().semantic_sha256,
                 }
             });
         let parsed = ParsedModuleProducts::decode(&bytes, &packages).unwrap();
@@ -17489,9 +17487,9 @@ pub(crate) mod tests {
                     &parsed,
                     &crate::artifacts::SourceEvidenceAdmission::from_exact(
                         exact
-                            .source
+                            .source()
                             .match_product(
-                                exact.request,
+                                exact.physical_request(),
                                 &input,
                                 source,
                                 &evidence_bytes,
@@ -17539,7 +17537,7 @@ pub(crate) mod tests {
                         producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer),
                         semantic_sha256: Some(request.semantic_sha256), include: &include,
                         source_path: &input, source, evidence: &admitted,
-                        exact_imports: exact.source.exact_imports(), owners: &owners,
+                        exact_imports: exact.source().exact_imports(), owners: &owners,
                         fresh_owners: &fresh, retained_sources: &BTreeMap::new(), packages: &BTreeMap::new(),
                     }).unwrap() else { panic!("complete fixture source recipe") };
             fresh_receipt.source_recipe = WorkerExecutionSource::ExactAvailable {
@@ -17554,9 +17552,9 @@ pub(crate) mod tests {
             &match exact.as_ref() {
                 Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
                     exact
-                        .source
+                        .source()
                         .match_product(
-                            exact.request,
+                            exact.physical_request(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -17719,9 +17717,9 @@ pub(crate) mod tests {
         let admitted_source = match exact.as_ref() {
             Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
                 exact
-                    .source
+                    .source()
                     .match_product(
-                        exact.request,
+                        exact.physical_request(),
                         &input,
                         source,
                         &evidence_bytes,
@@ -18032,7 +18030,7 @@ pub(crate) mod tests {
     #[test]
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
         use crate::artifact_inventory::CanonicalProducerIdentity;
-        use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
         use crate::recovery_artifacts::CertifiedRecoveryProduct;
         use tidepool_repr::{Generation, SessionModule};
@@ -18226,10 +18224,7 @@ pub(crate) mod tests {
             let admission = request
                 .admit_source(&input, source, &evidence_bytes)
                 .unwrap();
-            let exact = ExactProductAdmission {
-                request: &request,
-                source: &admission,
-            };
+            let exact = (&request).product_admission(&admission);
             assert!(admission
                 .evidence()
                 .modules
@@ -18290,8 +18285,8 @@ pub(crate) mod tests {
 None,
 &packet,
 &parsed,
-&crate::artifacts::SourceEvidenceAdmission::from_exact(exact.source.match_product(
-        exact.request, &input, source, &evidence_bytes, parsed.operation(),
+&crate::artifacts::SourceEvidenceAdmission::from_exact(exact.source().match_product(
+        exact.physical_request(), &input, source, &evidence_bytes, parsed.operation(),
     ).unwrap()),
 root.path(),
 &producer,
@@ -18423,9 +18418,9 @@ None,
                 &parsed,
                 &crate::artifacts::SourceEvidenceAdmission::from_exact(
                     exact
-                        .source
+                        .source()
                         .match_product(
-                            exact.request,
+                            exact.physical_request(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -18447,9 +18442,9 @@ None,
                 &parsed,
                 &crate::artifacts::SourceEvidenceAdmission::from_exact(
                     exact
-                        .source
+                        .source()
                         .match_product(
-                            exact.request,
+                            exact.physical_request(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -18782,10 +18777,7 @@ None,
                 "family_closure": []
             }
         });
-        let exact = ExactProductAdmission {
-            request: &planned.request,
-            source: &planned.source,
-        };
+        let exact = (&planned.request).product_admission(&planned.source);
         let baseline = Arc::new(planned_context.clone());
         let legacy_products = planned
             .certified
@@ -18868,9 +18860,7 @@ None,
 
     fn exact_current_original_history(nonempty: bool) {
         use crate::artifact_inventory::{ArtifactInventory, CanonicalProducerIdentity};
-        use crate::declaration_context::{
-            ExactDeclarationContext, ExactProductAdmission, OriginalCompilerInputs,
-        };
+        use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
         use crate::execution_source::{
             CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
         };
@@ -19082,12 +19072,11 @@ None,
             let private_input =
                 OriginalCompilerInputs::from_selection(&selection, &private_view).unwrap();
             let request = public_context
-                .prepare_compilation(&directory.join("inputs"), &producer)
-                .unwrap()
-                .in_program_context_with_private_input(
+                .prepare_compilation_with_private_input(
                     &directory.join("private-inputs"),
-                    public_context.clone(),
-                    &private_input,
+                    &producer,
+                    None,
+                    Some(private_input.clone()),
                 )
                 .unwrap();
             assert!(request.groups.is_empty());
@@ -19152,10 +19141,7 @@ None,
             let source_admission = request
                 .admit_source(&input, source, &evidence_bytes)
                 .unwrap();
-            let exact = ExactProductAdmission {
-                request: &request,
-                source: &source_admission,
-            };
+            let exact = (&request).product_admission(&source_admission);
             let native = &parsed.sidecars[0];
             let package_bytes =
                 &parsed.package_imports.as_ref().unwrap()[&("main".into(), "Fresh".into())];
@@ -19209,9 +19195,9 @@ None,
                 &parsed,
                 &crate::artifacts::SourceEvidenceAdmission::from_exact(
                     exact
-                        .source
+                        .source()
                         .match_product(
-                            exact.request,
+                            exact.physical_request(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -19485,12 +19471,11 @@ None,
                 )
                 .unwrap();
                 let cached_request = public_context
-                    .prepare_compilation(&directory.join("cached-inputs"), &producer)
-                    .unwrap()
-                    .in_program_context_with_private_input(
+                    .prepare_compilation_with_private_input(
                         &directory.join("cached-private-inputs"),
-                        public_context.clone(),
-                        &private_input,
+                        &producer,
+                        None,
+                        Some(private_input.clone()),
                     )
                     .unwrap();
                 assert!(cached_request.groups.is_empty());
@@ -19521,10 +19506,7 @@ None,
                 let cached_source = cached_request
                     .admit_source(&input, source, &cached_evidence)
                     .unwrap();
-                let cached_exact = ExactProductAdmission {
-                    request: &cached_request,
-                    source: &cached_source,
-                };
+                let cached_exact = (&cached_request).product_admission(&cached_source);
                 let mut cached_packet = packet.clone();
                 cached_packet.modules[0].origin = ProductOrigin::Cached;
                 cached_packet.modules[0].module_version = Some(owner.module_version.clone());
@@ -19556,9 +19538,9 @@ None,
                         &empty,
                         &crate::artifacts::SourceEvidenceAdmission::from_exact(
                             cached_exact
-                                .source
+                                .source()
                                 .match_product(
-                                    cached_exact.request,
+                                    cached_exact.physical_request(),
                                     &input,
                                     source,
                                     &cached_evidence,
@@ -19751,8 +19733,8 @@ None,
                 )
                 .unwrap(),
         );
-        let effective = request
-            .in_program_context(&directory.path().join("program-inputs"), context)
+        let effective = context
+            .prepare_compilation(&directory.path().join("program-inputs"), &producer)
             .unwrap();
         assert_eq!(effective.artifacts.len(), 1);
         effective

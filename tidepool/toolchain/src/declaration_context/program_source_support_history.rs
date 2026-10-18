@@ -91,29 +91,36 @@ mod program_source_support_history {
         coverage: &mut Coverage,
     ) {
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(root, empty.clone());
+        let mut request = program_request(root, empty.clone()).program_admission();
         assert_retained_input_reads(&request);
-        request.program_support = Some(support.clone());
+        request.program.program_support = Some(support.clone());
         let receipt = import_receipt_owner(
             root,
-            &request,
+            request.receipt_admission().physical_request(),
             &selected.unit,
             &selected.module,
             "none",
             false,
         );
-        let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
+        let admission = request
+            .receipt_admission()
+            .validate_receipt_with_validation(
+                &receipt,
+                None,
+                &empty,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
         let artifacts = support
             .compiler_support
             .artifacts()
             .merge_fixture_selections(&support_view(&[support_product("Consumer")]))
             .unwrap();
-        let actual = ExactProductAdmission {
-            request: &request,
-            source: &admission,
-        }
-        .original_execution_fixture(&artifacts)
-        .unwrap();
+        let actual = (&request)
+            .receipt_admission()
+            .product_admission(&admission)
+            .original_execution_fixture(&artifacts)
+            .unwrap();
 
         let reached = reachable(graph, selected);
         let known = reached
@@ -163,7 +170,7 @@ mod program_source_support_history {
         coverage.queries += 1;
     }
 
-    fn assert_retained_input_reads(request: &ExactCompilationRequest) {
+    fn assert_retained_input_reads(request: &ProgramAdmissionContinuation) {
         let before = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
         let inputs = request.compiler_inputs();
         let captured = request.clone();
@@ -188,7 +195,7 @@ mod program_source_support_history {
     }
 
     fn assert_private_choices(
-        request: &ExactCompilationRequest,
+        request: &ProgramAdmissionContinuation,
         expected: &BTreeSet<CachedHomeOwner>,
         public: &ExactDeclarationContext,
     ) {
@@ -273,26 +280,22 @@ mod program_source_support_history {
             assert_eq!(expected.len(), 20);
             let root = directory.path().join(format!("history-{choose_alternate}"));
             std::fs::create_dir_all(&root).unwrap();
-            // Promotion validates the displaced public interfaces. Materialize
-            // that baseline through the same context transition before replacing it.
+            // Public role growth and private promotion retain one semantic owner;
+            // neither transition creates compiler transport copies.
             let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
             let original = program_request(&root, empty)
-                .in_program_context(&root.join("public-input"), public.clone())
+                .program_admission()
+                .in_program_context(public.clone())
                 .unwrap();
-            assert_eq!(original.artifacts.len(), 20);
-            public
-                .validate_artifacts_from_metadata(
-                    &original.artifacts,
-                    &original.compiler_inputs().metadata,
-                )
-                .unwrap();
+            assert_eq!(original.compiler_inputs().metadata.entries.len(), 20);
+            assert_eq!(
+                std::fs::read_dir(&root).unwrap().count(),
+                1,
+                "semantic public roles must not create transport files"
+            );
             let before_promotion = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let request = original
-                .in_program_context_with_private_input(
-                    &root.join("planned-input"),
-                    public.clone(),
-                    &input,
-                )
+                .in_program_context_with_private_input(public.clone(), &input)
                 .unwrap();
             assert_eq!(
                 REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
@@ -307,13 +310,25 @@ mod program_source_support_history {
             assert_private_choices(&original, &BTreeSet::new(), &public);
             let captured = request.clone();
 
-            let receipt = import_receipt(&root, &request, "Unadmitted");
+            let receipt = import_receipt(
+                &root,
+                request.receipt_admission().physical_request(),
+                "Unadmitted",
+            );
             let mut value = read_receipt(&receipt);
             value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
                 .as_array_mut()
                 .unwrap()[3] = Value::Array(vec![]);
             write_receipt(&receipt, &value);
-            let admission = request.validate_receipt(&receipt, None, &public).unwrap();
+            let admission = request
+                .receipt_admission()
+                .validate_receipt_with_validation(
+                    &receipt,
+                    None,
+                    &public,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap();
             let generated_owner = admission.generated_source_owner().unwrap();
             assert_eq!(generated_owner, identity("fixture", "Consumer"));
             let source = "module Consumer where\n";
@@ -326,12 +341,11 @@ mod program_source_support_history {
             let full_selection = source_selection(&full_projection, &full_view);
             let full_input =
                 OriginalCompilerInputs::from_selection(&full_selection, &full_view).unwrap();
-            let execution = ExactProductAdmission {
-                request: &request,
-                source: &admission,
-            }
-            .original_execution_context(&full_input)
-            .unwrap();
+            let execution = (&request)
+                .receipt_admission()
+                .product_admission(&admission)
+                .original_execution_context(&full_input)
+                .unwrap();
             expected.extend(offered_owners(&sparse));
             assert_eq!(expected.len(), 22);
             assert_eq!(
@@ -371,11 +385,7 @@ mod program_source_support_history {
             assert_private_choices(&request, &offered_owners(&selected), &public);
             let before_continuation = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let continued = publication
-                .in_program_context_with_private_input(
-                    &root.join("sparse-input"),
-                    published.clone(),
-                    &continuation_input,
-                )
+                .in_program_context_with_private_input(published.clone(), &continuation_input)
                 .unwrap();
             assert!(expected.remove(sparse[0].owner()));
             assert_eq!(expected.len(), 21);
@@ -399,11 +409,7 @@ mod program_source_support_history {
             let stable_inputs = Arc::clone(&continued.inputs.compiler);
             let stable_roles = continued.compiler_inputs().projection().roles();
             assert!(continued
-                .in_program_context_with_private_input(
-                    &root.join("wrong-input"),
-                    published.clone(),
-                    &wrong_input,
-                )
+                .in_program_context_with_private_input(published.clone(), &wrong_input)
                 .is_err());
             assert!(OriginalCompilerInputs::from_selection(&selection, &wrong_view).is_err());
             let without_first = support_view(&selected[1..]);
@@ -418,11 +424,7 @@ mod program_source_support_history {
             ));
             assert_private_choices(&continued, &expected, &published);
             let retried = continued
-                .in_program_context_with_private_input(
-                    &root.join("repeated-input"),
-                    published.clone(),
-                    &input,
-                )
+                .in_program_context_with_private_input(published.clone(), &input)
                 .unwrap();
             assert_private_choices(&retried, &expected, &published);
 
@@ -662,10 +664,11 @@ mod program_source_support_history {
                         .extend_checked_original_products([2; 32], &products)
                         .unwrap(),
                 );
-                let mut request = program_request(directory.path(), context.clone());
+                let mut request =
+                    program_request(directory.path(), context.clone()).program_admission();
                 assert_retained_input_reads(&request);
                 let retained_inputs = Arc::clone(&request.inputs.compiler);
-                request.program_support = Some(current.clone());
+                request.program.program_support = Some(current.clone());
                 let before_graph = Arc::clone(&current.imports);
                 let before_artifacts = current.compiler_support.artifacts().descriptors();
                 let before_projection = current.compiler_support.projection().clone();
@@ -690,7 +693,7 @@ mod program_source_support_history {
                     request.compiler_inputs()
                 ));
                 assert_retained_input_reads(&request);
-                let after = request.program_support.as_ref().unwrap();
+                let after = request.program.program_support.as_ref().unwrap();
                 assert!(Arc::ptr_eq(&after.imports, &before_graph));
                 assert_eq!(
                     after.compiler_support.artifacts().descriptors(),
@@ -719,7 +722,7 @@ mod program_source_support_history {
                 assert!(retried.lexical_graph().is_empty());
                 assert_query(
                     directory.path(),
-                    request.program_support.as_ref().unwrap(),
+                    request.program.program_support.as_ref().unwrap(),
                     &graph,
                     &all_owners,
                     &first_owner,

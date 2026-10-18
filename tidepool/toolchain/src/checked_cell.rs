@@ -2248,7 +2248,6 @@ impl CapturedValueInterfaceOutput {
 #[derive(Debug)]
 pub(crate) struct PlannedCheckedDeclaration {
     pub(crate) source: String,
-    pub(crate) interface_fingerprint: String,
     pub(crate) certificate: Arc<crate::declaration_join::CertifiedAuthoredDeclaration>,
     pub(crate) receipt_digest: [u8; 32],
     // Complete same-offer compiler inputs belong to this checked receipt;

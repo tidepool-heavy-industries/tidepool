@@ -1071,16 +1071,16 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn from_original_output(
-        request: &crate::declaration_context::ExactCompilationRequest,
+        request: &crate::declaration_context::ExactRequestInputs,
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
         let projection = request
-            .compiler_inputs()
+            .compiler()
             .projection()
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
         request
-            .compiler_inputs()
+            .compiler()
             .compiler_source_support()
             .rebuild(
                 projection,
