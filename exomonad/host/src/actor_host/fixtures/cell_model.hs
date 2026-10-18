@@ -15,6 +15,7 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson
 import Tidepool.Agent.Contract
 import Tidepool.Model
+import qualified Exomonad.Models as Models
 import Tidepool.Effects (Sleep (..), Console (..))
 import Tidepool.Effects.Core (ActorEffectKey)
 import Tidepool.Effects.Row (knownEffects, effectKeys)
@@ -28,7 +29,7 @@ data EchoTools mode = EchoTools { echo :: mode :- Call EchoArgs Text }
 
 callbackTurn :: (Member Sleep effects, Member Console effects)
              => ModelTurn EchoTools effects Text
-callbackTurn = withModel (CustomModel OpenAIPlan "test-model") $ textTurn (AgentSpec
+callbackTurn = withModel Models.primaryModel $ textTurn (AgentSpec
   { specTools = EchoTools (presentWith id $ tool "Echo with the caller's effects" (\args -> do
       send (SleepWith (milliseconds 1))
       send (Print "model callback")

@@ -4,7 +4,7 @@ import Prelude
 import Data.Text (Text)
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
-import Tidepool.Effects.Core (Model (..), SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..), JevCallError (..))
+import Tidepool.Effects.Core (Backend (..), Model (..), OpenAIModel (..), Reasoning (..), DeepSeekReasoning (..), OpenAIReasoning (..), ArgonEffort (..), SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..), JevCallError (..))
 
 assert :: Bool -> String -> IO ()
 assert True _ = pure ()
@@ -23,14 +23,23 @@ main = do
   assert (toJSON observation == object ["request_id" .= ("request" :: Text), "provider" .= ("deep_seek" :: Text), "model" .= ("actual-provider-model" :: Text), "input_tokens" .= (Just 7 :: Maybe Int), "cached_tokens" .= (Just 0 :: Maybe Int), "output_tokens" .= (Nothing :: Maybe Int), "reasoning_tokens" .= (Nothing :: Maybe Int), "duration_ms" .= (12 :: Int)]) "request observation lost missing versus zero or identity"
   mapM_ roundtrip [ModelCallback "invocation" "operation" "tool" semantic, hook, ModelFinished receipt]
   mapM_ roundtrip [ModelNoAnnotation,ModelAbstained "reason",ModelAnnotated "text",ModelPruned "handle" "short"]
-  roundtrip (ModelRequestEnvelope "instructions" "input" Nothing (Just ModelLowEffort)
-    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing True)
+  let chosen = ModelSelectionEnvelope "catalog-hash" "argon" (ArgonReasoning EffortMedium)
+  roundtrip chosen
+  assert (toJSON chosen == object
+    ["catalog_identity" .= ("catalog-hash" :: Text), "key" .= ("argon" :: Text),
+     "reasoning" .= object ["tag" .= ("ArgonReasoning" :: Text),
+       "contents" .= ("EffortMedium" :: Text)]])
+    "catalog selection lost exact identity, key or typed reasoning"
+  roundtrip (ModelRequestEnvelope "instructions" "input" Nothing Nothing
+    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing True (Just chosen))
   mapM_ (\selection -> roundtrip (ModelRequestEnvelope "instructions" "input" (Just selection) Nothing
-    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing False))
-    [Luna, Sol, Astra, CustomAlias "luna", ProviderModel "luna"]
-  assert (toJSON Sol == object ["tag" .= ("Sol" :: String)]) "shared tier selector shape changed"
-  assert (toJSON (CustomAlias "luna") == object ["tag" .= ("CustomAlias" :: String), "contents" .= ("luna" :: String)]) "custom selector lost its kind"
-  assert (fromJSON (object ["tag" .= ("ProviderModel" :: String), "contents" .= ("luna" :: String)]) == Success (ProviderModel "luna")) "provider selector confused with tier alias"
+    (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing False Nothing))
+    [DeepSeekFlash, DeepSeekPro, OpenAIModel Gpt61Sol, GeminiArgon, CustomModel DeepSeek "registered-custom"]
+  mapM_ roundtrip [DeepSeekReasoning DeepSeekHigh, OpenAIReasoning OpenAIMedium, ArgonReasoning EffortHigh]
+  assert (toJSON GeminiArgon == object ["tag" .= ("GeminiArgon" :: Text)]) "Argon model selector shape changed"
+  assert (toJSON (CustomModel DeepSeek "registered-custom") == object
+    ["tag" .= ("CustomModel" :: Text), "contents" .= toJSON (DeepSeek, "registered-custom" :: Text)])
+    "custom model lost its explicit backend"
   mapM_ roundtrip
     [JevUnconfigured, JevCallCap, JevTransport "断線", JevTimeout,
      JevHttp 429 "後で", JevCircuitOpen 503 987, JevClientSetup "setup",

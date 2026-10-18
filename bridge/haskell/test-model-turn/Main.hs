@@ -39,7 +39,23 @@ import Tidepool.Agent.Contract
 import qualified Tidepool.Reload as Reload
 import Tidepool.Model
 import Tidepool.Internal.ModelControl qualified as Control
+import Tidepool.Effects.Core qualified as Core
 import Tidepool.Effects.Core (Console (..), say, ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
+
+-- Test-only choices exercise the shared class without claiming catalog authority.
+data TestModel = Flash DeepSeekOptions | Pro DeepSeekOptions
+
+instance ModelChoice TestModel where
+  modelSelection (Flash options) = Control.ModelSelectionEnvelope "test-catalog" "flash"
+    (Core.DeepSeekReasoning (deepSeekEffort options))
+  modelSelection (Pro options) = Control.ModelSelectionEnvelope "test-catalog" "pro"
+    (Core.DeepSeekReasoning (deepSeekEffort options))
+
+flashChoice :: TestModel
+flashChoice = Flash (DeepSeekOptions DeepSeekHigh)
+
+proChoice :: TestModel
+proChoice = Pro (DeepSeekOptions DeepSeekMax)
 
 data Tools mode = Tools { echo :: mode :- Call Text Text } deriving Generic
 data Reply = Reply { count :: Int, optional :: Maybe Text }
@@ -137,25 +153,28 @@ sourceInspection = do
 
 noToolsExample :: IO ()
 noToolsExample = do
-  let runExample label example =
-        let result = run (interpret (handleText label) example)
+  let runExample choice =
+        let result = run (interpret (handleText (modelSelection choice))
+              (ModelExample.invokeWithModel choice "bounded input"))
         in case ModelExample.report result of
           (Right "bounded answer", Just (_, ["request"], usage))
             | lookup "provider_requests" usage == Just 1
             , lookup "tool_attempts" usage == Just 0 -> pure ()
           other -> error ("NoTools example lost outcome or receipt: " ++ show other)
-  runExample "DeepSeekFlash" (ModelExample.flash "bounded input")
-  runExample "DeepSeekPro" (ModelExample.pro "bounded input")
+  runExample flashChoice
+  runExample proChoice
   case ModelExample.report (ModelResult (Left ModelCancelled) Nothing) of
     (Left _, Nothing) -> pure ()
     other -> error ("missing receipt or failure changed: " ++ show other)
   where
-    handleText :: Text -> ModelCall a -> Eff '[] a
-    handleText label (ModelStartWith value) =
+    handleText :: Control.ModelSelectionEnvelope -> ModelCall a -> Eff '[] a
+    handleText expected (ModelStartWith value) =
       case fromJSON value of
-        Success (Control.ModelRequestEnvelope _ input model _ limits tools _ hook)
+        Success (Control.ModelRequestEnvelope _ input model reasoning limits tools _ hook selection)
           | input == "bounded input"
-          , fmap toJSON model == Just (object ["tag" .= label])
+          , model == Nothing
+          , reasoning == Nothing
+          , selection == Just expected
           , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
           , tools == toJSON ([] :: [Value])
           , not hook -> pure (Right (toJSON (Control.ModelFinished
@@ -171,10 +190,10 @@ personaNotebook :: Eff (SyncEffects Persona.PersonaEffects)
   (ModelResult Text, ModelResult Text, (Int, Int, Int), (Int, Int, Int))
 personaNotebook = do
   say "before model calls"
-  flashResult <- ModelExample.synchronousFlash "persona DeepSeekFlash input"
+  flashResult <- ModelExample.synchronousWithModel flashChoice "persona DeepSeekFlash input"
   flashPage <- display (ModelExample.report flashResult)
   say "between model calls"
-  proResult <- ModelExample.synchronousPro "persona DeepSeekPro input"
+  proResult <- ModelExample.synchronousWithModel proChoice "persona DeepSeekPro input"
   proPage <- display (ModelExample.report proResult)
   say "after model calls"
   pure (flashResult, proResult, displayIdentity flashPage, displayIdentity proPage)
@@ -210,14 +229,16 @@ runPersonaNotebook = go 1
     prepend event (answer, events) = (answer, event : events)
     modelStep :: ModelCall b -> (b, NotebookEvent)
     modelStep (ModelStartWith value) = case fromJSON value of
-      Success (Control.ModelRequestEnvelope _ input model _ limits tools _ hook)
-        | limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
+      Success (Control.ModelRequestEnvelope _ input model reasoning limits tools _ hook selection)
+        | model == Nothing
+        , reasoning == Nothing
+        , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
         , tools == toJSON ([] :: [Value])
         , not hook ->
-            let label = case model of
-                  Just DeepSeekFlash -> "DeepSeekFlash"
-                  Just DeepSeekPro -> "DeepSeekPro"
-                  _ -> error "Persona model example changed its explicit model selector"
+            let label
+                  | selection == Just (modelSelection flashChoice) = "DeepSeekFlash"
+                  | selection == Just (modelSelection proChoice) = "DeepSeekPro"
+                  | otherwise = error "Persona model example changed its catalog identity, key or reasoning"
             in (Right (toJSON (Control.ModelFinished
                   (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"] [] 0
                     (Control.ModelUsageEnvelope 1 0 9 0) (Control.ModelUsageEnvelope 1 0 9 0)
