@@ -2045,7 +2045,13 @@ fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>
     if value.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(VERSION)) {
         return Err("unsupported actor journal version; use its matching binary".into());
     }
-    Ok(serde_json::from_value(value)?)
+    let row: Row = serde_json::from_value(value)?;
+    if let EventKind::Admitted { admission, .. } = &row.event {
+        admission
+            .model_permissions
+            .validate_declared_effects(&admission.effect_keys)?;
+    }
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -2224,6 +2230,46 @@ mod tests {
             .unwrap()
             .remove("model_permissions");
         assert!(parse_row(&missing.to_string()).is_err());
+    }
+
+    #[test]
+    fn recovery_refuses_grants_and_declared_effects_that_disagree() {
+        let model = crate::AdmittedModelIdentity::new(
+            "catalog".into(),
+            "flash".into(),
+            "provider".into(),
+            crate::Model::DeepSeekFlash,
+        )
+        .unwrap();
+        let permissions = crate::ModelPermissions::new(vec![crate::ModelGrant::new(
+            crate::ModelPermission {
+                operation: crate::ModelOperation::ModelCall,
+                family: crate::ModelFamily::DeepSeek,
+            },
+            model,
+            vec![crate::Reasoning::DeepSeekReasoning(
+                crate::DeepSeekReasoning::DeepSeekHigh,
+            )],
+        )
+        .unwrap()])
+        .unwrap();
+        let descriptor = descriptor("granted").with_capabilities(
+            crate::ActorCapabilities::default().with_model_permissions(permissions),
+        );
+        let admission =
+            DurableActorAdmission::capture(ActorRef::first(ActorId(1)), &descriptor, &[]);
+        let row = Row {
+            version: VERSION,
+            sequence: 1,
+            event: EventKind::Admitted {
+                admission: Box::new(admission),
+                startup: None,
+            },
+        };
+        let mut value = serde_json::to_value(row).unwrap();
+        assert!(parse_row(&value.to_string()).is_ok());
+        value["admission"]["effect_keys"] = serde_json::json!([]);
+        assert!(parse_row(&value.to_string()).is_err());
     }
 
     #[tokio::test]

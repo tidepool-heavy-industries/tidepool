@@ -102,6 +102,7 @@ impl ActorCapabilities {
         effects: Vec<ActorEffectKey>,
         requests: &[tidepool_bridge_effects::ModelGrantRequest],
         requested_budget: Option<(i64, i64)>,
+        captured: Option<&crate::CheckpointLease>,
     ) -> Result<Self, String> {
         use crate::{ModelOperation, ModelPermissionError};
         if !matches!(
@@ -118,9 +119,8 @@ impl ActorCapabilities {
             return Err(ModelPermissionError::FamilyMismatch.to_string());
         }
         if permission.operation == ModelOperation::ForkAgent {
-            let source = self
-                .conversation_permission
-                .as_ref()
+            let source = captured
+                .and_then(|lease| lease.issuer_conversation_permission())
                 .ok_or_else(|| ModelPermissionError::IncompatibleHistory.to_string())?;
             if source.model().catalog_identity() != conversation.model().catalog_identity()
                 || source.model().provider() != conversation.model().provider()
@@ -128,6 +128,8 @@ impl ActorCapabilities {
             {
                 return Err(ModelPermissionError::IncompatibleHistory.to_string());
             }
+        } else if captured.is_some() {
+            return Err(ModelPermissionError::InvalidChildOperation.to_string());
         }
         let permissions = self
             .model_permissions
@@ -174,7 +176,7 @@ impl ActorCapabilities {
             "'[{}]",
             self.effect_keys
                 .iter()
-                .map(|effect| effect.haskell_name())
+                .map(|effect| effect.haskell_row_entry())
                 .collect::<Vec<_>>()
                 .join(", ")
         )

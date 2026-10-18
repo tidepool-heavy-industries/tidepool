@@ -574,13 +574,45 @@ mod tests {
             .with_conversation_permission(Some(
                 ConversationPermission::new(source, vec![effort(1)]).unwrap(),
             ));
+        let registry = crate::ActorAdmissionRegistry::new();
+        let issuer = crate::ActorRef::first(crate::ActorId(1));
+        let token = registry.capture_checkpoint(
+            "captured".into(),
+            issuer,
+            parent.clone(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            tidepool_repr::SessionId(7),
+            tidepool_codegen::scope::ScopeId(3),
+            crate::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "call".into(),
+                "call".into(),
+            ),
+        );
+        let checkpoint = registry
+            .checkpoint(&token, tidepool_repr::SessionId(7))
+            .unwrap();
+        registry.retire_actor(issuer);
+        // Borrowed history comes from its retained issuer, independently of the caller.
+        let parent = parent.with_conversation_permission(Some(
+            ConversationPermission::new(foreign.clone(), vec![effort(1)]).unwrap(),
+        ));
         let selection = |model: &AdmittedModelIdentity| ModelSelectionEnvelope {
             catalog_identity: model.catalog_identity.clone(),
             key: model.key.clone(),
             reasoning: effort(1),
         };
         let child = parent
-            .admit_model_child(fork, &selection(&target), vec![], &[], None)
+            .admit_model_child(
+                fork,
+                &selection(&target),
+                vec![],
+                &[],
+                None,
+                Some(&checkpoint),
+            )
             .unwrap();
         assert!(child.model_permissions().grants().is_empty());
         let conversation = child.conversation_permission().unwrap();
@@ -588,10 +620,17 @@ mod tests {
         assert!(!conversation.permits(&identity(0), effort(1)));
         for foreign in [&foreign, &foreign_catalog] {
             assert!(parent
-                .admit_model_child(fork, &selection(foreign), vec![], &[], None)
+                .admit_model_child(
+                    fork,
+                    &selection(foreign),
+                    vec![],
+                    &[],
+                    None,
+                    Some(&checkpoint)
+                )
                 .is_err());
             assert!(parent
-                .admit_model_child(spawn, &selection(foreign), vec![], &[], None)
+                .admit_model_child(spawn, &selection(foreign), vec![], &[], None, None)
                 .is_ok());
         }
         let wrong_family = ModelPermission {
@@ -599,7 +638,27 @@ mod tests {
             family: ModelFamily::OpenAI,
         };
         assert!(parent
-            .admit_model_child(wrong_family, &selection(&target), vec![], &[], None)
+            .admit_model_child(
+                wrong_family,
+                &selection(&target),
+                vec![],
+                &[],
+                None,
+                Some(&checkpoint)
+            )
+            .is_err());
+        assert!(parent
+            .admit_model_child(fork, &selection(&target), vec![], &[], None, None)
+            .is_err());
+        assert!(parent
+            .admit_model_child(
+                spawn,
+                &selection(&target),
+                vec![],
+                &[],
+                None,
+                Some(&checkpoint)
+            )
             .is_err());
     }
 
