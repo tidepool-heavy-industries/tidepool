@@ -861,6 +861,10 @@ rust_filegroup(
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "src/actor_host/fixtures/recipe_unbound_restart.hs": "exomonad/host/src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "src/actor_host/fixtures/record_model_denied.hs": "exomonad/host/src/actor_host/fixtures/record_model_denied.hs",
+        "src/actor_host/fixtures/record_model_first.hs": "exomonad/host/src/actor_host/fixtures/record_model_first.hs",
+        "src/actor_host/fixtures/record_model_retire.hs": "exomonad/host/src/actor_host/fixtures/record_model_retire.hs",
+        "src/actor_host/fixtures/record_model_second.hs": "exomonad/host/src/actor_host/fixtures/record_model_second.hs",
         "src/actor_host/fixtures/review_fresh_consumer.hs": "exomonad/host/src/actor_host/fixtures/review_fresh_consumer.hs",
         "src/actor_host/fixtures/review_fresh_consumer_reply.hs": "exomonad/host/src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "src/actor_host/fixtures/review_named_final_acceptance.hs": "exomonad/host/src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -2831,6 +2835,10 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_unbound_restart.hs": "src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_denied.hs": "src/actor_host/fixtures/record_model_denied.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_first.hs": "src/actor_host/fixtures/record_model_first.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_retire.hs": "src/actor_host/fixtures/record_model_retire.hs",
+        "exomonad/host/src/actor_host/fixtures/record_model_second.hs": "src/actor_host/fixtures/record_model_second.hs",
         "exomonad/host/src/actor_host/fixtures/review_fresh_consumer.hs": "src/actor_host/fixtures/review_fresh_consumer.hs",
         "exomonad/host/src/actor_host/fixtures/review_fresh_consumer_reply.hs": "src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "exomonad/host/src/actor_host/fixtures/review_named_final_acceptance.hs": "src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -4081,6 +4089,41 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636970655f756e626f756e645f726573746172742e6873",
     src = "src/actor_host/fixtures/recipe_unbound_restart.hs",
     out = "recipe_unbound_restart.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c2e6873",
+    src = "src/actor_host/fixtures/record_model.hs",
+    out = "record_model.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f64656e6965642e6873",
+    src = "src/actor_host/fixtures/record_model_denied.hs",
+    out = "record_model_denied.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f66697273742e6873",
+    src = "src/actor_host/fixtures/record_model_first.hs",
+    out = "record_model_first.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f7265746972652e6873",
+    src = "src/actor_host/fixtures/record_model_retire.hs",
+    out = "record_model_retire.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636f72645f6d6f64656c5f7365636f6e642e6873",
+    src = "src/actor_host/fixtures/record_model_second.hs",
+    out = "record_model_second.hs",
     visibility = ["PUBLIC"],
 )
 

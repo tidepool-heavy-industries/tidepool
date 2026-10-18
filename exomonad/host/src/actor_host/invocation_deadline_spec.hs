@@ -36,8 +36,8 @@ agentSpec = defaultSpec
   , afterTool = Just (afterProbe Models.primaryModel)
   }
 
-afterProbe :: (KnownFamily family, Member AgentLaunch effects, Member (SpawnAgent family) effects, Member Cmd.Commands effects)
-           => Model family -> ToolCall -> ToolResult -> Eff effects Annotation
+afterProbe :: (KnownFamily modelFamily, Member AgentLaunch effects, Member (SpawnAgent modelFamily) effects, Member Cmd.Commands effects)
+           => Model modelFamily -> ToolCall -> ToolResult -> Eff effects Annotation
 afterProbe model call _
   | toolCallName call /= "lifetime_probe" = pure NoAnnotation
   | otherwise = do

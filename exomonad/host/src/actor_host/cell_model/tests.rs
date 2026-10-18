@@ -35,6 +35,9 @@ struct ScriptState {
     release: Notify,
     dropped: AtomicUsize,
     hold_nested: AtomicBool,
+    record_bindings: AtomicUsize,
+    record_cancellations: AtomicUsize,
+    record_settlements: AtomicUsize,
 }
 #[derive(Clone)]
 struct Script(Arc<ScriptState>);
@@ -103,6 +106,10 @@ impl ResponsesTransport for Script {
             ("nested", _) => final_turn("nested answer"),
             ("callback" | "nested-outer", _) => final_turn("done"),
             ("budget", _) => final_turn("allowed"),
+            ("record-typed", _) => turn(vec![Item(json!({
+                "type":"function_call", "name":"finalize", "call_id":"record-final",
+                "arguments":serde_json::to_string(&json!({"result":{"answer":42}})).unwrap(),
+            }))]),
             _ => panic!("unexpected fixture instructions {instructions}"),
         })
     }
@@ -143,7 +150,7 @@ fn fixture_catalog() -> crate::exomonad::model_catalog::InferenceConfig {
     }
 }
 
-fn configure(config: &mut ActorHostConfig) {
+fn configure_models(config: &mut ActorHostConfig, record: bool) {
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
@@ -151,9 +158,21 @@ fn configure(config: &mut ActorHostConfig) {
         tidepool_testing::fixture_source("exomonad/host/src/actor_host/fixtures/cell_model.hs"),
     )
     .unwrap();
+    if record {
+        std::fs::write(
+            authored.join("RecordModelFixture.hs"),
+            tidepool_testing::fixture_source(
+                "exomonad/host/src/actor_host/fixtures/record_model.hs",
+            ),
+        )
+        .unwrap();
+    }
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["ModelFixture".into()];
+        if record {
+            project.haskell.modules.push("RecordModelFixture".into());
+        }
         project.inference = Some(fixture_catalog());
     });
     commit_workspace(&config.workspace);
@@ -169,6 +188,7 @@ type HeldBinding = Arc<Mutex<Option<Arc<dyn CellModelBinding>>>>;
 struct HoldingFactory {
     inner: EmbeddedCellModelFactory<Offline, Script>,
     retained: HeldBinding,
+    script: Arc<ScriptState>,
 }
 impl CellModelFactory for HoldingFactory {
     fn bind(
@@ -178,7 +198,14 @@ impl CellModelFactory for HoldingFactory {
         descriptor: &ActorDescriptor,
         context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding> {
-        let binding = self.inner.bind(execution, principal, descriptor, context);
+        let mut binding = self.inner.bind(execution, principal, descriptor, context);
+        if descriptor.authored_label() == Some("record-model-probe") {
+            self.script.record_bindings.fetch_add(1, Ordering::SeqCst);
+            binding = Arc::new(ObservedRecordBinding {
+                inner: binding,
+                script: self.script.clone(),
+            });
+        }
         let mut retained = self.retained.lock().unwrap();
         if retained.is_none() {
             *retained = Some(binding.clone());
@@ -186,7 +213,45 @@ impl CellModelFactory for HoldingFactory {
         binding
     }
 }
+struct ObservedRecordBinding {
+    inner: Arc<dyn CellModelBinding>,
+    script: Arc<ScriptState>,
+}
+impl CellModelBinding for ObservedRecordBinding {
+    fn prepare(
+        &self,
+        request: ModelReq,
+        principal: PrincipalId,
+        table: DataConTable,
+    ) -> DeferredEffect {
+        self.inner.prepare(request, principal, table)
+    }
+    fn cancel(&self) {
+        self.script
+            .record_cancellations
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner.cancel();
+    }
+    fn settle(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), tidepool_effect::error::EffectError>> {
+        Box::pin(async move {
+            self.inner.settle().await?;
+            self.script
+                .record_settlements
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
 async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding) {
+    campaign_configured(false).await
+}
+
+async fn campaign_configured(
+    record: bool,
+) -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding) {
     let store = Arc::new(Store::memory().unwrap());
     let script = Arc::new(ScriptState::default());
     let retained = Arc::new(Mutex::new(None));
@@ -214,10 +279,11 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
     let factory = Arc::new(HoldingFactory {
         inner,
         retained: retained.clone(),
+        script: script.clone(),
     });
     let campaign = TestCampaign::start_with_model_factory(
         |admission| admission,
-        configure,
+        |config| configure_models(config, record),
         None,
         Some(factory),
     )
@@ -293,6 +359,97 @@ fn cancellation_terminal_comparison_refuses_mismatched_owner_results() {
             }
         )),
     ));
+}
+
+#[tokio::test]
+async fn record_actor_model_calls_retain_one_binding_and_retire_it_after_typed_replies() {
+    let (campaign, store, script, _) = campaign_configured(true).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let endpoint = campaign.root_installation.policy.clone();
+                let first = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    include_str!("../fixtures/record_model_first.hs"),
+                )
+                .await;
+                assert_eq!(committed_display_text(&first), "True");
+                assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
+                assert_eq!(script.record_cancellations.load(Ordering::SeqCst), 0);
+                assert_eq!(script.record_settlements.load(Ordering::SeqCst), 0);
+
+                let second = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    include_str!("../fixtures/record_model_second.hs"),
+                )
+                .await;
+                assert_eq!(committed_display_text(&second), "True");
+                assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
+                assert_eq!(script.record_cancellations.load(Ordering::SeqCst), 0);
+                assert_eq!(script.record_settlements.load(Ordering::SeqCst), 0);
+                let requests = script.requests.lock().unwrap().clone();
+                assert_eq!(requests.len(), 2);
+                assert!(requests
+                    .iter()
+                    .all(|request| request.model == "test-model"
+                        && request.pinned_effort == Effort::Low));
+                assert_eq!(
+                    store
+                        .events(None)
+                        .unwrap()
+                        .iter()
+                        .filter(|event| event.kind == "model_invocation_receipt")
+                        .count(),
+                    2
+                );
+
+                let retired = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    include_str!("../fixtures/record_model_retire.hs"),
+                )
+                .await;
+                assert_eq!(committed_display_text(&retired), "True");
+                assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
+                assert_eq!(script.record_cancellations.load(Ordering::SeqCst), 1);
+                assert_eq!(script.record_settlements.load(Ordering::SeqCst), 1);
+                let before_refusal = campaign
+                    .forest
+                    .inspect_host_graph()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|node| node.actor)
+                    .collect::<Vec<_>>();
+                let refused = dispatch_haskell_script(
+                    endpoint.as_ref(),
+                    include_str!("../fixtures/record_model_denied.hs"),
+                )
+                .await;
+                assert_eq!(refused["status"], "rejected", "{refused}");
+                assert_eq!(
+                    refused["items"].as_array().unwrap().last().unwrap()["failureLayer"],
+                    "effect",
+                    "{refused}"
+                );
+                assert_eq!(script.record_bindings.load(Ordering::SeqCst), 1);
+                assert_eq!(script.requests.lock().unwrap().len(), 2);
+                assert_eq!(
+                    before_refusal,
+                    campaign
+                        .forest
+                        .inspect_host_graph()
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|node| node.actor)
+                        .collect::<Vec<_>>()
+                );
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
