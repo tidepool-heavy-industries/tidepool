@@ -47,12 +47,16 @@ impl ActorCapabilities {
     /// Trusted Rust composition of non-model effects; authored rows use `admit`.
     #[must_use]
     pub fn with_effect_keys(mut self, effect_keys: Vec<ActorEffectKey>) -> Self {
+        let model_keys = self.model_permissions.effect_keys();
         self.effect_keys = effect_keys
             .into_iter()
-            .filter(|key| key.model_permission().is_none())
+            .filter(|key| key.model_permission().is_none() || model_keys.contains(key))
             .collect();
-        self.effect_keys
-            .extend(self.model_permissions.effect_keys());
+        for key in model_keys {
+            if !self.effect_keys.contains(&key) {
+                self.effect_keys.push(key);
+            }
+        }
         self
     }
 
@@ -71,9 +75,14 @@ impl ActorCapabilities {
 
     #[must_use]
     pub fn with_model_permissions(mut self, model_permissions: crate::ModelPermissions) -> Self {
+        let model_keys = model_permissions.effect_keys();
         self.effect_keys
-            .retain(|key| key.model_permission().is_none());
-        self.effect_keys.extend(model_permissions.effect_keys());
+            .retain(|key| key.model_permission().is_none() || model_keys.contains(key));
+        for key in model_keys {
+            if !self.effect_keys.contains(&key) {
+                self.effect_keys.push(key);
+            }
+        }
         self.model_permissions = model_permissions;
         self
     }
@@ -197,7 +206,7 @@ impl ActorCapabilities {
                 !self
                     .effect_keys
                     .iter()
-                    .any(|key| key.haskell_name() == name.as_str())
+                    .any(|key| key.haskell_row_entry() == name.as_str())
             })
             .cloned()
             .collect()

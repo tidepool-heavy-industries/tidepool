@@ -460,7 +460,11 @@ mod tests {
             let policy = permissions(&entries);
             let mut row = policy.effect_keys();
             row.push(ActorEffectKey::Replies);
-            prop_assert!(ActorCapabilities::admit(row.clone(), policy.clone(), None).is_ok());
+            let admitted = ActorCapabilities::admit(row.clone(), policy.clone(), None).unwrap();
+            prop_assert_eq!(admitted.effect_keys(), row.as_slice());
+            row.reverse();
+            let reversed = ActorCapabilities::admit(row.clone(), policy.clone(), None).unwrap();
+            prop_assert_eq!(reversed.effect_keys(), row.as_slice());
             if !policy.grants().is_empty() {
                 let remove = row.iter().position(|key| key.model_permission().is_some()).unwrap();
                 row.remove(remove);
@@ -484,6 +488,21 @@ mod tests {
             .effect_keys()
             .iter()
             .all(|key| key.model_permission().is_none()));
+    }
+
+    #[test]
+    fn available_effect_rendering_retains_family_arguments() {
+        let caps = ActorCapabilities::default()
+            .with_effect_keys(vec![])
+            .with_model_permissions(permissions(&[(0, 0, 1), (1, 0, 1), (2, 0, 1)]));
+        assert_eq!(
+            caps.haskell_effects_type(),
+            "'[ModelCall DeepSeek, ForkAgent DeepSeek, SpawnAgent DeepSeek]"
+        );
+        assert_eq!(
+            caps.missing_effect_names(&["ModelCall DeepSeek".into(), "ModelCall OpenAI".into()]),
+            vec!["ModelCall OpenAI"]
+        );
     }
 
     #[test]
