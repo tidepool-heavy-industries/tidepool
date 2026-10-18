@@ -1877,3 +1877,145 @@ impl IssuedNativeOffer {
         }))))
     }
 }
+
+#[cfg(test)]
+mod normalized_dependency_tests {
+    use super::*;
+    use crate::certified_products::tests::{
+        original_groups_fixture_with_interface, recovered_witness_fixtures,
+    };
+    use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
+    use crate::declaration_context::{
+        ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+    };
+
+    #[test]
+    fn normalized_source_keeps_retained_root_dependencies_without_dependency_roles_or_siblings() {
+        let producer_bytes = b"normalized-source-dependency-closure";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let hidden = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedHidden",
+                vec![(7, vec![]), (9, vec![])],
+                73,
+                &BTreeMap::new(),
+                b"hidden interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let root = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedRoot",
+                vec![(
+                    3,
+                    vec![PendingImportOwner::Source {
+                        owner: hidden.owner().clone(),
+                        original_ordinal: 7,
+                        binder: tidepool_repr::execution_schema::testing::identity(
+                            "NormalizedHidden",
+                            "entry_7",
+                        ),
+                    }],
+                )],
+                74,
+                &BTreeMap::new(),
+                b"root interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let sibling = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedSibling",
+                vec![(11, vec![])],
+                75,
+                &BTreeMap::new(),
+                b"sibling interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let products = recovered_witness_fixtures(&[hidden, root, sibling])
+            .into_iter()
+            .map(|witness| witness.product)
+            .collect::<Vec<_>>();
+        let inputs = OriginalCompilerInputs::from_checked_support_products(
+            &CompilerSourceSupport::empty(),
+            producer.sha256(),
+            &products,
+        )
+        .unwrap();
+        let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+        let root_owner = ExactModuleIdentity {
+            unit: products[1].owner().unit.clone(),
+            module: products[1].owner().module.clone(),
+        };
+        let interfaces = complete.selected_interfaces().unwrap();
+        let types = interfaces
+            .support_for_owners(vec![root_owner.clone()])
+            .unwrap();
+        let retained = types.retain_template_availability(&complete).unwrap();
+        assert_eq!(retained.projection().snapshot_roles().len(), 1);
+        assert!(retained
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let sibling_id = ArtifactEntry::original(producer.sha256(), products[2].clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
+        assert!(!catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 7
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 9
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: sibling_id,
+                    original_ordinal: 11
+                },
+                products[2].owner()
+            )
+            .unwrap()
+            .is_empty());
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&retained)
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(scratch.path(), producer_bytes)
+            .unwrap();
+        let hidden = request
+            .compiler_inputs()
+            .native_availability(hidden_id)
+            .expect("retained R carries dependency H without an H role");
+        assert!(hidden.permits(7));
+        assert!(!hidden.permits(9));
+        assert!(request
+            .compiler_inputs()
+            .native_availability(sibling_id)
+            .is_none());
+        assert!(request.groups.is_empty());
+    }
+}
