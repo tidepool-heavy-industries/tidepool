@@ -3194,6 +3194,7 @@ struct MaterializationFacts<'a> {
     observed: Vec<&'a RetainedArtifactMaterialization>,
 }
 
+#[derive(Clone, Default)]
 struct MaterializationCoverage {
     facts: imbl::OrdSet<usize>,
     excluded: bool,
@@ -3283,10 +3284,15 @@ impl RetainedArtifactMaterialization {
         // shadowed or unselected ancestor fact excludes whole-owner reuse even
         // when a later fact has the same logical key.
         for owner in &selected.observed {
-            let mut facts = imbl::OrdSet::new();
-            let mut excluded = false;
-            for parent in &owner._parents {
-                let parent = &coverage[indices[&(Arc::as_ptr(parent) as usize)]];
+            let mut inherited = owner
+                ._parents
+                .iter()
+                .map(|parent| &coverage[indices[&(Arc::as_ptr(parent) as usize)]]);
+            let MaterializationCoverage {
+                mut facts,
+                mut excluded,
+            } = inherited.next().cloned().unwrap_or_default();
+            for parent in inherited {
                 facts.extend(parent.facts.iter().copied());
                 excluded |= parent.excluded;
             }
