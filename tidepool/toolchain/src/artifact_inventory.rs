@@ -1017,7 +1017,7 @@ impl ArtifactRootIntent<'_> {
             Self::PrivateAvailability { .. } | Self::Offered(..) => Vec::new(),
             Self::Certified(selection) => {
                 let mut requirements = Vec::new();
-                for proof in selection.native_original_requirements() {
+                for proof in selection.new_product_native_requirements() {
                     if !requirements.contains(proof) {
                         requirements.push(proof.clone());
                     }
@@ -3808,6 +3808,16 @@ impl ArtifactInventory {
             )?;
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        if let ArtifactRootIntent::Certified(selection) = root_intent {
+            native_availability::bind_certified_input_demand(
+                &state,
+                parent,
+                &mut selected,
+                &groups,
+                selection,
+                &mut prebound,
+            )?;
+        }
         if let Some((roles, catalog)) = root_intent.input_constraints() {
             for (owner, role) in roles.snapshot_roles() {
                 let InputNativeDecision::IssuedChoices(choices) = catalog.decision(owner) else {

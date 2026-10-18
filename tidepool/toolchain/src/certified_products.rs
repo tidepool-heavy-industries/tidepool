@@ -2778,6 +2778,28 @@ impl CertifiedSourceSelection {
             .chain(self.private_native.requirements())
     }
 
+    /// Only unfinished products carry raw dependency constraints. Issued
+    /// availability is consumed through its exact owner at actual body demand.
+    pub(crate) fn new_product_native_requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.native_selections()
+            .flat_map(|native| match &native.availability {
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies.as_slice(),
+                ReceiptNativeAvailability::Issued(_) => &[],
+            })
+    }
+
+    pub(crate) fn issued_group_offer(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        owner: &CachedHomeOwner,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
+        self.issued_native_availability()
+            .find_map(|row| row.dependency_support(key, owner)?.offer_for_group(group))
+    }
+
     fn visible_modules(
         &self,
     ) -> impl Iterator<Item = (&(String, String), &ReceiptSourceSelection)> {

@@ -73,6 +73,163 @@ impl<'a> NativeDependencyCatalog<'a> {
     }
 }
 
+/// Bind demanded input bodies through their original opaque owner. Carrier-only
+/// views do not become proof owners, and availability does not add demand roots.
+pub(super) fn bind_certified_input_demand(
+    state: &InventoryState,
+    parent: &ArtifactView,
+    entries: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    demanded: &BTreeSet<NativeGroupKey>,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+    prebound: &mut BTreeMap<NativeGroupKey, NativeGroupBinding>,
+) -> Result<(), CompileError> {
+    let namespace = parent.namespace();
+    for key in demanded {
+        let entry = entries.get(&key.artifact).ok_or_else(|| {
+            admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                artifact: key.artifact,
+            })
+        })?;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(failure("native demand lacks original payload"));
+        };
+        if !selection.permits_native_group(key.artifact, product.owner(), key.original_ordinal) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: key.artifact,
+                    original_ordinal: key.original_ordinal,
+                },
+            ));
+        }
+        let resolution = selection
+            .native_group_candidates(*key, product.owner())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let crate::certified_products::NativeGroupCandidates::IssuedAvailability(candidates) =
+            resolution
+        else {
+            // Only a current product may issue a new body graph. Its inherited
+            // dependency requirements have already passed the raw proof check.
+            continue;
+        };
+        let canonical = ArtifactEntry::canonical(
+            product
+                .module_interface()
+                .ok_or_else(|| failure("native canonical carrier missing"))?
+                .clone(),
+        )
+        .descriptor
+        .id;
+        let mut compatible = Vec::new();
+        for group in candidates {
+            let Some(offer) = selection.issued_group_offer(*key, product.owner(), group) else {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: key.artifact,
+                        original_ordinal: key.original_ordinal,
+                    },
+                ));
+            };
+            let node = InventoryNodeKey::Group(group);
+            let owned = offer
+                .custody_snapshot()
+                .nodes_from_seeds([node])
+                .map_err(|_| failure("issued native dependency closure missing"))?;
+            if !offer.contains_checked_group(group)
+                || !state.contains_node(&node)
+                || admitted_closure(state, [node].into_iter())
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    != owned
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: key.artifact,
+                    },
+                ));
+            }
+            let carriers = state
+                .outgoing(node)
+                .filter_map(|(target, edge)| match target {
+                    InventoryNodeKey::Artifact(carrier)
+                        if carrier.artifact == key.artifact
+                            && *edge == ArtifactDependency::Interface =>
+                    {
+                        Some(carrier)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            if carriers.len() != 1 {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: key.artifact,
+                    },
+                ));
+            }
+            let carrier = *carriers.first().unwrap();
+            if namespace
+                .get(&key.artifact)
+                .is_some_and(|selected| *selected != carrier)
+            {
+                continue;
+            }
+            if state
+                .outgoing(InventoryNodeKey::Artifact(carrier))
+                .any(|(target, edge)| {
+                    matches!(target, InventoryNodeKey::Artifact(binding)
+                    if binding.artifact == canonical
+                    && namespace.get(&canonical).is_none_or(|selected| *selected == binding))
+                        && *edge == ArtifactDependency::Interface
+                })
+            {
+                compatible.push((group, offer, owned));
+            }
+        }
+        if compatible.len() > 1 {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: key.artifact,
+                },
+            ));
+        }
+        let Some((group, offer, owned)) = compatible.pop() else {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: key.artifact,
+                    original_ordinal: key.original_ordinal,
+                },
+            ));
+        };
+        // Retain just this demanded immutable closure. The offer remains the
+        // authority for membership; no sibling proof roots enter selection.
+        for node in owned {
+            if let InventoryNodeKey::Artifact(binding) = node {
+                let payload = offer
+                    .custody_lease()
+                    .payloads
+                    .get(&binding.artifact)
+                    .ok_or_else(|| failure("issued native dependency payload missing"))?;
+                if entries
+                    .get(&binding.artifact)
+                    .is_some_and(|entry| entry != payload)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::MetadataConflict {
+                            artifact: binding.artifact,
+                        },
+                    ));
+                }
+                entries
+                    .entry(binding.artifact)
+                    .or_insert_with(|| Arc::clone(payload));
+            }
+        }
+        prebound.insert(*key, group);
+    }
+    Ok(())
+}
+
 /// Fresh bodies can depend on an available group without selecting it for
 /// execution. Resolve only their certified imports from the supplied offers;
 /// proof roots remain separate from these dependency choices.
