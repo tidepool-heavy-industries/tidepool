@@ -14,7 +14,7 @@ module Tidepool.GhcPipeline
   , CompilerProducerIdentity, captureCompilerProducerIdentity
   , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), withSourceImportIntents
-  , PipelineResult, prBinds, prTyCons, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
+  , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
   , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
   , prTargetRdrEnv, prTargetTcGblEnv
   , generatedScaffoldRecipe
@@ -158,7 +158,7 @@ import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
-import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
+import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (FrontendResult(..), TcGblEnv, tcg_mod, tcg_th_coreplugins, tcg_import_decls, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_imports, tcg_keep)
 import GHC.Types.Name.Set (extendNameSetList)
@@ -661,7 +661,6 @@ capturesProductInterfaces _ = False
 
 data PipelineResult = PipelineResult
   { ownedPrBinds  :: [CoreBind]
-  , ownedPrTyCons :: [TyCon]
   , ownedPrHscEnv :: HscEnv
   -- | Actual thin-interface bytes selected by session injection.
   -- These authorize type-dependency seals, not source or native products.
@@ -706,9 +705,6 @@ data PipelineResult = PipelineResult
 -- Read accessors expose issued facts without record-update labels.
 prBinds :: PipelineResult -> [CoreBind]
 prBinds = ownedPrBinds
-
-prTyCons :: PipelineResult -> [TyCon]
-prTyCons = ownedPrTyCons
 
 prHscEnv :: PipelineResult -> HscEnv
 prHscEnv = ownedPrHscEnv
@@ -1968,8 +1964,7 @@ renderQuasiQuoteUse HasQuasiQuotes = "untracked"
 -- these separately lets an unchanged re-export or validation-only module
 -- prove its dependents valid without retaining its compiler session graph.
 data ModuleFacts = ModuleFacts
-  { moduleFactTyCons :: [TyCon]
-  , moduleFactReferences :: Set.Set Module
+  { moduleFactReferences :: Set.Set Module
     -- ^ Keep defining units until the current home compiler view selects
     -- its relation. A package module with the same name is another owner.
   , moduleFactPackageImports :: PackageImportEvidence
@@ -2033,8 +2028,8 @@ observationSummary (HydratedObservation summary _ _) = summary
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (LoadedObservation loaded) = pure (loadedFacts loaded)
-observationFacts (HydratedObservation _ hmi admitted) = pure
-  (hydratedModuleFacts hmi (admittedCandidateRoots admitted))
+observationFacts (HydratedObservation _ _ admitted) = pure
+  (hydratedModuleFacts (admittedCandidateRoots admitted))
     { moduleFactReferences = Set.fromList
         [ mkModule (stringToUnit (Text.unpack (symbolUnit identity)))
             (mkModuleName (Text.unpack (symbolModule identity)))
@@ -2045,34 +2040,13 @@ observationFacts (HydratedObservation _ hmi admitted) = pure
 
 -- Checked HPT metadata alone has no admitted native outline. Executable
 -- observations add their already authenticated candidate demand above.
-hydratedModuleFacts :: HomeModInfo -> PackageImportEvidence -> ModuleFacts
-hydratedModuleFacts hmi roots = ModuleFacts
-  { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
-  , moduleFactReferences = Set.empty
+hydratedModuleFacts :: PackageImportEvidence -> ModuleFacts
+hydratedModuleFacts roots = ModuleFacts
+  { moduleFactReferences = Set.empty
   , moduleFactPackageImports = roots
   , moduleFactHasDependentFiles = False
   , moduleFactQuasiQuoteUse = NoQuasiQuotes
   }
-
--- Original native groups can construct values from implementation interfaces
--- outside the lexical graph. Their verified HPT details still belong in the
--- runtime constructor metadata; adding those facts does not add lexical edges.
-exactInterfaceTyCons :: HscEnv -> Maybe ExactScope -> IO [TyCon]
-exactInterfaceTyCons _ Nothing = pure []
-exactInterfaceTyCons env (Just scope) = concat <$> forM originals
-  (\(artifact, _, _) -> case lookupHpt (hsc_HPT env) (mkModuleName (exactModule artifact)) of
-    Just hmi
-      | unitString (moduleUnit (mi_module (hm_iface hmi))) == exactUnit artifact
-      , moduleNameString (moduleName (mi_module (hm_iface hmi))) == exactModule artifact ->
-          pure (typeEnvTyCons (md_types (hm_details hmi)))
-    _ -> ioError (userError "exact constructor metadata owner is absent from the hydrated HPT"))
-  where
-    paired = Set.fromList
-      [ (executionUnit owner, executionModule owner, executionIfaceSha256 owner)
-      | owner <- scopeExecutionNativeOwners scope ]
-    originals =
-      [ entry | entry@(artifact, _, _) <- scopeInterfaces scope
-      , (exactUnit artifact, exactModule artifact, exactSha256 artifact) `Set.member` paired ]
 
 payloadFacts :: MemoPayload -> ModuleFacts
 payloadFacts (ValidationOnly facts _ _) = facts
@@ -2123,8 +2097,7 @@ directPackageImports env tcg = do
 
 frontFacts :: ModuleFront -> IO ModuleFacts
 frontFacts front = pure ModuleFacts
-    { moduleFactTyCons = mg_tcs (mfDesugared front)
-    , moduleFactReferences = mfReferencedModules front
+    { moduleFactReferences = mfReferencedModules front
     , moduleFactPackageImports = mfPackageImports front
     , moduleFactHasDependentFiles = mfHasDependentFiles front
     , moduleFactQuasiQuoteUse = mfQuasiQuoteUse front
@@ -3111,7 +3084,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   output = ModuleOutput (mg_module externalized) (mg_binds externalized)
                     (capturedBindingDisplay evalUserBinder tcg) (capturedCellBinderPins env tcg)
                     (foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan])
-                  facts = ModuleFacts (mg_tcs desugared) (moduleRefs desugared) roots
+                  facts = ModuleFacts (moduleRefs desugared) roots
                     (not (null files)) quotes
                   pending = PendingFinalization summaryC facts output tidy details typedEnv
                   action = HscRecomp tidy (ms_location summaryC) partial oldHash
@@ -3905,23 +3878,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               pvLabel variant ++ ": target module '" ++ targetModName
               ++ "' not found among compiled modules: "
               ++ show (map (moduleNameString . moduleName . moduleOutputModule) results)
-          -- 'allTyCons' unconditionally covers EVERY compiled module, not just the
-          -- tier's reachable set: TyCon/DataCon declarations are populated by the
-          -- typechecker and are never touched by 'core2core' (which transforms
-          -- 'mg_binds' only — the back half never re-derives 'mg_tcs'), so reading
-          -- them off the DESUGARED guts costs nothing extra and keeps a
-          -- validation-only module's data types available to metadata validation.
-          -- Order is summary order, which on the session variant (topologically
-          -- sorted over the target's own import closure, so the target is last) is
-          -- the dependencies-then-target order it used to build by hand.
           moduleFacts <- liftIO (mapM observationFacts observations)
           hscFinal0 <- getSession
           hscFinal <- liftIO (includeTypedSession hscFinal0)
           setSession hscFinal
-          exactTyCons <- liftIO (exactInterfaceTyCons hscFinal (pvExactScope variant))
           let allBinds  = concatMap moduleOutputBinds depOutputs
                 ++ moduleOutputBinds targetOutput
-              allTyCons = concatMap moduleFactTyCons moduleFacts ++ exactTyCons
           targetEnvironment <- liftIO (readIORef targetEnvironmentRef) >>= maybe
             (liftIO (ioError (userError (pvLabel variant ++ ": target frontend environment is absent")))) pure
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
@@ -3929,7 +3891,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           injectedTyped <- liftIO (readIORef typedSessionInterfacesRef)
           let pipelineResult = PipelineResult
                 { ownedPrBinds  = allBinds
-                , ownedPrTyCons = allTyCons
                 , ownedPrHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
                 , ownedPrInjectedSessionInterfaces = injectedBaseline
                 , ownedPrProducedSessionInterfaces = injectedTyped
@@ -3992,8 +3953,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               Nothing -> if not isTarget && not (isNothing loaded)
                   && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
                 then do
-                  forM_ loaded $ \hmi -> do
-                    let facts = hydratedModuleFacts hmi (maybe emptyPackageImports admittedCandidateRoots
+                  forM_ loaded $ \_ -> do
+                    let facts = hydratedModuleFacts (maybe emptyPackageImports admittedCandidateRoots
                           (Map.lookup (ms_mod_name summary) acceptedCandidates))
                     liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
                   pure Nothing
@@ -4040,8 +4001,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             ++ moduleNameString (ms_mod_name summary) ++ reason
                   dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
                   liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
-                    { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
-                    , moduleFactReferences = Set.empty
+                    { moduleFactReferences = Set.empty
                     , moduleFactPackageImports = emptyPackageImports
                     , moduleFactHasDependentFiles = not (null dependentFiles)
                     , moduleFactQuasiQuoteUse = quotes }) :))
