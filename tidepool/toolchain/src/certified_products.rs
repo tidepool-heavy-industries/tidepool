@@ -12199,9 +12199,8 @@ pub(crate) mod tests {
             ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
         };
         let producer_bytes = b"completed-request-input-permissions";
-        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-            producer_bytes,
-        );
+        let producer =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let dependency = fixture_finalized_product(
             original_groups_fixture_with_interface(
                 "RequestInput",
@@ -12232,10 +12231,8 @@ pub(crate) mod tests {
         let products = recovered_witness_fixtures(&[dependency, fresh]);
         let dependency = &products[0].product;
         let fresh = &products[1].product;
-        let input =
-            Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
-        let fresh_entry =
-            Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+        let input = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+        let fresh_entry = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
         for (ordinals, permitted) in [
             (vec![3, 7], true),
             (vec![3], true),
@@ -12275,12 +12272,29 @@ pub(crate) mod tests {
                 ordinals.len() == 2
             );
             let operation = InventoryOperation::new(Default::default());
-            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
-                &request,
-                &request.metadata,
-                &operation,
-            )
-            .unwrap();
+            let mut selection =
+                CertifiedSourceSelection::from_compiler_inputs(&request, &request.metadata, &operation)
+                    .unwrap();
+            let input_only =
+                OriginalCompilerInputs::from_selection(&selection, request.artifacts()).unwrap();
+            let source =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&input_only)
+                    .unwrap();
+            let source_row = source
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner() == dependency.owner())
+                .unwrap();
+            assert_eq!(source_row.permits(3), permitted);
+            assert_eq!(
+                source.artifacts().selected_native_groups(),
+                input_only.issued_artifacts().selected_native_groups()
+            );
+            let source_result = OriginalCompilerInputs::from_checked_support_products(
+                &source,
+                producer.sha256(),
+                std::slice::from_ref(fresh),
+            );
             selection
                 .admit_current(
                     fresh.owner(),
@@ -12298,26 +12312,34 @@ pub(crate) mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let result = OriginalCompilerInputs::from_selection(&selection, &physical);
-            assert_eq!(result.is_ok(), permitted);
-            if permitted {
-                let completed = result.unwrap();
-                assert!(completed.native_offers().iter().any(|offer| {
-                    offer.original() == fresh_entry.descriptor.id && offer.is_full()
-                }));
-                assert!(completed
-                    .issued_artifacts()
-                    .selected_native_groups()
-                    .iter()
-                    .all(|key| key.artifact != fresh_entry.descriptor.id));
-            } else {
-                assert!(
-                    matches!(result, Err(crate::CompileError::ArtifactInventory(error))
-                    if matches!(error.failure,
-                        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                            artifact, original_ordinal: 3,
-                        } if artifact == input.descriptor.id))
+            let request_result = OriginalCompilerInputs::from_selection(&selection, &physical);
+            for (consumer, result) in [("request", request_result), ("source", source_result)] {
+                assert_eq!(
+                    result.is_ok(),
+                    permitted,
+                    "{consumer} permissions {ordinals:?}; actual_error={:?}",
+                    result.as_ref().err()
                 );
+                if permitted {
+                    let completed = result.unwrap();
+                    assert!(completed.native_offers().iter().any(|offer| {
+                        offer.original() == fresh_entry.descriptor.id && offer.is_full()
+                    }));
+                    assert!(completed
+                        .issued_artifacts()
+                        .selected_native_groups()
+                        .iter()
+                        .all(|key| key.artifact != fresh_entry.descriptor.id));
+                } else {
+                    assert!(
+                        matches!(result, Err(crate::CompileError::ArtifactInventory(error))
+                        if matches!(error.failure,
+                            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                                artifact, original_ordinal: 3,
+                            } if artifact == input.descriptor.id)),
+                        "{consumer} must refuse unavailable input group 3"
+                    );
+                }
             }
         }
     }

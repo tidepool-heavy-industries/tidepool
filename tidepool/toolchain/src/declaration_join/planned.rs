@@ -781,9 +781,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         artifact_context
             .as_ref()
             .clone()
-            .retain_issued_native_offers(
-                output.compiler_inputs().issued_offers().iter().cloned(),
-            )?,
+            .retain_issued_native_inputs(output.compiler_inputs())?,
     );
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let ValidatedAuthoredClosure {

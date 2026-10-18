@@ -1,14 +1,11 @@
 use super::*;
 
-/// Exact dependency grants remain attached to their issuing owner. Request
-/// rows retain narrower per-original permissions than their supporting proofs.
+/// Exact dependency grants remain attached to their issuing owner. Source and
+/// request rows share permissions independently of their supporting proofs.
 pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
 
 enum DependencyGrantSource<'a> {
-    Source {
-        source: &'a CompilerSourceSupport,
-        offers: Vec<IssuedNativeOffer>,
-    },
+    Source(&'a CompilerSourceSupport),
     Request(&'a crate::declaration_context::ContinuationNativeInputs<'a>),
 }
 
@@ -20,27 +17,38 @@ impl<'a> NativeDependencyCatalog<'a> {
     }
 
     pub(crate) fn from_source(source: &'a CompilerSourceSupport) -> Result<Self, CompileError> {
-        let offers = source
-            .native_offers()
-            .iter()
-            .map(|offer| offer.within_projection(source.projection(), source.artifacts()))
-            .collect::<Result<Vec<_>, _>>()?
+        Ok(Self(DependencyGrantSource::Source(source)))
+    }
+
+    fn availability_rows(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
+        let source = match &self.0 {
+            DependencyGrantSource::Source(source) => Some(source.native_availability()),
+            DependencyGrantSource::Request(_) => None,
+        };
+        let request = match &self.0 {
+            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
+            DependencyGrantSource::Source(_) => None,
+        };
+        // Classification is derived by the receiving request. Every normalized
+        // row participates here, including a former compiler-role row and Empty.
+        source
             .into_iter()
-            .flatten()
-            .collect();
-        Ok(Self(DependencyGrantSource::Source { source, offers }))
+            .flat_map(|rows| rows.rows())
+            .chain(request.into_iter().flatten())
     }
 
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
         match &self.0 {
-            DependencyGrantSource::Source { source, .. } => source.input_decisions(),
+            DependencyGrantSource::Source(source) => source.input_decisions(),
             DependencyGrantSource::Request(inputs) => inputs.input_decisions(),
         }
     }
 
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
         let projection = match &self.0 {
-            DependencyGrantSource::Source { source, .. } => source.projection(),
+            DependencyGrantSource::Source(source) => source.projection(),
             DependencyGrantSource::Request(inputs) => inputs.projection(),
         };
         match projection.snapshot_roles().get(owner) {
@@ -109,21 +117,10 @@ impl<'a> NativeDependencyCatalog<'a> {
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
     ) -> Vec<(NativeGroupBinding, &IssuedNativeOffer)> {
         let mut supports = BTreeMap::new();
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => {
-                for row in inputs.availability_rows() {
-                    if let Some(support) = row.dependency_support(key, owner) {
-                        for group in support.groups() {
-                            if let Some(offer) = support.offer_for_group(group) {
-                                supports.entry(group).or_insert(offer);
-                            }
-                        }
-                    }
-                }
-            }
-            DependencyGrantSource::Source { offers, .. } => {
-                for offer in offers {
-                    for group in offer.group_bindings(key) {
+        for row in self.availability_rows() {
+            if let Some(support) = row.dependency_support(key, owner) {
+                for group in support.groups() {
+                    if let Some(offer) = support.offer_for_group(group) {
                         supports.entry(group).or_insert(offer);
                     }
                 }
@@ -694,9 +691,123 @@ pub(crate) struct NativeOfferContribution {
     offer: IssuedNativeOffer,
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     originals: BTreeSet<ArtifactId>,
+    identity: OnceLock<[u8; 32]>,
 }
 
+impl PartialEq for NativeOfferContribution {
+    fn eq(&self, other: &Self) -> bool {
+        self.offer == other.offer
+            && self.reachable == other.reachable
+            && self.originals == other.originals
+    }
+}
+impl Eq for NativeOfferContribution {}
+
 impl NativeOfferContribution {
+    pub(crate) fn snapshot_facts(
+        &self,
+    ) -> Result<crate::declaration_context::NativeContributionSnapshotFacts, CompileError> {
+        Ok(
+            crate::declaration_context::NativeContributionSnapshotFacts {
+                offer: self.offer.snapshot_facts().identity()?,
+                reachable: self.reachable.clone(),
+            },
+        )
+    }
+
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        if let Some(identity) = self.identity.get() {
+            return Ok(*identity);
+        }
+        let identity = self.snapshot_facts()?.identity()?;
+        let _ = self.identity.set(identity);
+        Ok(identity)
+    }
+
+    pub(crate) fn restore(
+        offer: IssuedNativeOffer,
+        facts: &crate::declaration_context::NativeContributionSnapshotFacts,
+    ) -> Result<Self, CompileError> {
+        if offer.snapshot_facts().identity()? != facts.offer
+            || !facts
+                .reachable
+                .iter()
+                .all(|node| offer.0.custody.reachable.contains(node))
+        {
+            return Err(failure("native contribution exceeds its issued proof"));
+        }
+        let state = offer
+            .0
+            .custody
+            .lease
+            .inventory
+            .0
+            .lock()
+            .expect("inventory lock");
+        let closure = admitted_closure(&state, facts.reachable.iter().copied());
+        if !closure.iter().all(|node| facts.reachable.contains(node)) {
+            return Err(failure("native contribution omits an issued dependency"));
+        }
+        drop(state);
+        let originals = facts
+            .reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
+                _ => None,
+            })
+            .collect();
+        let identity = OnceLock::new();
+        let _ = identity.set(facts.identity()?);
+        Ok(Self {
+            offer,
+            reachable: facts.reachable.clone(),
+            originals,
+            identity,
+        })
+    }
+
+    /// Restrict an already issued contribution to authenticated dependency roots.
+    pub(crate) fn for_groups(
+        &self,
+        roots: &BTreeSet<NativeGroupBinding>,
+    ) -> Result<Self, CompileError> {
+        let state = self
+            .offer
+            .0
+            .custody
+            .lease
+            .inventory
+            .0
+            .lock()
+            .expect("inventory lock");
+        let reachable = admitted_closure(
+            &state,
+            roots
+                .iter()
+                .copied()
+                .filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group)))
+                .map(ArtifactBindingNode::Group),
+        );
+        if !reachable.iter().all(|node| self.reachable.contains(node)) {
+            return Err(failure("restricted native contribution exceeds its issuer"));
+        }
+        drop(state);
+        let originals = reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
+                _ => None,
+            })
+            .collect();
+        Ok(Self {
+            offer: self.offer.clone(),
+            reachable,
+            originals,
+            identity: OnceLock::new(),
+        })
+    }
+
     pub(crate) fn offer(&self) -> &IssuedNativeOffer {
         &self.offer
     }
@@ -1640,6 +1751,7 @@ impl IssuedNativeOffer {
             offer: self.clone(),
             reachable,
             originals,
+            identity: OnceLock::new(),
         }))
     }
 
@@ -1763,5 +1875,147 @@ impl IssuedNativeOffer {
             body: NativeOfferBody::Partial(proof.clone()),
             custody: self.0.custody.clone(),
         }))))
+    }
+}
+
+#[cfg(test)]
+mod normalized_dependency_tests {
+    use super::*;
+    use crate::certified_products::tests::{
+        original_groups_fixture_with_interface, recovered_witness_fixtures,
+    };
+    use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
+    use crate::declaration_context::{
+        ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+    };
+
+    #[test]
+    fn normalized_source_keeps_retained_root_dependencies_without_dependency_roles_or_siblings() {
+        let producer_bytes = b"normalized-source-dependency-closure";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let hidden = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedHidden",
+                vec![(7, vec![]), (9, vec![])],
+                73,
+                &BTreeMap::new(),
+                b"hidden interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let root = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedRoot",
+                vec![(
+                    3,
+                    vec![PendingImportOwner::Source {
+                        owner: hidden.owner().clone(),
+                        original_ordinal: 7,
+                        binder: tidepool_repr::execution_schema::testing::identity(
+                            "NormalizedHidden",
+                            "entry_7",
+                        ),
+                    }],
+                )],
+                74,
+                &BTreeMap::new(),
+                b"root interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let sibling = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "NormalizedSibling",
+                vec![(11, vec![])],
+                75,
+                &BTreeMap::new(),
+                b"sibling interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let products = recovered_witness_fixtures(&[hidden, root, sibling])
+            .into_iter()
+            .map(|witness| witness.product)
+            .collect::<Vec<_>>();
+        let inputs = OriginalCompilerInputs::from_checked_support_products(
+            &CompilerSourceSupport::empty(),
+            producer.sha256(),
+            &products,
+        )
+        .unwrap();
+        let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+        let root_owner = ExactModuleIdentity {
+            unit: products[1].owner().unit.clone(),
+            module: products[1].owner().module.clone(),
+        };
+        let interfaces = complete.selected_interfaces().unwrap();
+        let types = interfaces
+            .support_for_owners(vec![root_owner.clone()])
+            .unwrap();
+        let retained = types.retain_template_availability(&complete).unwrap();
+        assert_eq!(retained.projection().snapshot_roles().len(), 1);
+        assert!(retained
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let sibling_id = ArtifactEntry::original(producer.sha256(), products[2].clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
+        assert!(!catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 7
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 9
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: sibling_id,
+                    original_ordinal: 11
+                },
+                products[2].owner()
+            )
+            .unwrap()
+            .is_empty());
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&retained)
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(scratch.path(), producer_bytes)
+            .unwrap();
+        let hidden = request
+            .compiler_inputs()
+            .native_availability(hidden_id)
+            .expect("retained R carries dependency H without an H role");
+        assert!(hidden.permits(7));
+        assert!(!hidden.permits(9));
+        assert!(request
+            .compiler_inputs()
+            .native_availability(sibling_id)
+            .is_none());
+        assert!(request.groups.is_empty());
     }
 }

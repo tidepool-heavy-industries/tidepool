@@ -767,6 +767,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         )
         .unwrap();
         let private = OriginalCompilerInputs {
+            native_availability: RequestNativeAvailability::issue_checked(&projection, &artifacts, &native_offers).unwrap(),
             demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
             projection,
             artifacts,

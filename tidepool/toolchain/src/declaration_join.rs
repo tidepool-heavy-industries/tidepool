@@ -715,7 +715,7 @@ fn certify_authored_declaration_inner(
         artifact_context
             .as_ref()
             .clone()
-            .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
+            .retain_issued_native_inputs(&issued_inputs)?,
     );
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let planned::AuthoredClosureObservation {
@@ -3238,7 +3238,7 @@ mod authored_tests {
             &live.artifact_view().binding_dependencies(),
         )
         .unwrap()
-        .context_with_snapshot(receipt.snapshot())
+        .context_for_expected_snapshot(receipt.root(), &receipt)
         .unwrap();
         assert_eq!(
             recovered
@@ -3478,7 +3478,9 @@ mod authored_tests {
             &snapshot.binding_dependencies().unwrap(),
         )
         .unwrap();
-        let mut recovered = inventory.context_with_snapshot(snapshot).unwrap();
+        let mut recovered = inventory
+            .context_for_expected_snapshot(receipt.root(), &receipt)
+            .unwrap();
         recovered.bind_snapshot_baseline(&receipt).unwrap();
         assert_eq!(
             recovered.semantic_sha256(),
