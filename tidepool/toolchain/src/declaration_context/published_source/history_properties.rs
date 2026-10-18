@@ -364,6 +364,12 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         callbacks.set(callbacks.get() + 1);
         let (root, helper, publication) = fixture_with_helper_version(initial, 1, true);
         let original = publication.context();
+        // Publication must carry the earned permission without selecting it.
+        let permissions = original.compiler_source_support().native_availability();
+        prop_assert!(permissions.rows().find(|row| row.original.descriptor.id == root.descriptor.id)
+            .is_some_and(|row| ORDINALS.iter().all(|ordinal| row.permits(*ordinal))));
+        prop_assert!(permissions.rows().find(|row| row.original.descriptor.id == helper.descriptor.id)
+            .is_some_and(|row| row.permits(7)));
         let expected_publication = original.compiler_input_roles().into_iter()
             .find(CompilerInputRole::is_published_source_original).unwrap();
         let mut expected_roles = original.compiler_input_roles();
@@ -416,10 +422,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let row = context.compiler_source_support().native_availability().rows()
                         .find(|row| row.original.descriptor.id == root.descriptor.id).unwrap();
                     prop_assert!(row.permits(ordinal));
-                    let permitted_groups = row.offers().filter_map(|offer| offer.proof())
-                        .flat_map(|proof| proof.selection.graph_selection().native_groups.iter().copied())
-                        .filter(|group| group.binding.artifact() == root.descriptor.id
-                            && group.original_ordinal == ordinal).collect::<BTreeSet<_>>();
+                    let permitted_groups = row.dependency_support(NativeGroupKey {
+                        artifact: root.descriptor.id, original_ordinal: ordinal,
+                    }, product.owner()).unwrap().groups().collect::<BTreeSet<_>>();
                     prop_assert!(!permitted_groups.is_empty());
                     let module = format!("HistoryOutput{ordinal}");
                     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
