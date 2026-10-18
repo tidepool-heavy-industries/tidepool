@@ -14808,9 +14808,7 @@ mod tests {
                 crate::certified_products::tests::original_witness_fixture(
                     module,
                     Some(crate::certified_products::PendingImportOwner::Retained {
-                        identity: tidepool_repr::execution_schema::testing::identity(
-                            "Value", "live",
-                        ),
+                        identity: tidepool_repr::execution_schema::testing::identity("Value", "live"),
                         generation,
                     }),
                     version,
@@ -14838,7 +14836,9 @@ mod tests {
             .prepare_compilation(&scratch.path().join("base"), &producer)
             .unwrap();
         assert!(base_request.groups.is_empty());
-        let demand = |request: &ExactCompilationRequest, expected: &CertifiedRecoveryProduct| {
+        let demand = |request: &ExactCompilationRequest,
+                      expected: &CertifiedRecoveryProduct|
+         -> Result<CertifiedRecoveryProduct, CompileError> {
             let module = expected.owner().module.as_str();
             let inputs = request.compiler_inputs();
             assert!(inputs.artifacts().selected_native_groups().is_empty());
@@ -14859,31 +14859,24 @@ mod tests {
                 binder: binding.identity.clone(),
             }];
             let validation = PackageInterfaceValidation::default();
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                    inputs,
-                    &inputs.metadata,
-                    &validation.inventory,
-                )
-                .unwrap();
+            let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                inputs,
+                &inputs.metadata,
+                &validation.inventory,
+            )
+            .unwrap();
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
                 .bind_segment(&inputs.artifacts(), vec![], &selection)
                 .unwrap();
-            let target = inputs
-                .artifacts()
-                .inventory()
-                .admit_bound_target(
-                    &mut fixed,
-                    &inputs.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                        &imports,
-                    ),
-                    vec![],
-                    &selection,
-                )
-                .unwrap();
+            let target = inputs.artifacts().inventory().admit_bound_target(
+                &mut fixed,
+                &inputs.artifacts(),
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            )?;
             let groups = target
                 .clone()
                 .bind_target(None, (&imports).to_vec())
@@ -14918,7 +14911,7 @@ mod tests {
                 std::fs::read(&physical.product.as_ref().unwrap().path).unwrap(),
                 product.product_bytes()
             );
-            target
+            Ok(target
                 .artifacts()
                 .entries_for_artifacts(&BTreeSet::from([id]))
                 .unwrap()
@@ -14927,9 +14920,9 @@ mod tests {
                     ArtifactPayload::Original(product) => Some(product.clone()),
                     _ => None,
                 })
-                .expect("the resolved target retains its exact original payload")
+                .expect("the resolved target retains its exact original payload"))
         };
-        let base_native = demand(&base_request, &native);
+        let base_native = demand(&base_request, &native).unwrap();
         assert_eq!(base_native.owner().module_version.0, [7; 32]);
         assert!(matches!(
             crate::certified_products::original_native_group_imports(&base_native, 7).unwrap()[0],
@@ -15019,8 +15012,45 @@ mod tests {
             (&right_request, &right_product, 9, 13),
         ] {
             let module = expected.owner().module.as_str();
-            let original = demand(branch, expected);
-            let selected = demand(&joined_request, expected);
+            let original = demand(branch, expected).unwrap();
+            let selected = if expected.owner() == right_product.owner() {
+                let id = ArtifactEntry::original(joined_request.producer_sha256, expected.clone())
+                    .unwrap()
+                    .descriptor
+                    .id;
+                let inputs = joined_request.compiler_inputs();
+                assert!(inputs
+                    .projection()
+                    .snapshot_roles()
+                    .get(&identity(&expected.owner().unit, module))
+                    .is_none());
+                assert!(inputs.native_availability(id).is_none());
+                assert!(inputs
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .all(|offer| offer.original() != id));
+                assert!(matches!(
+                    demand(&joined_request, expected),
+                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact, original_ordinal: 7,
+                        } if artifact == id)
+                ));
+                joined_request
+                    .context()
+                    .artifact_view()
+                    .entries_for_artifacts(&BTreeSet::from([id]))
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|entry| match &entry.payload {
+                        ArtifactPayload::Original(product) => Some(product.clone()),
+                        _ => None,
+                    })
+                    .expect("custody-only join retains Right's actual original payload")
+            } else {
+                demand(&joined_request, expected).unwrap()
+            };
             assert_eq!(selected.owner(), original.owner());
             assert_eq!(selected.owner().module_version.0, [version; 32]);
             assert_eq!(selected.product_bytes(), original.product_bytes());
@@ -15062,7 +15092,7 @@ mod tests {
             .prepare_compilation(&scratch.path().join("replacement"), &producer)
             .unwrap();
         assert!(replacement_request.groups.is_empty());
-        let selected = demand(&replacement_request, &replacement_product);
+        let selected = demand(&replacement_request, &replacement_product).unwrap();
         assert_eq!(selected.owner().module_version.0, [10; 32]);
         assert_ne!(selected.owner(), base_native.owner());
         assert!(matches!(
