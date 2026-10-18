@@ -9,7 +9,7 @@ module Tidepool.FinalizedModuleArtifacts
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
-  , localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody, revalidateLocalFinalizedAdmission
+  , localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, localFinalizedCoreBody, revalidateLocalFinalizedAdmission
   , revalidateLocalFinalizedAdmissionWith
   , matchesCapturedFinalization ) where
 
@@ -73,8 +73,9 @@ data FinalizedArtifactFailure
 instance Exception FinalizedArtifactFailure
 
 -- This identity pairs in-memory consumers with the exact compiler object that
--- issued their files. A stable name retains neither that object nor its Core.
-newtype FinalizationIdentity = FinalizationIdentity (StableName FinalizedModule)
+-- issued their files and the exact package facts used to encode its sidecar.
+-- A stable name retains neither that object nor its Core.
+data FinalizationIdentity = FinalizationIdentity (StableName FinalizedModule) PackageImportEvidence
   deriving (Eq)
 
 instance Show FinalizationIdentity where
@@ -111,6 +112,7 @@ captureFinalizedModuleArtifacts
   -> IO FinalizedModuleArtifacts
 captureFinalizedModuleArtifacts originals env finalized packages evidence directory = do
   absoluteDirectory <- normalise <$> makeAbsolute directory
+  timing <- readTimingEnabled
   let homeUnits = map (T.pack . unitIdString) (Set.toAscList (hsc_all_home_unit_ids env))
       owners = map originalKey (Map.elems finalized)
   when (length homeUnits > 128 || Map.size finalized > 128) $ throwIO FinalizedInventoryTooLarge
@@ -142,7 +144,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
   forM_ (Map.keys (Map.filter ((> 1) . Set.size) selectedPackages)) $
     \(unit,name) -> throwIO (InvalidFinalizedPackage unit name)
   issuedRows <- forM (sortOn originalKey (Map.elems finalized)) $ \original -> do
-    identity <- FinalizationIdentity <$> (evaluate original >>= makeStableName)
+    identity <- evaluate original >>= makeStableName
     let iface = hm_iface (finalizedHomeModInfo original)
         owner = mi_module iface
         unit = unitString (moduleUnit owner)
@@ -159,9 +161,12 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
           || not (isAbsolute (packagePath root)) || not (validDigest (packageSha256 root))) $
         throwIO (InvalidFinalizedPackage (packageUnit root) (packageModule root))
     let interfaceSHA = T.pack (artifactSha256 interfaceBody)
-        sidecar = encodePackageImports (ExactIfaceArtifact unit name "" (T.unpack interfaceSHA) []) roots
     interface <- capture "hi" interfaceLimit interfaceBody
+    emitCount timing "finalized_package_encoding_attempts" 1
+    sidecar <- evaluate (encodePackageImports (ExactIfaceArtifact unit name "" (T.unpack interfaceSHA) []) roots)
     package <- capture "packages.cbor" packageLimit (captureArtifactBytes sidecar)
+    emitCount timing "finalized_package_encoding_completions" 1
+    emitCount timing "finalized_package_encoded_bytes" (fromIntegral (artifactLength package))
     core <- captureFinalizedCore original >>= \case
       Right bytes -> Just <$> capture "core" coreLimit bytes
       Left refusal | isUnsupportedFinalizedCore refusal -> pure Nothing
@@ -175,7 +180,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
         >>= maybe (throwIO (MissingFinalizedDependency requiredUnit requiredName)) pure
       unless (validDigest sha) $ throwIO (MissingFinalizedDependency requiredUnit requiredName)
       pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
-    pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements identity)
+    pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements (FinalizationIdentity identity roots))
   let rows = issuedRows
   let required = Set.fromList [(unit,name)
         | CapturedModule _ _ _ _ _ _ dependencies _ <- rows, (unit,name,_) <- dependencies]
@@ -327,11 +332,11 @@ localFinalizedCore :: LocalFinalizedAdmission -> Maybe (FilePath,String)
 localFinalizedCore (LocalFinalizedAdmission _ directory (CapturedModule _ _ _ _ _ core _ _)) =
   (\payload -> (payloadPath directory "core" payload,payloadSha payload)) <$> core
 
-matchesCapturedFinalization :: LocalFinalizedAdmission -> FinalizedModule -> IO Bool
+matchesCapturedFinalization :: LocalFinalizedAdmission -> FinalizedModule -> PackageImportEvidence -> IO Bool
 matchesCapturedFinalization (LocalFinalizedAdmission _ _
-    (CapturedModule _ _ _ _ _ _ _ (FinalizationIdentity captured))) original = do
+    (CapturedModule _ _ _ _ _ _ _ (FinalizationIdentity captured packages))) original currentPackages = do
   current <- evaluate original >>= makeStableName
-  pure (captured == current)
+  pure (captured == current && packages == currentPackages)
 
 -- Admission already owns these immutable bodies. Paths are receipt/provenance
 -- views; publishing a new file still requires its independent output checks.
@@ -354,6 +359,10 @@ localFinalizedInterfaceBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ b
 
 localFinalizedPackageBody :: LocalFinalizedAdmission -> ArtifactBytes
 localFinalizedPackageBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ body _ _ _)) = body
+
+localFinalizedPackageEvidence :: LocalFinalizedAdmission -> PackageImportEvidence
+localFinalizedPackageEvidence (LocalFinalizedAdmission _ _
+    (CapturedModule _ _ _ _ _ _ _ (FinalizationIdentity _ packages))) = packages
 
 localFinalizedCoreBody :: LocalFinalizedAdmission -> Maybe ArtifactBytes
 localFinalizedCoreBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ _ body _ _)) = body

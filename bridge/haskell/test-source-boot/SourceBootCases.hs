@@ -132,14 +132,14 @@ import Tidepool.CompilerProducts
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts
-  , retainStagedProgramProducts )
+  , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
-  , localFinalizedCore, revalidateLocalFinalizedAdmissionWith )
+  , localFinalizedCore, localFinalizedSourceSha256, revalidateLocalFinalizedAdmissionWith )
 import Tidepool.BoundedRead (withFileObservations, observeFile)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts, encodeProjectedGroup, moduleProductInput, projectedGroupEncodingInput, projectedGroupEncodingBytes)
+import Tidepool.ExecutionEncode (encodeModuleProducts, encodeProjectedGroup, moduleProductInput, moduleProductBytes, projectedGroupEncodingInput, projectedGroupEncodingBytes)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
@@ -1002,6 +1002,30 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       publishStagedOriginalProducts captured staged
     when (null (certifiedOriginalProducts stagedPublished))
       (fail "staged readiness control lacks actual native originals")
+    graph <- case certifiedExecutionSource stagedPublished of
+      ExactExecutionSourceAvailable value -> pure value
+      _ -> fail "native package identity control did not issue its actual source graph"
+    let freshOwners = filter executionOwnerFresh (executionGraphOwners graph)
+    when (null freshOwners) (fail "source identity control issued no fresh owner")
+    forM_ freshOwners $ \owner -> do
+      let actual = executionOwnerIdentity owner
+          key@(unit,name) = executionIdentityKey actual
+      product' <- case [value | value <- certifiedOriginalProducts stagedPublished
+          , let (unit',name',_,_) = moduleProductInput value
+          , (T.unpack unit',T.unpack name') == key] of
+        [value] -> pure value
+        _ -> fail "source identity control lacks one genuine native original"
+      admission <- maybe (fail "source identity control lacks finalized custody") pure
+        (Map.lookup key (finalizedLocalAdmissions (certifiedFinalizedArtifacts stagedPublished)))
+      packages <- maybe (fail "source identity control lacks compiler package facts") pure
+        (Map.lookup (mkModuleName name) (pprPackageImports captured))
+      let (_,_,iface,_) = moduleProductInput product'
+          (artifact,_,_) = localFinalizedInterface admission
+          expected = exactProgramProductVersionFromDigest (compilationScope localCompilation)
+            unit name (localFinalizedSourceSha256 admission) iface (moduleProductBytes product')
+            (encodePackageImports artifact packages)
+      unless (executionVersion actual == expected) $
+        fail "source graph identity differs from the original package codec bytes"
     stagedRetentionDirectory <- pure (work </> "checked-local-staged-retention")
     createDirectory stagedRetentionDirectory
     _ <- withOriginalProductReceipt work captured (const stagedPublished) $
@@ -3691,6 +3715,21 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  let emittedOwners = Set.fromList [(unit,owner)
+        | product' <- certifiedOriginalProducts currentCertificate
+        , let (unit,owner,_,_) = moduleProductInput product']
+      packageRows = [TList [TString unit,TString owner,TBytes (encodePackageImports iface facts)]
+        | ((unit,owner),_) <- Map.toAscList (Map.fromSet (const ()) emittedOwners)
+        , Just admission <- [Map.lookup (T.unpack unit,T.unpack owner)
+            (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))]
+        , let (iface,_,_) = localFinalizedInterface admission
+        , Just facts <- [Map.lookup (mkModuleName (T.unpack owner)) (pprPackageImports paired)]]
+  unless (length packageRows == Set.size emittedOwners) $
+    fail "native package-byte oracle omitted a genuine published owner"
+  emittedPackages <- BS.readFile (captureDirectory </> "module-package-imports.cbor")
+  unless (emittedPackages == toStrictByteString
+      (encodeTerm (TList [TString "TPPKGBUNDLES",TInt 1,TList packageRows]))) $
+    fail "native package publication changed original package codec bytes"
   let segmentDirectory = captureDirectory </> "segment-originals"
   sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")

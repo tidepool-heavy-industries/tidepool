@@ -283,7 +283,7 @@ import Tidepool.ExecutionSource
   , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
-  , validatePackageImportRoot, encodePackageImports )
+  , validatePackageImportRoot )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest
@@ -544,7 +544,7 @@ retainProgramSourceImports previous prepared captured retained = do
           either fail pure =<< validateExactScopeEnvironment env retained
           let freshNodes = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
                 | node <- dependencyModules fresh, not (dependencyModuleBoot node)]
-              sourceMatches key originalRow@(ProgramImportOriginal row@(iface,_,packageSha) evidence lexical) =
+              sourceMatches key originalRow@(ProgramImportOriginal row evidence lexical) =
                 case (Map.lookup key freshNodes, evidence) of
                   (Nothing, _) -> pure (programImportOriginal admitted key == Just originalRow
                     && key `Set.notMember` scopeSourceSelectedOwners admitted)
@@ -566,9 +566,8 @@ retainProgramSourceImports previous prepared captured retained = do
                     , sort lexical == sort (nub [(unit,name) | (_,name,False,Just unit) <- imports])
                     , [canonicalSourceSha256 canonical] ==
                         [dependencySourceSha256 source | source <- dependencySources fresh
-                          , dependencySourcePath source == dependencyModuleSource node]
-                    , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) ->
-                        matchesCapturedFinalization finalized original
+                          , dependencySourcePath source == dependencyModuleSource node] ->
+                        matchesCapturedFinalization finalized original packages
                   (Just node, ModuleInterfaceEvidence canonical)
                     | [candidate] <- [candidate | candidate <- pprAcceptedCandidates prepared
                         , (candidateUnit candidate,candidateModule candidate) == key]
