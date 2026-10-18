@@ -1535,15 +1535,18 @@ class NativeQualificationTests(unittest.TestCase):
             ('missing-entry', {}, 'TIDEPOOL_PREPARED_ROOT_ENTRY', []),
             ('parallel', {}, None, ['--jobs', '2']),
         )
-        for label, changed, missing, options in mutations:
-            with self.subTest(input=label), tempfile.TemporaryDirectory() as directory:
+        for cohort, (label, changed, missing, options) in (
+                (cohort, mutation) for cohort in ("harness-performance", "harness-performance-persona",
+                                                  "harness-performance-notebook-reuse") for mutation in mutations):
+            with self.subTest(cohort=cohort, input=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 descriptor = {
                     'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
                     'cohorts': qualification.cohorts(), 'stdlib_mode': 'catalog-backed',
                     'startup_mode': 'prepared',
                     'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog.json',
-                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry'},
+                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry',
+                                    'TIDEPOOL_PREPARED_BUILTIN_ENTRIES': '/frozen/builtin-entries'},
                     **changed,
                 }
                 if missing is not None:
@@ -1553,7 +1556,7 @@ class NativeQualificationTests(unittest.TestCase):
                      patch.object(qualification.subprocess, 'run') as execute, \
                      contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(qualification.main([
-                        'run', str(root / 'qualification.json'), '--cohort', 'harness-performance',
+                        'run', str(root / 'qualification.json'), '--cohort', cohort,
                         '--output', str(output), *options]), 1)
                 execute.assert_not_called()
                 self.assertFalse(output.exists())
@@ -1735,6 +1738,67 @@ class NativeQualificationTests(unittest.TestCase):
                 if refused_dimension:
                     self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
                     self.assertEqual(measured["status"], "partial")
+
+    def test_prepared_persona_measurement_requires_consumed_route_and_complete_phase_roster(self):
+        from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
+        for mutation in (None, "missing_route", "wrong_route", "missing_entry", "empty_entry", "missing_phase", "missing_summary"):
+            with self.subTest(mutation=mutation):
+                fixture = HarnessUsecasePerfReportTests()
+                fixture.setUp()
+                self.addCleanup(fixture.tearDown)
+                runner_path = fixture.make_complete_case("persona-workbench")
+                phases_path = fixture.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(phases_path)
+                phases[0]["workspace_route"] = "prepared-workspace"
+                active = phases[1]
+                active.update(start_ns=10, end_ns=10 + active["wall_ns"],
+                              prepared_workspace_entry="/issued/workspace/entry")
+                active.update(installation_verification_start_ns=active["end_ns"] + 1,
+                              installation_verification_end_ns=active["end_ns"] + 11,
+                              installation_verification_ns=10)
+                cursor = active["installation_verification_end_ns"] + 1
+                for phase in phases[2:]:
+                    phase.update(start_ns=cursor, end_ns=cursor + phase["wall_ns"])
+                    cursor = phase["end_ns"] + 1
+                phases.append({"schema": 1, "phase": "measurement-summary", "completed": True,
+                               "start_ns": cursor, "end_ns": cursor + 10, "wall_ns": 10,
+                               "case_wall_ns": cursor + 10, "logical_compiler_requests": 0})
+                if mutation == "missing_route":
+                    phases[0].pop("workspace_route")
+                elif mutation == "wrong_route":
+                    phases[0]["workspace_route"] = "unprepared-workspace"
+                elif mutation == "missing_entry":
+                    active.pop("prepared_workspace_entry")
+                elif mutation == "empty_entry":
+                    active["prepared_workspace_entry"] = ""
+                elif mutation == "missing_summary":
+                    phases.pop()
+                elif mutation == "missing_phase":
+                    phases.pop(2)
+                fixture.write_jsonl(phases_path, phases)
+                fixture.add_owner_summaries()
+                record = json.loads(runner_path.read_text())
+                bundle = fixture.root / "bundle"
+                reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
+                reporter_path.parent.mkdir(parents=True)
+                shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
+                descriptor_path = fixture.root / "qualification.json"
+                descriptor_path.write_text("verified by run_cohort")
+                descriptor = {"bundle_root": str(bundle), "source_oid": "a" * 40,
+                              "harness_revision": "b" * 40, "profile": "production",
+                              "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
+                              "environment": phases[0]["deployment"]}
+                measured = qualification.analyze_harness_performance(
+                    descriptor, [record], [runner_path], qualification.cohorts()["harness-performance-persona"],
+                    True, descriptor_path, requested_trace_profile="full")
+                self.assertEqual(measured["completed"], mutation is None, measured["qualification"])
+                if mutation in ("missing_route", "wrong_route", "missing_entry", "empty_entry"):
+                    self.assertFalse(measured["qualification"]["prerequisites"]["selected_workspace_route_consumed"])
+                elif mutation == "missing_phase":
+                    self.assertFalse(measured["qualification"]["prerequisites"]["phase_coverage_complete"])
+                elif mutation == "missing_summary":
+                    self.assertFalse(measured["qualification"]["prerequisites"]["whole_case_wall_complete"])
 
     def test_offline_compiler_selection_is_exact_immutable_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
