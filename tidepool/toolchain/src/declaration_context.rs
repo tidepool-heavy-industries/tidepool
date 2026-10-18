@@ -567,7 +567,7 @@ impl OriginalCompilerInputs {
         let metadata = issued
             .projection
             .project_metadata(issued.artifacts.metadata_snapshot())?;
-        let transport = NativeCompilerTransport::receive(
+        let native = NativeInputSelection::receive(
             &issued.projection,
             &metadata,
             &issued.artifacts,
@@ -575,7 +575,7 @@ impl OriginalCompilerInputs {
             &issued.native_offers,
         )?;
         selection
-            .finish_new_product_availability(&metadata.retained, &transport.availability)
+            .finish_new_product_availability(&metadata.retained, &native.availability)
             .map_err(compiler_evidence_failure)?;
         // Return only physical custody. Continuation decisions belong to a
         // later input admission against the completed selection.
@@ -1075,7 +1075,7 @@ pub(crate) struct RequestCompilerInputs {
     // Retained availability outlives the transport subset consumed by this request.
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: CompilerArtifactMetadata,
-    native_transport: NativeCompilerTransport,
+    native_selection: NativeInputSelection,
     declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
 }
@@ -1209,7 +1209,7 @@ impl NativeTransportAvailability {
 
     pub(crate) fn original_owner(&self) -> &tidepool_repr::execution_schema::CachedHomeOwner {
         let ArtifactPayload::Original(product) = &self.original.payload else {
-            unreachable!("transport issuer checked original payload")
+            unreachable!("native selection issuer checked original payload")
         };
         product.owner()
     }
@@ -1332,7 +1332,7 @@ pub(crate) struct NativeAvailabilitySnapshotFacts {
 }
 
 /// Issuer-bound input availability, independent of output visibility and roles.
-/// Only transport issuance constructs a nonempty component; clones retain its
+/// Only native selection issuance constructs a nonempty component; clones retain its
 /// exact payload owners and opaque availability handles.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RequestNativeAvailability(
@@ -1709,7 +1709,7 @@ impl RequestNativeAvailability {
         validated: crate::artifact_inventory::ValidatedFreshNativeAvailability,
     ) -> Result<(Self, Vec<crate::artifact_inventory::IssuedNativeOffer>), CompileError> {
         let metadata = namespace.project_metadata(artifacts.metadata_snapshot())?;
-        let normalized = NativeCompilerTransport::normalize_issued_contributions(
+        let normalized = NativeInputSelection::normalize_issued_contributions(
             namespace,
             &metadata,
             artifacts,
@@ -1726,8 +1726,7 @@ impl RequestNativeAvailability {
     ) -> Result<Self, CompileError> {
         let metadata = roles.project_metadata(artifacts.metadata_snapshot())?;
         Ok(Self(
-            NativeCompilerTransport::issue_checked(roles, &metadata, artifacts, offers)?
-                .availability,
+            NativeInputSelection::issue_checked(roles, &metadata, artifacts, offers)?.availability,
         ))
     }
 
@@ -1759,8 +1758,8 @@ impl RequestNativeAvailability {
     }
 }
 
-/// Transport can own dependency bodies without issuing compiler namespace roles.
-/// Exact issuer bindings remain in the offers; transport records body availability.
+/// Native selection can own dependency bodies without issuing compiler namespace roles.
+/// Exact issuer bindings remain in the offers; this map records direct body availability.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AdvertisedNativeOriginals(Arc<BTreeMap<ExactModuleIdentity, ArtifactId>>);
 
@@ -1789,13 +1788,12 @@ impl AdvertisedNativeOriginals {
     }
 }
 
-struct NativeCompilerTransport {
-    metadata: CompilerArtifactMetadata,
+struct NativeInputSelection {
     availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     advertised: AdvertisedNativeOriginals,
 }
 
-impl NativeCompilerTransport {
+impl NativeInputSelection {
     fn receive(
         roles: &CompilerInputProjection,
         projection: &CompilerArtifactMetadata,
@@ -1815,10 +1813,6 @@ impl NativeCompilerTransport {
         normalized: RequestNativeAvailability,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
-        let mut metadata = CompilerArtifactMetadata {
-            retained: artifacts.metadata_snapshot(),
-            entries: projection.entries.clone(),
-        };
         let mut advertised = BTreeMap::new();
         for row in normalized.rows() {
             row.validate_full_evidence()?;
@@ -1876,13 +1870,7 @@ impl NativeCompilerTransport {
                 ));
             }
         }
-        for (owner, id) in &advertised {
-            metadata
-                .entries
-                .insert(owner.clone(), Arc::clone(&normalized.0[id].original));
-        }
         Ok(Self {
-            metadata,
             availability: normalized.0,
             advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         })
@@ -1894,12 +1882,11 @@ impl NativeCompilerTransport {
     /// These tags grant neither native availability nor retained heap roots.
     fn retained_generation_tags(
         &self,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
     ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
         for (original, availability) in self.availability.iter() {
-            let entry = self
-                .metadata
-                .retained
+            let entry = metadata
                 .artifacts
                 .get(original)
                 .ok_or_else(|| failure("advertised native original is outside request custody"))?;
@@ -1975,10 +1962,7 @@ impl NativeCompilerTransport {
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
         roots: &BTreeSet<ArtifactId>,
     ) -> Result<Self, CompileError> {
-        let metadata = CompilerArtifactMetadata {
-            retained: artifacts.metadata_snapshot(),
-            entries: projection.entries.clone(),
-        };
+        let metadata = &projection.retained;
         let mut availability = BTreeMap::<
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
@@ -2017,7 +2001,6 @@ impl NativeCompilerTransport {
                 continue;
             }
             let entry = metadata
-                .retained
                 .artifacts
                 .get(&offer.original())
                 .ok_or_else(|| failure("qualified native original is outside request custody"))?;
@@ -2076,7 +2059,6 @@ impl NativeCompilerTransport {
             }
             for original in contribution.originals() {
                 let entry = metadata
-                    .retained
                     .artifacts
                     .get(original)
                     .ok_or_else(|| failure("issued native dependency is outside request custody"))?
@@ -2103,7 +2085,6 @@ impl NativeCompilerTransport {
             .into_iter()
             .map(|(id, contributions)| {
                 let original = metadata
-                    .retained
                     .artifacts
                     .get(&id)
                     .ok_or_else(|| failure("issued native original is outside request custody"))?
@@ -2143,6 +2124,35 @@ impl NativeCompilerTransport {
             RequestNativeAvailability(Arc::new(availability)),
             offers,
         )
+    }
+}
+
+/// Physical launch lowering adds advertised originals without changing semantic roles.
+struct NativeCompilerTransport {
+    inputs: RequestCompilerInputs,
+    metadata: Arc<CompilerArtifactMetadata>,
+}
+
+impl NativeCompilerTransport {
+    fn lower(inputs: RequestCompilerInputs) -> Self {
+        let metadata = Self::lower_metadata(&inputs);
+        Self { inputs, metadata }
+    }
+
+    fn lower_metadata(inputs: &RequestCompilerInputs) -> Arc<CompilerArtifactMetadata> {
+        let mut metadata = CompilerArtifactMetadata {
+            retained: Arc::clone(&inputs.metadata.retained),
+            entries: inputs.metadata.entries.clone(),
+        };
+        for (owner, id) in inputs.native_selection.advertised.0.iter() {
+            metadata.entries.insert(
+                owner.clone(),
+                Arc::clone(&inputs.native_selection.availability[id].original),
+            );
+        }
+        #[cfg(test)]
+        NATIVE_TRANSPORT_LOWERINGS.with(|count| count.set(count.get() + 1));
+        Arc::new(metadata)
     }
 }
 
@@ -2215,7 +2225,7 @@ impl RequestCompilerInputs {
     ) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
         let mut facts = Vec::new();
         for proof in self
-            .native_transport
+            .native_selection
             .availability
             .values()
             .flat_map(|row| row.offers())
@@ -2232,15 +2242,15 @@ impl RequestCompilerInputs {
         &self,
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
-        self.native_transport.availability.get(&original).cloned()
+        self.native_selection.availability.get(&original).cloned()
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        RequestNativeAvailability(Arc::clone(&self.native_transport.availability))
+        RequestNativeAvailability(Arc::clone(&self.native_selection.availability))
     }
 
     pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
-        self.native_transport.advertised.clone()
+        self.native_selection.advertised.clone()
     }
 
     pub(crate) fn available_original_sources(
@@ -2258,6 +2268,7 @@ impl RequestCompilerInputs {
 #[cfg(test)]
 thread_local! {
     static REQUEST_COMPILER_INPUT_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NATIVE_TRANSPORT_LOWERINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ProtectedScaffoldRequirements {
@@ -2280,7 +2291,7 @@ impl ProtectedScaffoldRequirements {
         let metadata = support
             .projection()
             .project_metadata(support.artifacts().metadata_snapshot())?;
-        let native_transport = NativeCompilerTransport::receive(
+        let native_selection = NativeInputSelection::receive(
             support.projection(),
             &metadata,
             support.artifacts(),
@@ -2290,7 +2301,7 @@ impl ProtectedScaffoldRequirements {
         Ok(RequestCompilerInputs {
             source_support: Arc::new(support),
             metadata,
-            native_transport,
+            native_selection,
             declaration_semantic_sha256,
             original_sources: Default::default(),
         })
@@ -4441,6 +4452,7 @@ pub(crate) enum RetainedGenerationPolicy {
 #[derive(Clone)]
 pub(crate) struct ExactCompilationRequest {
     inputs: Arc<ExactRequestInputs>,
+    transport_metadata: Arc<CompilerArtifactMetadata>,
     pub(crate) manifest: PathBuf,
     pub(crate) request_sha256: String,
     // Checked-prefix identity is the persistent declaration baseline. The
@@ -6016,7 +6028,7 @@ impl ExactCompilationRequest {
         let Some(materialization) = &self.materialization else {
             return Vec::new();
         };
-        let metadata = &self.inputs.compiler.native_transport.metadata;
+        let metadata = &self.transport_metadata;
         let mut files = BTreeMap::new();
         for row in materialization.selected_rows(metadata).into_values() {
             for slice in row.owned_inputs.values() {
@@ -6198,8 +6210,8 @@ impl ExactCompilationRequest {
             RetainedGenerationPolicy::PreserveCertifiedDemand => self
                 .inputs
                 .compiler
-                .native_transport
-                .retained_generation_tags(retained)?,
+                .native_selection
+                .retained_generation_tags(&self.inputs.compiler.metadata.retained, retained)?,
             RetainedGenerationPolicy::PureActivationPreview => retained,
         };
         // These authenticated tags keep original native demands intact through
@@ -9548,8 +9560,8 @@ impl ExactDeclarationContext {
         producer: &[u8],
     ) -> Result<ExactCompilationRequest, CompileError> {
         let scaffold = ProtectedScaffoldRequirements::default();
-        let inputs = scaffold.compiler_inputs(self, None)?;
-        let metadata = &inputs.native_transport.metadata;
+        let transport = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?);
+        let metadata = &transport.metadata;
         if !root.is_absolute()
             || self
                 .owner
@@ -9597,7 +9609,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             None,
-            inputs,
+            transport,
             &scaffold,
             None,
             RequestInputTransport::DurableFiles,
@@ -9643,7 +9655,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             authorization,
-            inputs,
+            NativeCompilerTransport::lower(inputs),
             scaffold,
             private,
             RequestInputTransport::OwnedArena,
@@ -9688,7 +9700,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             Some(authorization),
-            inputs,
+            NativeCompilerTransport::lower(inputs),
             scaffold,
             private,
             RequestInputTransport::OwnedArena,
@@ -9939,12 +9951,16 @@ impl ExactDeclarationContext {
         root: &Path,
         producer: &[u8],
         authorization: Option<Value>,
-        inputs: RequestCompilerInputs,
+        native_transport: NativeCompilerTransport,
         scaffold: &ProtectedScaffoldRequirements,
         private: Option<OriginalCompilerInputs>,
         transport: RequestInputTransport,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let metadata = &inputs.native_transport.metadata;
+        let NativeCompilerTransport {
+            inputs,
+            metadata: transport_metadata,
+        } = native_transport;
+        let metadata = &transport_metadata;
         let compiler_metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
         let admitted_empty = authorization.is_some()
@@ -10106,7 +10122,7 @@ impl ExactDeclarationContext {
                             .filter(|group| independent && group.owner() == owner)
                             .map(PendingCertifiedGroup::group)
                             .collect::<Vec<_>>();
-                        let availability = inputs.native_transport.availability[&selected].as_ref();
+                        let availability = inputs.native_selection.availability[&selected].as_ref();
                         let mode = match &availability.mode {
                             NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
                             NativeTransportMode::IssuedGroups => Value::Array(vec![
@@ -10232,6 +10248,7 @@ impl ExactDeclarationContext {
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
         Ok(ExactCompilationRequest {
             inputs: ExactRequestInputs::issue(self.clone(), scaffold.clone(), private, inputs),
+            transport_metadata,
             manifest,
             request_sha256: sha256(&bytes),
             semantic_sha256,
@@ -15326,6 +15343,295 @@ mod tests {
         }
     }
 
+    struct ReferenceNativeCompilerTransport {
+        metadata: CompilerArtifactMetadata,
+        availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+        advertised: AdvertisedNativeOriginals,
+    }
+
+    // Frozen pre-split constructor, independent of the new semantic/physical split.
+    fn reference_native_transport(
+        roles: &CompilerInputProjection,
+        projection: &CompilerArtifactMetadata,
+        artifacts: &ArtifactView,
+        normalized: RequestNativeAvailability,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+    ) -> Result<ReferenceNativeCompilerTransport, CompileError> {
+        let mut metadata = CompilerArtifactMetadata {
+            retained: artifacts.metadata_snapshot(),
+            entries: projection.entries.clone(),
+        };
+        let mut advertised = BTreeMap::new();
+        for row in normalized.rows() {
+            row.validate_full_evidence()?;
+            if row.mode == NativeTransportMode::Full
+                && !row.contributions.iter().any(|contribution| {
+                    contribution.offer().original() == row.original.descriptor.id
+                        && contribution
+                            .offer()
+                            .qualified_private_availability(roles, artifacts)
+                            .is_some()
+                })
+            {
+                return Err(failure(
+                    "normalized Full differs from current canonical namespace",
+                ));
+            }
+            crate::artifact_inventory::validate_consumed_native_namespace(
+                &row.original,
+                &projection.entries,
+            )?;
+            let owner = &row.original.descriptor.owner;
+            let Some(role) = roles.snapshot_roles().get(owner) else {
+                continue;
+            };
+            let direct = match role.original() {
+                Some(original) => original == row.original.descriptor.id,
+                None => {
+                    role.interface() == row.canonical
+                        && (row.contributions.iter().any(|contribution| {
+                            contribution.matches_direct_canonical_binding(
+                                row.original.descriptor.id,
+                                row.canonical,
+                                artifacts,
+                            )
+                        }) || (row.mode == NativeTransportMode::IssuedGroups
+                            && row.issued_ordinals().is_empty()
+                            && offers.iter().any(|offer| {
+                                offer.matches_direct_canonical_binding(
+                                    row.original.descriptor.id,
+                                    row.canonical,
+                                    artifacts,
+                                )
+                            })))
+                }
+            };
+            if direct
+                && advertised
+                    .insert(owner.clone(), row.original.descriptor.id)
+                    .is_some_and(|previous| previous != row.original.descriptor.id)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                        owner: owner.clone(),
+                    },
+                ));
+            }
+        }
+        for (owner, id) in &advertised {
+            metadata
+                .entries
+                .insert(owner.clone(), Arc::clone(&normalized.0[id].original));
+        }
+        Ok(ReferenceNativeCompilerTransport {
+            metadata,
+            availability: normalized.0,
+            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+        })
+    }
+
+    fn check_native_selection_reference(
+        inputs: &RequestCompilerInputs,
+        normalized: &RequestNativeAvailability,
+    ) -> Option<ReferenceNativeCompilerTransport> {
+        let support = inputs.compiler_source_support();
+        let roles = inputs.projection();
+        let artifacts = inputs.artifacts();
+        let expected = normalized
+            .for_canonical_roles(roles, artifacts)
+            .and_then(|normalized| {
+                normalized.validate_role_coverage(roles)?;
+                reference_native_transport(
+                    roles,
+                    &inputs.metadata,
+                    artifacts,
+                    normalized,
+                    support.native_offers(),
+                )
+            });
+        let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
+        let actual = NativeInputSelection::receive(
+            roles,
+            &inputs.metadata,
+            artifacts,
+            normalized,
+            support.native_offers(),
+        );
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+            before
+        );
+        match (expected, actual) {
+            (Ok(expected), Ok(actual)) => {
+                assert_eq!(actual.availability, expected.availability);
+                assert_eq!(actual.advertised.0, expected.advertised.0);
+                Some(expected)
+            }
+            (Err(expected), Err(actual)) => {
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                None
+            }
+            (Ok(_), Err(error)) => {
+                panic!("new native selection refused reference success: {error:?}")
+            }
+            (Err(error), Ok(_)) => {
+                panic!("new native selection accepted reference refusal: {error:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn native_selection_keeps_reference_evidence_without_lowering_transport() {
+        let interface_only = metadata_fixture().0;
+        let support = interface_only
+            .compiler_source_support()
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
+        assert!(support
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        let interface_only = Arc::new(
+            interface_only
+                .as_ref()
+                .clone()
+                .rebuild(|facts| facts.compiler_support = support),
+        );
+        let contexts = [
+            interface_only,
+            metadata_fixture().0,
+            Arc::new(published_original_fixture()),
+            Arc::new(published_original_choice_history_fixture().clone()),
+        ];
+        let mut advertised_substitution = false;
+        for context in contexts {
+            let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
+            let inputs = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap();
+            assert_eq!(
+                NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+                before
+            );
+            let expected = check_native_selection_reference(
+                &inputs,
+                inputs.compiler_source_support().native_availability(),
+            )
+            .expect("genuinely issued common inputs");
+            if inputs
+                .projection()
+                .roles()
+                .iter()
+                .any(|role| role.original().is_some())
+            {
+                assert!(check_native_selection_reference(
+                    &inputs,
+                    &RequestNativeAvailability::default()
+                )
+                .is_none());
+            }
+            advertised_substitution |= expected.metadata.entries.iter().any(|(owner, entry)| {
+                inputs
+                    .metadata
+                    .entries
+                    .get(owner)
+                    .is_some_and(|semantic| semantic.descriptor.id != entry.descriptor.id)
+            });
+            let physical = NativeCompilerTransport::lower(inputs);
+            assert_eq!(
+                NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+                before + 1
+            );
+            assert_eq!(physical.metadata.entries, expected.metadata.entries);
+            assert!(Arc::ptr_eq(
+                &physical.metadata.retained,
+                &expected.metadata.retained
+            ));
+            assert_eq!(
+                physical.inputs.native_selection.availability,
+                expected.availability
+            );
+            assert_eq!(
+                physical.inputs.native_selection.advertised.0,
+                expected.advertised.0
+            );
+            let source = physical.inputs.compiler_source_support();
+            let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
+            let issued = NativeInputSelection::issue_checked(
+                source.projection(),
+                &physical.inputs.metadata,
+                source.artifacts(),
+                source.native_offers(),
+            )
+            .unwrap();
+            issued
+                .validate_selected_groups(&physical.inputs.metadata)
+                .unwrap();
+            assert_eq!(
+                NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+                before
+            );
+
+            let mut invalid = source.native_availability().0.as_ref().clone();
+            let row = Arc::make_mut(invalid.values_mut().next().expect("native row"));
+            row.mode = NativeTransportMode::Full;
+            row.contributions = Arc::from([]);
+            let invalid = RequestNativeAvailability(Arc::new(invalid));
+            let expected = reference_native_transport(
+                source.projection(),
+                &physical.inputs.metadata,
+                source.artifacts(),
+                invalid.clone(),
+                source.native_offers(),
+            )
+            .err()
+            .expect("complete proof is mandatory");
+            let actual = NativeInputSelection::from_normalized_rows(
+                source.projection(),
+                &physical.inputs.metadata,
+                source.artifacts(),
+                invalid,
+                source.native_offers(),
+            )
+            .err()
+            .expect("complete proof is mandatory after split");
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            assert_eq!(
+                NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+                before
+            );
+        }
+        assert!(
+            advertised_substitution,
+            "canonical semantic entry must differ from advertised original transport entry"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn native_selection_refusals_match_reference(
+            remove in proptest::collection::vec(proptest::bool::ANY, 0..8),
+            change_canonical in proptest::bool::ANY,
+        ) {
+            let context = published_original_choice_history_fixture();
+            let inputs = ProtectedScaffoldRequirements::default().compiler_inputs(context, None).unwrap();
+            let mut rows = inputs.compiler_source_support().native_availability().0.as_ref().clone();
+            let ids = rows.keys().copied().collect::<Vec<_>>();
+            for (id, remove) in ids.iter().zip(remove) {
+                if remove { rows.remove(id); }
+            }
+            if change_canonical {
+                if let Some(row) = rows.values_mut().next() {
+                    let row = Arc::make_mut(row);
+                    row.canonical = row.original.descriptor.id;
+                }
+            }
+            check_native_selection_reference(&inputs, &RequestNativeAvailability(Arc::new(rows)));
+        }
+    }
+
     #[test]
     fn metadata_authorization_and_preparation_share_one_identity() {
         let (context, producer) = metadata_fixture();
@@ -15338,6 +15644,7 @@ mod tests {
             .artifacts()
             .inventory()
             .metrics();
+        let lowering_before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
         let request = context
             .prepare_compilation_authorizing(directory.path(), &producer, |semantic_sha256| {
                 assert_eq!(semantic_sha256, expected);
@@ -15357,6 +15664,24 @@ mod tests {
         // The expected identity query already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(request.semantic_sha256, expected);
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+            lowering_before + 1
+        );
+        let transport = Arc::clone(&request.transport_metadata);
+        let files = request.input_transport_files();
+        let repeated_files = request.input_transport_files();
+        assert!(!files.is_empty());
+        assert_eq!(files.len(), repeated_files.len());
+        assert!(files
+            .iter()
+            .zip(&repeated_files)
+            .all(|(a, b)| Arc::ptr_eq(a, b)));
+        assert!(Arc::ptr_eq(&transport, &request.transport_metadata));
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+            lowering_before + 1
+        );
         let value: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
@@ -16327,10 +16652,7 @@ mod tests {
             crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
         ));
         {
-            let metadata = &replacement_request
-                .compiler_inputs()
-                .native_transport
-                .metadata;
+            let metadata = &replacement_request.transport_metadata;
             let mixed = RetainedArtifactMaterialization::select_custody_inputs(
                 &[
                     Arc::clone(joined_owner),
@@ -17069,8 +17391,10 @@ mod tests {
     ) -> ExactCompilationRequest {
         let manifest = root.join("scope");
         std::fs::write(&manifest, b"scope").unwrap();
+        let inputs = ExactRequestInputs::for_context(context);
         ExactCompilationRequest {
-            inputs: ExactRequestInputs::for_context(context),
+            transport_metadata: NativeCompilerTransport::lower_metadata(&inputs.compiler),
+            inputs,
             manifest,
             request_sha256: sha256(b"scope"),
             semantic_sha256: [1; 32],
@@ -17667,7 +17991,7 @@ mod tests {
                 let original = role.original().unwrap();
                 let offers = request
                     .compiler_inputs()
-                    .native_transport
+                    .native_selection
                     .availability
                     .get(&original)
                     .unwrap();
@@ -17721,7 +18045,7 @@ mod tests {
             );
             for availability in local
                 .compiler_inputs()
-                .native_transport
+                .native_selection
                 .availability
                 .values()
             {
@@ -21156,7 +21480,7 @@ mod tests {
             .materialization
             .as_ref()
             .expect("live input materialization");
-        let metadata = &request.inputs.compiler.native_transport.metadata;
+        let metadata = &request.transport_metadata;
         let rows = materialization.selected_rows(metadata);
         let mut supplied_kinds = BTreeSet::new();
         let mut aliases = BTreeSet::new();
