@@ -21237,12 +21237,20 @@ mod tests {
     fn fresh_source_owner_distinguishes_compiler_roles_from_retained_custody() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = support_offer(&[support_product("Consumer")]);
-        let hidden_support = recover_fixture_compiler_support(
-            CompilerInputProjection::default(),
-            fixture.artifacts().clone(),
-            [],
-        )
-        .unwrap();
+        let hidden_support = crate::artifact_inventory::CompilerSourceSupport::empty()
+            .retain_custody(fixture.artifacts())
+            .unwrap();
+        assert!(hidden_support.projection().roles().is_empty());
+        assert!(hidden_support.native_offers().is_empty());
+        assert!(hidden_support
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+            .is_empty());
+        assert!(hidden_support
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
         let hidden = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -21267,16 +21275,14 @@ mod tests {
         write_receipt(&receipt, &value);
         request.validate_receipt(&receipt, None, &hidden).unwrap();
 
-        let selected_support = recover_fixture_compiler_support(
-            fixture.projection().clone(),
-            fixture.artifacts().clone(),
-            [],
-        )
-        .unwrap();
+        let CompilerSupportFixture::Complete(inputs) = &fixture else {
+            panic!("selected source fixture must retain its complete checked input owner");
+        };
+        let selected_support = inputs.compiler_source_support();
         let selected = hidden
             .as_ref()
             .clone()
-            .extend_issued_compiler_support(&selected_support)
+            .extend_issued_compiler_support(selected_support)
             .unwrap();
         for (context, planned) in [
             (&selected, None),
