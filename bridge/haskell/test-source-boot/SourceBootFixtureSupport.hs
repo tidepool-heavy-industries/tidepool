@@ -11,7 +11,7 @@ module SourceBootFixtureSupport
 
 import Control.Exception
   ( Exception(..), SomeAsyncException, SomeException, IOException, bracket, bracketOnError
-  , finally, fromException, mask, onException, throwIO, try )
+  , finally, fromException, mask, onException, throwIO, try, evaluate )
 import Control.Monad (filterM, void)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
@@ -258,7 +258,14 @@ captureDiagnostics action = mask $ \restore -> do
         hSeek output AbsoluteSeek 0
         size <- hFileSize output
         bytes <- BS.hGet output (4 * 1024 * 1024)
-        text <- either throwIO (pure . Text.unpack) (TextEncoding.decodeUtf8' bytes)
+        text <- if size > 4 * 1024 * 1024
+          then case TextEncoding.streamDecodeUtf8 bytes of
+            TextEncoding.Some prefix _ _ -> do
+              -- Only the streaming decoder's incomplete trailing sequence is
+              -- omitted. Malformed bytes inside this bounded prefix still fail.
+              _ <- evaluate (Text.length prefix)
+              pure (Text.unpack prefix)
+          else either throwIO (pure . Text.unpack) (TextEncoding.decodeUtf8' bytes)
         pure (text ++ if size > 4 * 1024 * 1024
           then "\n[compiler diagnostics truncated at 4 MiB]\n" else "")
   outcome <- try $ do
