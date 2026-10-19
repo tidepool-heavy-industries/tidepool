@@ -143,3 +143,10 @@ already retains B independently. Test-only69c151 preserves exact requiredA7 edge
 while allowing unused request custody to narrow. Baseline c3 proved two earlier
 fixture premises fail unchanged; focused repairs preserve actual downstream body
 permission and conflicting selected implementation refusals.
+
+Warm5ac receiving merge resolved only four files: GhcPipeline keeps actual new
+CompilerWorldCache/empty initializer, Main keeps the additional materialization
+control, extract-cmd retains typed reject_compiler_response exports, host_work
+preserves the campaign's CompileViewBuild/Digest counters. Critical staged
+consumer diff read directly. Existing joined de23 evidence remains separate;
+new joined compilation/controls pending.
