@@ -695,13 +695,45 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
     );
     assert_ne!(selected[0].product_bytes(), substitute.product_bytes());
     assert!(!selected[0].same_durable_artifact(substitute));
-    assert!(
-        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_context(
-            &original,
-            CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-            std::slice::from_ref(substitute),
+    let substitute_entry = Arc::new(
+        ArtifactEntry::original(
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            substitute.clone(),
         )
-        .is_err(),
+        .unwrap(),
+    );
+    let inventory = ArtifactInventory::default();
+    let substitute_view = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![substitute_entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let substitute_projection =
+        CompilerInputProjection::from_issued_entries(&[substitute_entry]).unwrap();
+    let substitute_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &substitute_projection,
+            &substitute_view.metadata_snapshot(),
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+    let substitute_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        &substitute_selection,
+        &substitute_view,
+    )
+    .unwrap();
+    let substitution_directory = tempfile::tempdir().unwrap();
+    assert!(
+        ExactCompileContext::new(original.clone())
+            .prepare_compilation_with_private_input(
+                substitution_directory.path(),
+                PRODUCER,
+                None,
+                Some(substitute_output),
+            )
+            .is_err(),
         "an equal interface cannot substitute another issued implementation"
     );
 
@@ -787,17 +819,28 @@ proptest::proptest! {
 fn preview_reuses_selected_original_with_issued_group_custody() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let fixture = issued_declarations(true)[0].clone();
-    let crate::artifact_inventory::ArtifactPayload::Original(product) = &fixture.original.payload
-    else {
+    let crate::artifact_inventory::ArtifactPayload::Original(_) = &fixture.original.payload else {
         panic!("preview fixture must carry its certified original product");
     };
-    let candidate =
-        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
-            &crate::artifact_inventory::CompilerSourceSupport::empty(),
-            producer,
-            std::slice::from_ref(product),
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![fixture.original.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        &projection,
+        &artifacts.metadata_snapshot(),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .unwrap();
+    let candidate =
+        crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            .unwrap();
     let support =
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&candidate)
             .unwrap();
