@@ -612,7 +612,7 @@ impl PreparedWorker {
         let worker_path = json_path(&self.selection)?;
         let ghc_libdir = json_os_str(&self.ghc_libdir)?;
         Ok(format!(
-            "{{\n  \"schema\": 1,\n  \"producer_identity\": {producer_identity:?},\n  \"consumed_worker_identity\": {:?},\n  \"frontend_path\": {frontend_path},\n  \"worker_path\": {worker_path},\n  \"ghc_libdir\": {ghc_libdir}\n}}\n",
+            "{{\n  \"schema\": 2,\n  \"producer_identity\": {producer_identity:?},\n  \"consumed_worker_identity\": {:?},\n  \"frontend_path\": {frontend_path},\n  \"worker_path\": {worker_path},\n  \"ghc_libdir\": {ghc_libdir},\n  \"package_source\": {{\"kind\":\"observation-only\"}}\n}}\n",
             self.consumed_worker_identity()
         ))
     }
@@ -1764,7 +1764,11 @@ fn main() {{
         write_compiler_deployment_manifest(&manifest_path).unwrap();
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        assert_eq!(manifest["schema"], 1);
+        assert_eq!(manifest["schema"], 2);
+        assert_eq!(
+            manifest["package_source"],
+            serde_json::json!({"kind":"observation-only"})
+        );
         assert_eq!(
             manifest["producer_identity"],
             serde_json::to_value(old_identity).unwrap()

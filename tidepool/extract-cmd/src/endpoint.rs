@@ -31,6 +31,40 @@ pub struct CompilerIdentity {
     producer: [u8; 32],
     consumed_worker: [u8; 32],
     endpoint: [u8; 32],
+    package_source: Option<CompilerPackageSourceAssociation>,
+}
+
+/// The package source retained by this actual compiler service. This is a
+/// remote owner association, not ownership of another process's GC roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerPackageSourceAssociation {
+    source_id: [u8; 32],
+    profile_id: [u8; 32],
+    service_epoch: [u8; 32],
+    boot_profile_commitment: [u8; 32],
+    launch_configuration_sha256: [u8; 32],
+}
+
+impl CompilerPackageSourceAssociation {
+    pub fn launch_configuration_sha256(&self) -> &[u8; 32] {
+        &self.launch_configuration_sha256
+    }
+
+    pub fn source_id(&self) -> &[u8; 32] {
+        &self.source_id
+    }
+
+    pub fn profile_id(&self) -> &[u8; 32] {
+        &self.profile_id
+    }
+
+    pub fn service_epoch(&self) -> &[u8; 32] {
+        &self.service_epoch
+    }
+
+    pub fn boot_profile_commitment(&self) -> &[u8; 32] {
+        &self.boot_profile_commitment
+    }
 }
 
 impl CompilerIdentity {
@@ -39,6 +73,7 @@ impl CompilerIdentity {
             producer,
             consumed_worker,
             endpoint: producer,
+            package_source: None,
         }
     }
 
@@ -51,6 +86,7 @@ impl CompilerIdentity {
             producer,
             consumed_worker,
             endpoint: *hasher.finalize().as_bytes(),
+            package_source: None,
         }
     }
 
@@ -67,6 +103,10 @@ impl CompilerIdentity {
     /// Digest of the exact worker executable bytes pinned by this endpoint.
     pub fn consumed_worker_bytes(&self) -> &[u8; 32] {
         &self.consumed_worker
+    }
+
+    pub fn package_source_association(&self) -> Option<&CompilerPackageSourceAssociation> {
+        self.package_source.as_ref()
     }
 
     pub fn to_hex(&self) -> String {
@@ -1381,6 +1421,10 @@ impl CompilerEndpoint {
 
     pub fn identity(&self) -> &CompilerIdentity {
         &self.identity
+    }
+
+    pub fn package_source_association(&self) -> Option<&CompilerPackageSourceAssociation> {
+        self.identity.package_source_association()
     }
 
     pub fn transaction(self) -> Result<CompilerTransaction, SpawnError> {

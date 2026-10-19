@@ -81,6 +81,11 @@ GHC projection, including `ExecutionIR`, stays in `tidepool-extract-internal`.
 Pure encoder tests depend on the former; candidate codec tests use the existing
 Rust fixture issuer for valid packets and corrupt those packets for refusals.
 
+Supported package observation uses `--capture-supported-package-profile-v2`
+and `TPGHC002`. Preserve raw expanded database and unit directory paths: their
+source qualifier owns kernel-order alias validation and retention. Canonical
+targets alone erase mutable intermediate paths and cannot issue a rooted boot.
+
 ## Toolchain resolution and deployment
 
 `tidepool/toolchain/src/toolchain.rs` owns compiler resolution, deployment

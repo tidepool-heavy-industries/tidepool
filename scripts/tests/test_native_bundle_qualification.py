@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
+import struct
 import tempfile
 import subprocess
 import shutil
@@ -108,6 +110,9 @@ class RegisteredGcRootTests(unittest.TestCase):
             link.symlink_to(store)
         self.pins = [{'path': str(link), 'store_path': str(store)}
                      for link, store in zip(self.links, self.stores)]
+        boundary = patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path])
+        boundary.start()
+        self.addCleanup(boundary.stop)
 
     def test_one_query_verifies_every_exact_pair_and_deduplicates_store_paths(self):
         alias = self.root / 'another-root-a'
@@ -174,6 +179,17 @@ class RegisteredGcRootTests(unittest.TestCase):
     def test_no_pins_requires_no_query(self):
         with patch.object(qualification.subprocess, 'check_output') as query:
             qualification.verify_registered_gc_roots(self.tools, [])
+            query.assert_not_called()
+
+    def test_canonical_destination_cannot_replace_the_immediate_registered_target(self):
+        self.links[0].unlink()
+        mutable = self.root / 'mutable-hop'
+        mutable.symlink_to(self.stores[0])
+        self.links[0].symlink_to(mutable)
+        self.assertEqual(self.links[0].resolve(), self.stores[0])
+        with patch.object(qualification.subprocess, 'check_output') as query:
+            with self.assertRaisesRegex(ValueError, 'removed or changed'):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
             query.assert_not_called()
 
 
@@ -2079,8 +2095,8 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(child.stdout, '1\n')
                 self.assertEqual(descriptor, {'environment': {}})
 
-    def test_schema_four_refuses_old_descriptor_before_any_runtime_query(self):
-        self.assertEqual(qualification.QUALIFICATION_SCHEMA, 4)
+    def test_current_schema_refuses_old_descriptor_before_any_runtime_query(self):
+        self.assertEqual(qualification.QUALIFICATION_SCHEMA, 5)
         self.assertEqual(qualification.EXTERNAL_INPUTS, {
             'TIDEPOOL_GHC_LIBDIR', 'TIDEPOOL_BROWSER_NODE', 'PLAYWRIGHT_BROWSERS_PATH',
             'runtime_tools', 'EXOMONAD_OFFLINE_RUSTC', 'EXOMONAD_OFFLINE_CC'})
@@ -2568,7 +2584,7 @@ class NativeQualificationTests(unittest.TestCase):
                                 elif stage == 'freeze':
                                     qualification.freeze(args)
                                 else:
-                                    qualification.native_environment(bundle)
+                                    qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
                         self.assertFalse(output.exists())
                         execute.assert_not_called()
                         query.assert_not_called()
@@ -3134,6 +3150,7 @@ class CatalogSourceTests(unittest.TestCase):
 
         with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
              patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', return_value=nar) as metadata, \
              patch.object(qualification.subprocess, 'check_output', side_effect=add), \
              patch.object(qualification.subprocess, 'run', side_effect=run):
@@ -3185,6 +3202,7 @@ class CatalogSourceTests(unittest.TestCase):
             return '\n'.join(str(pin) + ' -> ' + nar['roots'][0] for pin in pins)
         with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
              patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', return_value=nar), \
              patch.object(qualification.subprocess, 'check_output', side_effect=roots):
             yield
@@ -3276,7 +3294,8 @@ class CatalogSourceTests(unittest.TestCase):
         first = {'path': str(pin), 'store_path': str(original)}
         second = {'path': str(other_pin), 'store_path': str(other)}
         with patch.object(qualification.subprocess, 'check_output', return_value=
-                          f'{pin} -> {original}\n{other_pin} -> {other}') as query:
+                          f'{pin} -> {original}\n{other_pin} -> {other}') as query, \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]):
             observation = qualification._RegisteredGcRoots(tools, [str(original), str(other)])
             qualification.verify_registered_gc_roots(tools, [first], observation)
             qualification.verify_registered_gc_roots(tools, [first, second], observation)
@@ -3323,7 +3342,7 @@ class CatalogSourceTests(unittest.TestCase):
         original, tools, record, pin, nar = self.retained_fixture()
         bundle, contract, catalog = self.catalog_fixture(original, tools, record)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
-            environment = qualification.native_environment(bundle)
+            environment = qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
             self.assertEqual(environment['TIDEPOOL_PRELUDE_DIR'], str(original / 'lib'))
             self.assertEqual(environment['TIDEPOOL_COMPILER_MODULES'], str(catalog))
             self.assertEqual(environment['TIDEPOOL_RECIPE_WORKSPACE'],
@@ -3417,6 +3436,30 @@ class CatalogSourceTests(unittest.TestCase):
             'external_inputs': external, 'elf_runtime': {},
             'nix_closure': {}, 'gc_roots': [],
         }
+        # Representation fixtures for this catalog-verification test. These do
+        # not instantiate a compiler service or issue a boot/source capability.
+        descriptor['source_oid'] = 'a' * 40
+        descriptor_path = bundle / qualification.DESCRIPTOR
+        service_directory = shared / 'compiler-service'
+        service_directory.mkdir()
+        config = service_directory / 'compiler-service-source.bin'
+        config.write_bytes(b'opaque compiler configuration representation fixture')
+        config_hash = qualification.sha256(config)
+        (service_directory / 'compiler-service-source.sha256').write_text(config_hash + '\n')
+        service_record = {
+            'profile_id': 'b' * 64, 'nix_closure': {'roots': []},
+            'declaration': {'kind': 'frozen-native-bundle', 'descriptor': str(descriptor_path),
+                            'source_oid': descriptor['source_oid'],
+                            'build_contract_sha256': qualification.sha256(shared / 'native-build-contract.json')},
+        }
+        service_record['source_id'] = qualification._package_source_id(service_record)
+        service_record_path = service_directory / 'compiler-service-source.json'
+        qualification.write_json(service_record_path, service_record)
+        descriptor['compiler_service_source'] = {
+            'record_path': str(service_record_path), 'record_sha256': qualification.sha256(service_record_path),
+            'source_id': service_record['source_id'], 'profile_id': service_record['profile_id'],
+            'launch_configuration_sha256': config_hash,
+        }
         selected_roots = [item['store_path'] for item in external.values()]
         selected_roots.append(str(original.resolve()))
         descriptor['nix_closure'] = metadata(tools, selected_roots)
@@ -3428,10 +3471,11 @@ class CatalogSourceTests(unittest.TestCase):
             descriptor['gc_roots'].append({'path': str(path), 'store_path': selected})
         with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
              patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', side_effect=metadata), \
              patch.object(qualification, 'verify_registered_gc_roots'), \
              patch.object(qualification.subprocess, 'run'):
-            environment = qualification.native_environment(bundle)
+            environment = qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
         environment.update(
             TIDEPOOL_BROWSER_NODE=str(browser_node),
             TIDEPOOL_BROWSER_DRIVER=str(bundle / qualification.BROWSER_DRIVER_ROOT / 'driver.mjs'),
@@ -3443,6 +3487,7 @@ class CatalogSourceTests(unittest.TestCase):
 
         with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
              patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', side_effect=metadata), \
              patch.object(qualification, 'native_runtime_tools', return_value=tools), \
              patch.object(qualification, 'verify_frozen_inventory', return_value={}), \
@@ -3475,7 +3520,7 @@ class CatalogSourceTests(unittest.TestCase):
                     browser_node.chmod(0o755)
                     qualification.write_json(descriptor_path, descriptor)
 
-            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment'):
+            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment', 'missing_service_source', 'changed_service_launch', 'changed_service_provenance'):
                 changed = json.loads(json.dumps(descriptor))
                 if mutation == 'missing_compiler':
                     del changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']
@@ -3488,6 +3533,12 @@ class CatalogSourceTests(unittest.TestCase):
                     changed['nix_closure']['nar_hashes'][first] = 'changed-nar'
                 elif mutation == 'online_nix_environment':
                     changed['environment']['EXOMONAD_NIX_OFFLINE'] = '0'
+                elif mutation == 'missing_service_source':
+                    del changed['compiler_service_source']
+                elif mutation == 'changed_service_launch':
+                    changed['compiler_service_source']['launch_configuration_sha256'] = 'd' * 64
+                elif mutation == 'changed_service_provenance':
+                    changed['source_oid'] = 'd' * 40
                 elif mutation == 'coherent_other_compiler':
                     original_compiler = changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']['store_path']
                     changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC'] = dict(
@@ -3497,7 +3548,7 @@ class CatalogSourceTests(unittest.TestCase):
                     changed['gc_roots'] = [value for value in changed['gc_roots']
                                            if value['store_path'] != original_compiler]
                 else:
-                    changed['schema'] = 3
+                    changed['schema'] = 4
                 qualification.write_json(descriptor_path, changed)
                 message = 'assembled compiler contract' if mutation == 'coherent_other_compiler' else ''
                 with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, message):
@@ -3507,7 +3558,7 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 qualification.native_environment(bundle, verified_catalog=contract['native_catalog'])
             with self.assertRaisesRegex(ValueError, 'requires this bundle\'s verified catalog'):
-                qualification._native_environment(bundle, contract['native_catalog'])
+                qualification._native_environment(bundle, contract['native_catalog'], package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
 
             catalog_calls_before_drift = verify_catalog.call_count
             root_calls_before_drift = verify_root.call_count
@@ -4019,6 +4070,406 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                              self.assertRaises(SystemExit) as stopped:
                             exec(compile(namespace_source, 'packaged-catalog-consumer.sh', 'exec'), {})
                         self.assertEqual(stopped.exception.code, 0)
+
+
+class CompilerServicePackageTests(unittest.TestCase):
+    def profile_body(self, libdir):
+        frame = qualification._package_frame
+        return (b'TPGHC002' + b''.join(frame(value) for value in
+                ('9.12.2', 'x86_64-linux', str(libdir), str(libdir / 'package.conf.d')))
+                + struct.pack('<I', 1) + frame('base-actual-unit') + frame('actual-abi')
+                + struct.pack('<I', 0) * 4)
+
+    @contextlib.contextmanager
+    def declared_provider(self, root, retain_alias=False, closure_alias=False, extra_package=False):
+        """Real declaration/acquisition entrypoints; external compiler/Nix are mocked."""
+        tools = runtime_tools_fixture(root)
+        libdir = root / 'compiler/lib'
+        libdir.mkdir(parents=True)
+        (libdir.parent / 'bin').mkdir()
+        (libdir.parent / 'bin/ghc-iserv').write_bytes(b'iserv')
+        frontend, worker = root / 'frontend', root / 'worker'
+        frontend.write_bytes(b'frontend')
+        worker.write_bytes(b'worker')
+        body = self.profile_body(libdir)
+        output = root / 'declaration'
+        fixed = '/nix/store/' + 'a' * 32 + '-compiler-package-profile-v1'
+        commands = []
+        alias = root / 'immutable-alias-fixture'
+        alias.symlink_to(tools, target_is_directory=True)
+        selected_roots = [tools, alias] if retain_alias else [tools]
+        if extra_package:
+            package = root / "package-object"
+            package.mkdir()
+            selected_roots.append(package)
+        original_hash = qualification.sha256
+        original_root_present = qualification._package_root_present
+
+        def read_hash(path):
+            return original_hash(output / 'compiler-package-profile-v1' if str(path) == fixed else path)
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if '--compiler-deployment-manifest' in command:
+                qualification.write_json(Path(command[-1]), {
+                    'schema': 2, 'package_source': {'kind': 'observation-only'}, 'producer_identity': [1] * 32, 'consumed_worker_identity': [2] * 32,
+                    'frontend_path': str(frontend), 'worker_path': str(worker), 'ghc_libdir': str(libdir)})
+            elif '--capture-supported-package-profile-v2' in command:
+                self.assertTrue(all(name not in kwargs['env'] for name in qualification.PACKAGE_ROOTED_ENVIRONMENT))
+                kwargs['stdout'].write(body)
+            elif '--add-root' in command:
+                target = Path(command[command.index('--add-root') + 1])
+                if target.parent.parent.name == 'package-source':
+                    plan = json.loads((target.parent.parent / 'acquisition.json').read_text())
+                    self.assertEqual(plan['status'], 'acquiring')
+                    self.assertIn(str(target), [item['path'] for item in plan['roots']])
+                target.symlink_to(command[-1])
+            else:
+                self.fail(f'unexpected external command {command}')
+            return subprocess.CompletedProcess(command, 0)
+
+        def output_command(command, **kwargs):
+            commands.append(command)
+            if '--print-fixed-path' in command:
+                return fixed + '\n'
+            if '--add-fixed' in command:
+                # The persisted plan must precede the first Nix side effect.
+                plans = list(root.glob('service-*/package-source/acquisition.json'))
+                self.assertTrue(plans)
+                self.assertTrue(all(json.loads(path.read_text())['nix_profile_import_attempts'] == 1 for path in plans))
+                self.assertEqual(command[-2], 'sha256')
+                return fixed + '\n'
+            if '--requisites' in command:
+                return '\n'.join(sorted(set(command[3:]) | ({str(alias)} if closure_alias else set()))) + '\n'
+            if '--hash' in command:
+                return 'sha256:fixture-nar\n' * (len(command) - 3)
+            if '--size' in command:
+                return '17\n' * (len(command) - 3)
+            self.fail(f'unexpected external query {command}')
+
+        def root_present(item):
+            if item['store_path'] != fixed:
+                return original_root_present(item)
+            target = Path(item['path'])
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISLNK(info.st_mode) or str(target.readlink()) != fixed:
+                raise ValueError('ambiguous fixture Nix symlink')
+            return True
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=True))
+            stack.enter_context(patch.object(qualification, 'native_runtime_tools', return_value=tools))
+            stack.enter_context(patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)))
+            stack.enter_context(patch.object(qualification, '_package_profile_paths', return_value=[tools]))
+            stack.enter_context(patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [tools] if path == tools / 'bin/python3' else selected_roots))
+            stack.enter_context(patch.object(qualification, '_package_loader_roots', return_value=[tools]))
+            stack.enter_context(patch.object(qualification, 'verify_registered_gc_roots'))
+            stack.enter_context(patch.object(qualification, '_package_root_present', side_effect=root_present))
+            stack.enter_context(patch.object(qualification, 'sha256', side_effect=read_hash))
+            stack.enter_context(patch.object(subprocess, 'run', side_effect=run))
+            stack.enter_context(patch.object(subprocess, 'check_output', side_effect=output_command))
+            authority = qualification.declare_compiler_service_source(SimpleNamespace(
+                frontend=frontend, worker=worker, ghc_libdir=libdir, runtime_tools=tools,
+                profile='fast-dev', output=output))
+            record_path = output / 'compiler-service-source.json'
+            record = json.loads(record_path.read_text())
+            def acquire_args(epoch='03'):
+                owner = root / ('service-' + epoch)
+                owner.mkdir(mode=0o700)
+                return SimpleNamespace(record=record_path, record_sha256=original_hash(record_path),
+                                       source_id=record['source_id'], profile_id=record['profile_id'],
+                                       service_epoch=epoch * 32, owner_directory=owner)
+            yield SimpleNamespace(authority=authority, record=record, record_path=record_path,
+                                  output=output, acquire_args=acquire_args, commands=commands, run=run)
+
+    def retirement_args(self, acquire):
+        receipt = acquire.owner_directory / 'package-source/receipt.json'
+        receipt_hash = qualification.sha256(receipt)
+        complete = acquire.owner_directory / 'compiler-service-complete-retirement.json'
+        qualification.write_private_json(complete, {
+            'schema': 1, 'kind': 'compiler-service-complete-retirement', 'complete': True,
+            'service_epoch': acquire.service_epoch, 'source_id': acquire.source_id,
+            'profile_id': acquire.profile_id, 'receipt_sha256': receipt_hash})
+        return SimpleNamespace(receipt=receipt, receipt_sha256=receipt_hash, complete_retirement=complete)
+
+    def test_actual_declaration_acquisition_and_exact_retirement(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            authority = json.loads(provider.authority.read_text())
+            self.assertEqual(authority['schema'], 2)
+            self.assertEqual(authority['package_source']['source_id'], list(bytes.fromhex(provider.record['source_id'])))
+            config = (provider.output / 'compiler-service-source.bin').read_bytes()
+            self.assertEqual(config[:9], b'TPSCF002\0')
+            self.assertEqual(authority['package_source']['launch_configuration_sha256'],
+                             list(qualification.hashlib.sha256(config).digest()))
+            self.assertIn(bytes.fromhex(provider.record['python_sha256']), config)
+            self.assertIn(bytes.fromhex(provider.record['provider_sha256']), config)
+            profile = (provider.output / 'compiler-package-profile-v1').read_bytes()
+            self.assertNotIn(bytes.fromhex(provider.record['source_id']), profile)
+            acquire = provider.acquire_args()
+            wire = qualification.acquire_compiler_service_source(acquire)
+            self.assertEqual(wire[:8], b'TPSRC001')
+            self.assertEqual(wire[8:40], bytes.fromhex(acquire.service_epoch))
+            receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
+            self.assertEqual((receipt['acquire_count'], receipt['retained_root_count'], receipt['unique_store_objects']), (1, 2, 2))
+            self.assertEqual(receipt['nar_serialized_bytes'], 34)
+            self.assertEqual(receipt['provider_profile_hash_passes'], 2)
+            release = self.retirement_args(acquire)
+            settled = qualification.release_compiler_service_source(release)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'package-settled-guard-held')
+            self.assertEqual(qualification.release_compiler_service_source(release), settled)
+            remaining = list((acquire.owner_directory / 'package-source/gc-roots').iterdir())
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(str(remaining[0].readlink()), receipt['provider_guard_store_path'])
+            self.assertEqual(json.loads(settled.read_text())['release_count'], 0)
+
+    def test_provider_replay_requires_guard_still_retained(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            qualification.release_compiler_service_source(release)
+            receipt = json.loads(release.receipt.read_text())
+            guard = next(item for item in receipt['roots'] if item['store_path'] == receipt['provider_guard_store_path'])
+            Path(guard['path']).unlink()
+            with self.assertRaisesRegex(ValueError, 'exact retained root'):
+                qualification.release_compiler_service_source(release)
+
+    def test_release_progress_preserves_the_sealed_acquisition_plan(self):
+        for change in ('omit-package', 'replace-guard'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+                acquire = provider.acquire_args()
+                qualification.acquire_compiler_service_source(acquire)
+                release = self.retirement_args(acquire)
+                receipt = json.loads(release.receipt.read_text())
+                progress = json.loads(release.receipt.read_text())
+                progress.update(status='releasing', complete_retirement_sha256=qualification.sha256(release.complete_retirement))
+                if change == 'omit-package':
+                    progress['roots'] = [item for item in progress['roots'] if item['store_path'] == progress['provider_guard_store_path']]
+                else:
+                    progress['provider_guard_store_path'] = next(item['store_path'] for item in progress['roots'] if item['store_path'] != progress['provider_guard_store_path'])
+                qualification.write_private_json(release.receipt.parent / 'release.json', progress)
+                with self.assertRaisesRegex(ValueError, 'sealed acquisition plan'):
+                    qualification.release_compiler_service_source(release)
+                self.assertTrue(all(Path(item['path']).is_symlink() for item in receipt['roots']))
+
+    def test_settled_phase_cannot_skip_outstanding_package_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            progress = json.loads(release.receipt.read_text())
+            progress.update(status='package-settled-guard-held', retained_root_count=1,
+                            complete_retirement_sha256=qualification.sha256(release.complete_retirement))
+            qualification.write_private_json(release.receipt.parent / 'release.json', progress)
+            settled = qualification.release_compiler_service_source(release)
+            result = json.loads(settled.read_text())
+            self.assertEqual(result['retained_root_count'], 1)
+            for item in result['roots']:
+                self.assertEqual(Path(item['path']).is_symlink(), item['store_path'] == result['provider_guard_store_path'])
+
+    def test_guard_cannot_reuse_package_root_recovery_states(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            settled = qualification.release_compiler_service_source(release)
+            progress = json.loads(settled.read_text())
+            guard = next(item for item in progress['roots'] if item['store_path'] == progress['provider_guard_store_path'])
+            Path(guard['path']).unlink()
+            guard['state'] = 'released'
+            qualification.write_private_json(settled, progress)
+            with self.assertRaisesRegex(ValueError, 'retained root guard'):
+                qualification.release_compiler_service_source(release)
+
+    def test_partial_registration_is_owned_and_settled_before_boot(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            count = 0
+            def fail_second(command, **kwargs):
+                nonlocal count
+                if '--add-root' in command:
+                    count += 1
+                    if count == 2:
+                        # Nix may register the root and fail before returning.
+                        provider.run(command, **kwargs)
+                        raise subprocess.CalledProcessError(1, command)
+                return provider.run(command, **kwargs)
+            with patch.object(subprocess, 'run', side_effect=fail_second), self.assertRaises(subprocess.CalledProcessError):
+                qualification.acquire_compiler_service_source(acquire)
+            state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
+            self.assertEqual(state['status'], 'preboot-released')
+            self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
+            self.assertFalse((acquire.owner_directory / 'package-source/receipt.json').exists())
+
+    def test_ambiguous_partial_registration_retains_plan_and_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            def ambiguous(command, **kwargs):
+                target = Path(command[command.index('--add-root') + 1])
+                target.write_text('not an issued symlink')
+                raise subprocess.CalledProcessError(1, command)
+            with patch.object(subprocess, 'run', side_effect=ambiguous), self.assertRaises(subprocess.CalledProcessError):
+                qualification.acquire_compiler_service_source(acquire)
+            state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
+            self.assertEqual(state['status'], 'retained-unknown')
+            self.assertTrue(state['roots'])
+
+    def test_retirement_other_epoch_refuses_before_root_removal(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            complete = json.loads(release.complete_retirement.read_text())
+            complete['service_epoch'] = '04' * 32
+            qualification.write_private_json(release.complete_retirement, complete)
+            with self.assertRaisesRegex(ValueError, 'exact complete parent'):
+                qualification.release_compiler_service_source(release)
+            self.assertEqual(len(list((acquire.owner_directory / 'package-source/gc-roots').iterdir())), 2)
+
+    def test_partial_release_resumes_only_its_exact_progress(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary), extra_package=True) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            original_unlink, count = Path.unlink, 0
+            def unlink(path, *args, **kwargs):
+                nonlocal count
+                if path.parent.name == 'gc-roots':
+                    count += 1
+                    if count == 2:
+                        raise PermissionError('controlled second root failure')
+                return original_unlink(path, *args, **kwargs)
+            with patch.object(Path, 'unlink', new=unlink), self.assertRaises(PermissionError):
+                qualification.release_compiler_service_source(release)
+            receipt = json.loads(release.receipt.read_text())
+            guard = next(item for item in receipt['roots'] if item['store_path'] == receipt['provider_guard_store_path'])
+            # Model GC between failed provider invocations: only a live guard
+            # keeps the interpreter/import closure available to restart release.
+            self.assertTrue(Path(guard['path']).is_symlink())
+            collected = {item['store_path'] for item in receipt['roots'] if not Path(item['path']).exists()}
+            self.assertTrue(collected)
+            self.assertNotIn(guard['store_path'], collected)
+            settled = qualification.release_compiler_service_source(release)
+            result = json.loads(settled.read_text())
+            self.assertEqual((result['status'], result['release_count']), ('package-settled-guard-held', 0))
+
+    def test_resumed_absent_root_is_synced_before_release_is_published(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            original_sync, fail = qualification._sync_directory, True
+            def sync(path):
+                nonlocal fail
+                if path.name == 'gc-roots' and fail:
+                    fail = False
+                    raise OSError('controlled directory fsync failure after unlink')
+                original_sync(path)
+            with patch.object(qualification, '_sync_directory', side_effect=sync), self.assertRaises(OSError):
+                qualification.release_compiler_service_source(release)
+            with patch.object(qualification, '_sync_directory', wraps=original_sync) as observed:
+                settled = qualification.release_compiler_service_source(release)
+            self.assertGreaterEqual(sum(call.args[0].name == 'gc-roots' for call in observed.call_args_list), 1)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'package-settled-guard-held')
+
+    def test_declaration_refuses_noncanonical_top_level_objects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'canonical top-level Nix objects'):
+                with self.declared_provider(root, retain_alias=True):
+                    self.fail('noncanonical profile declaration succeeded')
+            self.assertFalse(list(root.glob('service-*/package-source')))
+            self.assertFalse((root / 'declaration/compiler-service-source.bin').exists())
+
+    def test_declaration_refuses_transitive_noncanonical_closure_objects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'canonical top-level closure objects'):
+                with self.declared_provider(root, closure_alias=True):
+                    self.fail('transitive alias profile declaration succeeded')
+            self.assertFalse(list(root.glob('service-*/package-source')))
+            self.assertFalse((root / 'declaration/compiler-service-source.bin').exists())
+
+    def test_generic_pin_owner_preserves_root_object_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.declared_provider(root) as provider:
+                alias = root / 'immutable-alias-fixture'
+                tools = root / 'runtime-tools-fixture'
+                # Mock only the external Nix route/collector boundary; the generic
+                # pin owner must preserve the exact immediate source object.
+                with patch.object(qualification, '_package_nix_roots', return_value=[tools, alias]):
+                    closure, pins = qualification.pin_nix_closure(root / 'frozen', tools, [alias])
+                self.assertEqual(set(closure['roots']), {str(tools), str(alias)})
+                self.assertTrue(any(Path(item['path']).readlink() == alias for item in pins))
+
+    def test_changed_profile_refuses_before_service_side_effects(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            (provider.output / 'compiler-package-profile-v1').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'input changed: profile_path'):
+                qualification.acquire_compiler_service_source(acquire)
+            self.assertFalse((acquire.owner_directory / 'package-source').exists())
+
+    def test_profile_reader_rejects_counts_duplicates_trailing_and_budget(self):
+        body = self.profile_body(Path('/nix/store/example/lib'))
+        unit = qualification._package_frame('base-actual-unit') + qualification._package_frame('actual-abi') + struct.pack('<I', 0) * 4
+        duplicate = body[:-len(unit) - 4] + struct.pack('<I', 2) + unit * 2
+        self.assertEqual(qualification.package_profile_facts(body)['units'][0]['unit_id'], 'base-actual-unit')
+        for invalid in (body[:-1], body + b'extra', duplicate, b'TPGHC002' + struct.pack('<I', 0xffffffff),
+                        b'x' * (qualification.PACKAGE_PROFILE_LIMIT + 1)):
+            with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
+                qualification.package_profile_facts(invalid)
+
+    def test_profile_capture_refuses_ambient_native_loader_overrides(self):
+        for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'):
+            with patch.dict(os.environ, {name: '/mutable'}, clear=True), self.assertRaisesRegex(ValueError, name):
+                qualification._package_environment(Path('/nix/store/example/lib'))
+
+    def test_preassembly_scope_is_explicit_and_files_cannot_upgrade_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / 'share/exomonad'
+            shared.mkdir(parents=True)
+            (shared / 'ghc-libdir.txt').write_text('/nix/store/example/lib\n')
+            qualification.write_json(shared / 'native-build-contract.json', {'stdlib_mode': 'source-backed', 'offline_compilers': {}})
+            with patch.object(qualification, 'offline_compilers', return_value={}):
+                with self.assertRaises(FileNotFoundError):
+                    qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
+                service = shared / 'compiler-service'
+                service.mkdir()
+                (service / 'compiler-service-source.bin').write_bytes(b'opaque configuration fixture')
+                (service / 'compiler-service-source.sha256').write_text(qualification.sha256(service / 'compiler-service-source.bin') + '\n')
+                observed = qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
+                self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG', observed)
+                rooted = qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
+                self.assertIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted)
+                self.assertNotIn('LD_LIBRARY_PATH', rooted)
+
+    def test_immutable_alias_owners_survive_and_mutable_hops_with_dotdot_refuse(self):
+        a, b = Path('/nix/store/source'), Path('/nix/store/target')
+        aliases = {a: str(b), b / 'settings': str(b / 'actual-settings')}
+        def info(path):
+            return SimpleNamespace(st_mode=stat.S_IFLNK if path in aliases else stat.S_IFDIR)
+        with patch.object(Path, 'lstat', new=info), patch.object(os, 'readlink', side_effect=lambda path: aliases[path]):
+            self.assertEqual(qualification._package_nix_roots(a / 'settings'), [a, b])
+            aliases[a] = str(b / 'link/../settings')
+            aliases[b / 'link'] = '/tmp/mutable/subdir'
+            with self.assertRaisesRegex(ValueError, 'mutable'):
+                qualification._package_nix_roots(a / 'settings')
+
+    def test_path_resolution_refuses_whole_store_and_file_before_dotdot(self):
+        root = Path('/nix/store/origin')
+        def info(path):
+            return SimpleNamespace(st_mode=stat.S_IFREG if path == root / 'file' else stat.S_IFDIR)
+        with patch.object(Path, 'lstat', new=info):
+            with self.assertRaisesRegex(ValueError, 'whole Nix store'):
+                qualification._package_nix_roots(root / '..')
+            with self.assertRaisesRegex(ValueError, 'non-directory'):
+                qualification._package_nix_roots(root / 'file/../settings')
 
 
 if __name__ == '__main__':
