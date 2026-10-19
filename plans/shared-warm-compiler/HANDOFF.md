@@ -69,8 +69,9 @@ from old samples or stop that daemon without ownership checks.
 4. **Warm owns matched publication gate and wakes Qualification/campaign.** Rust
    birth9529 has full source acceptance and12PASS at666ee plus separate passive1PASS
    at9529. Tuple12 genuine issuer2b1498 and matching Context6/Published8/descriptor2
-   reader are composed but actual matched execution awaits reviewed Rust/Haskell
-   repairs and matching production profile. Do not fold an unmatched wire break.
+   reader are composed. Actual24d9 Rust/worker/wrapper compiled, then Tasty1 failed
+   sealed package evidence before new tuple12; exact sealed packages+iface reader
+   whitelist repair is protocol owned. Do not fold an unmatched wire break.
    Captured-source transport aliases must normalize against SAME immutable ordered
    root domain; no reopening retired worker materializations or logical-world change.
 5. **Reload owns coherent next R1 and raw-live-source migration.** f062 is joined.
