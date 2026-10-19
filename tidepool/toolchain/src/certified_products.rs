@@ -6796,6 +6796,7 @@ impl<'a> OriginalValidationInventory<'a> {
         Ok((group, witness.as_ref()))
     }
 
+    #[track_caller]
     fn validate_imports(
         &self,
         key: &crate::artifact_inventory::NativeGroupKey,
@@ -11404,6 +11405,14 @@ pub(crate) mod tests {
                 &[],
                 &mut PackageInterfaceValidation::default(),
             );
+            if ordinal == u32::MAX {
+                assert!(matches!(
+                    &actual,
+                    Err(CertificationError::Mismatch("selected original group"))
+                ));
+            } else {
+                assert!(actual.is_ok());
+            }
             assert_eq!(
                 actual.map_err(|error| format!("{error:?}")),
                 reference_available_originals(&available, &selected, &[])
@@ -11546,6 +11555,36 @@ pub(crate) mod tests {
             check(&available, &advertised, &private),
             Err(CertificationError::Mismatch("source binder/group closure"))
         ));
+        let first_view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![roots[0].clone(), leaf_entry.clone()],
+                &BTreeSet::from([key(&roots[0], 11), hidden]),
+            )
+            .unwrap();
+        let first_qualification =
+            NativeOriginalRequirement::from_selected_view(roots[0].descriptor.id, &first_view)
+                .unwrap()
+                .unwrap()
+                .qualify_availability(&first_view)
+                .unwrap()
+                .unwrap();
+        // The earlier root now succeeds and authenticates H. Its cached fact
+        // must still grant no membership to the later unqualified root.
+        assert!(matches!(
+            check(
+                &available,
+                &advertised,
+                std::slice::from_ref(&first_qualification)
+            ),
+            Err(CertificationError::Mismatch("source binder/group closure"))
+        ));
+        check(
+            &available,
+            &advertised,
+            &[first_qualification, qualification.clone()],
+        )
+        .unwrap();
         let complete = advertised.iter().copied().chain([hidden]).collect();
         check(&available, &complete, &private).unwrap();
         let mut missing = available.clone();
