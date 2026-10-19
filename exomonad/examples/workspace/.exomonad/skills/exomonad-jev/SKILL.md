@@ -33,8 +33,11 @@ modules. An explicit effect signature imports the effect type with
 `import Tidepool.Effects.Core (Jev)`. These compositions require no Project
 workflow helpers.
 
-`import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
-unqualified.
+When the workspace supplies `Jev.Operators`, the default notebook imports it
+as `J`, with `:=` and `:&` unqualified. Authored modules import it explicitly.
+An admitted `Jev` effect permits execution but does not supply this optional
+workspace module. If the run reports it absent, these recipes require installing
+the workspace's pinned Jev source before use; the effect grant alone is insufficient.
 
 `J.ask1 state question` asks one; `J.ask state packet` asks a whole packet in
 one round trip. Both return a typed Jev call error or a response. Use

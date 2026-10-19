@@ -1,8 +1,10 @@
 # Exomonad API
 
 The default notebook scope is `Tidepool.Actors.Exomonad`, plus configured workspace
-modules. `Cmd`, `J`, `R`, `T`, `Map`, and `Set` name commands, Jev, record actors,
-text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in scope.
+modules. `Cmd`, `R`, `T`, `Map`, and `Set` name commands, record actors, text,
+maps, and sets. `bash`, `withMemory`, `MiB`, and `GiB` are in scope. When the
+workspace supplies `Jev.Operators`, `J`, `:=`, and `:&` are also in scope.
+The admitted `Jev` effect permits calls; it does not install that workspace module.
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 `OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
 
@@ -282,8 +284,31 @@ topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
 display (LookupTools.renderBatch topics)
 ```
 
+Lookup accepts Haskell symbol names (`Tidepool.Effects.Core.readFile`), module
+names, type queries prefixed with `::` (use `_` for unknown parts), and
+`doc <topic>`. A task description such as “read a file” is not a semantic
+search query. A no-match result covers the attempted names or type in the
+captured lookup view; it does not establish that the capability is absent.
+Inspect close candidates, qualify the name, or browse its owning module.
+
+Effect names are not module names:
+
+| Admitted effect | Operation in `Tidepool.Effects.Core` | Reads |
+|---|---|---|
+| `FsRead` | `readFile` | Workspace file text, with typed `FsError` failure |
+| `Source` | `readSourceModule` | A module in the request's captured source generation, returning revision identity and source text |
+
+`Tidepool.Source.sourceLines` selects lines from a retained source result;
+`Tidepool.Actor.Source` owns record-actor event sources. For checked file
+updates, the existing compiled recipe
+`.exomonad/workspace/checks/file-snapshot-example.hs` uses `Tidepool.File`.
+For a natural-language assessment composed with explicit symbol lookup, see
+`checks/jev-lookup-example.hs` and its prerequisites in `checks/jev-composition.md`
+under that same installed workspace directory.
+
 Hosted lookup may add up to four Jev-selected related declarations or
-alternatives; original failures remain. `polymorphic` needs call-site
+alternatives; original failures remain. `doc workbench` describes navigation
+within retained results. `polymorphic` needs call-site
 constraints; `unknown` needs type information. `status` offers `summary`,
 `detailed`, `watches`, `recovery`, `lineage`, `trace` and `bindings` without
 compiling a cell.

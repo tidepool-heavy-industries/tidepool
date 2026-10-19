@@ -142,6 +142,19 @@ The hosted `lookup` tool is not a Haskell function. From a cell, use
 `lookupRaw (lookupRequest ["Cmd.quiet"])`; `lookupRequest` supplies the shipped
 hosted tool's defaults. Use `LookupRequest` directly for custom lookup options.
 
+Where the active `AgentSpec` mounts `Tidepool.Lookup.Tools`, lookup returns a
+`LookupCaptureReceipt`; its `readLookup` tool reads that exact retained capture.
+`LookupIndex` lists sections; `LookupSections` selects primary or related
+results with optional line ranges. `LookupSearch` performs literal text search
+within one retained section with a context radius and match limit; `LookupText`
+reuses the returned match or context ranges. `LookupReceipt` and
+`LookupSelectionTrace` expose the capture and selection evidence. These reads
+perform no new API search. From Haskell, `Tidepool.Lookup.Navigation` provides
+`lookupCaptureIndex`, `selectLookupCapture`, `searchLookupCapture`, and
+`selectLookupCaptureText` over a retained capture. Full example and bundle
+sections remain available when no line range is supplied; preserve their source
+and view identities when reusing selections.
+
 `display value` emits bounded structured output and returns an opaque
 `DisplayHandle value`. `expansions handle` lists the available field keys and
 their labels; `expand handle key` emits that field's bounded detail and returns
