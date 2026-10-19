@@ -50,6 +50,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Artifact-only custody and unions across carriers cannot supply that proof.
   Availability preserves exact dependency graphs without selecting executable
   groups or restoring source, lexical or instance authority.
+  Distinguish consuming an already issued dependency from qualifying new Full
+  availability. An interface-only consumer may retain a historical dependency's
+  exact closure when canonical bytes agree, without rebinding its edges. Check
+  the effective projected role, not just the parent view: an incoming Original
+  may not yet appear in the parent's namespace. Explicit Original selection and
+  Full qualification retain their stricter binding requirements.
   An opaque native offer owns its group proof separately from its receiving
   artifact view. Carrier-only retention cannot be turned into group ownership
   by copying roots. Availability fixtures consume the existing checked issuer

@@ -47,6 +47,15 @@ A canonical-only projection can retain group custody without selecting code;
 `select_roots(OriginalId)` can add available Group roots. Empty native permission
 and absent decisions remain distinct.
 
+Dependency consumption and Full qualification are separate decisions. The
+`ee0dc086` repair carries the effective consumed namespace into native dependency
+binding: a canonical-only role can consume an already-issued historical closure
+with matching canonical bytes while preserving its exact group/carrier edges.
+It cannot mint Full availability, substitute an explicit Original selection, or
+resolve competing group candidates by payload equality. Looking only at the
+parent namespace misses incoming Original roles. This repair is source-reviewed;
+its native controls and actual retained-command rerun are pending.
+
 ## P1–P10: producer, consumer and remaining work
 
 Paths below name the owning modules; symbols are searchable anchors.
