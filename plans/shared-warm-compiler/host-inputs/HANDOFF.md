@@ -58,6 +58,16 @@ reviewed concrete issuance contract.
   arrivals and changed owners stay checked; fresh group/package validation is
   unchanged. No root/delta/publication migration or worker Ready issuer is supplied
   by these bounded changes.
+- Deferred observation successor `8502351e..a8450863` removes the eager declaration
+  digest from `RequestCompilerInputs`. Its two physical authorization/request
+  consumers already hold the exact immutable declaration owner and compute the
+  unchanged wire identity there. Compiler-input admission now leaves that
+  observation unconstructed, including a changed lexical context. The actual
+  physical request still constructs it once. Independent source review accepts
+  the exact change without findings; production/cfg(test) compilation and five
+  counted controls passed. Receipt: `oracle/deferred-observation-review-a845.txt`
+  under the area's evidence directory. Metadata and group recensus still remain;
+  no end-to-end speedup is claimed.
 - Accepted C2 amendment: campaign `e2bd2611102566085d0c573568d820a50ed62fb3`,
   inspected directly. The selected row's exact binding and admitted payload is
   its home witness: canonical finalization, checked Val certificate or accepted
@@ -163,6 +173,21 @@ The admitted `just test-lib tidepool-toolchain` command used both exact names,
 `continuation.log` under the same evidence directory. Exit 0, selected/executed/
 passed 2, failed 0; build ID `4bad2e12-8c53-4872-a920-4ca7dc7d1c7f`.
 The complete component gate is therefore ten distinct tests passed.
+
+At `a845086387ede18670742067e5904deb950d55b5`, the deferred-observation successor
+compiled both owning targets with `-j1` (exit 0, three local actions) and executed
+five exact tests, all passed: its new zero/one encoding control, physical
+authorization/manifest identity, private original publication/capture/retry
+history, unchanged exact-owner reuse and mutable-package refusal. This is a
+separate successor run; two cases repeat prior controls. Retained exact counts,
+reports and commands are in `deferred-observation-summary.json` and adjacent
+`deferred-observation-{compile,counted}.log` within the same evidence directory.
+The executable is 110,954,328 bytes, SHA-256
+`3c15f37364484393f35eb17cb297e86aa78f1c437a95aeca429b6c06f3f5ee18`.
+All area clients settled before releasing the host compiler lease to 01D's
+isolated checkout. Its index source candidate `fde63bc1` has source acceptance,
+with a bounded additional acquisition-replacement/overlap test requested before
+final review; native compilation remains owned and observed by that leaf.
 
 Host Buck daemon PID 3873490 belongs to
 `/build.slice/inanna-build-1792399827-3873418.scope`.
