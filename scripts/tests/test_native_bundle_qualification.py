@@ -4081,7 +4081,7 @@ class CompilerServicePackageTests(unittest.TestCase):
                 + struct.pack('<I', 0) * 4)
 
     @contextlib.contextmanager
-    def declared_provider(self, root, retain_alias=False, closure_alias=False):
+    def declared_provider(self, root, retain_alias=False, closure_alias=False, extra_package=False):
         """Real declaration/acquisition entrypoints; external compiler/Nix are mocked."""
         tools = runtime_tools_fixture(root)
         libdir = root / 'compiler/lib'
@@ -4098,6 +4098,10 @@ class CompilerServicePackageTests(unittest.TestCase):
         alias = root / 'immutable-alias-fixture'
         alias.symlink_to(tools, target_is_directory=True)
         selected_roots = [tools, alias] if retain_alias else [tools]
+        if extra_package:
+            package = root / "package-object"
+            package.mkdir()
+            selected_roots.append(package)
         original_hash = qualification.sha256
         original_root_present = qualification._package_root_present
 
@@ -4160,7 +4164,7 @@ class CompilerServicePackageTests(unittest.TestCase):
             stack.enter_context(patch.object(qualification, 'native_runtime_tools', return_value=tools))
             stack.enter_context(patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)))
             stack.enter_context(patch.object(qualification, '_package_profile_paths', return_value=[tools]))
-            stack.enter_context(patch.object(qualification, '_package_nix_roots', return_value=selected_roots))
+            stack.enter_context(patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [tools] if path == tools / 'bin/python3' else selected_roots))
             stack.enter_context(patch.object(qualification, '_package_loader_roots', return_value=[tools]))
             stack.enter_context(patch.object(qualification, 'verify_registered_gc_roots'))
             stack.enter_context(patch.object(qualification, '_package_root_present', side_effect=root_present))
@@ -4214,9 +4218,24 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertEqual(receipt['provider_profile_hash_passes'], 2)
             release = self.retirement_args(acquire)
             settled = qualification.release_compiler_service_source(release)
-            self.assertEqual(json.loads(settled.read_text())['status'], 'released')
+            self.assertEqual(json.loads(settled.read_text())['status'], 'package-settled-guard-held')
             self.assertEqual(qualification.release_compiler_service_source(release), settled)
-            self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
+            remaining = list((acquire.owner_directory / 'package-source/gc-roots').iterdir())
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(str(remaining[0].readlink()), receipt['provider_guard_store_path'])
+            self.assertEqual(json.loads(settled.read_text())['release_count'], 0)
+
+    def test_provider_replay_requires_guard_still_retained(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            qualification.release_compiler_service_source(release)
+            receipt = json.loads(release.receipt.read_text())
+            guard = next(item for item in receipt['roots'] if item['store_path'] == receipt['provider_guard_store_path'])
+            Path(guard['path']).unlink()
+            with self.assertRaisesRegex(ValueError, 'exact retained root'):
+                qualification.release_compiler_service_source(release)
 
     def test_partial_registration_is_owned_and_settled_before_boot(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
@@ -4264,7 +4283,7 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertEqual(len(list((acquire.owner_directory / 'package-source/gc-roots').iterdir())), 2)
 
     def test_partial_release_resumes_only_its_exact_progress(self):
-        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary), extra_package=True) as provider:
             acquire = provider.acquire_args()
             qualification.acquire_compiler_service_source(acquire)
             release = self.retirement_args(acquire)
@@ -4278,9 +4297,17 @@ class CompilerServicePackageTests(unittest.TestCase):
                 return original_unlink(path, *args, **kwargs)
             with patch.object(Path, 'unlink', new=unlink), self.assertRaises(PermissionError):
                 qualification.release_compiler_service_source(release)
+            receipt = json.loads(release.receipt.read_text())
+            guard = next(item for item in receipt['roots'] if item['store_path'] == receipt['provider_guard_store_path'])
+            # Model GC between failed provider invocations: only a live guard
+            # keeps the interpreter/import closure available to restart release.
+            self.assertTrue(Path(guard['path']).is_symlink())
+            collected = {item['store_path'] for item in receipt['roots'] if not Path(item['path']).exists()}
+            self.assertTrue(collected)
+            self.assertNotIn(guard['store_path'], collected)
             settled = qualification.release_compiler_service_source(release)
             result = json.loads(settled.read_text())
-            self.assertEqual((result['status'], result['release_count']), ('released', 1))
+            self.assertEqual((result['status'], result['release_count']), ('package-settled-guard-held', 0))
 
     def test_resumed_absent_root_is_synced_before_release_is_published(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
@@ -4298,8 +4325,8 @@ class CompilerServicePackageTests(unittest.TestCase):
                 qualification.release_compiler_service_source(release)
             with patch.object(qualification, '_sync_directory', wraps=original_sync) as observed:
                 settled = qualification.release_compiler_service_source(release)
-            self.assertGreaterEqual(sum(call.args[0].name == 'gc-roots' for call in observed.call_args_list), 2)
-            self.assertEqual(json.loads(settled.read_text())['status'], 'released')
+            self.assertGreaterEqual(sum(call.args[0].name == 'gc-roots' for call in observed.call_args_list), 1)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'package-settled-guard-held')
 
     def test_declaration_refuses_noncanonical_top_level_objects(self):
         with tempfile.TemporaryDirectory() as temporary:

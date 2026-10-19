@@ -1036,7 +1036,12 @@ def declare_compiler_service_source(args) -> Path:
     if not iserv.is_file():
         raise ValueError(f"supported compiler lacks its fixed ghc-iserv: {iserv}")
     selected += [*_package_nix_roots(iserv), *_package_loader_roots([frontend, worker, iserv], environment)]
-    roots = sorted({str(root) for path in selected for root in _package_nix_roots(path)})
+    python = nix_path(tools / "bin/python3")
+    python_roots = _package_nix_roots(python)
+    if len(python_roots) != 1:
+        raise ValueError("provider Python requires one canonical Nix object")
+    provider_guard = str(python_roots[0])
+    roots = sorted({provider_guard, *(str(root) for path in selected for root in _package_nix_roots(path))})
     # TPSPF001 admits canonical top-level objects; aliases within those objects
     # retain their source and target roots through the single route validator.
     if any(Path(root).resolve(strict=True) != Path(root) for root in roots):
@@ -1066,8 +1071,8 @@ def declare_compiler_service_source(args) -> Path:
         "consumed_worker_identity": authority["consumed_worker_identity"],
         "ghc_libdir": str(libdir), "runtime_tools": str(tools),
         "provider_path": str(provider), "provider_sha256": sha256(provider),
-        "python_path": str(nix_path(tools / "bin/python3")),
-        "python_sha256": sha256(nix_path(tools / "bin/python3")),
+        "python_path": str(python), "provider_guard_store_path": provider_guard,
+        "python_sha256": sha256(python),
         "profile_path": str(profile), "profile_sha256": profile_hash,
         "profile_store_path": profile_store,
         "profile_id": hashlib.sha256(PACKAGE_PROFILE_DOMAIN + body).hexdigest(),
@@ -1194,12 +1199,13 @@ def acquire_compiler_service_source(args) -> bytes:
     root.mkdir(mode=0o700, exist_ok=False)
     _sync_directory(owner)
     profile_store = record["profile_store_path"]
-    roots = sorted({*record["nix_closure"]["roots"], profile_store})
+    roots = sorted({*record["nix_closure"]["roots"], record["provider_guard_store_path"], profile_store})
     planned = [{"path": str(root / "gc-roots" / hashlib.sha256(value.encode()).hexdigest()),
                 "store_path": value, "state": "planned"} for value in roots]
     state = {"schema": 1, "kind": "compiler-service-package-acquisition", "status": "acquiring",
              "service_epoch": epoch, "source_id": args.source_id, "profile_id": args.profile_id,
              "source_record_sha256": args.record_sha256, "runtime_tools": str(tools),
+             "provider_guard_store_path": record["provider_guard_store_path"],
              "roots": planned, "acquire_count": 1, "release_count": 0,
              "capture_bytes": record["capture_bytes"], "profile_declaration_write_bytes": record["profile_bytes"],
              "provider_profile_hash_passes": 1, "provider_profile_hash_bytes": record["profile_bytes"],
@@ -1274,11 +1280,11 @@ def release_compiler_service_source(args) -> Path:
     if prior is not None:
         if any(prior.get(key) != state.get(key) for key in ("service_epoch", "source_id", "profile_id")) or prior.get("complete_retirement_sha256") != sha256(complete_path):
             raise ValueError("compiler package release progress belongs to another retirement")
-        if prior.get("status") == "released":
-            _sync_directory(settlement.parent)
-            return settlement
         state = prior
     roots = state["roots"]
+    guard = state["provider_guard_store_path"]
+    if sum(item["store_path"] == guard for item in roots) != 1:
+        raise ValueError("compiler package release lacks its exact provider guard")
     for item in roots:
         target = receipt.parent / "gc-roots" / hashlib.sha256(item["store_path"].encode()).hexdigest()
         if item["path"] != str(target) or item["state"] not in ("registered", "releasing", "released"):
@@ -1288,11 +1294,15 @@ def release_compiler_service_source(args) -> Path:
             raise ValueError("compiler package root reappeared after release")
         if item["state"] == "registered" and not present:
             raise ValueError("compiler package release cannot confirm exact retained root")
+    if state.get("status") == "package-settled-guard-held":
+        # Only the native pending finalizer may resume after guard removal.
+        _sync_directory(settlement.parent)
+        return settlement
     result = {**state, "status": "releasing", "complete_retirement_sha256": sha256(complete_path)}
     write_private_json(settlement, result)
     try:
         for item in roots:
-            if item["state"] == "released":
+            if item["store_path"] == guard or item["state"] == "released":
                 continue
             item["state"] = "releasing"
             write_private_json(settlement, result)
@@ -1301,7 +1311,9 @@ def release_compiler_service_source(args) -> Path:
             _sync_directory(Path(item["path"]).parent)
             item["state"] = "released"
             write_private_json(settlement, result)
-        result.update(status="released", release_count=1, retained_root_count=0)
+        # The existing closed native parent owns final guard removal. Keeping the
+        # Python object makes every provider retry possible until that transfer.
+        result.update(status="package-settled-guard-held", package_release_count=1, release_count=0, retained_root_count=1)
         write_private_json(settlement, result)
     except BaseException as error:
         result.update(status="retained-unknown", failure=type(error).__name__ + ": " + str(error))

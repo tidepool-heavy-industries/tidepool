@@ -46,7 +46,10 @@ plan precedes Nix side effects. Failed preboot acquisitions settle only exact
 newly owned symlinks; ambiguous state retains the plan and roots.
 `release-compiler-service-source` requires the existing complete parent retirement
 record bound to the exact epoch, source, profile and acquisition receipt. It
-persists progress before unlinking roots. Root uncertainty prevents normal owner
+persists progress before unlinking package roots, retaining the canonical Python
+object guard for provider retries. Only the existing closed native parent finalizes
+that guard after durable finite pending facts; provider settlement is not final
+service release. Root uncertainty prevents normal owner
 directory cleanup. Clients, slots and transaction END do not acquire or release
 these roots.
 
