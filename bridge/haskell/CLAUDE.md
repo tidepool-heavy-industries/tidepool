@@ -123,11 +123,44 @@ the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;
 prepared queries use their exact completed HPT. They never manufacture an
 expression checking target or fall back to ambient source after refusal.
-The guard admits effective per-file flags only with GHC's checking backend:
+The guard admits effective per-file flags only with GHC's checking backend and
+without separate bytecode-generation flags:
 bytecode generation can compile foreign stubs even when CPP and TH are disabled.
 Authenticated source-row names without captured finder-representable paths
 produce Unavailable; passive custody can prevent an absence claim but cannot
 select an interface or authorize an ambient/package replacement.
+Unpublished world directories are released on failure or cancellation through
+the existing completion owner, retaining both the primary and cleanup failures.
+The masked final publication performs only preforced owner writes. Published
+backing files remain with their actual world/worker owner until safe release;
+dropping an index entry does not establish release of global GHC state.
+Effective source flags preserve the operation's fixed output policy, including
+directories, explicit filenames and suffixes. World queries refuse dump files,
+IDE outputs and coverage files before load; these are not captured world inputs
+or implicitly owned products.
+An admitted query stores only its scope-issued world binding. It borrows the
+actual payload from the still-held scope after executor and phase checks, so a
+retained closed request does not become another raw-source/HPT retention owner.
+Optional worlds and original images share the existing input owner's byte and
+entry allowance. World charges conservatively include captured custody and
+physical source copies; equal seals alone do not prove physical sharing between
+world acquisitions. FIFO admission order and charges belong to the existing
+universe index. Resident hits and retained-world END do not inventory backing.
+Releasing a nonresident world at END recursively removes its owned tree, with
+work proportional to that tree; stored charges do not eliminate deletion cost.
+A valid oversize world remains held through END, then becomes nonresident.
+World metadata uses in-memory interfaces with interface/Core file output disabled.
+Retire an unheld private world before deleting its backing; failed cleanup keeps
+the actual worker namespace and release evidence until confirmed reap. Worker
+RSS rotation still owns total GHC residency, including shared EPS and NameCache.
+Opt-in world retention observations use the existing Timing owner and the sole
+Rust machine-stderr prefix list. Request events reach the compiler log; scope
+release events outside request capture reach the owned daemon stderr log.
+Missing observations remain incomplete evidence. Emit admission after ownership
+transfer, and keep observations outside atomic publication. Cleanup failure
+cannot become a release event; a scope-release event is not a transport END ack.
+After index retirement, release observations belong inside the same captured
+release action as backing cleanup, so observer cancellation retains that debt.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization

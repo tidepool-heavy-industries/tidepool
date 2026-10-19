@@ -537,7 +537,7 @@ mod tests {
     }
 }
 
-fn world_bytes(value: &ciborium::value::Value) -> Result<Vec<u8>, CompileError> {
+pub(crate) fn world_bytes(value: &ciborium::value::Value) -> Result<Vec<u8>, CompileError> {
     crate::host_work::record_host_work(crate::host_work::HostWorkCounter::SemanticEncoding, 1);
     struct Bounded {
         bytes: Vec<u8>,
@@ -600,6 +600,31 @@ fn world_path(path: &Path) -> Result<ciborium::value::Value, CompileError> {
         .filter(|v| path.is_absolute() && !v.contains('\0'))
         .map(world_text)
         .ok_or_else(|| source_failure("world input path must be absolute UTF-8"))
+}
+
+/// Check the cold visibility envelope before cloning incoming bytes or row owners.
+/// SessionModule names have a bounded u64 generation; nine bytes bounds every
+/// CBOR head, including the outer arrays. The bounded writer enforces the final
+/// encoding too. This is the existing portable capture budget, not retention.
+pub(crate) fn check_world_visibility_size(
+    visibility_bytes: usize,
+    rows: usize,
+) -> Result<(), CompileError> {
+    let max_owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(u64::MAX))
+        .module_name()
+        .len() as u64;
+    let row_bound = 9 + 9 + max_owner + 2 * (9 + 32);
+    let bound = (rows as u64)
+        .checked_mul(row_bound)
+        .and_then(|n| n.checked_add(9 + 9 + 8 + 9 + 9))
+        .and_then(|n| n.checked_add(visibility_bytes as u64))
+        .ok_or_else(source_size_failure)?;
+    let allowance = capture_allowance()?;
+    if bound > allowance {
+        return Err(source_failure(format!(
+            "compiler world visibility requires at most {bound} bytes; capture allowance is {allowance} bytes")));
+    }
+    Ok(())
 }
 
 struct WorldColdRows {
@@ -740,6 +765,65 @@ impl WorldColdRows {
     }
 }
 
+/// Logical transfer facts only: paths and descriptor aliases do not identify a
+/// row. The image binds all immutable part hashes; role and required owners are
+/// separate semantic facts and must also survive transport unchanged.
+fn world_semantic_row(
+    row: &ciborium::value::Value,
+    producer: &[u8; 32],
+) -> Result<ciborium::value::Value, CompileError> {
+    use ciborium::value::Value;
+    let Value::Array(row) = row else {
+        return Err(source_failure("invalid world row"));
+    };
+    let [Value::Array(fields), Value::Bytes(image)] = row.as_slice() else {
+        return Err(source_failure("invalid world row image"));
+    };
+    let [Value::Text(unit), Value::Text(module), _, _, Value::Array(requires), _, _, Value::Array(evidence)] =
+        fields.as_slice()
+    else {
+        return Err(source_failure("invalid world interface row"));
+    };
+    let Some(Value::Text(role)) = evidence.first() else {
+        return Err(source_failure("invalid world row role"));
+    };
+    if image.len() != 32
+        || !matches!(
+            role.as_str(),
+            "module" | "native-declaration" | "join" | "value"
+        )
+    {
+        return Err(source_failure("invalid world row semantic facts"));
+    }
+    let mut owners = std::collections::BTreeSet::new();
+    for owner in requires {
+        let Value::Array(key) = owner else {
+            return Err(source_failure("invalid world row requirement"));
+        };
+        let [Value::Text(unit), Value::Text(module)] = key.as_slice() else {
+            return Err(source_failure("invalid world required owner"));
+        };
+        if !owners.insert((unit, module)) {
+            return Err(source_failure("duplicate world required owner"));
+        }
+    }
+    Ok(world_array(vec![
+        world_text(unit.clone()),
+        world_text(module.clone()),
+        world_blob(producer),
+        world_blob(image),
+        world_text(role.clone()),
+        world_array(
+            owners
+                .into_iter()
+                .map(|(unit, module)| {
+                    world_array(vec![world_text(unit.clone()), world_text(module.clone())])
+                })
+                .collect(),
+        ),
+    ]))
+}
+
 impl CompilerWorldOpenInputs {
     fn prepare(
         self,
@@ -785,6 +869,7 @@ impl CompilerWorldOpenInputs {
             .ok_or_else(source_size_failure)?;
         let metadata = self.primary_context.compiler_metadata_snapshot()?;
         let mut base = Vec::with_capacity(metadata.entries.len());
+        let mut base_references = Vec::with_capacity(metadata.entries.len());
         for (ordinal, entry) in metadata.entries.values().enumerate() {
             crate::host_work::checkpoint()?;
             let root = self.directory.path().join(format!("primary-{ordinal}"));
@@ -828,7 +913,9 @@ impl CompilerWorldOpenInputs {
                     })
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?;
-            base.push(rows.row(entry, parts)?.0);
+            let row = rows.row(entry, parts)?.0;
+            base_references.push(world_semantic_row(&row, &producer)?);
+            base.push(row);
         }
         let mut visible = Vec::with_capacity(self.visible_rows.len());
         let mut references = Vec::with_capacity(self.visible_rows.len());
@@ -840,13 +927,8 @@ impl CompilerWorldOpenInputs {
                     .checked_sub(part.bytes)
                     .ok_or_else(source_size_failure)?;
             }
-            let (row, image) = rows.row(&entry, parts)?;
-            references.push(world_array(vec![
-                world_text(entry.descriptor.owner.unit.clone()),
-                world_text(entry.descriptor.owner.module.clone()),
-                world_blob(producer),
-                world_blob(image),
-            ]));
+            let (row, _) = rows.row(&entry, parts)?;
+            references.push(world_semantic_row(&row, &producer)?);
             visible.push(row);
         }
         let blocks = self
@@ -870,12 +952,13 @@ impl CompilerWorldOpenInputs {
         // transfer and restoration; it does not independently verify CID content.
         let product = world_bytes(&world_array(vec![
             world_text("TPCWREST"),
-            1u64.into(),
+            2u64.into(),
             world_blob(self.primary_root.cid().to_bytes()),
             world_blob(self.sources.seal()),
             world_blob(producer),
             world_blob(profile),
             world_blob(&self.visibility),
+            world_blob(world_digest(&world_bytes(&world_array(base_references))?)),
             world_blob(world_digest(&world_bytes(&world_array(references))?)),
             world_blob(world_digest(&world_bytes(&world_array(seals))?)),
         ]))?;
@@ -889,7 +972,7 @@ impl CompilerWorldOpenInputs {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            1u64.into(),
+            2u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
@@ -983,11 +1066,25 @@ fn ensure_world(
         root: root.clone(),
         acquisition: A::Resident(hint),
     });
+    crate::host_work::record_host_work(
+        crate::host_work::HostWorkCounter::WorldEnsureResidentProbe,
+        1,
+    );
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization } if world == root => realization,
+        O::Ready { world, realization } if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
+                1,
+            );
+            realization
+        }
         O::NeedsAcquisition(world) if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureNeedsAcquisition,
+                1,
+            );
             if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
                 &restoration.inputs.directory,
             )) {
@@ -1004,9 +1101,19 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::InputFdExport,
                 restoration.input_files.len() as u64,
             );
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureComplete,
+                1,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
-                O::Ready { world, realization } if world == root => realization,
+                O::Ready { world, realization } if world == root => {
+                    crate::host_work::record_host_work(
+                        crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
+                        1,
+                    );
+                    realization
+                }
                 O::Rejected(reason) => {
                     return Err(source_failure(format!(
                         "compiler refused world acquisition: {reason:?}"
@@ -1171,10 +1278,17 @@ fn namespace_text(namespace: InspectionNamespace) -> &'static str {
         InspectionNamespace::Field => "Field",
     }
 }
+#[derive(Clone, Copy)]
+enum ModuleReceiptUse {
+    Requested,
+    Defining,
+}
+
 fn module_receipt(
     value: &ciborium::value::Value,
     sources: &CapturedCompilerSources,
     expected_profile: &[u8; 32],
+    receipt_use: ModuleReceiptUse,
 ) -> Result<WorldModuleReceipt, CompileError> {
     let v = answer_array(value, 4)?;
     if answer_text(&v[0])? != "resolved" {
@@ -1188,7 +1302,10 @@ fn module_receipt(
     let origin = match &v[3] {
         ciborium::value::Value::Array(o) if o.len() == 2 && answer_text(&o[0])? == "package" => {
             let profile = answer_hash(&o[1])?;
-            if &profile != expected_profile || sources.selected_sources.contains_key(&module) {
+            if &profile != expected_profile
+                || (matches!(receipt_use, ModuleReceiptUse::Requested)
+                    && sources.selected_sources.contains_key(&module))
+            {
                 return Err(world_response_error(true));
             }
             WorldModuleOrigin::Package { profile }
@@ -1388,6 +1505,7 @@ fn decode_world_answer(
                 &v[5],
                 &world.restoration.inputs.sources,
                 &world.restoration.profile,
+                ModuleReceiptUse::Requested,
             )?;
             if receipt.module != question.module() {
                 return Err(world_response_error(true));
@@ -1433,6 +1551,7 @@ fn decode_world_answer(
             &v[6],
             &world.restoration.inputs.sources,
             &world.restoration.profile,
+            ModuleReceiptUse::Defining,
         )?)
     };
     let inspection_payload = answer_blob(&v[7])?.to_vec();
@@ -1508,11 +1627,11 @@ mod answer_tests {
         let a = b"module Module where\nvalue = (1 :: Int)\n";
         let b = b"module Module where\nvalue = True\n";
         let ab = sources(a, b);
-        assert!(module_receipt(&home(0, a), &ab, &[7; 32]).is_ok());
-        assert!(module_receipt(&home(1, b), &ab, &[7; 32]).is_err());
+        assert!(module_receipt(&home(0, a), &ab, &[7; 32], ModuleReceiptUse::Requested).is_ok());
+        assert!(module_receipt(&home(1, b), &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
         let ba = sources(b, a);
-        assert!(module_receipt(&home(0, b), &ba, &[7; 32]).is_ok());
-        assert!(module_receipt(&home(1, a), &ba, &[7; 32]).is_err());
+        assert!(module_receipt(&home(0, b), &ba, &[7; 32], ModuleReceiptUse::Requested).is_ok());
+        assert!(module_receipt(&home(1, a), &ba, &[7; 32], ModuleReceiptUse::Requested).is_err());
         assert_ne!(ab.seal(), ba.seal());
         let package = world_array(vec![
             world_text("resolved"),
@@ -1520,7 +1639,66 @@ mod answer_tests {
             world_text("Module"),
             world_array(vec![world_text("package"), world_blob([7; 32])]),
         ]);
-        assert!(module_receipt(&package, &ab, &[7; 32]).is_err());
+        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        // A package-qualified reexport may define a name in a different unit
+        // despite a same-named home module in the captured search namespace.
+        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Defining).is_ok());
+        assert!(module_receipt(&package, &ab, &[8; 32], ModuleReceiptUse::Defining).is_err());
+    }
+    #[test]
+    fn cold_world_row_seal_binds_roles_requirements_order_and_ignores_aliases() {
+        let row = |name: &str, alias: &str, role: &str, required: &str| {
+            world_array(vec![
+                world_array(vec![
+                    world_text("main"),
+                    world_text(name),
+                    world_text(alias),
+                    world_text("iface-hash"),
+                    world_array(vec![world_array(vec![
+                        world_text("main"),
+                        world_text(required),
+                    ])]),
+                    world_text("/package-alias"),
+                    world_text("packages-hash"),
+                    world_array(vec![world_text(role)]),
+                ]),
+                world_blob([9; 32]),
+            ])
+        };
+        let seal = |rows: Vec<ciborium::value::Value>| {
+            world_digest(
+                &world_bytes(&world_array(
+                    rows.iter()
+                        .map(|r| world_semantic_row(r, &[3; 32]).unwrap())
+                        .collect(),
+                ))
+                .unwrap(),
+            )
+        };
+        let original = row("A", "/original", "module", "Dependency");
+        assert_eq!(
+            seal(vec![original.clone()]),
+            seal(vec![row("A", "/relocated", "module", "Dependency")])
+        );
+        assert_ne!(
+            seal(vec![original.clone()]),
+            seal(vec![row("A", "/original", "join", "Dependency")])
+        );
+        assert_ne!(
+            seal(vec![original.clone()]),
+            seal(vec![row("A", "/original", "module", "Other")])
+        );
+        assert_ne!(seal(vec![original.clone()]), seal(vec![]));
+        let second = row("B", "/second", "module", "Dependency");
+        assert_ne!(
+            seal(vec![original.clone(), second.clone()]),
+            seal(vec![second, original])
+        );
+    }
+    #[test]
+    fn cold_visibility_rejects_oversize_before_clone_or_allocation() {
+        assert!(check_world_visibility_size(usize::MAX, 0).is_err());
+        assert!(check_world_visibility_size(0, usize::MAX).is_err());
     }
     #[test]
     fn world_identifier_namespace_is_checked_beyond_question_echo() {
