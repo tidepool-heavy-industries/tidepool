@@ -273,7 +273,10 @@ impl WorldPublicationVisibility {
             if Arc::ptr_eq(issued, attempt))
         {
             *current = if live {
-                super::InstalledToolsAvailability::Generation(generation)
+                super::InstalledToolsAvailability::PublicationVisible {
+                    attempt: attempt.clone(),
+                    generation,
+                }
             } else {
                 super::InstalledToolsAvailability::GenerationUnavailable(generation)
             };
@@ -755,6 +758,59 @@ mod tests {
             }
         }
 
+        fn after_confirmed_c() -> Self {
+            let mut fixture = Self::new();
+            let initial = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(initial.visibility().install(fixture.generation.clone()));
+            assert!(initial.confirmed());
+            let predecessor = fixture.generation.clone();
+            let dependency = generation(
+                &mut fixture._history,
+                predecessor.id.next().unwrap(),
+                predecessor.dependency().prerequisite().clone(),
+            );
+            let mut context = predecessor.context.clone();
+            context.placement.lexical_scope = dependency.runtime_lease().scope();
+            context.source_dependency = SourceDependency::Generation(dependency.clone());
+            let descriptor =
+                crate::ActorDescriptor::new("replacement publication component", context.placement)
+                    .with_persistence_policy(crate::ActorPersistencePolicy::Ephemeral)
+                    .with_source_dependency(context.source_dependency().clone());
+            let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
+                &context,
+                &descriptor,
+                dependency.runtime_lease(),
+                None,
+            )
+            .unwrap()
+            .bind(None);
+            fixture.generation = Arc::new(super::super::ActorGeneration {
+                id: dependency.generation(),
+                installation: predecessor
+                    .installation
+                    .clone()
+                    .with_source_dependency(&SourceDependency::Generation(dependency.clone())),
+                context,
+                scope: dependency.runtime_lease().clone(),
+                public_owner,
+                prompts: predecessor.prompts.clone(),
+                configuration_digest: [0; 32],
+                durable: None,
+            });
+            fixture.source = SourceDependency::Generation(predecessor.dependency().clone());
+            fixture.expected = super::super::ActorRequestSnapshot::Generation(predecessor);
+            fixture
+        }
+
+        fn assert_candidate_unavailable(&self) {
+            assert!(matches!(
+                self.generation.installation.source_dependency().claim(),
+                Err(GenerationAdmissionError::Closed { .. })
+            ));
+            assert!(self.state.snapshot_for_call().is_err());
+            assert!(self.state.current_generation().is_none());
+        }
+
         fn reserve(
             &self,
             decision: Arc<tidepool_runtime::session::PublicationDecision>,
@@ -778,6 +834,56 @@ mod tests {
                 super::super::InstalledToolsObservation::SourceUnavailable(_)
             ));
         }
+    }
+
+    #[test]
+    fn publisher_replacement_visibility_waits_for_ack_before_selection_and_source() {
+        let fixture = PublicationFixture::after_confirmed_c();
+        // D is a real new canonical scope, not bootstrap C's already-owned fence.
+        assert!(!fixture
+            .generation
+            .dependency()
+            .depends_on(fixture.source.generation().unwrap()));
+        let retained_d = fixture.generation.installation.source_dependency().clone();
+        drop(retained_d.claim().unwrap());
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        fixture.assert_candidate_unavailable();
+        assert!(owner.visibility().install(fixture.generation.clone()));
+        // Visibility records actual D while the actual ACK owner has not completed.
+        fixture.assert_candidate_unavailable();
+        assert!(matches!(
+            owner.complete(Ok(super::super::ActorGenerationCommit::Published {
+                generation: fixture.generation.clone(),
+                cancellation_pending: false,
+            })),
+            Ok(super::super::ActorGenerationCommit::Published { .. })
+        ));
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &fixture.generation
+        ));
+        drop(retained_d.claim().unwrap());
+    }
+
+    #[test]
+    fn publisher_replacement_unknown_after_visibility_never_opens_retained_d() {
+        let fixture = PublicationFixture::after_confirmed_c();
+        let retained_d = fixture.generation.installation.source_dependency().clone();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        assert!(owner.visibility().install(fixture.generation.clone()));
+        fixture.assert_candidate_unavailable();
+        assert!(matches!(
+            owner.complete(Ok(super::super::ActorGenerationCommit::Unconfirmed(
+                "post-visible acknowledgement unavailable".into()
+            ))),
+            Ok(super::super::ActorGenerationCommit::Unconfirmed(_))
+        ));
+        fixture.assert_candidate_unavailable();
+        assert!(retained_d.claim().is_err());
+        assert!(
+            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            if Arc::ptr_eq(selected, &fixture.generation))
+        );
     }
 
     #[test]

@@ -1872,8 +1872,10 @@ fn retain_unconfirmed_generation(
         InstalledToolsAvailability::Generation(generation) => {
             *current = InstalledToolsAvailability::GenerationUnavailable(generation.clone());
         }
-        InstalledToolsAvailability::Available(_)
-        | InstalledToolsAvailability::PublicationInProgress(_)
+        InstalledToolsAvailability::PublicationVisible { generation, .. } => {
+            *current = InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+        }
+        InstalledToolsAvailability::PublicationInProgress(_)
         | InstalledToolsAvailability::PublicationUnavailable(_) => {
             if let (Some(previous), Some(candidate)) = (previous, candidate.take()) {
                 *current = InstalledToolsAvailability::InitialPublicationUnconfirmed(Box::new(
@@ -1896,6 +1898,8 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
 
 /// The exact prepared selection reserved by the current installation owner.
 struct ActorPublicationAttempt {
+    // Guard and callback retain this snapshot outside installation locks. State
+    // replacement drops only shared clones, never its last tools/source custody.
     expected: ActorRequestSnapshot,
     target: generation_admission::GenerationDependency,
 }
@@ -1904,6 +1908,8 @@ struct ActorPublicationGuard {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
     world: Option<generation_admission::WorldPublication>,
+    target_fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    target_prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     settled: bool,
 }
@@ -1923,12 +1929,42 @@ impl ActorPublicationGuard {
         source: &generation_admission::SourceDependency,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<Option<Self>, ResidentActorWorkbenchError> {
+        target.runtime_lease().validate_source_issuer()?;
         let world = match (&expected, source) {
             (
                 ActorRequestSnapshot::Bootstrap(_),
                 generation_admission::SourceDependency::World(world),
             ) => Some(world.begin_publication(&target)?),
             _ => None,
+        };
+        let target_prerequisite = if world.is_none() {
+            target
+                .prerequisite()
+                .as_ref()
+                .map(|parent| parent.runtime_lease().admit_source())
+                .transpose()?
+        } else {
+            None
+        };
+        let target_fence = if world.is_none() {
+            let fence = target.runtime_admission().fence()?;
+            let claims = fence.pending_claims();
+            let unconfirmed = fence.unconfirmed_claims();
+            if claims != 0 {
+                if unconfirmed == 0 {
+                    fence.reopen()?;
+                }
+                return Err(
+                    generation_admission::GenerationAdmissionError::BootstrapBusy {
+                        claims,
+                        unconfirmed,
+                    }
+                    .into(),
+                );
+            }
+            Some(fence)
+        } else {
+            None
         };
         let attempt = Arc::new(ActorPublicationAttempt { expected, target });
         let same = {
@@ -1953,12 +1989,17 @@ impl ActorPublicationGuard {
             if let Some(world) = world {
                 world.refused();
             }
+            if let Some(fence) = target_fence {
+                fence.reopen()?;
+            }
             return Ok(None);
         }
         Ok(Some(Self {
             state,
             attempt,
             world,
+            target_fence,
+            target_prerequisite,
             decision,
             settled: false,
         }))
@@ -2021,19 +2062,47 @@ impl ActorPublicationGuard {
         if let Some(world) = self.world.take() {
             world.refused();
         }
+        if let Some(fence) = self.target_fence.take() {
+            // This path has a completed, known-unpublished operation only.
+            // A stale/unknown source owner remains closed on settlement failure.
+            if fence.reopen().is_err() {
+                return;
+            }
+        }
         self.settled = true;
     }
 
     fn confirmed(mut self) -> bool {
         let current = || {
-            matches!(&*self.state.0.lock(), InstalledToolsAvailability::Generation(generation)
-            if generation.dependency().same_prepared(&self.attempt.target))
+            let mut current = self.state.0.lock();
+            let selected = match &*current {
+                InstalledToolsAvailability::PublicationVisible {
+                    attempt,
+                    generation,
+                } if Arc::ptr_eq(attempt, &self.attempt)
+                    && generation.dependency().same_prepared(&self.attempt.target) =>
+                {
+                    Some(generation.clone())
+                }
+                _ => None,
+            };
+            if let Some(generation) = selected {
+                *current = InstalledToolsAvailability::Generation(generation);
+                true
+            } else {
+                false
+            }
         };
-        let confirmed = if let Some(world) = self.world.take() {
+        let mut confirmed = if let Some(world) = self.world.take() {
             world.confirmed_when(current)
         } else {
             current()
         };
+        if confirmed {
+            if let Some(fence) = self.target_fence.take() {
+                confirmed = fence.reopen().is_ok();
+            }
+        }
         self.settled = confirmed;
         confirmed
     }
@@ -2060,6 +2129,13 @@ impl Drop for ActorPublicationGuard {
                 {
                     *current = InstalledToolsAvailability::GenerationUnavailable(generation.clone())
                 }
+                InstalledToolsAvailability::PublicationVisible {
+                    attempt: issued,
+                    generation,
+                } if Arc::ptr_eq(issued, &attempt) => {
+                    *current =
+                        InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                }
                 _ => {}
             }
         };
@@ -2067,6 +2143,9 @@ impl Drop for ActorPublicationGuard {
             world.unavailable(mark_installed);
         } else {
             mark_installed();
+        }
+        if let Some(claim) = self.target_prerequisite.take() {
+            claim.retain_unconfirmed();
         }
         // WorldPublication drops prerequisite claims only after both locks unlock.
     }
@@ -2088,7 +2167,10 @@ impl ActorPublicationVisibility {
         if matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) | InstalledToolsAvailability::PublicationUnavailable(attempt) if Arc::ptr_eq(attempt, &self.attempt))
         {
             *current = if live {
-                InstalledToolsAvailability::Generation(generation)
+                InstalledToolsAvailability::PublicationVisible {
+                    attempt: self.attempt.clone(),
+                    generation,
+                }
             } else {
                 InstalledToolsAvailability::GenerationUnavailable(generation)
             };
@@ -2106,6 +2188,9 @@ impl ActorPublicationVisibility {
             InstalledToolsAvailability::Generation(generation)
             | InstalledToolsAvailability::GenerationUnavailable(generation) => {
                 generation.dependency().same_prepared(&self.attempt.target)
+            }
+            InstalledToolsAvailability::PublicationVisible { attempt, .. } => {
+                Arc::ptr_eq(attempt, &self.attempt)
             }
             _ => false,
         };
@@ -2165,6 +2250,7 @@ where
                 return Ok(Ok(ActorGenerationCommit::Refused("publication attempt is unavailable".into())));
             }
             let outcome = (|| {
+            session.validate_lexical_scope_lease(prepared.scope.scope(), &prepared.scope)?;
             let PreparedActorGeneration { installation, context, scope, commit, public_owner, prompts, configuration_digest, .. } = prepared;
             let mut visible = None;
             let mut visibility_live = true;
@@ -2333,6 +2419,10 @@ enum InstalledToolsAvailability {
     GenerationUnavailable(Arc<ActorGeneration>),
     PublicationInProgress(Arc<ActorPublicationAttempt>),
     PublicationUnavailable(Arc<ActorPublicationAttempt>),
+    PublicationVisible {
+        attempt: Arc<ActorPublicationAttempt>,
+        generation: Arc<ActorGeneration>,
+    },
     InitialPublicationUnconfirmed(Box<UnconfirmedInitialPublication>),
 }
 
@@ -2352,6 +2442,7 @@ impl InstalledToolsAvailability {
             | Self::InitialPublicationUnconfirmed(_)
             | Self::PublicationInProgress(_)
             | Self::PublicationUnavailable(_) => None,
+            Self::PublicationVisible { .. } => None,
         }
     }
 }
@@ -2416,6 +2507,9 @@ impl InstalledToolsState {
                     attempt.expected.installation().tools_arc(),
                 )
             }
+            InstalledToolsAvailability::PublicationVisible { generation, .. } => {
+                InstalledToolsObservation::SourceUnavailable(generation.installation.tools_arc())
+            }
         }
     }
 
@@ -2454,6 +2548,9 @@ impl InstalledToolsState {
             | InstalledToolsAvailability::PublicationUnavailable(attempt) => {
                 Err(unavailable(attempt.expected.installation().actor()))
             }
+            InstalledToolsAvailability::PublicationVisible { generation, .. } => {
+                Err(unavailable(generation.context.actor))
+            }
         }
     }
 
@@ -2475,6 +2572,9 @@ impl InstalledToolsState {
                 | InstalledToolsAvailability::PublicationUnavailable(_),
                 _,
             ) => return Err(BootstrapInstallationError::UnconfirmedGeneration),
+            (InstalledToolsAvailability::PublicationVisible { .. }, _) => {
+                return Err(BootstrapInstallationError::UnconfirmedGeneration)
+            }
             (InstalledToolsAvailability::Empty, BootstrapExpectation::Empty) => {}
             (
                 InstalledToolsAvailability::Available(active),
