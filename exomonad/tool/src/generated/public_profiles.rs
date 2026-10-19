@@ -23,7 +23,6 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::Green,
     ActorEffectKey::Actor,
     ActorEffectKey::Reflect,
-    ActorEffectKey::Lookup,
     ActorEffectKey::Source,
     ActorEffectKey::Journal,
     ActorEffectKey::Web,

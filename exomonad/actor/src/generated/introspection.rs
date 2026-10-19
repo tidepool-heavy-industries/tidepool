@@ -23,4 +23,10 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum IntrospectionReq {
     IntrospectionInfoWith(tidepool_bridge::HaskellValue),
     IntrospectionTypeOfWith(tidepool_bridge::HaskellValue),
+    CurrentScopeView,
+    ScopeBindings(tidepool_bridge::HaskellValue),
+    ModuleExports(tidepool_bridge::HaskellValue, String),
+    RowFit(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
+    TypeOfExpression(tidepool_bridge::HaskellValue, String),
+    TypeSearch(tidepool_bridge::HaskellValue, String),
 }

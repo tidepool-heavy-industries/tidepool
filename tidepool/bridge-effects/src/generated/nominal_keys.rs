@@ -43,8 +43,6 @@ pub enum ActorEffectKeyWire {
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectReflect,
     #[haskell(module = "Tidepool.Effects.Core")]
-    EffectLookup,
-    #[haskell(module = "Tidepool.Effects.Core")]
     EffectRepoEvent,
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectSource,
@@ -109,7 +107,6 @@ impl ActorEffectKeyWire {
         Self::EffectSpawnAgentDeepSeek,
         Self::EffectActor,
         Self::EffectReflect,
-        Self::EffectLookup,
         Self::EffectRepoEvent,
         Self::EffectSource,
         Self::EffectJournal,
@@ -141,7 +138,6 @@ impl ActorEffectKeyWire {
             Self::EffectGreen => "EffectGreen",
             Self::EffectActor => "EffectActor",
             Self::EffectReflect => "EffectReflect",
-            Self::EffectLookup => "EffectLookup",
             Self::EffectRepoEvent => "EffectRepoEvent",
             Self::EffectSource => "EffectSource",
             Self::EffectJournal => "EffectJournal",
@@ -185,7 +181,6 @@ impl From<ActorEffectKeyWire> for exomonad_tool::ActorEffectKey {
             ActorEffectKeyWire::EffectGreen => Self::Green,
             ActorEffectKeyWire::EffectActor => Self::Actor,
             ActorEffectKeyWire::EffectReflect => Self::Reflect,
-            ActorEffectKeyWire::EffectLookup => Self::Lookup,
             ActorEffectKeyWire::EffectRepoEvent => Self::RepoEvent,
             ActorEffectKeyWire::EffectSource => Self::Source,
             ActorEffectKeyWire::EffectJournal => Self::Journal,
@@ -230,7 +225,6 @@ impl TryFrom<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {
             exomonad_tool::ActorEffectKey::Green => Self::EffectGreen,
             exomonad_tool::ActorEffectKey::Actor => Self::EffectActor,
             exomonad_tool::ActorEffectKey::Reflect => Self::EffectReflect,
-            exomonad_tool::ActorEffectKey::Lookup => Self::EffectLookup,
             exomonad_tool::ActorEffectKey::RepoEvent => Self::EffectRepoEvent,
             exomonad_tool::ActorEffectKey::Source => Self::EffectSource,
             exomonad_tool::ActorEffectKey::Journal => Self::EffectJournal,

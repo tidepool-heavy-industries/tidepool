@@ -17,7 +17,6 @@ pub mod fork_agent;
 pub mod green;
 pub mod introspection;
 pub mod jev;
-pub mod lookup;
 pub mod model_call;
 pub mod notifications;
 pub mod reflect;

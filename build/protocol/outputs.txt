@@ -24,7 +24,6 @@ tidepool/bridge-effects/src/generated/resource_scopes.rs
 bridge/mcp/src/generated/actor.rs
 bridge/mcp/src/generated/actor_context.rs
 bridge/mcp/src/generated/introspection.rs
-bridge/mcp/src/generated/lookup.rs
 bridge/mcp/src/generated/actor_kernel.rs
 bridge/mcp/src/generated/actor_local.rs
 bridge/mcp/src/generated/sleep.rs
@@ -78,7 +77,6 @@ exomonad/actor/src/generated/actor.rs
 exomonad/actor/src/generated/resource_scopes.rs
 exomonad/actor/src/generated/actor_context.rs
 exomonad/actor/src/generated/introspection.rs
-exomonad/actor/src/generated/lookup.rs
 exomonad/actor/src/generated/source.rs
 exomonad/actor/src/generated/runtime_info.rs
 exomonad/actor/src/generated/reload.rs

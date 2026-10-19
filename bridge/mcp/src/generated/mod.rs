@@ -20,7 +20,6 @@ pub mod green;
 pub mod introspection;
 pub mod jev;
 pub mod journal;
-pub mod lookup;
 pub mod model_call;
 pub mod notifications;
 pub mod read_state;
@@ -59,7 +58,6 @@ pub use green::*;
 pub use introspection::*;
 pub use jev::*;
 pub use journal::*;
-pub use lookup::*;
 pub use model_call::*;
 pub use notifications::*;
 pub use read_state::*;
@@ -104,7 +102,6 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_decl(),
         actor_context_decl(),
         introspection_decl(),
-        lookup_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
         sleep_decl(),
@@ -1174,12 +1171,20 @@ pub(crate) fn operation_documentation(type_name: &str) -> Option<Vec<crate::Effe
         "Introspection" => vec![
             crate::EffectOperationDocumentation { name: "IntrospectionInfoWith".into(), signature: "IntrospectionInfoWith :: NameQuery -> Introspection (Either QueryError IdentifierInfo)".into(), contract: vec![], source: None, examples: vec![] },
             crate::EffectOperationDocumentation { name: "IntrospectionTypeOfWith".into(), signature: "IntrospectionTypeOfWith :: NameQuery -> Introspection (Either QueryError TypeInfo)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "CurrentScopeView".into(), signature: "CurrentScopeView :: Introspection (Either QueryError ScopeProvenance)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "ScopeBindings".into(), signature: "ScopeBindings :: Maybe ScopeProvenance -> Introspection (Either QueryError NameList)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "ModuleExports".into(), signature: "ModuleExports :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError NameList)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RowFit".into(), signature: "RowFit :: Maybe ScopeProvenance -> IdentifierRef -> Introspection (Either QueryError Fit)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "TypeOfExpression".into(), signature: "TypeOfExpression :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError ExpressionType)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "TypeSearch".into(), signature: "TypeSearch :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError TypeMatches)".into(), contract: vec![], source: None, examples: vec![] },
             crate::EffectOperationDocumentation { name: "info".into(), signature: "info :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)".into(), contract: vec!["Inspect a name and return its structured declaration.".into()], source: None, examples: vec![] },
             crate::EffectOperationDocumentation { name: "typeOf".into(), signature: "typeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)".into(), contract: vec!["Inspect a name's canonical type.".into()], source: None, examples: vec![] },
-        ],
-        "Lookup" => vec![
-            crate::EffectOperationDocumentation { name: "LookupRaw".into(), signature: "LookupRaw :: LookupRequest -> Lookup LookupBatch".into(), contract: vec![], source: None, examples: vec![] },
-            crate::EffectOperationDocumentation { name: "lookupRaw".into(), signature: "lookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch".into(), contract: vec!["Capture structured lookups without presentation or automatic related queries.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "currentScopeView".into(), signature: "currentScopeView :: forall effs. Member Introspection effs => Eff effs (Either QueryError ScopeProvenance)".into(), contract: vec!["Read the immutable compile view this actor's inspection answers are relative to.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "scopeBindings".into(), signature: "scopeBindings :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Eff effs (Either QueryError NameList)".into(), contract: vec!["List the identifiers bound in the executing scope without checking a target. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "moduleExports".into(), signature: "moduleExports :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError NameList)".into(), contract: vec!["List a public module's exports without checking a target. Generated session modules remain private. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "rowFit".into(), signature: "rowFit :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> IdentifierRef -> Eff effs (Either QueryError Fit)".into(), contract: vec!["Observe whether an identifier's effects fit the executing actor's row. Runtime resource grants remain separate. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "typeOfExpression".into(), signature: "typeOfExpression :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError ExpressionType)".into(), contract: vec!["Compile an expression probe and return its canonical type without evaluating it. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "typeSearch".into(), signature: "typeSearch :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError TypeMatches)".into(), contract: vec!["Compile a type-pattern probe and return matching values without evaluating them. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current.".into()], source: None, examples: vec![] },
         ],
         "ActorKernel" => vec![
         ],
