@@ -9,12 +9,13 @@ module Tidepool.CompilerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
+  , runBoundWorldQuery
   , PreparedCompilation, preparedCompilationResult, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
 
-import Control.Exception (Exception, evaluate, throwIO)
+import Control.Exception (Exception, evaluate, throw, throwIO)
 import Control.Monad (forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
@@ -77,7 +78,9 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 -- No caller-maintained compiler record updates: argument normalization, exact
 -- admission and the one executor are bound before any mode consumes the request.
 data BoundCompilerRequest = BoundCompilerRequest CompilerScope WorkerRequest
-  RequestOperation (Maybe ExactScope) CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
+  RequestOperation CompilerInputBasis CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
+
+data CompilerInputBasis = ExactScopeBasis (Maybe ExactScope) | HeldWorldBasis (Maybe HeldCompilerWorld)
 
 boundWorkerRequest :: BoundCompilerRequest -> WorkerRequest
 boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _ _) = args
@@ -86,7 +89,9 @@ boundRequestOperation :: BoundCompilerRequest -> RequestOperation
 boundRequestOperation (BoundCompilerRequest _ _ operation _ _ _ _) = operation
 
 boundRequestExactScope :: BoundCompilerRequest -> Maybe ExactScope
-boundRequestExactScope (BoundCompilerRequest _ _ _ exact _ _ _) = exact
+boundRequestExactScope (BoundCompilerRequest _ _ _ basis _ _ _) = case basis of
+  ExactScopeBasis exact -> exact
+  HeldWorldBasis _ -> Nothing
 
 boundParserFlags :: BoundCompilerRequest -> DynFlags
 boundParserFlags (BoundCompilerRequest scope _ _ _ _ _ _) = scopedParserFlags scope
@@ -144,8 +149,12 @@ withBoundCompilerRequest sink compilerScope parsed use = do
               && Map.null (requestRetainedGenerations args))
               (throwIO CheckedPurposeMismatch)
         pure scope
+      basis <- case operation of
+        WorldPublicModuleOperation question -> HeldWorldBasis <$>
+          scopedReadHeldWorld compilerScope (worldQueryIdentity question) (worldQueryRealization question)
+        _ -> pure (ExactScopeBasis exact)
       emitPhase sink BodyStarted
-      result <- use (BoundCompilerRequest compilerScope args operation exact grant executor Nothing)
+      result <- use (BoundCompilerRequest compilerScope args operation basis grant executor Nothing)
       emitPhase sink BodyFinished
       pure result
 
@@ -155,13 +164,14 @@ data CellCompilationInputs = CellCompilationInputs (Maybe ProgramSourceImports)
   [((String,String),String)] [CompletedValueImport]
 
 cellSegmentRequest :: BoundCompilerRequest -> ProgramCellState -> BoundCompilerRequest
+cellSegmentRequest (BoundCompilerRequest _ _ _ (HeldWorldBasis _) _ _ _) _ = throw CheckedPurposeMismatch
 cellSegmentRequest (BoundCompilerRequest scope args operation _ grant executor _) state =
   let exact = programExact state
       values = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell exact))
       inputs = CellCompilationInputs (programSourceImports state) (programOriginals state)
         (selectedProgramValues (programValues state))
   in BoundCompilerRequest scope (args {requestInjectVals=values,requestRetainedGenerations=programRetained state})
-    operation (Just exact) grant executor (Just inputs)
+    operation (ExactScopeBasis (Just exact)) grant executor (Just inputs)
 
 cellCompilationPurpose :: CellCompilationInputs -> CompilePurpose -> CompilePurpose
 cellCompilationPurpose (CellCompilationInputs imports originals values) = withProgramSourceImports imports . replacePurpose
@@ -178,8 +188,11 @@ cellCompilationPurpose (CellCompilationInputs imports originals values) = withPr
 compileBoundCompleted :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath
   -> IO (CompletedCompilerResult result)
-compileBoundCompleted (BoundCompilerRequest scope args _ exact grant executor cell) selection retained purpose session path = do
+compileBoundCompleted (BoundCompilerRequest scope args _ basis grant executor cell) selection retained purpose session path = do
   requireCompilerExecutorOpen executor
+  exact <- case basis of
+    ExactScopeBasis value -> pure value
+    HeldWorldBasis _ -> throwIO CheckedPurposeMismatch
   let effectivePurpose = maybe purpose (`cellCompilationPurpose` purpose) cell
   scopedCompileCompleted scope (WithCompilerExecution grant executor selection) retained
     (maybe effectivePurpose (ExactScopeCompile effectivePurpose) exact) session path
@@ -270,13 +283,21 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
-runBoundGhc (BoundCompilerRequest scope _ _ _ _ executor _) operation = do
+runBoundGhc (BoundCompilerRequest scope _ _ basis _ executor _) operation = do
   requireCompilerExecutorOpen executor
+  case basis of HeldWorldBasis _ -> throwIO CheckedPurposeMismatch; ExactScopeBasis _ -> pure ()
   scopedRunGhc scope operation
 
-withBoundExactInterfaceTransaction :: BoundCompilerRequest -> (ExactInterfaceOperations -> IO a) -> IO a
-withBoundExactInterfaceTransaction (BoundCompilerRequest scope args _ _ _ executor _) use = do
+runBoundWorldQuery :: BoundCompilerRequest -> IO BS.ByteString
+runBoundWorldQuery (BoundCompilerRequest scope _ (WorldPublicModuleOperation question) (HeldWorldBasis world) grant executor _) = do
   requireCompilerExecutorOpen executor
+  scopedQueryWorld scope world grant executor question
+runBoundWorldQuery _ = throwIO CheckedPurposeMismatch
+
+withBoundExactInterfaceTransaction :: BoundCompilerRequest -> (ExactInterfaceOperations -> IO a) -> IO a
+withBoundExactInterfaceTransaction (BoundCompilerRequest scope args _ basis _ executor _) use = do
+  requireCompilerExecutorOpen executor
+  case basis of HeldWorldBasis _ -> throwIO CheckedPurposeMismatch; ExactScopeBasis _ -> pure ()
   withScopedExactInterfaceTransaction scope (requestIncludes args) use
 
 data PreparedArtifact = PreparedArtifact

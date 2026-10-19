@@ -8,7 +8,7 @@
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
 //! preflight ::= "TPDPF001"
-//! identity  ::= "TPDPI003" producer[32] consumed_worker[32] boot_epoch[32]
+//! identity  ::= "TPDPI004" producer[32] consumed_worker[32] boot_epoch[32] source-association
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
 //! transaction ::= "TPDTR004" expected_epoch[32] workload:u8
@@ -44,7 +44,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -74,7 +74,7 @@ const UNCONFIRMED_RESPONSE: &[u8; 8] = b"TPCU0001";
 const MAX_END_CAUSE_BYTES: u32 = 64 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
-const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI003";
+const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI004";
 const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// A graceful-stop request: no epoch, no body. The daemon acks with a single
 /// byte while accepted requests continue, then retires its socket exactly as
@@ -852,6 +852,14 @@ pub(crate) struct DaemonBinding {
     pub(crate) producer: [u8; 32],
     pub(crate) consumed_worker: [u8; 32],
     pub(crate) epoch: [u8; 32],
+    package_source: Option<crate::CompilerPackageSourceAssociation>,
+}
+
+impl DaemonBinding {
+    pub(crate) fn identity(&self) -> crate::CompilerIdentity {
+        crate::CompilerIdentity::daemon(self.producer, self.consumed_worker, self.epoch)
+            .with_service_association(self.package_source.clone())
+    }
 }
 
 /// Failure while attempting one daemon request. The point of failure carries
@@ -1412,6 +1420,9 @@ pub(crate) fn preflight_until(
     let epoch: [u8; 32] = read_exact_or_crash(&mut reader, 32)?
         .try_into()
         .map_err(|_| DaemonError::IncompleteResponse)?;
+    let package_source =
+        crate::CompilerPackageSourceAssociation::read_optional(&mut reader, &epoch)
+            .map_err(DaemonError::Io)?;
     tracing::info!(
         phase = "compiler_preflight",
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1421,6 +1432,7 @@ pub(crate) fn preflight_until(
         producer,
         consumed_worker,
         epoch,
+        package_source,
     })
 }
 
@@ -1925,7 +1937,7 @@ fn service_transaction(
             // while bounding GHC state. The worker executable is boot-pinned
             // by `PreparedWorker`, so replacing only this child does not
             // change the endpoint's producer.
-            worker.shutdown();
+            worker.shutdown_confirmed()?;
             worker.respawn(prepared)?;
             *served = 0;
             *followed_rotation = true;
@@ -1945,7 +1957,10 @@ fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), Front
     Ok(())
 }
 
-pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
+pub(crate) fn serve(
+    config: &DaemonConfig,
+    mut prepared: PreparedWorker,
+) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
     let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
@@ -1995,6 +2010,16 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
     let socket = OwnedSocket::bind(&config.socket)?;
     let listener = &socket.listener;
+    if let Some(configuration) =
+        crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?
+    {
+        let owner = crate::frontend::read_owned_service_startup().map_err(FrontendError::Io)?;
+        prepared.service_source = Some(
+            configuration
+                .acquire(epoch, owner)
+                .map_err(FrontendError::Io)?,
+        );
+    }
     let run_id = config.run_id.as_deref().unwrap_or("standalone");
     tracing::info!(
         run_id,
@@ -2323,7 +2348,7 @@ fn grant_worker_argv(
 struct QuarantinedSlot {
     worker: Worker,
     retirement: WorkerAbortRetirement,
-    _resource_permit: ResourcePermit,
+    _resource_permit: Option<ResourcePermit>,
     _admission_permit: Option<AdmissionPermit>,
     prior: Option<Box<FrontendError>>,
 }
@@ -2548,7 +2573,8 @@ fn serve_workers(
                     "compiler worker ready"
                 );
                 resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
-                ready_tx.send(()).ok();
+                ready_tx.send(worker.package_boot.clone()).ok();
+                drop(ready_tx);
                 let mut served = 0u64;
                 // The first request this slot ever serves is cold, exactly
                 // like a freshly rotated single-worker daemon.
@@ -2661,7 +2687,7 @@ fn serve_workers(
                             resident.quarantine();
                             drop(job_rx);
                             return Ok(Some(QuarantinedSlot {
-                                worker, retirement, _resource_permit: resource_permit,
+                                worker, retirement, _resource_permit: Some(resource_permit),
                                 _admission_permit: _permit, prior: None,
                             }));
                         }
@@ -2681,7 +2707,7 @@ fn serve_workers(
                                 resident.quarantine();
                                 drop(job_rx);
                                 return Ok(Some(QuarantinedSlot {
-                                    worker, retirement, _resource_permit: resource_permit,
+                                    worker, retirement, _resource_permit: Some(resource_permit),
                                     _admission_permit: _permit, prior: Some(Box::new(error)),
                                 }));
                             }
@@ -2689,14 +2715,47 @@ fn serve_workers(
                         }
                     }
                 }
-                worker.shutdown();
+                if let Err(error)=worker.shutdown_confirmed() {
+                    let retirement=worker.abort();
+                    if matches!(&retirement.worker,crate::CompilerWorkerRetirement::WaitUnconfirmed(_)) {
+                        resident.quarantine();
+                        return Ok(Some(QuarantinedSlot {worker,retirement,_resource_permit:None,_admission_permit:None,prior:Some(Box::new(error))}));
+                    }
+                    return Err(error);
+                }
                 Ok(None)
             }));
         }
         drop(ready_tx);
 
         // Do not advertise the endpoint before at least one worker has started.
-        let started = ready_rx.recv().is_ok();
+        let mut boot_receipts = Vec::with_capacity(worker_count);
+        let started = (0..worker_count).all(|_| match ready_rx.recv() {
+            Ok(receipt) => {
+                boot_receipts.push(receipt);
+                true
+            }
+            Err(_) => false,
+        });
+        let service_association_result = if started {
+            prepared
+                .service_source
+                .as_ref()
+                .map(|source| source.association(&boot_receipts))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        let service_association = match service_association_result {
+            Ok(association) => association,
+            Err(error) => {
+                drop(job_txs);
+                return collect_slot_retirement(
+                    Err(FrontendError::Io(error)),
+                    slots.into_iter().map(|slot| slot.join()),
+                );
+            }
+        };
         let mut next_admission_id = AdmissionId(0);
         let outcome: Result<(), FrontendError> = 'accept: loop {
             if !started {
@@ -2740,6 +2799,11 @@ fn serve_workers(
                 response.extend_from_slice(producer);
                 response.extend_from_slice(&consumed_worker);
                 response.extend_from_slice(epoch);
+                crate::CompilerPackageSourceAssociation::write_optional(
+                    service_association.as_ref(),
+                    &mut response,
+                )
+                .expect("Vec writes cannot fail");
                 log_send_failure(
                     run_id,
                     "preflight response",
@@ -3638,11 +3702,19 @@ fn observe_aborted_worker(
     }
 }
 
+fn read_package_boot(stdout: &mut ChildStdout) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0; 8 + 5 * 32];
+    crate::process::read_exact_until(stdout, &mut bytes, Instant::now() + IO_TIMEOUT, || false)?;
+    Ok(bytes)
+}
+
 pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
     build_products_namespace: BuildProductsNamespace,
+    package_boot: Option<crate::package_source::WorkerPackageBootReceipt>,
+    _package_source: Option<std::sync::Arc<crate::package_source::ServicePackageSource>>,
 }
 
 impl Worker {
@@ -3665,9 +3737,39 @@ impl Worker {
 
     fn spawn_in_namespace(
         prepared: &PreparedWorker,
-        build_products_namespace: BuildProductsNamespace,
+        mut build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
         let mut command = prepared.command()?;
+        let worker_instance = boot_epoch()?;
+        if let Some(source) = &prepared.service_source {
+            source
+                .configure_worker(&mut command, &worker_instance)
+                .map_err(FrontendError::Io)?;
+            let root = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR").ok_or_else(|| {
+                FrontendError::Daemon(
+                    "rooted compiler requires its owned products directory".into(),
+                )
+            })?;
+            let world_directory = PathBuf::from(root)
+                .join(&build_products_namespace.path)
+                .join(hex(&worker_instance))
+                .join("worlds");
+            if !world_directory.is_absolute() {
+                return Err(FrontendError::Daemon(
+                    "world products directory must be absolute".into(),
+                ));
+            }
+            fs::create_dir_all(&world_directory).map_err(FrontendError::Io)?;
+            build_products_namespace
+                .directories
+                .insert(world_directory.clone());
+            command.env("TIDEPOOL_COMPILER_WORLD_DIRECTORY", world_directory);
+        } else {
+            for key in crate::package_source::BOOT_ENV {
+                command.env_remove(key);
+            }
+            command.env_remove("TIDEPOOL_COMPILER_WORLD_DIRECTORY");
+        }
         let profile = CompilerTraceProfile::select(
             std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
             std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
@@ -3696,12 +3798,41 @@ impl Worker {
             .stdout
             .take()
             .ok_or_else(|| FrontendError::Daemon("worker stdout was not piped".to_owned()))?;
-        Ok(Self {
+        let mut worker = Self {
             child,
             stdin: Some(stdin),
             stdout,
             build_products_namespace,
-        })
+            package_boot: None,
+            _package_source: prepared.service_source.clone(),
+        };
+        if let Some(source) = &prepared.service_source {
+            match read_package_boot(&mut worker.stdout)
+                .and_then(|bytes| source.check_boot(&bytes, &worker_instance))
+            {
+                Ok(receipt) => worker.package_boot = Some(receipt),
+                Err(error) => {
+                    let retirement = worker.abort();
+                    if matches!(
+                        &retirement.worker,
+                        crate::CompilerWorkerRetirement::WaitUnconfirmed(_)
+                    ) {
+                        return Err(FrontendError::UnconfirmedWorkers {
+                            retained: RetainedDaemonWorkers(vec![QuarantinedSlot {
+                                worker,
+                                retirement,
+                                _resource_permit: None,
+                                _admission_permit: None,
+                                prior: Some(Box::new(FrontendError::Io(error))),
+                            }]),
+                            prior: None,
+                        });
+                    }
+                    return Err(FrontendError::Io(error));
+                }
+            }
+        }
+        Ok(worker)
     }
 
     /// A slot may retain its warm disk products only after its former child
@@ -3938,8 +4069,11 @@ impl Worker {
     /// retirement of its exact worker, rather than merely requesting shutdown.
     pub(crate) fn shutdown_confirmed(&mut self) -> Result<(), FrontendError> {
         drop(self.stdin.take());
-        match self.child.wait() {
-            Ok(status) => {
+        match observe_aborted_worker(
+            || self.child.try_wait(),
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        ) {
+            crate::CompilerWorkerRetirement::Reaped(status) => {
                 let scratch = self.build_products_namespace.cleanup_checked();
                 if status.success() {
                     scratch.map_err(|failures| FrontendError::ScratchCleanup { status, failures })
@@ -3950,16 +4084,17 @@ impl Worker {
                     })
                 }
             }
-            Err(source) => {
-                // Products may still be in use. Preserve the primary wait
-                // failure and keep their existing owner attached to the child.
-                self.abort();
-                Err(FrontendError::WorkerWait(source))
+            crate::CompilerWorkerRetirement::WaitUnconfirmed(cause) => {
+                Err(FrontendError::WorkerWait(match cause.raw_os_error {
+                    Some(code) => io::Error::from_raw_os_error(code),
+                    None => io::Error::new(cause.kind, cause.message),
+                }))
             }
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    #[cfg(test)]
+    fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
             if let Err(error) = self.child.kill() {
@@ -4850,7 +4985,7 @@ mod tests {
                         )),
                     ),
                 },
-                _resource_permit: permit,
+                _resource_permit: Some(permit),
                 _admission_permit: Some(AdmissionPermit(marker)),
                 prior: None,
             });
@@ -6314,6 +6449,7 @@ tidepool-reuse-error: witness failed\n";
             connection.write_all(&[7; 32]).unwrap();
             connection.write_all(&[8; 32]).unwrap();
             connection.write_all(&[9; 32]).unwrap();
+            connection.write_all(&[0]).unwrap();
         });
         let binding = preflight(&socket).unwrap();
         server.join().unwrap();
@@ -6886,6 +7022,8 @@ tidepool-reuse-error: witness failed\n";
             stdin: Some(stdin),
             stdout,
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
+            package_boot: None,
+            _package_source: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -6933,6 +7071,8 @@ tidepool-reuse-error: witness failed\n";
                     stdout: child.stdout.take().unwrap(),
                     child,
                     build_products_namespace: BuildProductsNamespace::direct().unwrap(),
+                    package_boot: None,
+                    _package_source: None,
                 };
                 let (connection, client) = UnixStream::pair().unwrap();
                 let action_client = client.try_clone().unwrap();
@@ -7007,6 +7147,8 @@ tidepool-reuse-error: witness failed\n";
             stdout: child.stdout.take().unwrap(),
             child,
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
+            package_boot: None,
+            _package_source: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result =
@@ -7091,6 +7233,48 @@ tidepool-reuse-error: witness failed\n";
             .unwrap();
         assert!(built.success());
         fixture
+    }
+
+    #[test]
+    fn daemon_stop_preserves_failed_worker_outer_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = compile_control_ack_worker(directory.path());
+        std::fs::write(directory.path().join("phase"), [19]).unwrap();
+        let socket = directory.path().join("compiler.sock");
+        let prepared = PreparedWorker::for_test(executable).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: Some(100),
+            rss_ceiling_mb: Some(u64::MAX),
+            request_deadline_secs: Some(10),
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
+        };
+        let server = std::thread::spawn(move || serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if preflight(&socket).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test waits for actual daemon readiness"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        request_stop(&socket).unwrap();
+        let result = server.join().unwrap();
+        assert!(
+            matches!(result,Err(FrontendError::WorkerClose {status,..}) if status.code()==Some(17)),
+            "daemon must not advertise successful retirement after worker bracket failure"
+        );
+        assert!(!socket.exists());
     }
 
     #[test]

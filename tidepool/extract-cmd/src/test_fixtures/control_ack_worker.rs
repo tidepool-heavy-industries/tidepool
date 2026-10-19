@@ -120,6 +120,9 @@ fn main() {
         output.write_all(&[1]).unwrap();
         output.flush().unwrap();
     }
+    if phase == 19 {
+        std::process::exit(17);
+    }
 }
 
 // Transport-only frontend controls. These bytes never issue compiler products.

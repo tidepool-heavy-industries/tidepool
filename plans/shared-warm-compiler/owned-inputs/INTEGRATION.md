@@ -1,95 +1,92 @@
 # Owned inputs integration packet
 
-Reviewed provider base:
-`923fd554a08ae208833e6bdd9b88a11d54e227ca`.
-Full producer candidate:
-`a56ad6f71e7533db7ff5003a70bb856c32f20991`.
-Full history folded at area merge
-`bb996c6fc54282d693a8aa82bd130629ecd0668f` on
-`feature/shared-warm/owned-inputs`. The product tree equals the reviewed
-candidate. Current area differences are documentation only.
+Area base `fa31c1213932498684d456e363c46d5e4c061e71`; full reviewed candidate
+`c819558fe37d46228fc9eaa34371c6603f497912`; tested product
+`dd0297a75e9c76bfd5b5d00a772700e8550486f1`.
+All provider history from base923fd554a08ae208833e6bdd9b88a11d54e227ca is
+retained, including accepted providera56, full committed Warm
+`20c063b86faaaa653c18780b42efc4c6efe0a676` and its narrow profile-carrier fix
+`0b2afbc9121fb5d73ee7723289bc4aabe719fbe0`. Supplier conflict resolution was
+byte-identical20c with Warm approval. Uncommitted client WIP was excluded.
+Area differences after the tested product are owned documentation only.
 
-This checkpoint supplies the actual declared package provider and explicit
-admission API. It does not qualify actual Rooted boot, package acquisition,
-native guard finalization, compiler-world queries or a frozen release.
+## Result and contract
 
-## Resulting contract
+The actual declared compiler_service_deployment captures TPGHC002 raw package
+routes and emits current schema2 expectation plus independently sealed CF002
+configuration. Python/provider bytes are authenticated and captured; the sole
+qualifier acquires one durable Nix rootset per actual service epoch. Closed
+Rust ownership carries the actual source through fresh worker boot and service
+retirement. Expected IDs, actual source custody and actual boot acknowledgment
+remain separate capabilities. Archived products use finite provenance checking
+and cannot issue Rooted service admission. Old compiler schema1 refuses.
 
-The actual declared `//build/package:compiler_service_deployment` captures fresh
-GHC facts through its matched worker and emits the expected manifest, sealed
-CF002 configuration, provider and immutable-profile declaration. TPGHC002
-preserves raw global database/unit paths for the sole immutable-route validator.
-Selected and transitive closure objects must have canonical top-level Nix
-identities; settings/unit aliases within those objects remain supported.
+The profile carrier is separately pinned and authenticated by canonical Nix
+identity, raw SHA and ProfileID. Its own final store hash cannot occur inside
+its wrapper. Only that carrier is omitted from body-membership checking; all
+actual GHC/database/unit source and target guards remain. Existing EPS is never
+retrospectively admitted.
 
-One schema2 expectation explicitly selects observation-only or Rooted. Rooted
-expected source/profile IDs and launch-configuration digest are data. Actual
-service association and post-BEGIN worker boot proof have separate private
-issuers. Publisher revalidation retains its actual source association; archive
-loading validates finite provenance without constructing live admission.
+Package release authenticates the sealed acquisition plan and complete parent,
+settles exact package pins and retains the canonical Python guard for retry.
+The native parent durably records TPSFN001 before unlinking that final guard.
+Its explicit finish entry resumes without configuration/Python/provider/profile
+access. Client completion, worker rotation, END and Drop do not unpin service
+roots. Uncertain epochs retain their exact obligation.
 
-Acquisition durably records its exact plan before Nix effects. Partial unknown
-outcomes retain one epoch obligation. Release authenticates the complete-parent
-receipt and sealed acquisition plan, imports only per-root progress states, and
-settles actual package pins. Exactly one canonical Python-object guard remains
-for retry. Package settlement is not final guard release. Warm's existing native
-retirement owner must finish or recover that guard from durable pending facts.
-Clients, worker slots, END and Drop do not unpin service roots.
-
-## Review and evidence
-
-Independent Sol-high cumulative provider source acceptance is recorded in the
-private `source-lifetime/REVIEW-SERVICE-SOURCE.md` exacta56 section. The supervisor
-read critical producer/consumer diffs, challenged mutable progress authority and
-verified the resulting negative controls and evidence. No separate source owner,
-registry, Rooted test factory or compatibility parser was introduced.
+## Executed and independently reviewed evidence
 
 Private evidence root:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/owned-inputs/rows/`.
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/owned-inputs/`.
 
-| Exact source | Evidence | Result |
+| Exact source | Observation | Result |
 | --- | --- | --- |
-|1e17c6e22ea0bed63bd8af7d124968419561ccbb|SERVICE-API-1e17c6-COMPILE-TERMINAL.json|same14 production/cfgtest labels passed,38local actions|
-|1e17c6e22ea0bed63bd8af7d124968419561ccbb|SERVICE-API-1e17c6-COUNTED-TERMINAL.json|3cases, each selected/executed/pass1, exit0|
-|a56ad6f71e7533db7ff5003a70bb856c32f20991|SERVICE-PLAN-a56ad6-PYTHON-TERMINAL.json|declared recipe456executed/pass456, exit0; external compiler/Nix mocked|
-|a56ad6f71e7533db7ff5003a70bb856c32f20991|SERVICE-DECLARED-a56ad6-TERMINAL.json|actual fresh profile declaration passed,1local action, tests0|
+|1e17c6e22ea0bed63bd8af7d124968419561ccbb|API production/cfgtest and three counted admission/provenance controls|compile0; each case executed/pass1|
+|a56ad6f71e7533db7ff5003a70bb856c32f20991|declared qualifier Python recipe|456executed/pass456; external compiler/Nix mocked|
+|dd0297a75e9c76bfd5b5d00a772700e8550486f1|same five provider/toolchain/extract production/cfgtest targets, pinned-j1|exit0,6local actions, tests0|
+|dd0297a75e9c76bfd5b5d00a772700e8550486f1|two actual service-owner controls|2executed/pass2;4finite GHC inspections/exact typed passes4|
 
-The actual producer captured99units/82,897bytes; wrapper104,065bytes,
-72selected roots/318unique closure objects, NAR serialized5,259,609,592bytes.
-The final artifact paths, six file seals and production source-record verifier
-passed. Producer receipt SHA256:
-`1507e1788356ac59de689bcbcbcd52260e178a6c08f83cfaf3b535df29553978`.
+Full commands, actual compiler/resource/profile/harness and proof hashes, exits
+and scope are in `rows/join-dd0297-probe/TERMINAL.json`, SHA256
+`51d8dff6688c0c659c02621a2bc47a7a2b3e1cdff28daecc7037b1983dc83bb8`.
+Sol-high independently verified the actual source/receipt/epoch/complete/pending/
+finalized associations and accepted the scoped terminal. The supervisor verified
+48 referenced hashes, nested actual request exits, both new rootsets empty and
+the original failed rootset retained; `SUPERVISOR-VERIFY-dd0297.json` records it.
 
-Supervisor independently verified the counted binary SHA256
-`c5319b392176241c6c6da7707d2361ba5a5e1fab452fc2d78aaa95f3ff80bdf5`,
-all three report/log hashes and nested1pass/exit0 counts. The first counted
-recipe also built17required Haskell runtime actions; the Rust check-plan build
-did not include those resources. Historical observed daemon peak5,486,354,432
-bytes includes earlier work and is not a per-command peak.
+Each tested service acquired once; two finite clients shared one unchanged
+73-pin set/319 unique immutable objects. Both epochs reference the same backing
+closure: unique union319, not638. Owner-issued NAR serialized bytes are
+5,259,713,776 per closure; this is not measured filesystem allocation, freed disk
+or process memory. Profile104,065bytes, two hash passes/208,130hash bytes and
+one import attempt per epoch. No per-client acquisition was observed.
 
-Failures remain separate evidence: old rawpair compile callers, Buck output
-normalization/macro procedure failures, release-progress counterexamples and an
-incorrectly immutable derived counter. Later passes do not erase those records.
-Compiler/hosted cleanup is not_observed; directory resource hashes remain UNKNOWN
-where no owning manifest exists. Imported Haskell boot-test compilation and
-execution require Warm's exact receipt, not an inference from worker production.
+Normal completion passed actual fresh Rooted boot, two semantic inspections,
+confirmed owned cleanup, native final marker, zero new pins and no remaining
+observed PID/start incarnations. The blocker control passed two inspections,
+then produced an actual final-marker IsADirectory failure after durable pending
+facts and guard unlink. Actual --finish succeeded under missing configuration
+and poisoned Python/PATH, leaving zero new pins. Its original broader owned
+outcome remains unconfirmed. No actual global Nix GC was performed; the control
+proves owned pin settlement and native retry, not reclamation of shared bytes.
 
-## Prior row frontier and remaining integration
+## Preserved failures and open acceptance
 
-The immutable row frontier was already accepted and folded into campaign
-`f088e3e7837c72cf0e82aab8e71a2687d767da34`; exact joined production/cfgtest and
-36controls passed. Public checkpoint62495a4db6 and private
-campaign/CORE-JOINED-TERMINAL.json retain that separate gate. No repeated row
-qualification or measured performance claim is added here.
+First e695 boot failed before readiness/clients0 because the profile carrier was
+incorrectly checked against its own body closure. Its73pins remain retained at
+`rows/join-e695/normal-owner`; no fake complete/pending or cleanup was issued.
+First dd0297 boot succeeded and cleaned up, but its private fixture omitted the
+caller-generated inspection binder. That failed observation remains separate;
+the corrected fixture added only the binder and retained the exact typed golden.
 
-Next producer is Warm: actual CF002 issuer/native finalization and recovery.
-Then rows imports the exact paired checkpoint, independent review and joined
-production/test compilation run, followed by actual service boot/refusal,
-rootset sharing/rotation, partial release/GC retry, complete retirement and the
-first PublicModule consumer. Host and reload retain their publication/source
-admission owners. Ordinary cells, successors, forks and exact restoration remain
-required under RUST-CLIENT-MIGRATION; a query-only result is partial delivery.
+Control process peaks were not observed; retained daemon-scope peak6,097,649,664B
+is not a per-control measurement. All commands are terminal; OWN8/8 released.
 
-All owned commands are terminal. Checkouts, WIP/history, evidence, mounts and
-idle daemons remain retained. Fresh resource accounting is required for any new
-native lane. No status polling or automatic retry on uncertainty.
+Stable row ownership was separately accepted and campaign-joined at f088e3e783
+with36controls passing. This new package gate does not establish PublicModule,
+ordinary-cell persistent-service compilation, successor/restore cost bounds,
+rotation/multiworker/iserv execution or release qualification. Warm/Host own the
+actual world consumers and campaign owns their combined gate. Restore direction
+reuses existing source/row/recovery owners; full native-offer collection before
+a base-aware materializer remains a known cost trap. Required prototype/native
+owners and run-wide SourceRootOwner can legitimately retain backing.

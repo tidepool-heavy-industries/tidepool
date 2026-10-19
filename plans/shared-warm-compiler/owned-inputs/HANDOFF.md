@@ -1,66 +1,48 @@
 # Owned inputs handoff
 
-The independently reviewed provider history through
-`a56ad6f71e7533db7ff5003a70bb856c32f20991` is folded into this area.
-[INTEGRATION.md](INTEGRATION.md) records exact source, evidence and limits.
-The current product tree matches that candidate; area differences are handoff
-and integration documentation. This is a component checkpoint, not completed
-Rooted service or compiler-world acceptance.
+The full reviewed provider and matched service-owner history is folded into
+`feature/shared-warm/owned-inputs` from candidate
+`c819558fe37d46228fc9eaa34371c6603f497912`. The tested product is
+`dd0297a75e9c76bfd5b5d00a772700e8550486f1`; the candidate adds only its leaf
+handoff. [INTEGRATION.md](INTEGRATION.md) records exact evidence and limits.
+This area changes only its own handoff/integration documentation after that
+product. Campaign owns joined integration and final acceptance.
 
-## Ownership and authorization
+## Remaining continuation
 
-Supervisor: `/root/warm_compiler_campaign/owned_inputs`. Area branch:
-`feature/shared-warm/owned-inputs`, checkout
-`/srv/swarm/checkouts/tidepool-shared-warm-owned-inputs-20261019`.
-Two reserved descendants remain: rows implements; source_lifetime independently
-reviews (Sol medium/high respectively). No extra agents, native goals or polling.
-Producer branch `feature/shared-warm/service-source` in the existing owned-rows
-checkout starts at accepted `923fd554a08ae208833e6bdd9b88a11d54e227ca`.
+Warm and Host own persistent-world/PublicModule, ordinary-cell preparation,
+successor/restoration and atomic publication consumers under
+RUST-CLIENT-MIGRATION. Historical exact rows remain references separate from
+primary namespace. The package-owner controls use finite GHC type inspections;
+they do not qualify those world consumers, worker rotations, multiple slots,
+iserv execution or a frozen release. No whole-baseline rebuilding or encoding
+is authorized as a successor shortcut.
 
-The controlling RUST-CLIENT-MIGRATION requires ordinary actor cells, publication
-and recovery through the persistent compiler service. Historical exact row
-references remain separate from primary compiler namespace selection. Query-only
-acceleration is partial delivery; successor/restore issuance must not rebuild or
-reencode whole baselines. Alpha permits explicit old-format refusal.
+The reserved source_lifetime Sol-high reviewer accepts a concrete full Warm
+client/retention candidate for independent cumulative review after package
+terminal reconciliation. Warm supplies exact base/candidate and three
+production discriminators, then wakes a dormant reviewer with followup_task.
+No extra agent, idle activation, polling or author self-review.
 
-## Active boundary
+The original failed e695 owner remains an explicit unknown epoch:
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/owned-inputs/rows/join-e695/normal-owner`.
+Its 73 pins and sealed acquisition receipt remain retained, with no complete
+parent or native pending/finalized evidence. Observed process absence does not
+authorize release. The later blocker control finalized package custody but
+retains its broader unconfirmed lifecycle outcome; package success does not
+upgrade cache/socket cleanup.
 
-Owned qualifier code declares the fixed profile, acquires one rootset per actual
-service epoch, and settles package roots while retaining the canonical Python
-guard. Warm alone owns the authenticated CF002 execution, actual service/worker
-boot, shared codecs and native TPSFN001 guard finalizer/retry. Host owns actual
-published-session world/source capture and rooted production resource attachment.
-Archive provenance checks cannot issue live Rooted admission.
+## Ownership and resources
 
-Provider replay takes authority from the sealed acquisition receipt, authenticates
-ordered root identity and guard, imports only validated progress states, and
-recomputes settlement. Actual declaration and mocked provider tests passed.
-Actual acquisition, Rooted GHC boot, native finalization/retry and first joined
-PublicModule remain pending; no source-effect retry or old-EPS blessing.
+Supervisor `/root/warm_compiler_campaign/owned_inputs`; two existing children:
+rows implements (Sol medium), source_lifetime independently reviews (Sol high).
+Rows branch `feature/shared-warm/service-source` in the existing owned-rows
+checkout is clean, all native commands terminal and OWN8GiB/8GiB growth released.
+Registered output mounts, evidence and idle checkout daemons remain retained.
+Fresh actual memory plus remaining concurrent increments must fit80GiB and disk
+must preserve100GiB unreserved before new native work.
 
-## Continuation and resources
-
-Await Warm's exact issuer/finalizer candidate and terminal evidence. Producer
-Warm wakes rows/supervisor; rows imports the paired source, reviewer checks the
-cumulative candidate, then actual boot/retirement and joined client controls run.
-Native guard recovery must consume durable pending facts without reopening
-GC-released Python/provider/profile. Normal completion releases all pins;
-uncertainty preserves one explicit epoch obligation.
-
-All owned commands are terminal; daemon4119018 and its registered output mount
-remain retained. No active expensive owned lane is reserved. Fresh actual
-memory plus remaining concurrent increments must fit80GiB and disk must retain
-100GiB unreserved before another admitted command. Never delete caches or
-restart shared daemons. Exact pending command/allowance follows campaign's next
-concrete resource admission.
-
-Restore investigation RESTORE-PRODUCT-BACKING.md is accepted as direction only:
-reuse existing world restoration/source Arc/exact persistent row references and
-recovery transaction, no predecessor-world chain. Actual snapshot native-offer
-collection remains a whole-history trap before a base-aware materializer.
-Required prototype/native owners and run-wide SourceRootOwner can retain backing;
-map shape alone proves no minimal-release bound.
-
-Every producer outcome requires a terminal event. Use send_message for running
-recipients and followup_task for dormant recipients. No periodic status loop;
-retain the exact producer, recipient and continuation before yielding.
+Every outcome requires exact source/evidence/disposition and a terminal event.
+Use send_message for running recipients and followup_task for dormant ones.
+Await campaign joined integration or Warm's concrete review packet; the producer
+wakes this area/reviewer with the exact continuation. No periodic status loop.
