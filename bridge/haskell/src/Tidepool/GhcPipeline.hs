@@ -39,6 +39,7 @@ module Tidepool.GhcPipeline
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, HeldWorldQueryBinding
   , WorldCellRefusal(..)
   , materializeWorldSources, worldMaterializationCharge
+  , emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , completedCompilerWorldInputs, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
   , CompilerScopeRunner, withResidentCompilerScopes
@@ -105,7 +106,7 @@ import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot, typedSegmentInputOccurrences)
-import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..), mkNodeKey, nodeDependencies)
@@ -227,7 +228,7 @@ import Tidepool.CheckedPrefixImports
   , hydrateCompletedValueAliases, transformCompletedValueAliases )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
-import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
@@ -5412,6 +5413,22 @@ scopedCompileCompleted = ownedScopedCompileCompleted
 scopedReadExactScope :: CompilerScope -> FilePath -> IO (Either String ExactScope)
 scopedReadExactScope = ownedScopedReadExactScope
 
+-- Human evidence only; the existing typed acquisition result controls refusal.
+-- Limit each untrusted field to 4 KiB UTF-8 BEFORE JSON escaping/allocation. Even
+-- worst-case JSON escaping then stays below 74 KiB of the 16 MiB response allowance.
+-- Diagnostic failure cannot replace the original rejection; cancellation still
+-- follows the enclosing request's existing async/custody policy.
+emitWorldAcquisitionRejection :: String -> FilePath -> String -> IO ()
+emitWorldAcquisitionRejection reason manifest detail = do
+  _ <- trySynchronous $ do
+    let bounded value = case boundedUtf8 4096 value of
+          Just bytes -> Text.unpack (TextEncoding.decodeUtf8 bytes)
+          Nothing -> "<diagnostic field exceeds 4096 UTF-8 bytes>"
+        message = "world input acquisition rejected: " ++ bounded reason
+          ++ "\nmanifest: " ++ bounded manifest ++ "\ndetail: " ++ bounded detail
+    hPutStrLn stderr (renderDiag (Diag Nothing DiagError message))
+  pure ()
+
 scopedEnsureWorld :: CompilerScope -> ExactInputsRequest -> IO EnsureExactInputsOutcome
 scopedEnsureWorld = ownedScopedEnsureWorld
 
@@ -5650,11 +5667,24 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       CompleteExactInputs manifest -> do
                         acquired <- try (readWorldInputsWithOwner (universeOriginalInputs selected) manifest)
                         case acquired of
-                          Left (_failure :: WorldInputsFailure) -> pure (ExactInputsRejected AcquisitionRejected)
+                          Left (WorldInputsFailure cause detail) -> do
+                            emitWorldAcquisitionRejection ("read/decode " ++ show cause) manifest detail
+                            pure (ExactInputsRejected AcquisitionRejected)
                           Right facts
-                            | worldInputsIdentity facts /= root -> pure (ExactInputsRejected InvalidRoot)
+                            | worldInputsIdentity facts /= root -> do
+                                emitWorldAcquisitionRejection "world identity mismatch" manifest
+                                  ("expected " ++ root ++ "; captured " ++ worldInputsIdentity facts)
+                                pure (ExactInputsRejected InvalidRoot)
                             | worldInputsProfile facts /= servicePackageProfile association
-                              || Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer ->
+                              || Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer -> do
+                                when (worldInputsProfile facts /= servicePackageProfile association) $
+                                  emitWorldAcquisitionRejection "package profile mismatch" manifest
+                                    ("expected " ++ hexBytes (servicePackageProfile association)
+                                      ++ "; captured " ++ hexBytes (worldInputsProfile facts))
+                                when (Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer) $
+                                  emitWorldAcquisitionRejection "compiler producer mismatch" manifest
+                                    ("expected " ++ maybe "<unset compiler producer>" (\(CompilerProducerIdentity value) -> value) producer
+                                      ++ "; captured " ++ hexBytes (worldInputsProducer facts))
                                 pure (ExactInputsRejected AcquisitionRejected)
                             | otherwise -> case held <|> lookupCompilerWorld root (universeWorlds selected) of
                                 Just world -> install WorldCompleteReused world
