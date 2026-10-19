@@ -86,6 +86,16 @@ producers. A joined nonempty/narrow facade-producer control is required alongsid
 the binding controls. No eager refusal of every boundary-capture operation is
 acceptable.
 No R1 source has yet been folded into the area branch.
+The complete frozen repair candidate is now
+`fc92605eb78c52284f90249f6e5dd1200ba060de`. The same compiler ticket installs
+the scoped source hook and retains both actor and lower runtime claims through
+END; facade producer methods are private behind owning session wrappers.
+Joined legacy-Sleep binding, source-refusal and real facade local/narrow controls
+are authored but unexecuted. Pinned formatting, source-map and whitespace checks
+passed in the leaf checkout. Full cumulative exact review is active before fold;
+production and test compilation remain zero. Leaf evidence and exact selectors:
+`/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/HANDOFF.md`
+and adjacent `DEFERRED-COMMANDS.txt`.
 The suspected pre-initial retained-lease/parent-gate alias has no demonstrated
 production path: retention mints a separate detached scope, and actual child
 target leasing first occurs at adoption. Keep this distinction in the review.
@@ -105,18 +115,19 @@ an informed worker yields.
   R1 source is `3d56ffcc344a12606f095d1f0bac2ff0abf69959`, joined with area
   `a0d293d2a0` at `fe3ef791f96788d9d71ac1d2333b6d6436bac35d` in the leaf
   checkout. The final source checkpoint is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`;
-  the leaf owns the approved bounded bootstrap END hook repair candidate plus
-  terminal receipt with exact focused selectors and
-  held successor map. The area owner then integrates the reviewed checkpoint,
+  its terminal source checkpoint is now `fc92605eb78c52284f90249f6e5dd1200ba060de`,
+  with the approved hook/facade repair, exact focused selectors and held
+  successor map. It is dormant, reserved for concrete review/compiler repairs.
+  The area owner then integrates the reviewed checkpoint,
   regenerates source maps and owns the first admitted compile/repair stage.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
   `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
   and completed the bootstrap-world/typed-child strategy review with the settled
   reopen-only recovery contract. It was reactivated for exact cumulative
   `5b74..9bb4c1eb` repair review after the blocked `fe3ef791` report. That review
-  completed blocked on bootstrap END custody; reviewer is preparing bounded
-  joined-oracle guidance, then awaits the next exact repair. Actual
-  compile/focused-gate evidence is still pending.
+  completed blocked on bootstrap END custody; reviewer is now active on the
+  exact cumulative `5b74..fc92605e` repair. Actual compile/focused-gate evidence
+  is still pending.
   The area owner uses `followup_task` for that candidate, then supplies native
   evidence and any compile repairs for cumulative review, then
   repairs findings, requests exact rereview and owns the fold.
