@@ -91,38 +91,54 @@ service-issued logical world, ordinary cells, per-item successors, atomic paired
 publication, fork, recovery and obsolete-route deletion are required. First query
 is the delivery sequence, not an optional cache as final architecture.
 
-Reserved implementation leaf selected_root is active in
-`tidepool-shared-warm-host-world-20261019`. It preserved original dirty world WIP
-SHA256 `171c544a55e74daf9dccac48ad57b7492b419f4ca9494ddf54e5e0338213bf42`,
-then merged full area da584, reviewed reload 3dd (own merge 9dbb0d4), and real
-Warm f160 (own merge 3e26464). Warm resolved its seven shared protocol/type merge
-conflicts; the leaf did not invent protocol semantics or commit runtime WIP into
-a dependency merge. Latest Warm arity/profile fixes and reload fixture successors
-are required before the joined consumer compile; their owner terminal receipts
-control acceptance, not this handoff.
+Reserved implementation leaf selected_root owns the actual query checkpoint in
+`tidepool-shared-warm-host-world-20261019`. Full area da584, Warm's actual service
+client/profile fix and Reload80ad source-lease consumers are integrated. Earlier
+world WIP and paused02A are preserved independently. Candidate
+`e5a32b1ac1f5dac7eb0be6b5c1b1855c4ae784fc` contains the actual PublicModule
+StructuredInfo/Type branch before the legacy compile view, provenance, value Vec,
+support merge, source preparation and FD export. Cold raw primary and visible
+checked rows remain separate. Original source A and existing canonical target B
+are admitted before deferred source capture or client work. Completed results
+require matching origin, clean END, cancellation and direct publication-key CAS.
+Source capture unsupported, unavailable and unreadable stay distinct from a
+service-issued closed absence. Lookup hydration advances no notebook publication.
 
-The actual early actor PublicModule StructuredInfo/Type path must precede actor
-compile view, structured provenance, source.prepare, reachable-value Vec capture,
-support folds, semantic hashes and FD export. Cold issuance also omits
-checked_value_context and all retained-support merging: actual primary context
-and unmerged binding-row/visibility owners remain separate. Historical graphs
-stay custody. Runtime native/instance/prototype proofs remain exact at consumers.
+The dedicated generated `actor_compiler_world_queries_test` group was issued at
+`d32ea95fd98e06ac2fd4fd9d35e0639b797f5280` and merged into the query candidate.
+It shares `exomonad_actor_unit_tests`, selects exactly two ignored cases with the
+existing owned-resident runner, and supplies the declared service deployment and
+source configuration only to this group. Generic finite actor groups retain
+their resources. Generation and diff checks passed; the focused generator
+functional test executed/passed one case. Source packet:
+`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/world-query-execution-group/SOURCE-CHECKPOINT.json`.
+The existing resource adapter reads the fixed sibling CF digest as launch DATA;
+actual endpoint association and independently configured deployment own admission.
 
-The runtime leaf now carries original A and existing canonical target B leases
-into the source transaction owner, admits both before deferred capture or client
-hit, and seals completed results against exact origin, clean END, cancellation
-and direct publication-key CAS. This is active unqualified WIP, not an accepted
-query. Actual Rooted boot must consume the real reviewed provider/profile fix,
-not a test proof. Bounded one/two-world cold/hit/refusal component controls need
-not wait for final retention implementation; their acceptance remains limited.
-Lookup hydration never advances the logical world or notebook publication.
+Independent oracle is reviewing the complete query and group histories. Its
+first compile finding, a nonexistent test counter name, was repaired using the
+existing digest/encoding counters. No production semantic blocker has been
+reported so far; final review remains pending. Actual service cases call the
+production actor query method and real runtime CAS, not frontend hole resumption.
+They grow unrelated sibling-scope history; a separate transferred-world cold
+control observes at least three visible raw rows without support merging. These
+are component limits, not full frontend or frozen Persona acceptance.
 
-Host owns the generated execution group/resource consumer after actual case names
-exist; Warm owns client/protocol/Haskell; owned owns package provider and actual
-boot/retirement proof; reload owns source transaction leases. Dedicated groups
-share the existing Rust harness and owned-resident runner, with declared service
-resources selected only there. No new Cargo target, compiler mode, handwritten
-native map or authority factory is authorized. Generic finite groups remain finite.
+A frozen four-target runtime/actor production and cfg-test compile is admitted
+under a fourteen-GiB total memory/thirty-two-GiB growth lane. Host-world leaf owns
+its command and terminal observation. At launch, actual global memory was
+45,193,015,296 B; conservative projection including all prospective campaign14,
+remaining reload14 and host14 was 79,745,966,080 B, below 85,899,345,920 B pressure.
+Free disk was 437,607,788,544 B. No idle qualification daemon was subtracted as
+campaign active work. The supervisor updates only the host entry in campaign
+LIVE.json. Compilation/execution is not yet qualified at this checkpoint.
+
+Actual two-case execution waits for compilation, source review and the coherent
+matched Format2/re-export consumer join. Pending supported counted command:
+`swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --output-dir EVIDENCE`.
+No service execution, speedup, final retention or ordinary-cell migration claim
+follows from the declared group or early compile. Warm owns service protocol and
+Haskell; owned owns package provider/boot; reload owns source transaction leases.
 
 ## Required successors and continuation
 
@@ -135,8 +151,7 @@ on later refusal. Share current owned nodes, without predecessor replay chains,
 per-item snapshot/native-offer folds or full-world encoding hidden at commit.
 
 Two Sol-high descendants only: selected_root active implementation,
-selection_oracle settled after exact repair review and reserved for actual query
-candidate review. No grandchildren/additional descendants. Paused old 02A is
+selection_oracle active on complete actual query/group review. No grandchildren/additional descendants. Paused old 02A is
 unchanged and not a dependency (patch SHA256
 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
 No periodic polling. Every terminal producer checks recipient state and sends
