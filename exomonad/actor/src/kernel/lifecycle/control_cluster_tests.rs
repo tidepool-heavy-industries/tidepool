@@ -763,14 +763,17 @@ impl resident::PublicOwnerPublisher for FailedOwnerPublisher {
         _: tidepool_runtime::session::RecoveryPublicOwner,
     ) -> futures_util::future::BoxFuture<
         'static,
-        Result<tidepool_runtime::session::DurablePublicOwnerPublication, String>,
+        Result<
+            tidepool_runtime::session::DurablePublicOwnerPublication,
+            resident::PublicOwnerPublicationFailure,
+        >,
     > {
         let entered = self.entered.clone();
         let release = self.release.clone();
         Box::pin(async move {
             entered.notify_one();
             release.notified().await;
-            Err("publication settlement witness".into())
+            Err("publication settlement witness".to_owned().into())
         })
     }
 
@@ -782,7 +785,10 @@ impl resident::PublicOwnerPublisher for FailedOwnerPublisher {
         _: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
     ) -> futures_util::future::BoxFuture<
         'static,
-        Result<tidepool_runtime::session::DurablePublicOwnerPublication, String>,
+        Result<
+            tidepool_runtime::session::DurablePublicOwnerPublication,
+            resident::PublicOwnerPublicationFailure,
+        >,
     > {
         Box::pin(async { panic!("this history issues initialization, never transfer") })
     }

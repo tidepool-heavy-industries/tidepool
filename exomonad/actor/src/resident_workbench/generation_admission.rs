@@ -314,6 +314,14 @@ impl SourceDependency {
                     .map_err(tidepool_runtime::session::ResidentError::Session)?;
                 world.adopt_scope(lease)?;
             }
+            // Initial publication preserves this exact issuer epoch; recovery
+            // adopts only after transfer. Never refresh an already issued lease.
+            let lease = world
+                .0
+                .scope
+                .get()
+                .ok_or(GenerationAdmissionError::Unqualified)?;
+            session.validate_lexical_scope_lease(scope, lease)?;
         }
         Ok(())
     }

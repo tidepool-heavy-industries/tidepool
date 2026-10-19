@@ -9410,18 +9410,52 @@ where
         &self,
         context: crate::ActorSessionContext,
         owner: tidepool_runtime::session::RecoveryPublicOwner,
-    ) -> Result<tidepool_runtime::session::DurablePublicOwnerPublication, ResidentActorWorkbenchError>
-    {
+    ) -> Result<
+        tidepool_runtime::session::DurablePublicOwnerPublication,
+        crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure,
+    > {
+        use crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure;
         self.access
             .with_machine(context, move |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                session
-                    .initialize_durable_public_scope_with_readiness(owner, scope)
+                let publication = session
+                    .initialize_durable_public_scope_with_readiness(
+                        owner,
+                        context.placement.lexical_scope,
+                    )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    })?;
+                Ok(Self::finish_committed_source_setup(
+                    session,
+                    context,
+                    publication,
+                ))
             })
             .await
+            .map_err(|error| PublicOwnerPublicationFailure::Uncommitted(error.to_string()))?
+    }
+
+    fn finish_committed_source_setup(
+        session: &mut ResidentSession<H, O>,
+        context: &crate::ActorSessionContext,
+        publication: tidepool_runtime::session::DurablePublicOwnerPublication,
+    ) -> Result<
+        tidepool_runtime::session::DurablePublicOwnerPublication,
+        crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure,
+    > {
+        if let tidepool_runtime::session::DurablePublicOwnerPublication::Committed(readiness) =
+            &publication
+        {
+            if let Err(error) = context
+                .source_dependency()
+                .adopt_final_scope(session, context.placement.lexical_scope)
+            {
+                return Err(crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure::CommittedSourceUnavailable {
+                    readiness: Arc::clone(readiness), cause: error.to_string(),
+                });
+            }
+        }
+        Ok(publication)
     }
 
     pub(crate) async fn begin_public_bootstrap(
@@ -9498,28 +9532,32 @@ where
         predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
         successor: tidepool_runtime::session::RecoveryPublicOwner,
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
-    ) -> Result<tidepool_runtime::session::DurablePublicOwnerPublication, ResidentActorWorkbenchError>
-    {
+    ) -> Result<
+        tidepool_runtime::session::DurablePublicOwnerPublication,
+        crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure,
+    > {
+        use crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure;
         let predecessor = predecessor.clone();
         self.access
             .with_machine(context, move |session, context, _| {
-                let scope = context.placement.lexical_scope;
                 let publication = session
                     .transfer_recovered_public_owner_with_readiness(
                         &predecessor,
                         successor,
-                        scope,
+                        context.placement.lexical_scope,
                         authority,
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                context
-                    .source_dependency()
-                    .adopt_final_scope(session, scope)?;
-                Ok(publication)
+                Ok(Self::finish_committed_source_setup(
+                    session,
+                    context,
+                    publication,
+                ))
             })
             .await
+            .map_err(|error| PublicOwnerPublicationFailure::Uncommitted(error.to_string()))?
     }
 
     /// Admit one cell's independent lexical write domain and its exact public
