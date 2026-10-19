@@ -35,6 +35,9 @@ module Tidepool.ExactScope
   , scopeAvailableOriginalProducts
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
+  , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
+  , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingRow
+  , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsRetainedCharge
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
@@ -56,7 +59,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', writeIORef)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, foldl')
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -2222,14 +2225,39 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsCustody :: RequestOriginalInputs
   , worldInputsPrimaryRoot :: BS.ByteString
   , worldInputsRuntimeVisibility :: BS.ByteString
+  , worldInputsBindingScope :: Word64
+  , worldInputsBindings :: Map.Map String WorldBinding
+  , worldInputsBindingCharge :: (Integer,Int)
+  }
+
+-- Current occurrence selection is distinct from the referenced row's owner.
+-- In particular, a reexport's defining SymbolIdentity need not name that row.
+data WorldBinding = WorldBinding
+  { worldBindingSymbol :: SymbolIdentity
+  , worldBindingSessionVar :: Word64
+  , worldBindingScope :: Word64
+  , worldBindingRow :: WorldBindingRow
+  }
+
+-- The semantic row is authenticated against captured visible input bytes.
+-- Certified artifact/receipt identities are passive provenance issued by the
+-- closed Rust CheckedValueArtifact constructor, not an independently checked
+-- compiler receipt or a native/runtime permission in this receiver.
+data WorldBindingRow = WorldBindingRow
+  { worldBindingRowInterface :: ScopeInterfaceInput
+  , worldBindingCertifiedArtifact :: BS.ByteString
+  , worldBindingCompilerReceipt :: BS.ByteString
   }
 
 -- Conservative backing charge: receiving allowances count every retained
 -- encoded body/path, even when a separate world happens to have equal bytes.
 -- Equal seals alone do not establish physical sharing between acquisitions.
 worldInputsRetainedCharge :: WorldInputFacts -> (Integer,Int)
-worldInputsRetainedCharge facts = (requestInputBytes custody,requestInputCount custody)
-  where custody = worldInputsCustody facts
+worldInputsRetainedCharge facts =
+  (requestInputBytes custody + bindingBytes,requestInputCount custody + bindingEntries)
+  where
+    custody = worldInputsCustody facts
+    (bindingBytes,bindingEntries) = worldInputsBindingCharge facts
 
 data CapturedWorldSources = CapturedWorldSources
   { worldSourceOrigin :: BS.ByteString
@@ -2282,7 +2310,8 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
-      frontier <- verifyWorldBlocks primary blocks
+      (bindingScope,bindingRoot) <- decodeWorldBytes decodeWorldBindingRoot visibility
+      frontier <- verifyWorldBlocks [primary,bindingRoot] blocks
       validateWorldContext frontier primary producer
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility baseSeal visibleSeal blockSeal <-
         decodeWorldBytes decodeWorldRestoration restoration
@@ -2330,13 +2359,17 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
             ParsedJoinEvidence -> pure LexicalJoinEvidence
             ParsedValueEvidence -> pure CheckedValueEvidence
           pure (ScopeInterfaceInput row admitted)
+      (bindings,bindingCharge) <- readWorldBindings frontier bindingRoot producer
+        (zip visibleRows (drop (length baseRows) rows))
+      when (toInteger (requestInputCount custody) + toInteger (snd bindingCharge) > toInteger (maxBound :: Int))
+        (worldCorrupt "compiler world retained entry count exceeds host range")
       let bind (ScopeInterfaceInput row evidence) = ScopeInterfaceInput row $ case evidence of
             ModuleInterfaceEvidence proof -> ModuleInterfaceEvidence (bindCanonicalProofInputs custody proof)
             other -> other
           complete = map bind rows
       let identity = SHA.hash restoration
       pure (WorldInputFacts (hexBytes identity) identity producer profile sources
-        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility)
+        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility bindingScope bindings bindingCharge)
 
 decodeWorldBytes :: (forall s. Decoder s a) -> BS.ByteString -> IO a
 decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict bytes) of
@@ -2359,8 +2392,8 @@ verifyWorldBlock (cid,body)
 supportedWorldCID :: BS.ByteString -> Bool
 supportedWorldCID cid = BS.length cid == 38 && BS.take 6 cid == BS.pack [1,0x71,0xa0,0xe4,2,32]
 
-verifyWorldBlocks :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO (Map.Map BS.ByteString BS.ByteString)
-verifyWorldBlocks primary blocks = do
+verifyWorldBlocks :: [BS.ByteString] -> [(BS.ByteString,BS.ByteString)] -> IO (Map.Map BS.ByteString BS.ByteString)
+verifyWorldBlocks roots blocks = do
   unless (Set.size (Set.fromList (map fst blocks)) == length blocks)
     (worldCorrupt "duplicate compiler world block CID")
   mapM_ verifyWorldBlock blocks
@@ -2374,14 +2407,14 @@ verifyWorldBlocks primary blocks = do
         Just (cid,remaining) -> case Map.lookup cid available of
           Nothing -> worldCorrupt "compiler world block child is absent"
           Just children -> visit (Set.insert cid seen) (Set.union children remaining)
-  visit Set.empty (Set.singleton primary)
+  visit Set.empty (Set.fromList roots)
   pure (Map.fromList blocks)
 
 -- This data reader uses the same fixed HAMT fold as the owning context maps.
 -- It cannot issue a compiler world, scope hold, runtime grant or Ready result.
 readWorldStringMap :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO (Map.Map String String)
 readWorldStringMap root blocks = do
-  frontier <- verifyWorldBlocks root blocks
+  frontier <- verifyWorldBlocks [root] blocks
   worldHamtMap frontier root (T.unpack <$> decodeStringCanonical) (E.encodeString . T.pack)
     (T.unpack <$> decodeStringCanonical)
 
@@ -2394,17 +2427,27 @@ worldHamtMap :: forall key value. Ord key
   => Map.Map BS.ByteString BS.ByteString -> BS.ByteString
   -> (forall s. Decoder s key) -> (key -> E.Encoding)
   -> (forall s. Decoder s value) -> IO (Map.Map key value)
-worldHamtMap frontier root keyDecoder keyEncoder valueDecoder = walk Set.empty Map.empty [(root,[])]
+worldHamtMap frontier root keyDecoder keyEncoder valueDecoder =
+  fst <$> worldHamtMapWithCharge frontier root keyDecoder keyEncoder valueDecoder
+
+-- The stored charge is the known encoded backing and actual node count, not
+-- exact heap bytes. Callers add decoded records to the SAME input-owner budget.
+worldHamtMapWithCharge :: forall key value. Ord key
+  => Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+  -> (forall s. Decoder s key) -> (key -> E.Encoding)
+  -> (forall s. Decoder s value) -> IO (Map.Map key value,(Integer,Int))
+worldHamtMapWithCharge frontier root keyDecoder keyEncoder valueDecoder = walk Set.empty Map.empty 0 [(root,[])]
   where
-    walk _ facts [] = pure facts
-    walk seen facts ((cid,route):rest) = do
+    walk seen facts bytes [] = pure (facts,(bytes,Set.size seen))
+    walk seen facts bytes ((cid,route):rest) = do
       when (cid `Set.member` seen) (worldCorrupt "repeated compiler world HAMT node")
       let depth = length route
       when (depth >= 52) (worldCorrupt "compiler world HAMT exceeds SHA256 routing depth")
       body <- maybe (worldCorrupt "compiler world HAMT child is absent") pure (Map.lookup cid frontier)
       pointers <- decodeWorldBytes (node depth) body
       (next,children) <- foldM (pointer route) (facts,[]) pointers
-      walk (Set.insert cid seen) next (children ++ rest)
+      charged <- evaluate (bytes + toInteger (BS.length body))
+      walk (Set.insert cid seen) next charged (children ++ rest)
     pointer route (facts,children) (slot,WorldHamtLink cid) =
       pure (facts,(cid,route ++ [slot]):children)
     pointer route (facts,children) (slot,WorldHamtBucket entries) = do
@@ -2531,6 +2574,108 @@ encodeWorldBindingNode node = E.encodeMapLen 1 <> case node of
     <> E.encodeString "binding" <> encodeWorldBinding binding
     <> E.encodeString "original_ordinal" <> E.encodeWord32 ordinal
 
+-- TPCWBIND3 names a second actual root; raw CID bytes in visibility do not
+-- become a Context DAG link by themselves. No legacy visibility is inferred.
+decodeWorldBindingRoot :: Decoder s (Word64,BS.ByteString)
+decodeWorldBindingRoot = do
+  worldArray 3
+  magic <- decodeStringCanonical
+  unless (magic == "TPCWBIND3") (fail "unsupported compiler world bindings")
+  scope <- decodeWord64Canonical
+  root <- decodeBytesCanonical
+  unless (supportedWorldCID root) (fail "unsupported compiler world binding root CID")
+  pure (scope,root)
+
+worldBindingText :: Decoder s T.Text
+worldBindingText = do
+  value <- decodeStringCanonical
+  unless (not (T.null value) && not (T.any (== '\0') value))
+    (fail "invalid compiler world binding identity")
+  pure value
+
+decodeWorldBindingValue :: Decoder s (SymbolIdentity,Word64,Word64,BS.ByteString)
+decodeWorldBindingValue = do
+  token <- peekTokenType
+  unless (token == TypeListLen) (fail "invalid compiler world binding value tuple")
+  count <- decodeListLenCanonical
+  unless (count == 4) (fail "invalid compiler world binding value tuple")
+  worldArray 5
+  unit <- worldBindingText
+  name <- worldBindingText
+  namespace <- worldBindingText
+  occurrence <- worldBindingText
+  parentToken <- peekTokenType
+  parent <- if parentToken == TypeNull then decodeNull >> pure Nothing else do
+    value <- decodeStringCanonical
+    when (T.any (== '\0') value) (fail "invalid compiler world record parent")
+    pure (Just value)
+  variable <- decodeWord64Canonical
+  scope <- decodeWord64Canonical
+  row <- worldCID
+  pure (SymbolIdentity unit name namespace occurrence parent,variable,scope,row)
+
+-- Compare one exact canonical semantic row, including role/requirements, with
+-- the existing receiving projection. A byte-image key alone omits those facts.
+decodeWorldBindingRow :: Int -> Decoder s (BS.ByteString,BS.ByteString,BS.ByteString)
+decodeWorldBindingRow payloadBytes = do
+  worldArray 3
+  worldArray 6
+  unit <- worldBindingText
+  name <- worldBindingText
+  producer <- digest
+  image <- digest
+  role <- worldBindingText
+  count <- decodeListLenCanonical
+  unless (count <= payloadBytes) (fail "compiler world row requirements exceed encoded body")
+  required <- replicateM count (worldArray 2 >> ((,) <$> worldBindingText <*> worldBindingText))
+  unless (and (zipWith (<) required (drop 1 required)))
+    (fail "compiler world row requirements are duplicate or unsorted")
+  certified <- digest
+  receipt <- digest
+  let semantic = toStrictByteString (E.encodeListLen 6 <> E.encodeString unit <> E.encodeString name
+        <> E.encodeBytes producer <> E.encodeBytes image <> E.encodeString role
+        <> E.encodeListLen (fromIntegral count)
+        <> foldMap (\(u,n) -> E.encodeListLen 2 <> E.encodeString u <> E.encodeString n) required)
+  pure (semantic,certified,receipt)
+  where
+    digest = do
+      bytes <- decodeBytesCanonical
+      unless (BS.length bytes == 32) (fail "invalid compiler world row provenance digest")
+      pure bytes
+
+readWorldBindings :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> [(OfferedWorldRow,ScopeInterfaceInput)] -> IO (Map.Map String WorldBinding,(Integer,Int))
+readWorldBindings frontier root producer visible = do
+  (selected,(nodeBytes,nodeCount)) <- worldHamtMapWithCharge frontier root (T.unpack <$> worldBindingText) (E.encodeString . T.pack)
+    decodeWorldBindingValue
+  eligible <- forM [(offered,input) | (offered@((_,ParsedValueEvidence),_),input) <- visible] $ \(offered,input) -> do
+    semantic <- toStrictByteString <$> worldSemanticRowEncoding producer offered
+    pure (semantic,input)
+  let rows = Map.fromList eligible
+      referenced = Set.fromList [cid | (_,_,_,cid) <- Map.elems selected]
+  -- Decode each shared row once; aliases retain that same immutable row value.
+  decoded <- forM (Set.toAscList referenced) $ \cid -> do
+    body <- maybe (worldCorrupt "compiler world binding row is absent") pure (Map.lookup cid frontier)
+    (semantic,certified,receipt) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
+    input <- maybe (worldCorrupt "compiler world binding row differs from admitted visible value inputs") pure
+      (Map.lookup semantic rows)
+    pure (cid,(WorldBindingRow input certified receipt,toInteger (BS.length body)))
+  let actual = Map.fromDistinctAscList decoded
+      bytes = foldl' (\total (_,(_,size)) -> total + size) nodeBytes decoded
+      -- The raw descriptor already charges these encoded bytes once. This
+      -- additional conservative basis accounts for the decoded index without
+      -- pretending to measure exact heap. Every alias owns a name record;
+      -- only its distinct row record/backing is shared.
+      entries = toInteger (Map.size selected) + toInteger nodeCount + toInteger (Set.size referenced)
+  when (entries > toInteger (maxBound :: Int))
+    (worldCorrupt "compiler world binding retention count exceeds host range")
+  bindings <- forM selected $ \(symbol,variable,scope,cid) -> case Map.lookup cid actual of
+    Just (row,_) -> pure (WorldBinding symbol variable scope row)
+    Nothing -> worldCorrupt "compiler world binding has no decoded row"
+  -- Settle all charge work during acquisition, never at a hit or END.
+  _ <- evaluate (bytes + entries + toInteger (Map.size bindings))
+  pure (bindings,(bytes,fromInteger entries))
+
 data WorldDescriptorField = WorldDescriptorVersion Word64 | WorldDescriptorProducer BS.ByteString
   | WorldDescriptorLink BS.ByteString
 
@@ -2640,20 +2785,23 @@ worldBlockLinks bytes = scan 1 bytes Set.empty
 -- evidence. Receiving paths and arena aliases do not change logical identity.
 worldSemanticRowsSeal :: BS.ByteString -> [OfferedWorldRow] -> IO BS.ByteString
 worldSemanticRowsSeal producer rows = do
-  encoded <- forM rows $ \((row@(iface,_,_),evidence),image) -> do
-    role <- case evidence of
-      ParsedModuleEvidence descriptor -> case descriptorPurpose descriptor of
-        ScopeInterface SourceOriginalRole -> pure "module"
-        ScopeInterface NativeDeclarationRole -> pure "native-declaration"
-        CandidateCarrier -> worldCorrupt "world row has no semantic scope role"
-      ParsedJoinEvidence -> pure "join"
-      ParsedValueEvidence -> pure "value"
-    let (unit,name) = rowOwner row
-        required = Set.toAscList (Set.fromList (exactRequirements iface))
-    pure (E.encodeListLen 6 <> text unit <> text name <> E.encodeBytes producer <> E.encodeBytes image
-      <> text role <> E.encodeListLen (fromIntegral (length required))
-      <> foldMap (\(ownerUnit,ownerName) -> E.encodeListLen 2 <> text ownerUnit <> text ownerName) required)
+  encoded <- mapM (worldSemanticRowEncoding producer) rows
   pure (SHA.hash (toStrictByteString (E.encodeListLen (fromIntegral (length rows)) <> mconcat encoded)))
+
+worldSemanticRowEncoding :: BS.ByteString -> OfferedWorldRow -> IO E.Encoding
+worldSemanticRowEncoding producer ((row@(iface,_,_),evidence),image) = do
+  role <- case evidence of
+    ParsedModuleEvidence descriptor -> case descriptorPurpose descriptor of
+      ScopeInterface SourceOriginalRole -> pure "module"
+      ScopeInterface NativeDeclarationRole -> pure "native-declaration"
+      CandidateCarrier -> worldCorrupt "world row has no semantic scope role"
+    ParsedJoinEvidence -> pure "join"
+    ParsedValueEvidence -> pure "value"
+  let (unit,name) = rowOwner row
+      required = Set.toAscList (Set.fromList (exactRequirements iface))
+  pure (E.encodeListLen 6 <> text unit <> text name <> E.encodeBytes producer <> E.encodeBytes image
+    <> text role <> E.encodeListLen (fromIntegral (length required))
+    <> foldMap (\(ownerUnit,ownerName) -> E.encodeListLen 2 <> text ownerUnit <> text ownerName) required)
   where text = E.encodeString . T.pack
 
 worldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO BS.ByteString

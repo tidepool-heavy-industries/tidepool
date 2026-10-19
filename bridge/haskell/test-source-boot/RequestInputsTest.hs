@@ -71,7 +71,7 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -402,16 +402,27 @@ semanticWorldBindingControls work scopePath contextParcel = do
         path <- issueCodecFixturePacket work (operation ++ ".cbor") (toStrictByteString (encodeTerm
           (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments])))
         readCodecTerm path >>= decodeParcel
-  (primary,blockPairs) <- case deserialiseFromBytes decodeTerm (BL.fromStrict contextParcel) of
+  (primary,contextBlocks) <- case deserialiseFromBytes decodeTerm (BL.fromStrict contextParcel) of
     Right (remaining,value) | BL.null remaining -> decodeParcel value
     _ -> fail "genuine context parcel is not one complete CBOR value"
-  worldContextCoverage primary blockPairs
+  worldContextCoverage primary contextBlocks
   (emptyPrimary,emptyBlocks) <- blockFixture "world-context-blocks" [TBytes producer]
+  emptyBinding <- case lookup emptyPrimary emptyBlocks of
+    Just body -> case deserialiseFromBytes decodeTerm (BL.fromStrict body) of
+      Right (remaining,TMap fields) | BL.null remaining -> case lookup (TString "roles") fields of
+        Just (TTagged 42 (TBytes link)) | not (BS.null link),BS.head link == 0 -> pure (BS.tail link)
+        _ -> fail "empty Materializer context omitted its actual role-map CID"
+      _ -> fail "empty Materializer context needs its actual descriptor"
+    Nothing -> fail "empty Materializer context omitted its descriptor block"
+  let blockPairs = Map.toAscList (Map.fromList (contextBlocks ++ emptyBlocks))
   (hamtRoot,hamtBlocks) <- blockFixture "world-blocks" []
   worldHamtControls hamtRoot hamtBlocks
   let sources = "TPCSRC01" <> BS.replicate 8 0
       sourcePath = work </> "world-seal-sources.bin"
       profile = BS.replicate 32 97
+      bindingVisibility root = toStrictByteString (encodeTerm
+        (TList [TString "TPCWBIND3",TInt 0,TBytes root]))
+      visibility = bindingVisibility emptyBinding
       blocks pairs = TList [TList [TBytes cid,TBytes body] | (cid,body) <- pairs]
       acquisition = TList [TString "continue-originals",arenas,TList images]
       base = offered
@@ -426,13 +437,13 @@ semanticWorldBindingControls work scopePath contextParcel = do
       seal rs = SHA.hash (encode (TList (map rowProjection rs)))
       restorationFor version root pairs bs vs = encode (TList
         [TString "TPCWREST",TInt version,TBytes root,TBytes (SHA.hash sources),TBytes producer
-        ,TBytes profile,TBytes BS.empty,TBytes (seal bs),TBytes (seal vs)
+        ,TBytes profile,TBytes visibility,TBytes (seal bs),TBytes (seal vs)
         ,TBytes (SHA.hash (encode (TList [TList [TBytes cid,TBytes (SHA.hash body)] | (cid,body) <- pairs])))])
       restoration version = restorationFor version primary blockPairs
       product = restoration 2 base visible
       packetFor version receipt root pairs bs vs inputs = TList
         [TString "TPCWORLD",TInt version,TBytes receipt,text sourcePath,TBytes producer,TBytes profile
-        ,TList [TList bs,TList vs],inputs,TBytes BS.empty,TBytes root,blocks pairs]
+        ,TList [TList bs,TList vs],inputs,TBytes visibility,TBytes root,blocks pairs]
       packet version receipt = packetFor version receipt primary blockPairs
       readPacket label term = do
         let path = work </> (label ++ ".world.cbor")
@@ -443,7 +454,7 @@ semanticWorldBindingControls work scopePath contextParcel = do
         result <- try (readPacket label term) :: IO (Either WorldInputsFailure WorldInputFacts)
         case result of
           Left (WorldInputsFailure WorldInputsCorrupt reason)
-            | maybe True (== reason) expected -> pure ()
+            | maybe True (\cause -> reason == cause || show cause `isInfixOf` reason) expected -> pure ()
           Left failure -> throwIO failure
           Right _ -> fail ("world semantic receipt accepted mutation: " ++ label)
       replaceFirst value (_:rest) = value:rest
@@ -458,6 +469,24 @@ semanticWorldBindingControls work scopePath contextParcel = do
   original <- readPacket "world-seal-valid" (packet 2 product base visible acquisition)
   unless (worldInputsIdentityBytes original == SHA.hash product)
     (fail "cold world reader changed its exact restoration identity")
+  unless (Map.null (worldInputsBindings original) && worldInputsBindingScope original == 0)
+    (fail "cold reader lost its actual empty current-binding root/scope")
+  emptyNode <- maybe (fail "empty binding root omitted its body") pure (lookup emptyBinding blockPairs)
+  announced <- concat <$> forM images (\image -> case image of
+    TList [_,_,_,_,TList parts] -> forM parts $ \part -> case part of
+      TList [_,TString path,_,size,_,_] -> case size of
+        TInt amount -> pure (path,toInteger amount)
+        TInteger amount -> pure (path,amount)
+        _ -> fail "world charge fixture needs exact part lengths"
+      _ -> fail "world charge fixture needs complete part descriptors"
+    _ -> fail "world charge fixture needs complete image descriptors")
+  let distinctParts = Map.fromList announced
+      rawBytes = sum (Map.elems distinctParts) + toInteger (BS.length sources)
+        + toInteger (BS.length (encode (packet 2 product base visible acquisition)))
+      expectedCharge = (rawBytes + toInteger (BS.length emptyNode),Map.size distinctParts + 3)
+  unless (worldInputsRetainedCharge original == expectedCharge)
+    (fail ("world binding retention omitted encoded backing/entry charge: "
+      ++ show (worldInputsRetainedCharge original,expectedCharge)))
   _ <- readPacket "world-seal-empty-context"
     (packetFor 2 (restorationFor 2 emptyPrimary emptyBlocks base visible)
       emptyPrimary emptyBlocks base visible acquisition)
@@ -517,6 +546,40 @@ semanticWorldBindingControls work scopePath contextParcel = do
   let missingChild = filter ((/= child) . fst) blockPairs
   requireCorrupt (Just "compiler world block child is absent") "missing-block-child"
     (packetFor 2 (restorationFor 2 primary missingChild base visible) primary missingChild base visible acquisition)
+  let replaceAt index value values = take index values ++ value : drop (index+1) values
+      withVisibility changed (TList fields) = case fields !! 2 of
+        TBytes receipt -> case deserialiseFromBytes decodeTerm (BL.fromStrict receipt) of
+          Right (remaining,TList productFields) | BL.null remaining ->
+            TList (replaceAt 8 (TBytes changed)
+              (replaceAt 2 (TBytes (encode (TList (replaceAt 6 (TBytes changed) productFields)))) fields))
+          _ -> error "visibility control requires a complete genuine restoration"
+        _ -> error "visibility control requires a restoration byte field"
+      withVisibility _ _ = error "visibility control requires a complete world descriptor"
+      alternate = bindingVisibility hamtRoot
+      combined = Map.toAscList (Map.fromList (blockPairs ++ hamtBlocks))
+  unless (not (any ((== hamtRoot) . fst) blockPairs))
+    (fail "second-root control must have an independent actual binding CID")
+  requireCorrupt (Just "compiler world block child is absent") "missing-binding-root"
+    (withVisibility alternate (packet 2 product base visible acquisition))
+  -- Context remains complete while only an actual second-root child is absent.
+  bindingRootTerm <- case lookup hamtRoot hamtBlocks of
+    Just body -> case deserialiseFromBytes decodeTerm (BL.fromStrict body) of
+      Right (remaining,value) | BL.null remaining -> pure value
+      _ -> fail "second-root control needs an actual complete HAMT root"
+    Nothing -> fail "second-root control omitted its actual root"
+  bindingChild <- case [cid | cid <- links bindingRootTerm, not (any ((== cid) . fst) blockPairs)] of
+    cid:_ -> pure cid
+    [] -> fail "second-root control needs an actual distinct provided child"
+  let missingBindingChild = filter ((/= bindingChild) . fst) combined
+  requireCorrupt (Just "compiler world block child is absent") "missing-binding-child"
+    (withVisibility alternate (packetFor 2 (restorationFor 2 primary missingBindingChild base visible)
+      primary missingBindingChild base visible acquisition))
+  requireCorrupt (Just "invalid compiler world binding value tuple") "malformed-binding-value"
+    (withVisibility alternate (packetFor 2 (restorationFor 2 primary combined base visible)
+      primary combined base visible acquisition))
+  requireCorrupt (Just "unsupported compiler world bindings") "legacy-binding-visibility"
+    (withVisibility (encode (TList [TString "TPCWBIND2",TInt 0,TBytes emptyBinding]))
+      (packet 2 product base visible acquisition))
   forM_ [("base",base,\rs -> (rs,visible)),("visible",visible,\rs -> (base,rs))] $ \(which,selected,replace) -> do
     let mutations = [("drop",tail selected),("reorder",reverse selected)
           ,("retag",replaceFirst (retag (head selected)) selected)
