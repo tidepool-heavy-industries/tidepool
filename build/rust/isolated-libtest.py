@@ -480,8 +480,8 @@ def resolve_resource_environment(names):
     source_config = selected.get('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG')
     if source_config is not None:
         # The declared service producer owns this fixed sibling. This is launch
-        # data, not service authority: the frontend measures the configuration
-        # and admission checks the deployment's independently expected digest.
+        # data, not service authority. The frontend must measure these bytes;
+        # admission must check the independently configured deployment digest.
         digest_file = Path(source_config).with_suffix('.sha256')
         with digest_file.open('rb') as stream:
             digest = stream.read(66)

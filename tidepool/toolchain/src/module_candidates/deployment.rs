@@ -581,8 +581,19 @@ impl DeploymentModulePackage {
         &self,
         deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(), ModulePackageError> {
-        if self.catalog.producer_identity != deployment.producer_identity
-            || self.catalog.consumed_worker_identity != deployment.consumed_worker_identity
+        self.validate_product_provenance(
+            deployment.producer_identity,
+            deployment.consumed_worker_identity,
+        )
+    }
+
+    pub(crate) fn validate_product_provenance(
+        &self,
+        producer_identity: [u8; 32],
+        consumed_worker_identity: [u8; 32],
+    ) -> Result<(), ModulePackageError> {
+        if self.catalog.producer_identity != producer_identity
+            || self.catalog.consumed_worker_identity != consumed_worker_identity
         {
             return Err(ModulePackageError::CompilerMismatch);
         }
@@ -718,6 +729,81 @@ impl DeploymentModulePackage {
     pub fn source_selection(&self) -> &NativeCatalogSourceSelection {
         &self.catalog.source_selection
     }
+
+    /// Require catalog targets to be representable in their own declared
+    /// namespace. The captured root order independently selects query sources;
+    /// this check issues neither that selection nor a native grant.
+    pub fn validate_captured_source_lookup(
+        &self,
+        roots: &[PathBuf],
+        manifests: &[crate::cache::SourceRootManifest],
+    ) -> Result<(), ModulePackageError> {
+        if self.records.len() != self.catalog.modules.len() {
+            return Err(ModulePackageError::Format(
+                "unacquired catalog source targets",
+            ));
+        }
+        if roots.len() != manifests.len()
+            || roots.iter().collect::<BTreeSet<_>>().len() != roots.len()
+        {
+            return Err(ModulePackageError::Format(
+                "ambiguous captured source roots",
+            ));
+        }
+        let catalog_roots = self.source_selection().include_roots();
+        let mut next_root = 0;
+        for root in &catalog_roots {
+            let Some(offset) = roots[next_root..]
+                .iter()
+                .position(|candidate| candidate == root)
+            else {
+                return Err(ModulePackageError::Format(
+                    "captured catalog source root order",
+                ));
+            };
+            next_root += offset + 1;
+        }
+        for record in &self.records {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+            if record.include != catalog_roots
+                || record
+                    .module
+                    .split('.')
+                    .any(|part| part.is_empty() || part.contains('/') || part.contains('\\'))
+            {
+                return Err(ModulePackageError::Format(
+                    "unrepresentable catalog source target",
+                ));
+            }
+            let relative = PathBuf::from(record.module.replace('.', "/"));
+            let ordinary = relative.with_extension("hs");
+            let literate = relative.with_extension("lhs");
+            let Some(root) = catalog_roots.iter().find(|root| {
+                record.source == root.join(&ordinary) || record.source == root.join(&literate)
+            }) else {
+                return Err(ModulePackageError::Format(
+                    "unrepresentable catalog source target",
+                ));
+            };
+            let position = roots.iter().position(|candidate| candidate == root).ok_or(
+                ModulePackageError::Format("captured catalog source root order"),
+            )?;
+            let files = &manifests[position];
+            let ordinary_exists = files.contains_path(&ordinary);
+            let literate_exists = files.contains_path(&literate);
+            if ordinary_exists && literate_exists {
+                return Err(ModulePackageError::Format(
+                    "ambiguous catalog source suffix",
+                ));
+            }
+            if !(ordinary_exists && record.source == root.join(&ordinary)
+                || literate_exists && record.source == root.join(&literate))
+            {
+                return Err(ModulePackageError::Format("missing catalog source target"));
+            }
+        }
+        Ok(())
+    }
     pub fn source_identity(&self) -> &str {
         &self.source_identity
     }
@@ -808,14 +894,12 @@ impl DeploymentModulePackage {
             return Err(ModulePackageError::Format("catalog schema"));
         }
         catalog.source_selection.validate_under(policy)?;
-        if catalog.producer_identity != authority.producer_identity
-            || catalog.consumed_worker_identity != authority.consumed_worker_identity
-            || authority.schema != 1
-            || authority.producer_identity == [0; 32]
-            || authority.consumed_worker_identity == [0; 32]
-        {
-            return Err(ModulePackageError::CompilerMismatch);
-        }
+        crate::toolchain::CompilerDeploymentConfiguration::Configured(authority.clone())
+            .validate_product_provenance(
+                catalog.producer_identity,
+                catalog.consumed_worker_identity,
+            )
+            .map_err(|_| ModulePackageError::CompilerMismatch)?;
         let artifact_root = path
             .parent()
             .ok_or(ModulePackageError::RootMoved)?
@@ -1662,7 +1746,12 @@ mod tests {
                     "Jev" => NativeSourceRole::Jev,
                     _ => NativeSourceRole::Stdlib,
                 };
-                source.join(role.relative_root()).join(format!("{name}.hs"))
+                let file = if name == "Nonconventional" {
+                    "catalog-extra.hs".to_owned()
+                } else {
+                    format!("{name}.hs")
+                };
+                source.join(role.relative_root()).join(file)
             };
             for name in names {
                 fs::write(
@@ -1673,12 +1762,13 @@ mod tests {
             }
             let producer_identity = [3; 32];
             let authority = CompilerDeploymentAuthority {
-                schema: 1,
+                schema: 2,
                 producer_identity,
                 consumed_worker_identity: [4; 32],
                 frontend_path: "/configured/frontend".into(),
                 worker_path: "/configured/worker".into(),
                 ghc_libdir: "/configured/ghc".into(),
+                package_source: crate::toolchain::ConfiguredPackageSource::ObservationOnly,
             };
             let evidence = DependencyEvidence {
                 version: 4,
@@ -1867,6 +1957,7 @@ mod tests {
                 &crate::toolchain::AdmittedCompilerDeployment {
                     producer_identity,
                     consumed_worker_identity: [4; 32],
+                    source: crate::toolchain::AdmittedPackageSource::ObservationOnly,
                 },
                 &prepared,
                 RootPolicy::Fixture,
@@ -1891,6 +1982,94 @@ mod tests {
         fn catalog(&self) -> Catalog {
             serde_json::from_slice(&fs::read(self.output.join("catalog.json")).unwrap()).unwrap()
         }
+    }
+
+    #[test]
+    fn captured_catalog_lookup_preserves_independent_current_source_selection() {
+        fn manifests(roots: &[PathBuf]) -> Vec<crate::cache::SourceRootManifest> {
+            roots
+                .iter()
+                .map(|root| {
+                    crate::cache::SourceRootManifest::from_file_digests(
+                        crate::cache::source_root_manifest(root).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect()
+        }
+        let fixture = Fixture::new();
+        let package = fixture.load().unwrap();
+        let roots = package.source_selection().include_roots();
+        package
+            .validate_captured_source_lookup(&roots, &manifests(&roots))
+            .unwrap();
+        let unacquired = DeploymentModulePackage::read_catalog_under(
+            &fixture.output.join("catalog.json"),
+            &fixture.authority,
+            RootPolicy::Fixture,
+        )
+        .unwrap();
+        assert!(matches!(
+            unacquired.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "unacquired catalog source targets"
+            ))
+        ));
+
+        let shadow = tempfile::tempdir().unwrap();
+        fs::write(
+            shadow.path().join("Library.hs"),
+            "module Library where\nvalue = False\n",
+        )
+        .unwrap();
+        let shadowed = std::iter::once(shadow.path().to_owned())
+            .chain(roots.iter().cloned())
+            .collect::<Vec<_>>();
+        let shadowed_manifests = manifests(&shadowed);
+        package
+            .validate_captured_source_lookup(&shadowed, &shadowed_manifests)
+            .unwrap();
+        let selected_source = shadowed[0].join("Library.hs");
+        assert_ne!(selected_source, package.records[0].source);
+        assert_ne!(
+            fs::read(selected_source).unwrap(),
+            fs::read(&package.records[0].source).unwrap()
+        );
+
+        let mut reordered = roots.clone();
+        reordered.swap(0, 1);
+        assert!(matches!(
+            package.validate_captured_source_lookup(&reordered, &manifests(&reordered)),
+            Err(ModulePackageError::Format(
+                "captured catalog source root order"
+            ))
+        ));
+        let mut duplicated = roots.clone();
+        duplicated.push(roots[0].clone());
+        assert!(matches!(
+            package.validate_captured_source_lookup(&duplicated, &manifests(&duplicated)),
+            Err(ModulePackageError::Format(
+                "ambiguous captured source roots"
+            ))
+        ));
+
+        fs::write(roots[1].join("Library.lhs"), "> module Library where\n").unwrap();
+        assert!(matches!(
+            package.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "ambiguous catalog source suffix"
+            ))
+        ));
+
+        let nonconventional = Fixture::with_modules(&["Nonconventional"]);
+        let package = nonconventional.load().unwrap();
+        let roots = package.source_selection().include_roots();
+        assert!(matches!(
+            package.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "unrepresentable catalog source target"
+            ))
+        ));
     }
 
     fn combine_rows(encoded: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
@@ -2216,6 +2395,31 @@ mod tests {
     #[test]
     fn configured_compiler_and_worker_are_independently_checked() {
         let fixture = Fixture::new();
+        fixture.load().unwrap();
+        let mut legacy = fixture.authority.clone();
+        legacy.schema = 1;
+        assert!(matches!(
+            DeploymentModulePackage::load_under(
+                &fixture.output.join("catalog.json"),
+                &legacy,
+                RootPolicy::Fixture
+            ),
+            Err(ModulePackageError::CompilerMismatch)
+        ));
+        let mut rooted_expectation = fixture.authority.clone();
+        rooted_expectation.package_source = crate::toolchain::ConfiguredPackageSource::Rooted {
+            source_id: [1; 32],
+            supported_profile_id: [2; 32],
+            launch_configuration_sha256: [3; 32],
+        };
+        // Reading archived products validates provenance, without constructing
+        // an admitted service or claiming its configured rooted source exists.
+        DeploymentModulePackage::load_under(
+            &fixture.output.join("catalog.json"),
+            &rooted_expectation,
+            RootPolicy::Fixture,
+        )
+        .unwrap();
         for worker in [false, true] {
             let mut authority = fixture.authority.clone();
             if worker {

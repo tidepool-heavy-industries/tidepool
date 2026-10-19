@@ -1564,7 +1564,7 @@ pub async fn restart(run_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let compiler_ready = match tidepool_extract_cmd::preflight_compiler_daemon(&compiler_socket) {
         Ok(ready) => {
             deployment
-                .admit(*ready.producer_bytes(), *ready.consumed_worker_bytes())
+                .admit_service_preflight(&ready)
                 .map_err(boot_refusal)?;
             true
         }
@@ -1981,10 +1981,7 @@ async fn wait_until_compiler_daemon(
             .await
             .map_err(|error| runtime_error(format!("compiler preflight task failed: {error}")))?;
             if let Ok(identity) = ready {
-                deployment.admit(
-                    *identity.producer_bytes(),
-                    *identity.consumed_worker_bytes(),
-                )?;
+                deployment.admit_service_preflight(&identity)?;
                 return Ok(());
             }
             if !tmux.exists().await? {

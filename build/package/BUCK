@@ -75,6 +75,30 @@ TIDEPOOL_EXTRACT_WORKER="$WORKER" \
 )
 
 genrule(
+    name = "compiler_service_deployment",
+    srcs = [
+        ":qualification_script",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//bridge/haskell:tidepool_extract_bin",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:native_catalog_ghc_libdir",
+    ],
+    out = "compiler-service-deployment",
+    bash = """set -euo pipefail
+TOOLS=""" + read_root_config("nix", "exomonad_runtime_tools") + """
+OUTPUT=`"$TOOLS/bin/python3" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$PWD/$OUT"`
+"$TOOLS/bin/python3" "$(location :qualification_script)" declare-compiler-service-source \\
+  --frontend "$(exe //tidepool/extract-cmd:tidepool-extract)" \\
+  --worker "$(exe //bridge/haskell:tidepool_extract_bin)" \\
+  --ghc-libdir """ + read_root_config("nix", "ghc_libdir") + """ \\
+  --runtime-tools "$TOOLS" \\
+  --profile """ + read_root_config("tidepool", "profile", "fast-dev") + """ \\
+  --output "$OUTPUT"
+""",
+    visibility = ["PUBLIC"],
+)
+
+genrule(
     name = "embedded_web_provenance",
     srcs = [
         "//third-party/rust:matched_harness_source_revision",

@@ -1,106 +1,144 @@
 # Host inputs current handoff
 
-Owner: `/root/warm_compiler_campaign/host_inputs`. Isolated checkout
+Owner `/root/warm_compiler_campaign/host_inputs`; checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019`, branch
-`feature/shared-warm/host-inputs`. Original base `5b74c2f1`.
+`feature/shared-warm/host-inputs`, original base `5b74c2f1`.
 
-## Qualified checkpoint
+## Tested area checkpoint
 
-`9f086d0d23901115260caf37dd908e095f671cfa` joins the accepted demand-service
-baseline with complete counter history through `8424c144` and runtime fact-key
-history through `70120cc3`. These are independently source reviewed. Supervisor
-read the critical production changes and actual execution reports.
+Production source `da584c7421eefc77941ae9681d3821d1f27bbe9b` is independently
+reviewed and compiled through both coupled consumers:
 
-- Runtime fact key: production/cfg-test compilation passed, two exact controls
-  selected/executed/passed, including same-tip binding/catalog invalidation,
-  frozen child isolation and overflow refusal. No full-view construction or
-  semantic hashing on repeated key reads; ordinary full-view path calibrates it.
-- Counter producers: toolchain production/cfg-test compilation passed at `9f086d`;
-  two exact controls selected/executed/passed. Explicit thread/unwind propagation,
-  failed manifest write after successful encoding, FD export and empty retained
-  value fold were exercised. Test executable SHA256
-  `1ac34d45180652b3861cd3d065b2108129ddd9c539a4c3ef27e9e0ce8391d6ea`.
+- Toolchain production/cfg-test compilation passed (three local actions); two
+  exact controls selected/executed/passed: captured catalog eligibility and the
+  existing configured producer/worker checker, expanded with current-schema
+  positive, schema-1 refusal and finite Rooted-expectation provenance checks.
+- Host production/cfg-test compilation passed (558 local actions); the new
+  ordered, different-body source-owner control selected/executed/passed once.
+  This compiles the two real CLI preflight callers against the complete reviewed
+  owned API/provider dependency through `a56ad6f71e`, merged with full history.
+- Earlier runtime/actor source `cb888d0b` passed production/cfg-test and five exact
+  controls. Campaign joined `80db8e5c`/fixture repair `40471e84` passed the original
+  source-capture/cold-restore and retained-byte-budget controls. No routine repeat
+  of those unchanged controls was used to inflate the new gate.
 
-Key evidence: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/host-inputs/host-world/commands.json`
-and `key-counted-summary.json`. Counter commands, exact reports and limits:
-`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/counters-8424/`.
-Independent receipts are under that host evidence root's `oracle/` directory.
-Neither parcel establishes an implemented service query, worker hit or speedup.
+Exact commands, reports, artifact hashes and limits are retained under
+`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/catalog-lookup-9487/`:
+`NATIVE-DA584-TERMINAL.json`, `HOST-DA584-TERMINAL.json`, matching compile/count
+terminal records and logs. Toolchain test artifact SHA256 is
+`633b21d6ed53eb00d53df89f993f87f69f5b21461827c3927031135e5d281cca`;
+host artifact SHA256 is
+`3a16677da4fcf3c09d058a108ab84e5c287cf9eb156d8522db60474092e87895`.
+Supervisor read production changes and actual reports. Process cleanup was
+confirmed; hosted/compiler cleanup and directory resource hashes remain limited.
 
-All owning native clients are terminal. Counter scope peak was 5,269,278,720 B;
-its daemon remains idle in `build.slice` (PID 4122402, scope
-`inanna-build-1792405723-4122308.scope`). The six-GiB lane was released to the
-campaign. New native work requires fresh aggregate admission. Buck output remains
-an owned per-checkout XFS bind mount. Installed storage-status remains unsupported.
+All host native clients are terminal; both six- and fourteen-GiB grants are
+released. Daemon PID 4122402 remains in build.slice with idle current
+6,247,665,664 B and observed lifetime peak 13,127,516,160 B (the peak increased
+during the host gate). Output remains its owned per-checkout XFS bind mount.
+New native work requires fresh actual phase/scope admission. Idle daemons stay
+in global usage; never subtract an old idle daemon from a future test allowance.
 
-## Current source-only successor
+## Source owners and the repaired boundary
 
-`0aa94eca24326f5feb53bf1c84333ef3e9592426` adds actual source-owner capture in
-actor mount forwarding and host source/generation/workspace. It uses the existing
-RetainedSourceGraph and traversal, hashes and retains bodies from the same read,
-retains root/prepared/catalog owners, and caches the completed cold data on that
-immutable graph. No new source issuer or scanner is introduced. Missing or
-interrupted observation maps to existing Unavailable; unreadable/mismatched data
-remains Unreadable. Read counters charge successful reads before cancellation.
-Fresh ambient catalog or uncovered catalog home roots return unsupported.
+The existing RetainedSourceGraph and workspace traversal capture strict bodies
+and manifests from the same reads, preserving root order, captured absence and
+actual root/prepared/catalog custody. A shared pre-retention byte allowance spans
+all roots. Factory framing remains independently bounded. Completed cold source
+data is cached on the immutable graph; a hit skips the cold catalog check and
+source census. Typed interrupted/missing and unreadable observations stay distinct.
 
-The actual owner control covers unimported source A -> B, captured absence then
-creation, cold restore A and last-owner release. It has not compiled or executed.
-Pinned Rust 1.93 formatting and diff check passed. Independent source receipt:
-`oracle/source-capture-review-e9c96d86.txt`, four-path diff SHA256
-`e9c96d86de6aa785ab4d3ae960a41dbd2331c1ede81a636ef1d9294b2825ace9`.
-Warm's real CapturedCompilerSources factory was read as mutable source; its exact
-committed candidate is still a dependency. Do not fold this source-only parcel
-as qualified. Two CLI preflight migrations remain separate uncommitted WIP,
-depending on owned API `00744ee1` and warm's actual identity association.
+Catalog target coverage and current source selection are separate. The final
+eligibility check validates each acquired catalog record's conventional module
+path in its OWN authenticated declared include/source role. Partial records,
+nonconventional or missing targets, ambiguous suffixes, duplicate roots and role
+reordering refuse before submission. No current selection or native grant is
+issued by this check. The captured ordered SourceGraph independently selects the
+actual query source. Earlier A can win over catalog B with DIFFERENT bodies; the
+service receipt must identify A's actual module/unit/root/path/bytes. Equal bytes
+never turn distinct source owners into aliases or authorize native-edge changes.
 
-## Accepted next boundary
+Actual recovered e6 and 428b frozen owner graphs contain earlier retained Jev.Core
+roots (root4) and catalog roots (root10). The superseded global-first-winner guard
+refused seven of 94 targets. The approved own-role policy admits the 94 target
+namespaces in the read-only diagnostic; this is not native query attestation.
+Both observations are preserved in FROZEN-ELIGIBILITY-DIAGNOSTIC.json and
+FROZEN-OWN-ROLE-ELIGIBILITY-DIAGNOSTIC.json under the gate evidence directory.
+CATALOG-CURRENT-SOURCE-CONTRACT.md records the approved distinction.
 
-The persistent logical world is the normal production compiler boundary. The
-first actual PublicModule info/type query precedes capture_value_interfaces,
-checked_value_context, structured provenance, source preparation, hashing and FD
-export. Full cell, paired publication and recovery migration remains required;
-the first query is the delivery sequence, not a final optional query cache.
+The first actual ceda native attempt compiled but failed its one case BEFORE
+reaching the guard: the production catalog reader still required authority
+schema 1 despite the mandatory schema-2 deployment contract. NATIVE-FAILED-CEDA.json
+retains this failure. The repair uses the EXISTING configured product-provenance
+validator, preserves typed CompilerMismatch, and adds no checker or service
+issuer. A valid Rooted EXPECTATION may authenticate archived products without
+claiming a live source association; actual source admission remains independent.
+The subsequent two-control gate passed. Owned independently found the analogous
+Haskell wrapper schema check; that separate repair belongs to Warm/owned.
 
-C1 correction: cold issuance also omits checked_value_context and all retained
-value support merging. Actual current declaration/source facts and published
-binding-row owners/visibility are separate inputs. Historical native/support
-references remain exact custody and do not become current source roles. Rust
-retains runtime provenance, native edges, instance/prototype proofs and source
-admission; Haskell owns compiler world selection and demand-specific resolution.
-Strict native required edges remain validated at actual consuming operations.
+Independent source receipts under the host evidence root's oracle directory:
+`catalog-source-separation-review-ceda5339.txt`,
+`catalog-provenance-schema-review-da584c74.txt`, and
+`cli-service-preflight-review-e4f7b31c.txt`. Earlier conservative-policy receipts
+are explicitly superseded. The new host A/B control proves strict retained body
+order. Its seal also includes run origin, so seal inequality alone does not
+isolate order sensitivity. Actual GHC A/B selection and source receipt are open.
 
-First source policy supports captured non-CPP/nonexternal-preprocessor modules
-and a fixed package profile. Warm checks the whole actually demanded closure,
-including module-local options. Old graph-v2 does not authenticate a new
-header-only revision. Captured bytes may retain actual A; they cannot bless B.
-Unsupported after accepted submission is typed refusal, never old-route replay.
-Lookup hydration does not advance the logical world or notebook publication.
+## Actual service query frontier
 
-Warm owns compiler_world and the raw private cold builder, all protocol/Haskell;
-host owns actual runtime/actor query routing, source capture, work observations
-and a generated execution group. Only that group binds the rooted service
-resource with existing owned-resident mode; generic finite tests stay unchanged.
-Owned owns deployment/package producers. Reload's original-source transaction
-owner is an unqualified dependency before accepted production query submission.
+RUST-CLIENT-MIGRATION.md controls the final production boundary. Persistent
+service-issued logical world, ordinary cells, per-item successors, atomic paired
+publication, fork, recovery and obsolete-route deletion are required. First query
+is the delivery sequence, not an optional cache as final architecture.
 
-## Grants and continuation
+Reserved implementation leaf selected_root is active in
+`tidepool-shared-warm-host-world-20261019`. It preserved original dirty world WIP
+SHA256 `171c544a55e74daf9dccac48ad57b7492b419f4ca9494ddf54e5e0338213bf42`,
+then merged full area da584, reviewed reload 3dd (own merge 9dbb0d4), and real
+Warm f160 (own merge 3e26464). Warm resolved its seven shared protocol/type merge
+conflicts; the leaf did not invent protocol semantics or commit runtime WIP into
+a dependency merge. Latest Warm arity/profile fixes and reload fixture successors
+are required before the joined consumer compile; their owner terminal receipts
+control acceptance, not this handoff.
 
-Two descendants remain reserved: selected_root and selection_oracle, both Sol
-high. Implementation checkout is `tidepool-shared-warm-host-world-20261019`, clean
-at tested `70120cc3`; it awaits actual warm API/source/counter/admission dependencies
-before resuming the actor query and subsequent publication migration. Oracle is
-settled after source capture review and will review the complete joined candidate.
-No grandchildren or extra descendants are authorized.
+The actual early actor PublicModule StructuredInfo/Type path must precede actor
+compile view, structured provenance, source.prepare, reachable-value Vec capture,
+support folds, semantic hashes and FD export. Cold issuance also omits
+checked_value_context and all retained-support merging: actual primary context
+and unmerged binding-row/visibility owners remain separate. Historical graphs
+stay custody. Runtime native/instance/prototype proofs remain exact at consumers.
 
-Paused 02A is untouched in the older selected-root checkout at `b5ebb643`. Exact
-incomplete patch: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/host-inputs/selected-root/02a/paused-wip.patch`,
-SHA256 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`.
-It has no build/test acceptance and must not be revived under the new boundary.
+The runtime leaf now carries original A and existing canonical target B leases
+into the source transaction owner, admits both before deferred capture or client
+hit, and seals completed results against exact origin, clean END, cancellation
+and direct publication-key CAS. This is active unqualified WIP, not an accepted
+query. Actual Rooted boot must consume the real reviewed provider/profile fix,
+not a test proof. Bounded one/two-world cold/hit/refusal component controls need
+not wait for final retention implementation; their acceptance remains limited.
+Lookup hydration never advances the logical world or notebook publication.
 
-No periodic polling. Producers notify a running owner with send_message and
-reactivate a dormant owner with followup_task, carrying exact source, evidence
-and next action. Every command keeps an observer through its terminal result.
-Current wake dependencies: warm committed source/client carrier, owned rooted
-resource/API, reload reviewed source transaction owner, then admitted host native
-consumer gate and the actual cold/hot actor query controls.
+Host owns the generated execution group/resource consumer after actual case names
+exist; Warm owns client/protocol/Haskell; owned owns package provider and actual
+boot/retirement proof; reload owns source transaction leases. Dedicated groups
+share the existing Rust harness and owned-resident runner, with declared service
+resources selected only there. No new Cargo target, compiler mode, handwritten
+native map or authority factory is authorized. Generic finite groups remain finite.
+
+## Required successors and continuation
+
+Accepted CELL-SUCCESSOR contract remains at
+`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/CELL-SUCCESSOR-CONTRACT-8d69.md`,
+SHA256 `895bbea0ee1a95560209bf7a3b433979b9ee2d905c7ccd3ae7a974230f4ae6e9`.
+Use actual per-item ordinal/base and certified changed output; atomically publish
+world/restoration with bindings or declarations and preserve committed prefixes
+on later refusal. Share current owned nodes, without predecessor replay chains,
+per-item snapshot/native-offer folds or full-world encoding hidden at commit.
+
+Two Sol-high descendants only: selected_root active implementation,
+selection_oracle settled after exact repair review and reserved for actual query
+candidate review. No grandchildren/additional descendants. Paused old 02A is
+unchanged and not a dependency (patch SHA256
+`264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
+No periodic polling. Every terminal producer checks recipient state and sends
+exact source/evidence/next action to a running owner, or followup_task to a dormant
+owner. Every external command retains an observer through terminal settlement.

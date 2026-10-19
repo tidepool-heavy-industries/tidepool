@@ -65,6 +65,7 @@ import Tidepool.GhcPipeline
   , CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
+  , captureSupportedPackageProfile
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
@@ -161,6 +162,7 @@ import Tidepool.TurnSource
   , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset, preambleImportMarker )
 import Tidepool.DependencyEvidence
   ( validateDependencyEvidence, writeDependencyEvidence )
+import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -175,6 +177,10 @@ main = do
     then putStrLn "tidepool-extractor-role-v1 worker" >> exitWith ExitSuccess
   else if rawWorkerRequest == ["--print-worker-request-flag"]
     then putStrLn workerRequestFlag >> exitWith ExitSuccess
+  else if rawWorkerRequest == ["--capture-supported-package-profile-v2"]
+    then do
+      hSetBinaryMode stdout True
+      captureSupportedPackageProfile >>= BS.hPut stdout
   else if rawWorkerRequest == ["--worker-loop-v2"]
     then do
       hSetBinaryMode stdin True
@@ -185,6 +191,7 @@ main = do
             serveTransaction (\sink cwd argv ->
               setCurrentDirectory cwd >> runWorkerInvocation sink scope argv)
     else do
+      requireObservationPackageEnvironment
       hSetEncoding stdout utf8
       -- Direct transport boots the same compiler owner once for all helpers.
       result <- WorkerServer.runDirectRequest (runDirectInvocation rawWorkerRequest)
