@@ -1,6 +1,9 @@
 use super::*;
 
-use crate::artifact_inventory::{CanonicalProducerIdentity, NativeArtifactDemand, NativeGroupKey};
+use crate::artifact_inventory::{
+    ArtifactBindingNode, ArtifactDependency, ArtifactEntry, CanonicalProducerIdentity,
+    NativeArtifactDemand, NativeGroupKey,
+};
 use crate::cache::{DependencyEvidence, ModuleEvidence, SourceEvidence};
 use crate::certified_products::{
     AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedProducts, CertifiedReceipt,
@@ -386,6 +389,22 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .selected_native_groups()
         .is_empty());
     let public_inputs = public_request.compiler_inputs();
+    let expected_original = ArtifactEntry::original(producer, original.clone())
+        .unwrap()
+        .descriptor
+        .id;
+    let offered_carriers = public_inputs
+        .compiler_source_support()
+        .native_offers()
+        .iter()
+        .filter(|offer| offer.original() == expected_original && offer.is_full())
+        .flat_map(|offer| offer.issued_group_carriers().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(offered_carriers.len(), 1);
+    let (offered_group, offered_carrier) = offered_carriers.iter().next().unwrap();
+    assert_eq!(offered_group.binding.artifact(), expected_original);
+    assert_eq!(offered_group.original_ordinal, ORDINAL);
+    assert_eq!(offered_carrier.artifact, expected_original);
     let public_selection = CertifiedSourceSelection::from_compiler_inputs(
         public_inputs,
         &public_inputs.metadata,
@@ -419,10 +438,26 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             .collect::<BTreeSet<_>>(),
         view.selected_native_groups(),
     );
-    assert!(resolved
-        .groups()
-        .iter()
-        .all(|group| view.contains_issued_native_group(*group)));
+    let actual_carriers = demanded
+        .artifacts()
+        .binding_dependencies()
+        .into_iter()
+        .filter_map(
+            |(dependent, required, edge)| match (dependent, required, edge) {
+                (
+                    ArtifactBindingNode::Group(group),
+                    ArtifactBindingNode::Artifact(carrier),
+                    ArtifactDependency::Interface,
+                ) if resolved.groups().contains(&group)
+                    && carrier.artifact == group.binding.artifact() =>
+                {
+                    Some((group, carrier))
+                }
+                _ => None,
+            },
+        )
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_carriers, offered_carriers);
     assert_eq!(resolved.imports(), imports);
     let inherited = selected_package_closure(
         &BTreeMap::new(),
