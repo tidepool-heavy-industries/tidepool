@@ -3154,29 +3154,40 @@ readWorldNativeMaps frontier descriptor = do
   pure ((offers,availability,decisions),foldl' addWorldCharge (0,0)
     [worldMapCharge offers offersCharge,worldMapCharge availability availabilityCharge,worldMapCharge decisions decisionsCharge])
 
-readWorldNativeAuthority :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+type WorldAuthorityMemo = IORef (Map.Map BS.ByteString (Maybe WorldNativeAuthority))
+
+readWorldNativeAuthority :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
   -> IO (WorldNativeAuthority,(Integer,Integer))
-readWorldNativeAuthority frontier root = do
-  (descriptor,descriptorBytes) <- readWorldDescriptor frontier root
-    (worldDescriptor ["roles","offers","native_availability","input_decisions"] False)
-  requireWorldDescriptorVersion 2 descriptor
-  rolesCID <- worldDescriptorLink "roles" descriptor
-  (roles,roleCharge) <- readWorldRoles frontier rolesCID
-  (facts,charge) <- readWorldNativeMaps frontier descriptor
-  pure (WorldNativeAuthority roles facts,foldl' addWorldCharge (descriptorBytes,1) [roleCharge,charge])
+readWorldNativeAuthority memo frontier root = do
+  decoded <- readIORef memo
+  case Map.lookup root decoded of
+    Just Nothing -> worldCorrupt "cyclic compiler world publication authority"
+    Just (Just authority) -> pure (authority,(0,1))
+    Nothing -> do
+      modifyIORef' memo (Map.insert root Nothing)
+      (descriptor,descriptorBytes) <- readWorldDescriptor frontier root
+        (worldDescriptor ["roles","offers","native_availability","input_decisions"] False)
+      requireWorldDescriptorVersion 2 descriptor
+      rolesCID <- worldDescriptorLink "roles" descriptor
+      (roles,roleCharge) <- readWorldRoles memo frontier rolesCID
+      (facts,charge) <- readWorldNativeMaps frontier descriptor
+      let authority = WorldNativeAuthority roles facts
+      modifyIORef' memo (Map.insert root (Just authority))
+      -- One immutable decode per authority CID plus each retained reference.
+      pure (authority,foldl' addWorldCharge (descriptorBytes,2) [roleCharge,charge])
 
 -- Current and publication-birth domains share the same strict role decoder.
 -- A born role's own publication owner remains independent and is retained too.
-readWorldRoles :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+readWorldRoles :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
   -> IO (Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority)),(Integer,Integer))
-readWorldRoles frontier root = do
+readWorldRoles memo frontier root = do
   (links,hamtCharge) <- worldHamtMapWithCharge frontier root decodeWorldModuleKey encodeWorldModuleKey worldCID
   roles <- forM links $ \cid -> do
     (role,bytes) <- readWorldDescriptor frontier cid decodeWorldCompilerRole
     (selection,charge) <- case role of
       WorldPublishedRole _ _ _ _ selectedRoot _ authorityRoot -> do
         (selected,selectedCharge) <- readWorldSelection frontier selectedRoot
-        (authority,authorityCharge) <- readWorldNativeAuthority frontier authorityRoot
+        (authority,authorityCharge) <- readWorldNativeAuthority memo frontier authorityRoot
         pure (Just (selected,authority),addWorldCharge selectedCharge authorityCharge)
       _ -> pure (Nothing,(0,0))
     pure ((role,selection),addWorldCharge (bytes,1) charge)
@@ -3191,7 +3202,8 @@ readWorldContext frontier root producer = do
     Just (WorldDescriptorProducer actual) | actual == producer -> pure ()
     _ -> worldCorrupt "compiler world context producer differs"
   rolesCID <- worldDescriptorLink "roles" descriptor
-  (roles,roleCharge) <- readWorldRoles frontier rolesCID
+  authorityMemo <- newIORef Map.empty
+  (roles,roleCharge) <- readWorldRoles authorityMemo frontier rolesCID
   lexicalCID <- worldDescriptorLink "lexical" descriptor
   (lexicalLinks,lexicalCharge) <- worldHamtMapWithCharge frontier lexicalCID decodeWorldModuleKey encodeWorldModuleKey worldCID
   lexical <- forM (Map.toAscList lexicalLinks) $ \(owner,cid) -> do

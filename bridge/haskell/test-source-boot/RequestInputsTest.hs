@@ -86,7 +86,7 @@ import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext)
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuinePublishedScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
@@ -377,7 +377,10 @@ capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> 
 -- roots from one genuine issuer completion. Only physical arena endpoints are
 -- adapted into this test's existing sealed-byte owner; semantic facts are kept.
 semanticWorldBindingControls :: IORef [Handle] -> FilePath -> FilePath -> BS.ByteString -> IO ()
-semanticWorldBindingControls handles work scopePath contextParcel = do
+semanticWorldBindingControls = semanticWorldInputControls Nothing
+
+semanticWorldInputControls :: Maybe [String] -> IORef [Handle] -> FilePath -> FilePath -> BS.ByteString -> IO ()
+semanticWorldInputControls published handles work scopePath contextParcel = do
   scope <- readExactScope scopePath >>= either fail pure
   producer <- rawHex (scopeProducerSha256 scope)
   let encode = toStrictByteString . encodeTerm
@@ -424,9 +427,13 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
         selected <- visit Set.empty roots
         pure (Map.toAscList (Map.restrictKeys available selected))
   (primary,association,base,durable,contextBlocks) <- parcel contextParcel
-  unless (length base == 2) (fail "genuine primary control needs both acquired owners")
+  case published of
+    Nothing -> unless (length base == 2) (fail "genuine primary control needs both acquired owners")
+    Just _ -> unless (not (null base)) (fail "genuine Published control needs acquired primary rows")
   acquisition <- sealed durable
-  worldContextCoverage primary contextBlocks
+  case published of
+    Nothing -> worldContextCoverage primary contextBlocks
+    Just names -> worldPublishedCoverage names primary contextBlocks
   (emptyPrimary,emptyAssociation,emptyBase,emptyDurable,emptyBlocks) <- fixture "world-context-blocks" [TBytes producer] >>= parcel
   unless (null emptyBase) (fail "empty issuer unexpectedly published primary rows")
   emptyAcquisition <- sealed emptyDurable
@@ -483,7 +490,9 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
       && Map.null (worldInputsBindings original) && worldInputsBindingScope original == 0
       && not (worldInputsPrimaryIsEmpty original))
     (fail "cold v3 reader lost actual primary selection or occurrence identity")
-  let selectedOwners = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
+  selectedOwners <- forM base $ \entry -> case entry of
+    TList [TList [TString unit,TString name,_,_,_,_,_,_],_] -> pure (T.unpack unit,T.unpack name)
+    _ -> fail "genuine primary control lost its actual row owner"
   unless (all (worldHasSelectedSource original) selectedOwners)
     (fail "genuine Context source owners lost their exact acquired association")
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
@@ -522,8 +531,9 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
   unless (worldInputsRetainedCharge original == expectedCharge)
     (fail ("three-root known backing/record charge differs from independent DATA census: "
       ++ show (worldInputsRetainedCharge original,expectedCharge)))
-  forM_ [("drop",tail base),("retag",replaceFirst (retag (head base)) base)
-         ,("valid-swap",replaceFirst (last base) base),("requires",replaceFirst (changeRequires (head base)) base)] $ \(label,changed) ->
+  forM_ ([("drop",tail base),("retag",replaceFirst (retag (head base)) base)
+         ,("requires",replaceFirst (changeRequires (head base)) base)]
+         ++ [("valid-swap",replaceFirst (last base) base) | length base > 1]) $ \(label,changed) ->
     requireCorrupt Nothing ("world-base-" ++ label) (packet 3 product primary blockPairs changed [] acquisition emptyBinding)
   requireCorrupt (Just "compiler world visible input census differs from occurrence facts") "world-unreferenced-visible"
     (packet 3 product primary blockPairs base base acquisition emptyBinding)
@@ -568,6 +578,38 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
     exact <- reachable [cid,association,emptyBinding] (replaceBlock primary cid body blockPairs)
     requireCorrupt (Just reason) ("world-context-" ++ label)
       (packet 3 (restoration 3 cid association emptyBinding) cid exact base [] acquisition emptyBinding)
+  forM_ published $ \_ -> do
+    let mutatePublished label target changed expected = do
+          (roots,updated) <- rewriteWorldFixtureBlock target changed [primary,association,emptyBinding] blockPairs
+          case roots of
+            [context,associations,occurrences] -> requireCorrupt expected label
+              (packet 3 (restoration 3 context associations occurrences) context updated base [] acquisition occurrences)
+            _ -> fail "Published mutation lost its exact three roots"
+    publications <- worldPublishedFacts primary blockPairs
+    forM_ publications $ \(roleCID,role,authorityCID,authority) -> do
+      let remove name (TMap fields) = TMap (filter ((/= TString name) . fst) fields)
+          remove _ _ = error "genuine Published mutation needs descriptor map"
+          set name replacement (TMap fields) = TMap [(key,if key == TString name then replacement else value) | (key,value) <- fields]
+          set _ _ _ = error "genuine Published mutation needs descriptor map"
+          oldAuthority = set "version" (TInt 1) (remove "roles" authority)
+      mutatePublished "world-published-role7" roleCID (remove "native_authority" role)
+        (Just "unsupported compiler world compiler role")
+      mutatePublished "world-published-authority1" authorityCID oldAuthority
+        (Just "invalid compiler world descriptor fields")
+      mutatePublished "world-published-authority1-map5" authorityCID (set "version" (TInt 1) authority)
+        (Just "unsupported compiler world descriptor version")
+      forM_ ["roles","offers","native_availability","input_decisions"] $ \name -> do
+        mutatePublished ("world-published-missing-" ++ name) authorityCID (remove name authority)
+          (Just "invalid compiler world descriptor fields")
+        root <- worldFixtureFieldLink name authority
+        requireCorrupt (Just "compiler world block child is absent") ("world-published-absent-" ++ name)
+          (packet 3 product primary (filter ((/= root) . fst) blockPairs) base [] acquisition emptyBinding)
+      requireCorrupt (Just "compiler world block child is absent") "world-published-absent-authority"
+        (packet 3 product primary (filter ((/= authorityCID) . fst) blockPairs) base [] acquisition emptyBinding)
+    independent <- readPacket "world-published-second-acquisition" originalPacket
+    unless (worldInputsIdentityBytes independent == worldInputsIdentityBytes original
+        && worldInputsRetainedCharge independent == worldInputsRetainedCharge original)
+      (fail "independent Published acquisition lost exact logical facts or known charge")
   unless (not (any ((== hamtRoot) . fst) blockPairs))
     (fail "extra/missing-root controls require an independent actual String HAMT")
   extraRoot <- maybe (fail "String HAMT fixture omitted root") pure (lookup hamtRoot hamtBlocks)
@@ -643,10 +685,120 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
     changeScope (TList (TInt byte:rest)) = TList (TInt (byte `xor` 1):rest)
     changeScope _ = error "actual binding scope is not its fixed 32-byte array"
 
+-- These helpers inspect genuine producer DATA for oracle preconditions. They
+-- do not construct roles, publication owners or service-world authority.
+worldFixtureTerm :: BS.ByteString -> IO Term
+worldFixtureTerm bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+  Right (remaining,value) | BL.null remaining -> pure value
+  _ -> fail "world fixture needs one complete CBOR term"
+
+worldFixtureBlock :: [(BS.ByteString,BS.ByteString)] -> BS.ByteString -> IO Term
+worldFixtureBlock pairs cid = maybe (fail "world fixture omitted its actual block") worldFixtureTerm (lookup cid pairs)
+
+worldFixtureLink :: Term -> IO BS.ByteString
+worldFixtureLink (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 = pure (BS.tail bytes)
+worldFixtureLink _ = fail "world fixture needs an actual tagged CID"
+
+worldFixtureField :: String -> Term -> IO Term
+worldFixtureField name (TMap fields) = maybe (fail ("world fixture omitted field " ++ name)) pure (lookup (TString (T.pack name)) fields)
+worldFixtureField _ _ = fail "world fixture needs its descriptor map"
+
+worldFixtureFieldLink :: String -> Term -> IO BS.ByteString
+worldFixtureFieldLink name term = worldFixtureField name term >>= worldFixtureLink
+
+worldFixtureHamtRows :: [(BS.ByteString,BS.ByteString)] -> BS.ByteString -> IO [(Term,Term)]
+worldFixtureHamtRows pairs root = worldFixtureBlock pairs root >>= \term -> case term of
+  TList [TBytes _,TList pointers] -> concat <$> forM pointers (\pointer -> case pointer of
+    TList bucket -> forM bucket $ \entry -> case entry of
+      TList [TBytes key,value] -> do
+        decoded <- worldFixtureTerm key
+        case decoded of
+          TList [fact] -> pure (fact,value)
+          _ -> fail "world fixture needs its exact SnapshotKey wrapper"
+      _ -> fail "world fixture needs exact HAMT key/value pairs"
+    _ -> worldFixtureLink pointer >>= worldFixtureHamtRows pairs)
+  _ -> fail "world fixture needs its actual HAMT node"
+
+worldPublishedFacts :: BS.ByteString -> [(BS.ByteString,BS.ByteString)]
+  -> IO [(BS.ByteString,Term,BS.ByteString,Term)]
+worldPublishedFacts root pairs = do
+  context <- worldFixtureBlock pairs root
+  roles <- worldFixtureFieldLink "roles" context >>= worldFixtureHamtRows pairs
+  concat <$> forM roles (\(_,reference) -> do
+    cid <- worldFixtureLink reference
+    role <- worldFixtureBlock pairs cid
+    kind <- worldFixtureField "kind" role
+    case kind of
+      TString "published_source_original" -> do
+        authorityCID <- worldFixtureFieldLink "native_authority" role
+        authority <- worldFixtureBlock pairs authorityCID
+        pure [(cid,role,authorityCID,authority)]
+      _ -> pure [])
+
+worldPublishedCoverage :: [String] -> BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO ()
+worldPublishedCoverage expected root pairs = do
+  context <- worldFixtureBlock pairs root
+  rows <- worldFixtureFieldLink "roles" context >>= worldFixtureHamtRows pairs
+  published <- fmap concat $ forM rows $ \(key,reference) -> do
+    cid <- worldFixtureLink reference
+    role <- worldFixtureBlock pairs cid
+    kind <- worldFixtureField "kind" role
+    case (kind,key) of
+      (TString "published_source_original",TMap fields) -> case lookup (TString "module") fields of
+        Just (TString name) -> pure [T.unpack name]
+        _ -> fail "actual Published role lacks its module key"
+      _ -> pure []
+  unless (Set.fromList published == Set.fromList expected && length published == length expected)
+    (fail "genuine completion did not issue exactly the requested Published roots")
+  publications <- worldPublishedFacts root pairs
+  unless (length publications > 1
+      && Set.size (Set.fromList [cid | (_,_,cid,_) <- publications]) < length publications)
+    (fail "genuine Published fixture must exercise repeated shared birth-authority references")
+  forM_ publications $ \(_,_,_,authority) -> do
+    version <- worldFixtureField "version" authority
+    unless (version == TInt 2) (fail "genuine publication must carry authority descriptor2")
+    maps <- forM ["roles","offers","native_availability","input_decisions"] $ \name ->
+      worldFixtureFieldLink name authority >>= worldFixtureHamtRows pairs
+    unless (not (null (head maps)) && not (null (maps !! 1)))
+      (fail "genuine Published birth must exercise nonempty typed roles and native offers")
+  putStrLn ("genuine Published authority coverage roots=" ++ show published ++ " descriptor2/four required maps")
+
+-- Rehash negative fixture DATA along actual parent links. Unchanged bodies
+-- retain their producer CIDs; only this mutation path gets new test addresses.
+rewriteWorldFixtureBlock :: BS.ByteString -> Term -> [BS.ByteString] -> [(BS.ByteString,BS.ByteString)]
+  -> IO ([BS.ByteString],[(BS.ByteString,BS.ByteString)])
+rewriteWorldFixtureBlock target replacement roots pairs = do
+  memo <- newIORef Map.empty
+  let encode = toStrictByteString . encodeTerm
+      visit cid = do
+        done <- readIORef memo
+        case Map.lookup cid done of
+          Just (actual,_) -> pure actual
+          Nothing -> do
+            body <- maybe (fail "world mutation omitted an actual reachable body") pure (lookup cid pairs)
+            original <- worldFixtureTerm body
+            changed <- rewrite (if cid == target then replacement else original)
+            let bytes = encode changed
+            actual <- if bytes == body then pure cid else worldFixtureCID bytes
+            modifyIORef' memo (Map.insert cid (actual,bytes))
+            pure actual
+      rewrite tagged@(TTagged 42 _) = do
+        child <- worldFixtureLink tagged
+        actual <- visit child
+        pure (TTagged 42 (TBytes (BS.cons 0 actual)))
+      rewrite (TList values) = TList <$> mapM rewrite values
+      rewrite (TMap fields) = TMap <$> mapM (\(key,value) -> (,) <$> rewrite key <*> rewrite value) fields
+      rewrite value = pure value
+  actualRoots <- mapM visit roots
+  actualPairs <- Map.elems <$> readIORef memo
+  exact <- worldFixtureReachableBlocks actualRoots actualPairs
+  pure (actualRoots,exact)
+
 -- Independent recomputation from the genuine parcel's raw CBOR terms. This
 -- neither invokes the typed receiver fold nor issues any selection authority.
 worldPrimaryChargeOracle :: BS.ByteString -> BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO (Integer,Int)
 worldPrimaryChargeOracle contextRoot associationRoot pairs = do
+  seenAuthorities <- newIORef Set.empty
   let blocks = Map.fromList pairs
       body cid = maybe (fail "charge oracle lacks actual block") pure (Map.lookup cid blocks)
       decode bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
@@ -719,11 +871,15 @@ worldPrimaryChargeOracle contextRoot associationRoot pairs = do
           TString "published_source_original" -> do
             selected <- linked "selection" role >>= selection
             authorityCID <- linked "native_authority" role
-            authority <- value authorityCID
-            authorityBytes <- size authorityCID
-            authorityMaps <- forM ["roles","offers","native_availability","input_decisions"] $ \name -> linked name authority >>= hamt
-            bornRoles <- mapM (roleFact . snd) (fst (head authorityMaps))
-            pure (plus selected (foldl plus (authorityBytes,1) (map snd authorityMaps ++ bornRoles)))
+            seen <- readIORef seenAuthorities
+            authorityCharge <- if Set.member authorityCID seen then pure (0,1) else do
+              modifyIORef' seenAuthorities (Set.insert authorityCID)
+              authority <- value authorityCID
+              authorityBytes <- size authorityCID
+              authorityMaps <- forM ["roles","offers","native_availability","input_decisions"] $ \name -> linked name authority >>= hamt
+              bornRoles <- mapM (roleFact . snd) (fst (head authorityMaps))
+              pure (foldl plus (authorityBytes,2) (map snd authorityMaps ++ bornRoles))
+            pure (plus selected authorityCharge)
           _ -> pure (0,0)
         pure (plus (bytes,1) extra)
   context <- value contextRoot
@@ -901,6 +1057,16 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
     firstPath <- ownedFixtureScope handles fileScope
     semanticWorldBindingControls handles work firstPath contextParcel
+    let publishedWork = work </> "published-world"
+    createDirectoryIfMissing True publishedWork
+    forM_ ["PublishedConsumer.hs","PublishedSeed.hs","PublishedSibling.hs"] $ \name ->
+      copyFile ("test-source-boot/fixtures" </> name) (publishedWork </> name)
+    publishedOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (publishedWork </> "PublishedConsumer.hs") [publishedWork] Nothing
+    publishedFixture <- capturePreparedFixture publishedWork publishedOriginal
+    (publishedScope,publishedParcel) <- writeGenuinePublishedScopeWithContext "PublishedConsumer" ["PublishedSeed","PublishedSibling"] publishedWork publishedFixture
+    publishedOwned <- ownedFixtureScope handles publishedScope
+    semanticWorldInputControls (Just ["PublishedSeed","PublishedSibling"]) handles publishedWork publishedOwned publishedParcel
     missingOwnedPartsRefuse firstPath
     capturedProofScope <- readExactScope firstPath >>= either fail pure
     missingCapturedProofPartsRefuse capturedProofScope

@@ -8,6 +8,7 @@ module Tidepool.Test.GenuineCandidate
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
   , writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext
+  , writeGenuinePublishedScopeWithContext
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -66,6 +67,8 @@ data FixtureDelivery
   = CandidateDelivery { fixtureDeliveryRoot :: FilePath }
   | ScopeDelivery { fixtureDeliveryRoot :: FilePath }
   | WorldContextDelivery { fixtureDeliveryRoot :: FilePath }
+  | PublishedContextDelivery
+      { fixtureDeliveryRoot :: FilePath, fixtureCompletedTarget :: String, fixturePublicationRoots :: [String] }
 
 data FixtureOutput
   = CandidateManifestOutput BS.ByteString
@@ -127,6 +130,19 @@ writeGenuineExecutionScopeWithContext nativeOwners lexicalRoots work capture = d
     ScopeContextOutput path bytes -> pure (path,bytes)
     _ -> fail "fixture delivery omitted its requested scope and context parcel"
 
+-- Explicit publication intent is consumed by the Rust completed-source issuer.
+-- Ordinary fixture selection never silently endorses a source original.
+writeGenuinePublishedScopeWithContext :: String -> [String] -> FilePath -> CapturedCompilerFixture -> IO (FilePath,BS.ByteString)
+writeGenuinePublishedScopeWithContext target roots work capture = do
+  unless (not (null target) && not (null roots) && all (not . null) roots
+      && Set.size (Set.fromList roots) == length roots)
+    (fail "published fixture requires one completed target and unique nonempty publication roots")
+  output <- deliverCapturedFixture capture (FixtureSelection [] [] [] [])
+    (PublishedContextDelivery work target roots)
+  case output of
+    ScopeContextOutput path bytes -> pure (path,bytes)
+    _ -> fail "published fixture delivery omitted its scope and context parcel"
+
 writeGenuineCandidateLexicalScope
   :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO FilePath
 writeGenuineCandidateLexicalScope candidates lexicalOwners work capture = scopeOutput $
@@ -181,20 +197,26 @@ writePacket delivery input selection = do
       source = (fixtureSourcePath . capturedInput) <$> input
       capture = capturedPacket <$> input
       wantsScope = case delivery of CandidateDelivery _ -> False; _ -> True
+      intent = case delivery of
+        PublishedContextDelivery _ target roots ->
+          encodeListLen 12 <> text "TPSOURCEBOOTPUBLISHED1"
+            <> common <> text target <> names roots
+        _ -> encodeListLen 10 <> text "TPSOURCEBOOTFIXTURE4" <> common
+      common = optional source
+        <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)
+        <> names (fixtureNativeOwners selection) <> encodeBool wantsScope
+        <> text producer <> names (fixtureLexicalRoots selection) <> optional capture
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
-    (encodeListLen 10 <> text "TPSOURCEBOOTFIXTURE4" <> optional source
-      <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)
-      <> names (fixtureNativeOwners selection) <> encodeBool wantsScope
-      <> text producer <> names (fixtureLexicalRoots selection) <> optional capture))
+    intent)
   completion <- runPacketProducer OriginalProductsProducer packet
   case delivery of
-    WorldContextDelivery _ -> do
+    ScopeDelivery _ -> readScopeOutput packet completion
+    CandidateDelivery _ -> CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
+    _ -> do
       scoped <- readScopeOutput packet completion
       case scoped of
         ScopeOutput path -> ScopeContextOutput path <$> completedPacketOutput completion (packet </> "world-context-blocks.cbor")
         _ -> fail "fixture delivery omitted its requested original scope"
-    ScopeDelivery _ -> readScopeOutput packet completion
-    CandidateDelivery _ -> CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
 
 -- Select the actual checked root; projection policy and all emission belong to
 -- the same internal compiler owner used by the production worker.
