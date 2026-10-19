@@ -235,9 +235,24 @@ world/restoration with bindings or declarations and preserve committed prefixes
 on later refusal. Share current owned nodes, without predecessor replay chains,
 per-item snapshot/native-offer folds or full-world encoding hidden at commit.
 
-Two Sol-high descendants only: selected_root active implementation,
-selection_oracle settled after exact864 source review and reserved for
-subsequent joined candidates. No grandchildren/additional descendants. Paused old 02A is
+Two Sol-high descendants only, with no grandchildren/additional descendants.
+selected_root owns independent typed namespace implementation in real checkout
+`/srv/swarm/checkouts/tidepool-shared-warm-host-bindings-20261019`, branch
+`feature/shared-warm/host-bindings`, exact base6971cdf53ac54adf9cf44075bfaab771d5721475.
+Its full approved old-profile Warm526 merge is f7a36643e66dcf1c2c10d117aa8f505a85df2200;
+no new CID/profile or native gate is imported. Capture must preserve every visible
+certified occurrence's actual symbol/id/scope/row and all aliases. Generic visible
+stubs require distinct typed UnsupportedBinding before builder/service; LegacyDisk
+missing-proof stays distinct. Source-backed generic mount custody remains required
+for complete namespace coverage. This initial boundary must not become a silent
+omission or permanently unsupported migration shortcut. Query eea remains immutable.
+
+selection_oracle owns independent Warm old-profile diagnostic/producer repair
+review, then exact typed consumer review. Diagnostic8e259 has source acceptance;
+canonical producer issuance repair is pending. The genuine Rooted query retry
+preempts independent work once the reviewed exact dependency is ready. No active
+HOST native job exists; source-only changes still require production and cfg-test
+consumer compilation and meaningful counted controls under fresh admission. Paused old 02A is
 unchanged and not a dependency (patch SHA256
 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
 Required retention controls remain actual A/B eviction and exact restore, zero
