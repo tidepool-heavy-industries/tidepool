@@ -52,11 +52,11 @@ No new actors are needed. Reserved grants persist across event-bound yields.
 
 | Area | Current candidate/evidence | Next owned action |
 | --- | --- | --- |
-| host_inputs (2leaves) | cb888 folded/joined14-control gate passed. Area3eae contains full provider a56 and reviewed CLI e4f7; new catalog correctionceda533 source review pending. Actual frozen graph exposed7/94 guard refusals, so global catalog-owner==first-winner restriction is removed. | Independently review ceda; admitted6GiB/8GiB-growth native guard/CLI gate after fresh resources. Actual query runtime route then ordinary-cell/publication/recovery remain with host+warm. |
-| owned_inputs (2leaves) | Full provider a56; area fa31 clean. RustAPI1e17 production/test compile+3/3 controls; final declared Python456pass; actual declared producer a56 passed with72selected roots/318closure objects. Warm4ef finalizer source independently accepted. | Await Warm native finalizer receipt, then import/join exact source and test real Rooted boot/lifetime. Producer exit0 means GUARD-HELD, not all pins released. Rows and source_lifetime are reserved; Warm must followup dormant parent with exact terminal result. |
-| warm_workers (1leaf) | Source6404 first GHC compile failed3 missing Encoding helpers, tests0; repaired20c063 plus hot HPT lookup retry16925 active. Exact6404 native-finalizer Rust prod/test compile3local and four actual recovery/refusal/poison controls4/4 passed. | Own6GiB serial lane, terminal observer retained. Global world retention/eviction repair remains before joined acceptance. Actual service client/boot/query and matched transitive unsupported controls are unqualified. |
-| reload (2leaves) | Canonical custody80568+b2 source accepted; two owner controls passed with failed oracle retained. Opaque fresh-issued RuntimePreparedTargets b61 six-target compile24local passed. Reviewed cf0 plus actual producer fixtures joined3dd27; host/browser compile next. | Own14GiB lane; execute owner/preparation/recipe/facade controls. Review physical END-loss discriminator at actual custody seam; no fabricated nested END. R1 registrations and R2 force drain remain approved successor waves. |
-| qualification (1leaf) | Authentic frozen e6 conflict retained. Trace e00/area428b source accepted, native+three strict controls passed. Exact428b actual bundle953local0remote passed852.6s; source export321.1s separate; freeze/verify passed descriptor0df0d478. | Own frozen workflow, next actual strong Persona full-profile run with fresh10GiB admission. Trace actual role promotion/selection, preserve exact issued edges. Actual source-owner graph receipt delivered to host; final deletion/history/performance gates remain. |
+| host_inputs (2leaves) | cb888 folded/joined14-control gate passed. Area da584 includes provider a56, CLI e4f7, reviewed own-role catalog correction and finite provenance reader repair. First ceda native guard failed before guard on stale schema1 reader; repaired da584 toolchain compile+2/2 controls passed. Frozen own-role eligibility94/94 is source-only. | Actual host production/cfg(test)+new ordered A/B control88624 active14/8. Reserved query leaf integrates real client+canonical source owner; actual query then ordinary-cell/publication/recovery remain with host+warm. |
+| owned_inputs (2leaves) | Full provider a56; area fa31 clean. RustAPI1e17 production/test compile+3/3 controls; final declared Python456pass; actual declared producer a56 passed with72selected roots/318closure objects. Warm4ef finalizer source independently accepted and four actual recovery controls passed. Joined e695 five-label compile22local passed; real boot refused before readiness/clients0 because profile object was checked against its own described closure. | Exact narrow self-profile fix dd0297 source accepted; matched five-label retry82482 active8/8, then two real lifecycle controls. Original failed73-pin epoch remains retained with sealed receipt; no fabricated complete/pending/cleanup. Producer exit0 means GUARD-HELD, not all pins released. Rows wakes dormant parent with terminal evidence. |
+| warm_workers (1leaf) | Source6404 first GHC compile failed3 missing Encoding helpers; repaired20c063 worker/test bins compile13local passed, tests0. Native-finalizer Rust4/4 passed. Real client6b8 production/cfg(test) compile611local passed, tests0;42b scope/source/namespace review fixes remain uncompiled. | Prior8/2 lane terminal/released; conditional incremental successor compile+controls follows fresh resources. Retention A/output guard source ready; B aggregate existing-budget/tiny request binding implementation approved after bounded release-proof review. Real Rooted query and lifecycle controls remain unqualified. |
+| reload (2leaves) | Canonical custody80568+b2 source accepted; two owner controls passed with failed oracle retained. Opaque fresh-issued RuntimePreparedTargets b61 six-target compile24local passed. Reviewed cf0 plus actual producer fixtures joined; owning host/test compile exposed two new fixture-only errors, repaired in80adfe1d. Eight-target retry46512 active14/32, no executed feature acceptance yet. | Own14GiB lane; execute owner/preparation/recipe/facade controls. Review physical END-loss discriminator at actual custody seam; no fabricated nested END. R1 registrations and R2 force drain remain approved successor waves. |
+| qualification (1leaf) | Authentic frozen e6 conflict retained. Trace e00/area428b source accepted, native+three strict controls passed. Exact428b actual bundle953local0remote passed852.6s; source export321.1s separate; freeze/verify passed descriptor0df0d478. | Frozen428b stronger Persona executed1/fail1, all3cleanup confirmed; diagnostics incomplete due178/29357 physical timing detail sampling. All commands terminal/10 released. Actual AvailabilityOnly catalog→fresh Original mismatch identified; leaf implements typed repair and selected-output tests, parent owns disjoint test migration/review. |
 
 Campaign directly reviews critical source/consumers, shared contracts and exact
 joined evidence, folds reviewed area histories, publishes checkpoints and owns
@@ -97,8 +97,11 @@ worlds and materialized directories must be bounded by owning eviction policy.
 
 Frozen e6 stronger Persona fails exact requiredA7d8aebf vs selectedB636d4273
 Jev.Tidepool, despite equal interfaces; historical Jev.Operators issued edges
-retain A. Strict validator is correct. Qualification traces the first actual
-promotion/selection; no certificate equality relaxation or issued-edge rewrite.
+retain A. Strict validator is correct. Exact428b trace proves first B promotion in Candidate issuance; availability-only
+producer rows enter the selected-fresh issuer. Current Full/InterfaceOnly Operators
+roots retain A edges under role policy, but do not prove explicit executable lookup
+demand. Typed availability/selection repair is active; no certificate equality
+relaxation or issued-edge rewrite.
 Later pure-cell checks were not reached. Three immutable6d3 actor prerequisite
 failures remain separate findings, not waived or attributed to new service code.
 
@@ -120,9 +123,11 @@ local-only Buck workflow and verified bind mounts; no substitute wrapper. Preser
 100GiB unreserved including expected growth. Sample actual global memory plus
 remaining expected increments of EXACT active scopes below80GiB pressure threshold.
 Idle daemons stay in global current. Latest campaign gate peak14,228,971,520B;
-all own jobs terminal and its incremental allowance released. Active area ceilings:
-reload14GiB/32GiB growth, warm6/2, host conditional6/8. Qualification bundle20/32
-is terminal and transitioning to separately sampled hosted10 phase. Operational
+all own jobs terminal and its incremental allowance released. Active area ceilings at this checkpoint:
+reload14GiB/32GiB growth, host14/8, owned8/8. Warm prior8/2 and qualification
+bundle20/32 plus hosted10 are terminal/released. Warm next8/2 and qualification
+repair gate require new fresh samples. Count only active scopes, never subtract idle
+old/new owned or qualification daemons as if they were active foreground jobs. Operational
 current receipts are `campaign/LIVE.json` plus each owner's exact admission record;
 refresh before every launch. No shared-daemon restart or output deletion by campaign.
 
