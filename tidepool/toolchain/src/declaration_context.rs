@@ -8173,25 +8173,33 @@ struct ExactReceiptImport {
 
 /// Source facts decoded from the actual preparation's captured output owner.
 /// Semantic admission still requires its issued input and source selections.
-pub(crate) struct DecodedWorldSourceReceipt {
+pub(crate) struct DecodedWorldSourceReceipt<'a> {
+    output: &'a crate::compiler_world::WorldCellOutputAdmission,
+    aliases: Vec<PathBuf>,
     binding: WorldSourceCompilationBinding,
     source: DecodedExactCompilationReceipt,
     package_imports_path: PathBuf,
     package_imports: Arc<[u8]>,
 }
 
-impl DecodedWorldSourceReceipt {
+impl DecodedWorldSourceReceipt<'_> {
+    pub(crate) fn source_path_domain(
+        &self,
+    ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
+        self.output.source_path_domain(&self.aliases)
+    }
+
     pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
         (&self.package_imports_path, &self.package_imports)
     }
 }
 
-pub(crate) fn decode_world_source_receipt(
-    output: &crate::compiler_world::WorldCellOutputAdmission,
+pub(crate) fn decode_world_source_receipt<'a>(
+    output: &'a crate::compiler_world::WorldCellOutputAdmission,
     segment_index: usize,
     receipt_relative: &Path,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
-) -> Result<DecodedWorldSourceReceipt, CompileError> {
+) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
     if !std::ptr::eq(operation, output.validation.inventory.as_ref()) {
         return Err(failure("world source receipt has another inventory operation"));
     }
@@ -8222,16 +8230,16 @@ pub(crate) fn decode_world_source_receipt(
     operation
         .charge_value_copies(&value, 3)
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let header = row(&value, 10)?;
+    let header = world_source_header(&value)?;
     let plan = binding.reservation.plan();
-    if string(&header[0])? != "TPCWSOURCE1"
-        || world_source_digest(&header[1])? != *plan.world().logical_id()
+    if world_source_digest(&header[1])? != *plan.world().logical_id()
         || world_source_digest(&header[2])? != binding.plan_receipt_sha256
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
         || string(&header[4])? != binding.segment.digest()
     {
         return Err(failure("world source receipt belongs to another preparation"));
     }
+    let aliases = decode_world_source_aliases(&header[10], operation)?;
     let resolve = |value: &Value| -> Result<(PathBuf, [u8; 32], Arc<[u8]>), CompileError> {
         let reference = row(value, 2)?;
         let name = string(&reference[0])?;
@@ -8263,11 +8271,44 @@ pub(crate) fn decode_world_source_receipt(
         operation,
     )?;
     Ok(DecodedWorldSourceReceipt {
+        output,
+        aliases,
         binding,
         source,
         package_imports_path: output_root.join(packages_relative),
         package_imports,
     })
+}
+
+fn world_source_header(value: &Value) -> Result<&[Value], CompileError> {
+    let header = row(value, 11)?;
+    if string(&header[0])? != "TPCWSOURCE2" {
+        return Err(failure("unsupported world source receipt version"));
+    }
+    Ok(header)
+}
+
+fn decode_world_source_aliases(
+    value: &Value,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Vec<PathBuf>, CompileError> {
+    let aliases = value
+        .as_array()
+        .ok_or_else(|| failure("world source root aliases are not an array"))?;
+    operation
+        .reserve::<PathBuf>(aliases.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    for alias in aliases {
+        operation
+            .charge(string(alias)?.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+    }
+    // Preserve the successful preparation's order and spelling. The same
+    // output owner validates these aliases against its captured source domain.
+    aliases
+        .iter()
+        .map(|alias| string(alias).map(PathBuf::from))
+        .collect()
 }
 
 fn world_source_digest(value: &Value) -> Result<[u8; 32], CompileError> {
@@ -21147,6 +21188,37 @@ mod tests {
         std::fs::write(receipt.parent().unwrap().join("source.hs"), source).unwrap();
         std::fs::write(directory.path().join("A.hs"), b"changed original").unwrap();
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
+    }
+
+    #[test]
+    fn world_source_v2_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+        let mut header = vec![Value::Null; 11];
+        header[0] = text("TPCWSOURCE2");
+        assert!(world_source_header(&Value::Array(header.clone())).is_ok());
+        header[0] = text("TPCWSOURCE1");
+        assert!(world_source_header(&Value::Array(header.clone())).is_err());
+        header.pop();
+        assert!(world_source_header(&Value::Array(header.clone())).is_err());
+        header[0] = text("TPCWSOURCE2");
+        assert!(world_source_header(&Value::Array(header)).is_err());
+
+        let aliases = Value::Array(vec![text("/held/second"), text("/held/first")]);
+        let operation = InventoryOperation::new(Default::default());
+        assert_eq!(
+            decode_world_source_aliases(&aliases, &operation).unwrap(),
+            vec![PathBuf::from("/held/second"), PathBuf::from("/held/first")],
+        );
+        let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..Default::default()
+        });
+        assert!(decode_world_source_aliases(&aliases, &exhausted).is_err());
+        assert!(decode_world_source_aliases(&Value::Null, &operation).is_err());
+        assert!(decode_world_source_aliases(
+            &Value::Array(vec![Value::Null]),
+            &operation,
+        )
+        .is_err());
     }
 
     #[test]
