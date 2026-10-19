@@ -140,6 +140,16 @@ or implicitly owned products.
 An admitted query stores only its scope-issued world binding. It borrows the
 actual payload from the still-held scope after executor and phase checks, so a
 retained closed request does not become another raw-source/HPT retention owner.
+Optional worlds and original images share the existing input owner's byte and
+entry allowance. World charges conservatively include captured custody and
+physical source copies; equal seals alone do not prove physical sharing between
+world acquisitions. FIFO admission order and charges belong to the existing
+universe index. Resident hits and END do not rescan backing files or inventories.
+A valid oversize world remains held through END, then becomes nonresident.
+World metadata uses in-memory interfaces with interface/Core file output disabled.
+Retire an unheld private world before deleting its backing; failed cleanup keeps
+the actual worker namespace and release evidence until confirmed reap. Worker
+RSS rotation still owns total GHC residency, including shared EPS and NameCache.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization

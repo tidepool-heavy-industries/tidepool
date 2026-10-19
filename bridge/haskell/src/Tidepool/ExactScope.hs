@@ -20,6 +20,7 @@ module Tidepool.ExactScope
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
+  , exactInputRetentionLimits, commitWorldInputRetention
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
   , ExactCompilationPublication(..)
@@ -35,7 +36,7 @@ module Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
-  , worldInputsSourceModuleHints
+  , worldInputsSourceModuleHints, worldInputsRetainedCharge
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, decodeWorldSources
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
@@ -434,7 +435,7 @@ data CapturedScopeInputs = CapturedScopeInputs RequestOriginalInputs RequestIfac
 -- own exact selection, allowance, paths and publication obligations.
 data ExactInputOwner = ExactInputOwner Integer (MVar RetainedOriginalInputs)
 data RetainedOriginalInputs = RetainedOriginalInputs
-  [(String,CapturedOriginalContent)] RequestIfaceDecoder DecodedOriginalFacts
+  [(String,CapturedOriginalContent)] RequestIfaceDecoder DecodedOriginalFacts !Integer !Int
 
 newExactInputOwner :: IO ExactInputOwner
 newExactInputOwner = do
@@ -449,7 +450,55 @@ newExactInputOwner = do
   -- Inactive acceleration is deliberately smaller than a request allowance.
   -- RSS admission/rotation continues to own total GHC residency.
   ExactInputOwner (min allowance retention)
-    <$> newMVar (RetainedOriginalInputs [] decoder emptyDecodedOriginalFacts)
+    <$> newMVar (RetainedOriginalInputs [] decoder emptyDecodedOriginalFacts 0 0)
+
+-- Original bytes and optional world backing consume this one allowance. The
+-- world index belongs to CompilerUniverse; this owner stores only its charge.
+exactInputRetentionLimits :: ExactInputOwner -> (Integer,Int)
+exactInputRetentionLimits (ExactInputOwner limit _) = (limit,maxRetainedInputEntries)
+
+-- The existing optional-image metadata bound also counts retained world raw
+-- entries and copied filesystem nodes. Active receiving custody is separate.
+maxRetainedInputEntries :: Int
+maxRetainedInputEntries = 4096
+
+selectRetainedOriginalInputs :: Integer -> Integer -> Int
+  -> [(String,CapturedOriginalContent)] -> [(String,CapturedOriginalContent)]
+selectRetainedOriginalInputs limit worldBytes worldCount =
+  take (max 0 (maxRetainedInputEntries - worldCount)) . keep emptyCapturedOriginalContent
+  where
+    keep _ [] = []
+    keep content (entry@(_,more):rest)
+      | capturedOriginalContentBytes combined + worldBytes <= limit = entry : keep combined rest
+      | otherwise = keep content rest
+      where combined = mergeCapturedOriginalContent content more
+
+-- The sole world consumer preforces its successor before entering this masked
+-- commit. Publication performs only nonblocking owner writes after decoder
+-- pruning, just like exact-scope raw/decoder publication below.
+commitWorldInputRetention :: ExactInputOwner -> Integer -> Int -> IO () -> IO ()
+commitWorldInputRetention (ExactInputOwner limit state) worldBytes worldCount publish =
+  modifyMVarMasked state $ \(RetainedOriginalInputs retained decoder
+      (DecodedOriginalFacts certificates packages native graphs) _ _) -> do
+    unless (worldBytes >= 0 && worldBytes <= limit && worldCount >= 0 && worldCount <= maxRetainedInputEntries)
+      (fail "optional world retention exceeds the shared input allowance")
+    let settled = selectRetainedOriginalInputs limit worldBytes worldCount retained
+        content = foldl (\known (_,more) -> mergeCapturedOriginalContent known more)
+          emptyCapturedOriginalContent settled
+        seals = Set.map fst (capturedOriginalContentKeys content)
+        certificateFacts = Map.restrictKeys certificates seals
+        packageFacts = Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) packages
+        nativeFacts = Map.restrictKeys native seals
+        graphFacts = Map.restrictKeys graphs seals
+        next = RetainedOriginalInputs settled decoder
+          (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts) worldBytes worldCount
+    _ <- evaluate (length settled + Set.size seals + Map.size certificateFacts
+      + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts)
+    _ <- evaluate (capturedOriginalContentBytes content)
+    _ <- evaluate next
+    _ <- pruneRequestIfaceDecoder seals decoder
+    publish
+    pure (next,())
 
 data DecodedOriginalFacts = DecodedOriginalFacts
   (Map.Map String CanonicalModuleCertificate)
@@ -1276,7 +1325,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
     | kind <- ["certificate","packages","census","graph"], suffix <- [".hits",".misses"]])
   timing <- readTimingEnabled
   (result,decodedCount) <- mask $ \restore ->
-    modifyMVarMasked state $ \previous@(RetainedOriginalInputs retained decoder (DecodedOriginalFacts certificates packages native graphs)) -> do
+    modifyMVarMasked state $ \previous@(RetainedOriginalInputs retained decoder (DecodedOriginalFacts certificates packages native graphs) worldBytes worldCount) -> do
     captured <- try (restore $ do
       certificatesState <- newIORef certificates
       packagesState <- newIORef packages
@@ -1384,12 +1433,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
               candidates = additions ++ filter ((`Set.notMember` keys) . fst) retained
               unionContent entries = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
                 emptyCapturedOriginalContent entries
-              keep _ [] = []
-              keep content (entry@(_,more):rest)
-                | capturedOriginalContentBytes combined <= retentionLimit = entry : keep combined rest
-                | otherwise = keep content rest
-                where combined = mergeCapturedOriginalContent content more
-              settled = take 4096 (keep emptyCapturedOriginalContent candidates)
+              settled = selectRetainedOriginalInputs retentionLimit worldBytes worldCount candidates
               retainedContent = unionContent settled
               bytesRetained = capturedOriginalContentBytes retainedContent
               bytesBefore = capturedOriginalContentBytes (unionContent candidates)
@@ -1398,6 +1442,9 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
           emitCount timing "original_inputs.live_request_encoded_bytes" (requestInputBytes originals)
           emitCount timing "original_inputs.receiving_images" (fromIntegral (length images))
           emitCount timing "original_inputs.receiving_encoded_bytes" (capturedOriginalContentBytes (unionContent additions))
+          emitCount timing "original_inputs.world_reserved_bytes" worldBytes
+          emitCount timing "original_inputs.world_reserved_entries" (toInteger worldCount)
+          emitCount timing "original_inputs.shared_optional_charged_bytes" (bytesRetained + worldBytes)
           let seals = Set.map fst (capturedOriginalContentKeys retainedContent)
           certificateFacts <- Map.restrictKeys <$> readIORef certificatesState <*> pure seals
           packageFacts <- Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) <$> readIORef packagesState
@@ -1406,7 +1453,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
           emitCount timing "original_inputs.decoded_content_facts" (fromIntegral
             (Map.size certificateFacts + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts))
           let next = RetainedOriginalInputs settled decoder
-                (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts)
+                (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts) worldBytes worldCount
               staged = (seals,complete,next)
           -- Force the candidate's retention metadata while cancellation and all
           -- acquisition/timing failures still restore the previous owner.
@@ -2175,6 +2222,13 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsRuntimeVisibility :: BS.ByteString
   }
 
+-- Conservative backing charge: receiving allowances count every retained
+-- encoded body/path, even when a separate world happens to have equal bytes.
+-- Equal seals alone do not establish physical sharing between acquisitions.
+worldInputsRetainedCharge :: WorldInputFacts -> (Integer,Int)
+worldInputsRetainedCharge facts = (requestInputBytes custody,requestInputCount custody)
+  where custody = worldInputsCustody facts
+
 data CapturedWorldSources = CapturedWorldSources
   { worldSourceOrigin :: BS.ByteString
   , worldSourceDomainSha256 :: BS.ByteString
@@ -2249,7 +2303,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
               (zip visibleRows visibleImages)
       unless (SHA.hash (toStrictByteString rowRefs) == visibleSeal)
         (worldCorrupt "visible world rows differ from restoration")
-      RetainedOriginalInputs retained _ _ <- readMVar state
+      RetainedOriginalInputs retained _ _ _ _ <- readMVar state
       let available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
             emptyCapturedOriginalContent retained
       originals <- continueRequestInputs available

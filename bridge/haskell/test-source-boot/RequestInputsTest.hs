@@ -66,7 +66,8 @@ import Tidepool.ExactScope
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
-  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces )
+  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
+  , exactInputRetentionLimits, commitWorldInputRetention )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -449,6 +450,39 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     unless (positiveLimit < sum imageSizes)
       (fail "positive eviction fixture lacks two separately retainable images")
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
+      -- The production world index reserves against this same owner. A full
+      -- byte OR entry reservation must evict genuine optional image/decoder
+      -- state while preserving the live receiving scope's captured bytes.
+      forM_ [False,True] $ \entriesOnly -> do
+        shared <- newExactInputOwner
+        sharedLive <- readExactScopeWithOwner shared thirdPath >>= either fail pure
+        let (byteLimit,entryLimit) = exactInputRetentionLimits shared
+            (reservedBytes,reservedEntries) = if entriesOnly then (0,entryLimit) else (byteLimit,0)
+            interfaces = [iface | (iface,_,_) <- scopeInterfaces sharedLive]
+            decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) sharedLive interfaces >>= either fail pure
+        before <- mapM (scopeInterfaceBytes sharedLive) interfaces
+        _ <- decode
+        published <- newIORef False
+        commitWorldInputRetention shared reservedBytes reservedEntries (writeIORef published True)
+        installed <- readIORef published
+        unless installed (fail "shared retention did not publish its world reservation")
+        _ <- decode
+        (_,decoded) <- captureDiagnostics decode
+        unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decoded | iface <- interfaces] == 2
+            && sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decoded | iface <- interfaces] == 0)
+          (fail "world reservation left optional image decoding in another pool")
+        (_,reserved) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
+        unless (counterValues "original_inputs.retained_encoded_bytes" reserved == [0]
+            && total "original_inputs.certificate.misses" reserved == 2)
+          (fail "legacy acquisition ignored the shared world reservation")
+        after <- mapM (scopeInterfaceBytes sharedLive) interfaces
+        unless (before == after) (fail "world reservation revoked live raw input custody")
+        commitWorldInputRetention shared 0 0 (pure ())
+        _ <- readExactScopeWithOwner shared thirdPath >>= either fail pure
+        (_,released) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
+        unless (total "original_inputs.retained_encoded_bytes" released > 0
+            && total "original_inputs.certificate.hits" released > 0)
+          (fail "released world reservation failed to restore the same optional pool")
       bounded <- newExactInputOwner
       (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
       let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
