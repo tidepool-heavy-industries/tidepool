@@ -678,10 +678,7 @@ impl EntryPreparation {
             return Err(invalid("configured compiler deployment unavailable"));
         };
         CompilerDeploymentConfiguration::Configured(authority)
-            .admit(
-                deployment.producer_identity,
-                deployment.consumed_worker_identity,
-            )
+            .revalidate_admitted(deployment)
             .map_err(invalid)?;
         sources.revalidate(source)?;
         if let Some(catalog) = catalog {
@@ -875,8 +872,8 @@ pub fn load_selected_production_entry_with_catalog(
             "original purpose, target or configured source selection differs",
         ));
     }
-    let deployment = CompilerDeploymentConfiguration::Configured(authority.clone())
-        .admit(manifest.producer, manifest.worker)
+    CompilerDeploymentConfiguration::Configured(authority.clone())
+        .validate_product_provenance(manifest.producer, manifest.worker)
         .map_err(invalid)?;
     sources.revalidate(&manifest.source)?;
     let selection_scratch = tempfile::tempdir()?;
@@ -889,7 +886,7 @@ pub fn load_selected_production_entry_with_catalog(
         let package = catalog
             .acquire()?
             .ok_or_else(|| invalid("linked entry catalog is unavailable"))?;
-        package.validate_deployment(&deployment)?;
+        package.validate_product_provenance(manifest.producer, manifest.worker)?;
         if package.catalog_path() != dependencies.catalog_path
             || package.catalog_identity() != dependencies.catalog_identity
             || package.producer_identity() != &dependencies.producer_identity

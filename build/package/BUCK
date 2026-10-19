@@ -85,11 +85,11 @@ genrule(
     ],
     out = "compiler-service-deployment",
     bash = """set -euo pipefail
-TOOLS="$(location toolchains//:exomonad_runtime_tools)"
+TOOLS=""" + read_root_config("nix", "exomonad_runtime_tools") + """
 "$TOOLS/bin/python3" "$(location :qualification_script)" declare-compiler-service-source \\
   --frontend "$(exe //tidepool/extract-cmd:tidepool-extract)" \\
   --worker "$(exe //bridge/haskell:tidepool_extract_bin)" \\
-  --ghc-libdir "$(location toolchains//:native_catalog_ghc_libdir)" \\
+  --ghc-libdir """ + read_root_config("nix", "ghc_libdir") + """ \\
   --runtime-tools "$TOOLS" \\
   --profile """ + read_root_config("tidepool", "profile", "fast-dev") + """ \\
   --output "$PWD/$OUT"

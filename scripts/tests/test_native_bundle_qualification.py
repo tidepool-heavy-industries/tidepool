@@ -110,6 +110,9 @@ class RegisteredGcRootTests(unittest.TestCase):
             link.symlink_to(store)
         self.pins = [{'path': str(link), 'store_path': str(store)}
                      for link, store in zip(self.links, self.stores)]
+        boundary = patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path])
+        boundary.start()
+        self.addCleanup(boundary.stop)
 
     def test_one_query_verifies_every_exact_pair_and_deduplicates_store_paths(self):
         alias = self.root / 'another-root-a'
@@ -176,6 +179,17 @@ class RegisteredGcRootTests(unittest.TestCase):
     def test_no_pins_requires_no_query(self):
         with patch.object(qualification.subprocess, 'check_output') as query:
             qualification.verify_registered_gc_roots(self.tools, [])
+            query.assert_not_called()
+
+    def test_canonical_destination_cannot_replace_the_immediate_registered_target(self):
+        self.links[0].unlink()
+        mutable = self.root / 'mutable-hop'
+        mutable.symlink_to(self.stores[0])
+        self.links[0].symlink_to(mutable)
+        self.assertEqual(self.links[0].resolve(), self.stores[0])
+        with patch.object(qualification.subprocess, 'check_output') as query:
+            with self.assertRaisesRegex(ValueError, 'removed or changed'):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
             query.assert_not_called()
 
 
@@ -2081,8 +2095,8 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(child.stdout, '1\n')
                 self.assertEqual(descriptor, {'environment': {}})
 
-    def test_schema_four_refuses_old_descriptor_before_any_runtime_query(self):
-        self.assertEqual(qualification.QUALIFICATION_SCHEMA, 4)
+    def test_current_schema_refuses_old_descriptor_before_any_runtime_query(self):
+        self.assertEqual(qualification.QUALIFICATION_SCHEMA, 5)
         self.assertEqual(qualification.EXTERNAL_INPUTS, {
             'TIDEPOOL_GHC_LIBDIR', 'TIDEPOOL_BROWSER_NODE', 'PLAYWRIGHT_BROWSERS_PATH',
             'runtime_tools', 'EXOMONAD_OFFLINE_RUSTC', 'EXOMONAD_OFFLINE_CC'})
@@ -2570,7 +2584,7 @@ class NativeQualificationTests(unittest.TestCase):
                                 elif stage == 'freeze':
                                     qualification.freeze(args)
                                 else:
-                                    qualification.native_environment(bundle)
+                                    qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
                         self.assertFalse(output.exists())
                         execute.assert_not_called()
                         query.assert_not_called()
@@ -3136,6 +3150,7 @@ class CatalogSourceTests(unittest.TestCase):
 
         with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
              patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', return_value=nar) as metadata, \
              patch.object(qualification.subprocess, 'check_output', side_effect=add), \
              patch.object(qualification.subprocess, 'run', side_effect=run):
@@ -3187,6 +3202,7 @@ class CatalogSourceTests(unittest.TestCase):
             return '\n'.join(str(pin) + ' -> ' + nar['roots'][0] for pin in pins)
         with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
              patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', return_value=nar), \
              patch.object(qualification.subprocess, 'check_output', side_effect=roots):
             yield
@@ -3278,7 +3294,8 @@ class CatalogSourceTests(unittest.TestCase):
         first = {'path': str(pin), 'store_path': str(original)}
         second = {'path': str(other_pin), 'store_path': str(other)}
         with patch.object(qualification.subprocess, 'check_output', return_value=
-                          f'{pin} -> {original}\n{other_pin} -> {other}') as query:
+                          f'{pin} -> {original}\n{other_pin} -> {other}') as query, \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]):
             observation = qualification._RegisteredGcRoots(tools, [str(original), str(other)])
             qualification.verify_registered_gc_roots(tools, [first], observation)
             qualification.verify_registered_gc_roots(tools, [first, second], observation)
@@ -3325,7 +3342,7 @@ class CatalogSourceTests(unittest.TestCase):
         original, tools, record, pin, nar = self.retained_fixture()
         bundle, contract, catalog = self.catalog_fixture(original, tools, record)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
-            environment = qualification.native_environment(bundle)
+            environment = qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
             self.assertEqual(environment['TIDEPOOL_PRELUDE_DIR'], str(original / 'lib'))
             self.assertEqual(environment['TIDEPOOL_COMPILER_MODULES'], str(catalog))
             self.assertEqual(environment['TIDEPOOL_RECIPE_WORKSPACE'],
@@ -3419,6 +3436,30 @@ class CatalogSourceTests(unittest.TestCase):
             'external_inputs': external, 'elf_runtime': {},
             'nix_closure': {}, 'gc_roots': [],
         }
+        # Representation fixtures for this catalog-verification test. These do
+        # not instantiate a compiler service or issue a boot/source capability.
+        descriptor['source_oid'] = 'a' * 40
+        descriptor_path = bundle / qualification.DESCRIPTOR
+        service_directory = shared / 'compiler-service'
+        service_directory.mkdir()
+        config = service_directory / 'compiler-service-source.bin'
+        config.write_bytes(b'opaque compiler configuration representation fixture')
+        config_hash = qualification.sha256(config)
+        (service_directory / 'compiler-service-source.sha256').write_text(config_hash + '\n')
+        service_record = {
+            'profile_id': 'b' * 64, 'nix_closure': {'roots': []},
+            'declaration': {'kind': 'frozen-native-bundle', 'descriptor': str(descriptor_path),
+                            'source_oid': descriptor['source_oid'],
+                            'build_contract_sha256': qualification.sha256(shared / 'native-build-contract.json')},
+        }
+        service_record['source_id'] = qualification._package_source_id(service_record)
+        service_record_path = service_directory / 'compiler-service-source.json'
+        qualification.write_json(service_record_path, service_record)
+        descriptor['compiler_service_source'] = {
+            'record_path': str(service_record_path), 'record_sha256': qualification.sha256(service_record_path),
+            'source_id': service_record['source_id'], 'profile_id': service_record['profile_id'],
+            'launch_configuration_sha256': config_hash,
+        }
         selected_roots = [item['store_path'] for item in external.values()]
         selected_roots.append(str(original.resolve()))
         descriptor['nix_closure'] = metadata(tools, selected_roots)
@@ -3430,10 +3471,11 @@ class CatalogSourceTests(unittest.TestCase):
             descriptor['gc_roots'].append({'path': str(path), 'store_path': selected})
         with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
              patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', side_effect=metadata), \
              patch.object(qualification, 'verify_registered_gc_roots'), \
              patch.object(qualification.subprocess, 'run'):
-            environment = qualification.native_environment(bundle)
+            environment = qualification.native_environment(bundle, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
         environment.update(
             TIDEPOOL_BROWSER_NODE=str(browser_node),
             TIDEPOOL_BROWSER_DRIVER=str(bundle / qualification.BROWSER_DRIVER_ROOT / 'driver.mjs'),
@@ -3445,6 +3487,7 @@ class CatalogSourceTests(unittest.TestCase):
 
         with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
              patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, '_package_nix_roots', side_effect=lambda path: [path]), \
              patch.object(qualification, 'nix_metadata', side_effect=metadata), \
              patch.object(qualification, 'native_runtime_tools', return_value=tools), \
              patch.object(qualification, 'verify_frozen_inventory', return_value={}), \
@@ -3477,7 +3520,7 @@ class CatalogSourceTests(unittest.TestCase):
                     browser_node.chmod(0o755)
                     qualification.write_json(descriptor_path, descriptor)
 
-            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment'):
+            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment', 'missing_service_source', 'changed_service_launch', 'changed_service_provenance'):
                 changed = json.loads(json.dumps(descriptor))
                 if mutation == 'missing_compiler':
                     del changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']
@@ -3490,6 +3533,12 @@ class CatalogSourceTests(unittest.TestCase):
                     changed['nix_closure']['nar_hashes'][first] = 'changed-nar'
                 elif mutation == 'online_nix_environment':
                     changed['environment']['EXOMONAD_NIX_OFFLINE'] = '0'
+                elif mutation == 'missing_service_source':
+                    del changed['compiler_service_source']
+                elif mutation == 'changed_service_launch':
+                    changed['compiler_service_source']['launch_configuration_sha256'] = 'd' * 64
+                elif mutation == 'changed_service_provenance':
+                    changed['source_oid'] = 'd' * 40
                 elif mutation == 'coherent_other_compiler':
                     original_compiler = changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']['store_path']
                     changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC'] = dict(
@@ -3499,7 +3548,7 @@ class CatalogSourceTests(unittest.TestCase):
                     changed['gc_roots'] = [value for value in changed['gc_roots']
                                            if value['store_path'] != original_compiler]
                 else:
-                    changed['schema'] = 3
+                    changed['schema'] = 4
                 qualification.write_json(descriptor_path, changed)
                 message = 'assembled compiler contract' if mutation == 'coherent_other_compiler' else ''
                 with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, message):
@@ -3509,7 +3558,7 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 qualification.native_environment(bundle, verified_catalog=contract['native_catalog'])
             with self.assertRaisesRegex(ValueError, 'requires this bundle\'s verified catalog'):
-                qualification._native_environment(bundle, contract['native_catalog'])
+                qualification._native_environment(bundle, contract['native_catalog'], package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
 
             catalog_calls_before_drift = verify_catalog.call_count
             root_calls_before_drift = verify_root.call_count
@@ -4059,7 +4108,7 @@ class CompilerServicePackageTests(unittest.TestCase):
             commands.append(command)
             if '--compiler-deployment-manifest' in command:
                 qualification.write_json(Path(command[-1]), {
-                    'schema': 1, 'producer_identity': [1] * 32, 'consumed_worker_identity': [2] * 32,
+                    'schema': 2, 'package_source': {'kind': 'observation-only'}, 'producer_identity': [1] * 32, 'consumed_worker_identity': [2] * 32,
                     'frontend_path': str(frontend), 'worker_path': str(worker), 'ghc_libdir': str(libdir)})
             elif '--capture-supported-package-profile-v1' in command:
                 self.assertTrue(all(name not in kwargs['env'] for name in qualification.PACKAGE_ROOTED_ENVIRONMENT))
@@ -4148,7 +4197,11 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertEqual(authority['schema'], 2)
             self.assertEqual(authority['package_source']['source_id'], list(bytes.fromhex(provider.record['source_id'])))
             config = (provider.output / 'compiler-service-source.bin').read_bytes()
-            self.assertEqual(config[:9], b'TPSCF001\0')
+            self.assertEqual(config[:9], b'TPSCF002\0')
+            self.assertEqual(authority['package_source']['launch_configuration_sha256'],
+                             list(qualification.hashlib.sha256(config).digest()))
+            self.assertIn(bytes.fromhex(provider.record['python_sha256']), config)
+            self.assertIn(bytes.fromhex(provider.record['provider_sha256']), config)
             profile = (provider.output / 'compiler-package-profile-v1').read_bytes()
             self.assertNotIn(bytes.fromhex(provider.record['source_id']), profile)
             acquire = provider.acquire_args()
@@ -4264,8 +4317,7 @@ class CompilerServicePackageTests(unittest.TestCase):
                 self.assertEqual(json.loads(settled.read_text())['status'], 'released')
                 with patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)):
                     closure, pins = qualification.pin_nix_closure(
-                        root / 'frozen', root / 'runtime-tools-fixture', [root / 'runtime-tools-fixture'],
-                        retained_alias_roots=[root / 'immutable-alias-fixture'])
+                        root / 'frozen', root / 'runtime-tools-fixture', [root / 'runtime-tools-fixture', root / 'immutable-alias-fixture'])
                 self.assertIn(str(root / 'immutable-alias-fixture'), closure['roots'])
                 self.assertTrue(any(Path(item['path']).readlink() == root / 'immutable-alias-fixture' for item in pins))
 
@@ -4292,6 +4344,26 @@ class CompilerServicePackageTests(unittest.TestCase):
             with patch.dict(os.environ, {name: '/mutable'}, clear=True), self.assertRaisesRegex(ValueError, name):
                 qualification._package_environment(Path('/nix/store/example/lib'))
 
+    def test_preassembly_scope_is_explicit_and_files_cannot_upgrade_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / 'share/exomonad'
+            shared.mkdir(parents=True)
+            (shared / 'ghc-libdir.txt').write_text('/nix/store/example/lib\n')
+            qualification.write_json(shared / 'native-build-contract.json', {'stdlib_mode': 'source-backed', 'offline_compilers': {}})
+            with patch.object(qualification, 'offline_compilers', return_value={}):
+                with self.assertRaises(FileNotFoundError):
+                    qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
+                service = shared / 'compiler-service'
+                service.mkdir()
+                (service / 'compiler-service-source.bin').write_bytes(b'opaque configuration fixture')
+                (service / 'compiler-service-source.sha256').write_text(qualification.sha256(service / 'compiler-service-source.bin') + '\n')
+                observed = qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.OBSERVATION_ONLY)
+                self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG', observed)
+                rooted = qualification._native_environment(root, tools=root, package_scope=qualification.CompilerPackageScope.ROOTED_SERVICE)
+                self.assertIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted)
+                self.assertNotIn('LD_LIBRARY_PATH', rooted)
+
     def test_immutable_alias_owners_survive_and_mutable_hops_with_dotdot_refuse(self):
         a, b = Path('/nix/store/source'), Path('/nix/store/target')
         aliases = {a: str(b), b / 'settings': str(b / 'actual-settings')}
@@ -4303,6 +4375,16 @@ class CompilerServicePackageTests(unittest.TestCase):
             aliases[b / 'link'] = '/tmp/mutable/subdir'
             with self.assertRaisesRegex(ValueError, 'mutable'):
                 qualification._package_nix_roots(a / 'settings')
+
+    def test_path_resolution_refuses_whole_store_and_file_before_dotdot(self):
+        root = Path('/nix/store/origin')
+        def info(path):
+            return SimpleNamespace(st_mode=stat.S_IFREG if path == root / 'file' else stat.S_IFDIR)
+        with patch.object(Path, 'lstat', new=info):
+            with self.assertRaisesRegex(ValueError, 'whole Nix store'):
+                qualification._package_nix_roots(root / '..')
+            with self.assertRaisesRegex(ValueError, 'non-directory'):
+                qualification._package_nix_roots(root / 'file/../settings')
 
 
 if __name__ == '__main__':

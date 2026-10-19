@@ -149,7 +149,7 @@ PREPARED_CHILD_TESTS = [
     "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
-QUALIFICATION_SCHEMA = 4
+QUALIFICATION_SCHEMA = 5
 PRODUCTION_ENTRY_SCHEMA = 4
 BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
 BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
@@ -161,7 +161,11 @@ BROWSER_DRIVER_SOURCES = {
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
-    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
+    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256",
+    "TIDEPOOL_COMPILER_PACKAGE_PROFILE", "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256",
+    "TIDEPOOL_COMPILER_SERVICE_EPOCH", "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID",
+    "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID", "TIDEPOOL_COMPILER_WORKER_INSTANCE",
+    "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
     "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
@@ -826,17 +830,15 @@ def nix_metadata(tools: Path, roots: list[str]) -> dict:
         raise ValueError("declared Nix closure lacks complete SHA-256 NAR evidence")
     return {"roots": roots, "closure": closure, "nar_hashes": dict(zip(closure, hashes))}
 
-def pin_nix_closure(root: Path, tools: Path, selected: list[Path], *,
-                    retained_alias_roots: list[Path] = ()) -> tuple[dict, list[dict]]:
-    roots = sorted({str(store_root(path)) for path in selected})
-    roots = sorted(set(roots) | {str(owner) for path in retained_alias_roots for owner in _package_nix_roots(path)})
+def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict, list[dict]]:
+    roots = sorted({str(owner) for path in selected for owner in _package_nix_roots(path)})
     pinned = []
     for selected_root in roots:
         target = root / "share/exomonad/gc-roots" / hashlib.sha256(selected_root.encode()).hexdigest()
         target.parent.mkdir(parents=True, exist_ok=True)
         command = [str(tools / "bin/nix-store"), "--add-root", str(target), "--indirect", "--realise", selected_root]
         subprocess.run(command, check=True, capture_output=True, timeout=60)
-        if target.resolve(strict=True) != Path(selected_root) and not _package_root_present({"path": str(target), "store_path": selected_root}):
+        if not _package_root_present({"path": str(target), "store_path": selected_root}):
             raise ValueError(f"Nix did not retain the requested deployment root: {target}")
         pinned.append({"path": str(target), "store_path": selected_root, "command": command, "exit_code": 0})
     verify_registered_gc_roots(tools, pinned)
@@ -939,6 +941,10 @@ def _package_nix_roots(path: Path) -> list[Path]:
             else:
                 pending = list(target.parts) + pending
                 current = current.parent
+        elif pending and not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"supported package path traverses a non-directory: {current}")
+    if len(current.parts) < 4:
+        raise ValueError(f"supported package path names the whole Nix store: {path}")
     return sorted(roots)
 
 
@@ -963,7 +969,7 @@ def _package_environment(ghc_libdir: Path) -> dict:
         if os.environ.get(name):
             raise ValueError(f"supported package profile refuses ambient {name}")
     environment = execution_environment({"environment": {"TIDEPOOL_GHC_LIBDIR": str(ghc_libdir)}})
-    for name in (*PACKAGE_ROOTED_ENVIRONMENT, "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"):
+    for name in (*PACKAGE_ROOTED_ENVIRONMENT, "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"):
         environment.pop(name, None)
     return environment
 
@@ -1011,8 +1017,9 @@ def declare_compiler_service_source(args) -> Path:
     subprocess.run([str(frontend), "--compiler-deployment-manifest", str(authority_path)],
                    env={**environment, "TIDEPOOL_EXTRACT_WORKER": str(worker)}, check=True, timeout=60)
     authority = json.loads(authority_path.read_text())
-    if authority.get("schema") != 1 or any(authority.get(key) != str(value) for key, value in
-            (("frontend_path", frontend), ("worker_path", worker), ("ghc_libdir", libdir))):
+    if (authority.get("schema") != 2 or authority.get("package_source") != {"kind": "observation-only"}
+            or any(authority.get(key) != str(value) for key, value in
+            (("frontend_path", frontend), ("worker_path", worker), ("ghc_libdir", libdir)))):
         raise ValueError("compiler service declaration does not match actual frontend/worker/libdir")
     with tempfile.TemporaryFile() as captured:
         subprocess.run([str(worker), "--capture-supported-package-profile-v1"], env=environment,
@@ -1054,6 +1061,7 @@ def declare_compiler_service_source(args) -> Path:
         "ghc_libdir": str(libdir), "runtime_tools": str(tools),
         "provider_path": str(provider), "provider_sha256": sha256(provider),
         "python_path": str(nix_path(tools / "bin/python3")),
+        "python_sha256": sha256(nix_path(tools / "bin/python3")),
         "profile_path": str(profile), "profile_sha256": profile_hash,
         "profile_store_path": profile_store,
         "profile_id": hashlib.sha256(PACKAGE_PROFILE_DOMAIN + body).hexdigest(),
@@ -1067,17 +1075,21 @@ def declare_compiler_service_source(args) -> Path:
     record["source_id"] = _package_source_id(record)
     record_path = output / "compiler-service-source.json"
     write_json(record_path, record)
-    authority.update(schema=2, package_source={
-        "source_id": list(bytes.fromhex(record["source_id"])),
-        "supported_profile_id": list(bytes.fromhex(record["profile_id"])),
-        "record_path": str(record_path), "record_sha256": list(bytes.fromhex(sha256(record_path))),
-    })
-    write_json(authority_path, authority)
-    configuration = (b"TPSCF001" + bytes([int(frozen_descriptor is not None)]) + _package_frame(record["python_path"])
-                     + _package_frame(str(provider)) + _package_frame(str(record_path))
+    configuration = (b"TPSCF002" + bytes([int(frozen_descriptor is not None)]) + _package_frame(record["python_path"])
+                     + bytes.fromhex(record["python_sha256"])
+                     + _package_frame(str(provider)) + bytes.fromhex(record["provider_sha256"])
+                     + _package_frame(str(record_path))
                      + bytes.fromhex(sha256(record_path)) + bytes.fromhex(record["source_id"])
                      + bytes.fromhex(record["profile_id"]))
     (output / "compiler-service-source.bin").write_bytes(configuration)
+    configuration_hash = hashlib.sha256(configuration).hexdigest()
+    (output / "compiler-service-source.sha256").write_text(configuration_hash + "\n")
+    authority.update(schema=2, package_source={
+        "kind": "rooted", "source_id": list(bytes.fromhex(record["source_id"])),
+        "supported_profile_id": list(bytes.fromhex(record["profile_id"])),
+        "launch_configuration_sha256": list(bytes.fromhex(configuration_hash)),
+    })
+    write_json(authority_path, authority)
     return authority_path
 
 
@@ -1121,7 +1133,8 @@ def _verify_package_source_record(args) -> tuple[dict, Path]:
         descriptor = verify(descriptor_path)
         if (descriptor.get("compiler_service_source") != {
                 "record_path": str(record_path), "record_sha256": args.record_sha256,
-                "source_id": args.source_id, "profile_id": args.profile_id}
+                "source_id": args.source_id, "profile_id": args.profile_id,
+                "launch_configuration_sha256": descriptor["environment"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256"]}
                 or descriptor["source_oid"] != declaration["source_oid"]
                 or sha256(Path(descriptor["bundle_root"]) / "share/exomonad/native-build-contract.json") != declaration["build_contract_sha256"]):
             raise ValueError("frozen descriptor does not own the configured compiler package source")
@@ -1256,6 +1269,7 @@ def release_compiler_service_source(args) -> Path:
         if any(prior.get(key) != state.get(key) for key in ("service_epoch", "source_id", "profile_id")) or prior.get("complete_retirement_sha256") != sha256(complete_path):
             raise ValueError("compiler package release progress belongs to another retirement")
         if prior.get("status") == "released":
+            _sync_directory(settlement.parent)
             return settlement
         state = prior
     roots = state["roots"]
@@ -1488,9 +1502,14 @@ def verify_registered_gc_roots(tools: Path, pins: list[dict],
     expected = set()
     for pinned in pins:
         target = Path(pinned["path"])
-        if not target.is_absolute() or (target.resolve(strict=True) != Path(pinned["store_path"])
-                                      and not _package_root_present(pinned)):
+        if not target.is_absolute():
             raise ValueError("deployment Nix GC root was removed or changed")
+        try:
+            present = _package_root_present(pinned)
+        except ValueError as error:
+            raise ValueError("deployment Nix GC root was removed or changed") from error
+        if not present:
+            raise FileNotFoundError(target)
         expected.add((str(target), pinned["store_path"]))
     if not expected:
         return
@@ -2177,8 +2196,13 @@ def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict, *,
         _VERIFIED_CATALOG_ISSUER)
 
 
+class CompilerPackageScope(Enum):
+    OBSERVATION_ONLY = "observation-only"
+    ROOTED_SERVICE = "rooted-service"
+
+
 def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | None = None,
-                        tools: Path | None = None) -> dict:
+                        tools: Path | None = None, *, package_scope: CompilerPackageScope) -> dict:
     root = root.resolve(strict=True)
     if tools is None:
         tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
@@ -2200,11 +2224,15 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     }
     service_config = root / "share/exomonad/compiler-service/compiler-service-source.bin"
-    if service_config.is_file():
-        # This explicit profile is checked against actual loader maps during
-        # freeze. Schema1 bundles retain their existing loader environment.
+    if package_scope is CompilerPackageScope.ROOTED_SERVICE:
         environment.pop("LD_LIBRARY_PATH")
+        configuration_hash = sha256(service_config)
+        if (service_config.parent / "compiler-service-source.sha256").read_text() != configuration_hash + "\n":
+            raise ValueError("frozen compiler service configuration seal changed")
         environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = str(service_config)
+        environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256"] = configuration_hash
+    elif package_scope is not CompilerPackageScope.OBSERVATION_ONLY:
+        raise ValueError("unsupported compiler package scope")
 
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     environment.update(offline_compilers(contract.get("offline_compilers")))
@@ -2230,14 +2258,14 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
     return environment
 
 
-def native_environment(root: Path) -> dict:
+def native_environment(root: Path, *, package_scope: CompilerPackageScope) -> dict:
     root = root.resolve(strict=True)
     tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     verified_catalog = None
     if contract["stdlib_mode"] == "catalog-backed":
         verified_catalog = _verify_native_catalog_bundle(root, tools, contract)
-    return _native_environment(root, verified_catalog, tools)
+    return _native_environment(root, verified_catalog, tools, package_scope=package_scope)
 
 def execution_environment(descriptor: dict) -> dict:
     environment = dict(os.environ)
@@ -2464,7 +2492,7 @@ def freeze(args) -> Path:
     if fixture_record["manifest"] != fixture_source_manifest or fixture_record["files"] != fixture_source_hashes:
         raise ValueError("assembled fixture resources differ from recorded source")
     verify_fixture_source_contract(fixture_record, contract)
-    environment = native_environment(root)
+    environment = native_environment(root, package_scope=CompilerPackageScope.OBSERVATION_ONLY)
     environment.update(TIDEPOOL_BROWSER_NODE=str(browser_node),
                        TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
                        PLAYWRIGHT_BROWSERS_PATH=str(nix_path(args.playwright_browsers)))
@@ -2487,6 +2515,8 @@ def freeze(args) -> Path:
     environment.pop("LD_LIBRARY_PATH")
     environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = str(
         root / "share/exomonad/compiler-service/compiler-service-source.bin")
+    environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256"] = sha256(
+        root / "share/exomonad/compiler-service/compiler-service-source.bin")
     external = {}
     for key in ("TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", *OFFLINE_COMPILERS):
         path = nix_path(Path(environment[key]))
@@ -2502,8 +2532,7 @@ def freeze(args) -> Path:
             selected.extend(Path(path) for path in item["libraries"] if path.startswith("/nix/store/"))
     if contract["stdlib_mode"] == "catalog-backed":
         selected.append(Path(contract["native_catalog"]["source_selection"]["snapshot_root"]))
-    closure, gc_roots = pin_nix_closure(root, tools, selected,
-                                      retained_alias_roots=[Path(path) for path in service_record["nix_closure"]["roots"]])
+    closure, gc_roots = pin_nix_closure(root, tools, selected)
     if contract["stdlib_mode"] == "catalog-backed":
         transfer_catalog_retention(root, contract, gc_roots, tools)
     copied_log = root / "share/exomonad/build.log"
@@ -2522,7 +2551,8 @@ def freeze(args) -> Path:
         "programs": programs(root), "cohorts": cohorts(),
         "compiler_service_source": {
             "record_path": str(service_record_path), "record_sha256": sha256(service_record_path),
-            "source_id": service_record["source_id"], "profile_id": service_record["profile_id"]},
+            "source_id": service_record["source_id"], "profile_id": service_record["profile_id"],
+            "launch_configuration_sha256": environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256"]},
     }
     descriptor["inventory"] = inventory(root, [DESCRIPTOR])
     descriptor["inventory_sha256"] = digest_inventory(descriptor["inventory"])
@@ -2568,9 +2598,9 @@ def verify(path: Path) -> dict:
     if set(descriptor["external_inputs"]) != EXTERNAL_INPUTS:
         raise ValueError("qualification requires every declared Nix runtime input")
     for item in descriptor["external_inputs"].values():
-        path = nix_path(Path(item["path"]))
-        if str(store_root(path)) != item["store_path"]:
-            raise ValueError(f"declared Nix selection changed: {path}")
+        selected = nix_path(Path(item["path"]))
+        if str(store_root(selected)) != item["store_path"]:
+            raise ValueError(f"declared Nix selection changed: {selected}")
     browser_node = browser_node_executable(
         Path(descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"]))
     selected_compilers = offline_compilers(contract.get("offline_compilers"))
@@ -2580,17 +2610,21 @@ def verify(path: Path) -> dict:
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     registered_roots = _RegisteredGcRoots(tools, descriptor["nix_closure"]["roots"])
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
-    if "compiler_service_source" in descriptor:
-        service = descriptor["compiler_service_source"]
-        record_path = root / "share/exomonad/compiler-service/compiler-service-source.json"
-        if service.get("record_path") != str(record_path) or sha256(record_path) != service.get("record_sha256"):
-            raise ValueError("frozen compiler package source record changed")
-        record = json.loads(record_path.read_text())
-        if (record.get("source_id") != service.get("source_id") or _package_source_id(record) != service.get("source_id")
-                or record.get("profile_id") != service.get("profile_id")
-                or record.get("declaration", {}).get("descriptor") != str(path)):
-            raise ValueError("frozen compiler package source association changed")
-        expected_roots.update(record["nix_closure"]["roots"])
+    if not isinstance(descriptor.get("compiler_service_source"), dict):
+        raise ValueError("current frozen qualification requires its compiler service source")
+    service = descriptor["compiler_service_source"]
+    record_path = root / "share/exomonad/compiler-service/compiler-service-source.json"
+    if service.get("record_path") != str(record_path) or sha256(record_path) != service.get("record_sha256"):
+        raise ValueError("frozen compiler package source record changed")
+    record = json.loads(record_path.read_text())
+    if (record.get("source_id") != service.get("source_id") or _package_source_id(record) != service.get("source_id")
+            or record.get("profile_id") != service.get("profile_id")
+            or record.get("declaration") != {
+                "kind": "frozen-native-bundle", "descriptor": str(path), "source_oid": descriptor["source_oid"],
+                "build_contract_sha256": sha256(root / "share/exomonad/native-build-contract.json")}
+            or service.get("launch_configuration_sha256") != sha256(root / "share/exomonad/compiler-service/compiler-service-source.bin")):
+        raise ValueError("frozen compiler package source association changed")
+    expected_roots.update(record["nix_closure"]["roots"])
     verified_catalog = None
     if descriptor["stdlib_mode"] == "catalog-backed":
         verified_catalog = _verify_native_catalog_bundle(
@@ -2609,11 +2643,10 @@ def verify(path: Path) -> dict:
     if len(descriptor["gc_roots"]) != len(expected_gc_roots) or {item["path"]: item["store_path"] for item in descriptor["gc_roots"]} != expected_gc_roots:
         raise ValueError("deployment must pin exactly its declared Nix runtime roots")
     for pinned in descriptor["gc_roots"]:
-        if (Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"])
-                and not _package_root_present(pinned)):
+        if not _package_root_present(pinned):
             raise ValueError("deployment Nix GC root was removed or changed")
     verify_registered_gc_roots(tools, descriptor["gc_roots"], registered_roots)
-    expected_environment = _native_environment(root, verified_catalog, tools)
+    expected_environment = _native_environment(root, verified_catalog, tools, package_scope=CompilerPackageScope.ROOTED_SERVICE)
     expected_environment.update(
         TIDEPOOL_BROWSER_NODE=str(browser_node),
         TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),

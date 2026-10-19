@@ -27,10 +27,16 @@ These script controls complement actual frozen consumer execution.
 `//build/package:compiler_service_deployment` declares the supported Nix-only
 compiler package profile without assembling the browser-bearing bundle. Its
 `compiler-deployment.json` is schema 2; `compiler-service-source.bin` is the
-closed frontend configuration selected by `TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG`.
+closed frontend configuration selected by `TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG`
+and its `TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256` commitment. The directory
+contains `compiler-service-source.sha256` for the declared launch adapter.
 Configuration describes an expectation. The actual service constructor acquires
 one epoch-owned root set, and fresh worker GHC boot validates the profile before
-the service issues readiness. Schema 1 remains ObservationOnly.
+the service issues readiness. Schema 2 requires an explicit `observation-only` or
+`rooted` expectation; schema 1 is refused. Configuration and echoed IDs cannot
+issue a service association. The frontend measures the launch configuration and
+authenticates its captured Python/provider bytes; rooted admission compares the
+measured configuration commitment with the independent configured expectation.
 
 The qualifier's `declare-compiler-service-source` producer captures the matched
 worker's actual expanded GHC unit facts. `acquire-compiler-service-source` verifies
@@ -88,7 +94,9 @@ Workspace overrides, unmatched ordered rows and explicit live policies keep
 their existing routes.
 
 Named source snapshot metadata is version 2, qualification descriptors are
-version 4, and prepared workspace selections are version 9. Completed preparation
+version 5, and prepared workspace selections are version 9. Current frozen
+descriptors require the compiler service record and configuration; older
+descriptors are refused by this reader. Completed preparation
 retains the exact initial run and helper revisions in its authenticated workspace
 inventory. Rebuild, refreeze and reprepare with this reader; it does not infer
 missing named-entry provenance or an original helper for older selections.

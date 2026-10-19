@@ -6225,13 +6225,13 @@ mod tests {
         drop(unknown);
         let manifest = directory.path().join("deployment.json");
         let configuration = tidepool_toolchain::toolchain::CompilerDeploymentAuthority {
-            schema: 1,
+            schema: 2,
             producer_identity: [b'c'; 32],
             consumed_worker_identity: [b'b'; 32],
             frontend_path: frontend,
             worker_path: directory.path().join("worker"),
             ghc_libdir: directory.path().join("ghc"),
-            package_source: None,
+            package_source: tidepool_toolchain::toolchain::ConfiguredPackageSource::ObservationOnly,
         };
         std::fs::write(&manifest, serde_json::to_vec(&configuration).unwrap()).unwrap();
         let _configuration = TestEnvGuard::set("TIDEPOOL_COMPILER_DEPLOYMENT", manifest);

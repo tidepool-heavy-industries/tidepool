@@ -489,17 +489,18 @@ pub struct CompilerDeploymentAuthority {
     /// GHC library directory hashed into the configured producer identity.
     pub ghc_libdir: PathBuf,
     /// Expected immutable package profile. Data alone cannot issue service custody.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package_source: Option<ConfiguredPackageSource>,
+    pub package_source: ConfiguredPackageSource,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfiguredPackageSource {
-    pub source_id: [u8; 32],
-    pub supported_profile_id: [u8; 32],
-    pub record_path: PathBuf,
-    pub record_sha256: [u8; 32],
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ConfiguredPackageSource {
+    ObservationOnly,
+    Rooted {
+        source_id: [u8; 32],
+        supported_profile_id: [u8; 32],
+        launch_configuration_sha256: [u8; 32],
+    },
 }
 
 /// Explicitly selected deployment mode. Local callers can supply a configured
@@ -566,7 +567,7 @@ impl CompilerDeploymentConfiguration {
     fn validate(&self) -> Result<(), DeploymentAdmissionError> {
         match self {
             Self::Unknown => Err(DeploymentAdmissionError::Unknown),
-            Self::Configured(authority) if !matches!(authority.schema, 1 | 2) => {
+            Self::Configured(authority) if authority.schema != 2 => {
                 Err(DeploymentAdmissionError::Schema(authority.schema))
             }
             Self::Configured(authority)
@@ -582,13 +583,15 @@ impl CompilerDeploymentConfiguration {
             {
                 Err(DeploymentAdmissionError::InvalidPath)
             }
-            Self::Configured(authority) => match (authority.schema, &authority.package_source) {
-                (1, None) => Ok(()),
-                (2, Some(source))
-                    if source.source_id != [0; 32]
-                        && source.supported_profile_id != [0; 32]
-                        && source.record_sha256 != [0; 32]
-                        && source.record_path.is_absolute() =>
+            Self::Configured(authority) => match &authority.package_source {
+                ConfiguredPackageSource::ObservationOnly => Ok(()),
+                ConfiguredPackageSource::Rooted {
+                    source_id,
+                    supported_profile_id,
+                    launch_configuration_sha256,
+                } if *source_id != [0; 32]
+                    && *supported_profile_id != [0; 32]
+                    && *launch_configuration_sha256 != [0; 32] =>
                 {
                     Ok(())
                 }
@@ -638,17 +641,56 @@ impl CompilerDeploymentConfiguration {
             *identity.producer_bytes(),
             *identity.consumed_worker_bytes(),
         )?;
+        let source = self.validate_source_association(identity.package_source_association())?;
+        Ok(AdmittedCompilerDeployment {
+            producer_identity: *identity.producer_bytes(),
+            consumed_worker_identity: *identity.consumed_worker_bytes(),
+            source,
+        })
+    }
+
+    pub(crate) fn revalidate_admitted(
+        &self,
+        deployment: &AdmittedCompilerDeployment,
+    ) -> Result<(), DeploymentAdmissionError> {
+        self.verify_identities(
+            deployment.producer_identity,
+            deployment.consumed_worker_identity,
+        )?;
+        let source = self.validate_source_association(deployment.package_source_association())?;
+        if source != deployment.source {
+            return Err(DeploymentAdmissionError::PackageSourceMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_product_provenance(
+        &self,
+        producer_identity: [u8; 32],
+        consumed_worker_identity: [u8; 32],
+    ) -> Result<(), DeploymentAdmissionError> {
+        self.verify_identities(producer_identity, consumed_worker_identity)
+    }
+
+    fn validate_source_association(
+        &self,
+        actual: Option<&tidepool_extract_cmd::CompilerPackageSourceAssociation>,
+    ) -> Result<AdmittedPackageSource, DeploymentAdmissionError> {
         let Self::Configured(authority) = self else {
-            unreachable!("validated authority")
+            return Err(DeploymentAdmissionError::Unknown);
         };
-        let source = match &authority.package_source {
-            None => AdmittedPackageSource::ObservationOnly,
-            Some(expected) => {
-                let actual = identity
-                    .package_source_association()
-                    .ok_or(DeploymentAdmissionError::PackageSourceRequired)?;
-                if actual.source_id() != &expected.source_id
-                    || actual.profile_id() != &expected.supported_profile_id
+        Ok(match &authority.package_source {
+            ConfiguredPackageSource::ObservationOnly => AdmittedPackageSource::ObservationOnly,
+            ConfiguredPackageSource::Rooted {
+                source_id,
+                supported_profile_id,
+                launch_configuration_sha256,
+                ..
+            } => {
+                let actual = actual.ok_or(DeploymentAdmissionError::PackageSourceRequired)?;
+                if actual.source_id() != source_id
+                    || actual.profile_id() != supported_profile_id
+                    || actual.launch_configuration_sha256() != launch_configuration_sha256
                     || actual.service_epoch() == &[0; 32]
                     || actual.boot_profile_commitment() == &[0; 32]
                 {
@@ -656,11 +698,6 @@ impl CompilerDeploymentConfiguration {
                 }
                 AdmittedPackageSource::Rooted(actual.clone())
             }
-        };
-        Ok(AdmittedCompilerDeployment {
-            producer_identity: *identity.producer_bytes(),
-            consumed_worker_identity: *identity.consumed_worker_bytes(),
-            source,
         })
     }
 
@@ -1269,13 +1306,13 @@ mod tests {
 
     fn configured_deployment() -> CompilerDeploymentConfiguration {
         CompilerDeploymentConfiguration::Configured(CompilerDeploymentAuthority {
-            schema: 1,
+            schema: 2,
             producer_identity: [3; 32],
             consumed_worker_identity: [4; 32],
             frontend_path: PathBuf::from("/configured/frontend"),
             worker_path: PathBuf::from("/configured/worker"),
             ghc_libdir: PathBuf::from("/configured/ghc/lib"),
-            package_source: None,
+            package_source: ConfiguredPackageSource::ObservationOnly,
         })
     }
 
@@ -1308,6 +1345,84 @@ mod tests {
         configured_deployment()
             .verify_identities([3; 32], [4; 32])
             .unwrap();
+    }
+
+    #[test]
+    fn deployment_requires_current_explicit_source_scope() {
+        let CompilerDeploymentConfiguration::Configured(mut authority) = configured_deployment()
+        else {
+            unreachable!()
+        };
+        let mut serialized = serde_json::to_value(&authority).unwrap();
+        serialized.as_object_mut().unwrap().remove("package_source");
+        assert!(serde_json::from_value::<CompilerDeploymentAuthority>(serialized).is_err());
+        authority.schema = 1;
+        assert_eq!(
+            CompilerDeploymentConfiguration::Configured(authority).validate(),
+            Err(DeploymentAdmissionError::Schema(1))
+        );
+    }
+
+    #[test]
+    fn finite_product_provenance_does_not_issue_a_rooted_service() {
+        let CompilerDeploymentConfiguration::Configured(mut authority) = configured_deployment()
+        else {
+            unreachable!()
+        };
+        authority.package_source = ConfiguredPackageSource::Rooted {
+            source_id: [1; 32],
+            supported_profile_id: [2; 32],
+            launch_configuration_sha256: [4; 32],
+        };
+        let configured = CompilerDeploymentConfiguration::Configured(authority);
+        configured
+            .validate_product_provenance([3; 32], [4; 32])
+            .unwrap();
+        let observed = AdmittedCompilerDeployment {
+            producer_identity: [3; 32],
+            consumed_worker_identity: [4; 32],
+            source: AdmittedPackageSource::ObservationOnly,
+        };
+        assert_eq!(
+            configured.revalidate_admitted(&observed),
+            Err(DeploymentAdmissionError::PackageSourceRequired)
+        );
+    }
+
+    #[test]
+    fn actual_endpoint_admission_preserves_pair_and_refuses_unissued_source_expectations() {
+        let configured =
+            CompilerDeploymentConfiguration::from_env().expect("declared compiler deployment");
+        let CompilerDeploymentConfiguration::Configured(authority) = &configured else {
+            panic!("required configured compiler resource is missing")
+        };
+        let (endpoint, _, admitted) = bind_admitted_extract_endpoint(&configured)
+            .expect("actual configured compiler endpoint");
+        assert_eq!(admitted.producer_identity, authority.producer_identity);
+        assert_eq!(
+            admitted.consumed_worker_identity,
+            authority.consumed_worker_identity
+        );
+        configured.revalidate_admitted(&admitted).unwrap();
+        let mut refused = authority.clone();
+        let mut foreign_source = endpoint
+            .package_source_association()
+            .map(|source| *source.source_id())
+            .unwrap_or([0; 32]);
+        foreign_source[0] ^= 1;
+        refused.package_source = ConfiguredPackageSource::Rooted {
+            source_id: foreign_source,
+            supported_profile_id: [2; 32],
+            launch_configuration_sha256: [4; 32],
+        };
+        assert_eq!(
+            CompilerDeploymentConfiguration::Configured(refused).admit(&endpoint),
+            Err(if endpoint.package_source_association().is_some() {
+                DeploymentAdmissionError::PackageSourceMismatch
+            } else {
+                DeploymentAdmissionError::PackageSourceRequired
+            })
+        );
     }
 
     #[test]
