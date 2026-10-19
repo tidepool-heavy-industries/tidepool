@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
+import struct
 import tempfile
 import subprocess
 import shutil
@@ -4019,6 +4021,288 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                              self.assertRaises(SystemExit) as stopped:
                             exec(compile(namespace_source, 'packaged-catalog-consumer.sh', 'exec'), {})
                         self.assertEqual(stopped.exception.code, 0)
+
+
+class CompilerServicePackageTests(unittest.TestCase):
+    def profile_body(self, libdir):
+        frame = qualification._package_frame
+        return (b'TPGHC001' + b''.join(frame(value) for value in
+                ('9.12.2', 'x86_64-linux', str(libdir), str(libdir / 'package.conf.d')))
+                + struct.pack('<I', 1) + frame('base-actual-unit') + frame('actual-abi')
+                + struct.pack('<I', 0) * 4)
+
+    @contextlib.contextmanager
+    def declared_provider(self, root, retain_alias=False):
+        """Real declaration/acquisition entrypoints; external compiler/Nix are mocked."""
+        tools = runtime_tools_fixture(root)
+        libdir = root / 'compiler/lib'
+        libdir.mkdir(parents=True)
+        (libdir.parent / 'bin').mkdir()
+        (libdir.parent / 'bin/ghc-iserv').write_bytes(b'iserv')
+        frontend, worker = root / 'frontend', root / 'worker'
+        frontend.write_bytes(b'frontend')
+        worker.write_bytes(b'worker')
+        body = self.profile_body(libdir)
+        output = root / 'declaration'
+        fixed = '/nix/store/' + 'a' * 32 + '-compiler-package-profile-v1'
+        commands = []
+        alias = root / 'immutable-alias-fixture'
+        alias.symlink_to(tools, target_is_directory=True)
+        selected_roots = [tools, alias] if retain_alias else [tools]
+        original_hash = qualification.sha256
+        original_root_present = qualification._package_root_present
+
+        def read_hash(path):
+            return original_hash(output / 'compiler-package-profile-v1' if str(path) == fixed else path)
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if '--compiler-deployment-manifest' in command:
+                qualification.write_json(Path(command[-1]), {
+                    'schema': 1, 'producer_identity': [1] * 32, 'consumed_worker_identity': [2] * 32,
+                    'frontend_path': str(frontend), 'worker_path': str(worker), 'ghc_libdir': str(libdir)})
+            elif '--capture-supported-package-profile-v1' in command:
+                self.assertTrue(all(name not in kwargs['env'] for name in qualification.PACKAGE_ROOTED_ENVIRONMENT))
+                kwargs['stdout'].write(body)
+            elif '--add-root' in command:
+                target = Path(command[command.index('--add-root') + 1])
+                if target.parent.parent.name == 'package-source':
+                    plan = json.loads((target.parent.parent / 'acquisition.json').read_text())
+                    self.assertEqual(plan['status'], 'acquiring')
+                    self.assertIn(str(target), [item['path'] for item in plan['roots']])
+                target.symlink_to(command[-1])
+            else:
+                self.fail(f'unexpected external command {command}')
+            return subprocess.CompletedProcess(command, 0)
+
+        def output_command(command, **kwargs):
+            commands.append(command)
+            if '--print-fixed-path' in command:
+                return fixed + '\n'
+            if '--add-fixed' in command:
+                # The persisted plan must precede the first Nix side effect.
+                plans = list(root.glob('service-*/package-source/acquisition.json'))
+                self.assertTrue(plans)
+                self.assertTrue(all(json.loads(path.read_text())['nix_profile_import_attempts'] == 1 for path in plans))
+                self.assertEqual(command[-2], 'sha256')
+                return fixed + '\n'
+            if '--requisites' in command:
+                return '\n'.join(sorted(set(command[3:]))) + '\n'
+            if '--hash' in command:
+                return 'sha256:fixture-nar\n' * (len(command) - 3)
+            if '--size' in command:
+                return '17\n' * (len(command) - 3)
+            self.fail(f'unexpected external query {command}')
+
+        def root_present(item):
+            if item['store_path'] != fixed:
+                return original_root_present(item)
+            target = Path(item['path'])
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISLNK(info.st_mode) or str(target.readlink()) != fixed:
+                raise ValueError('ambiguous fixture Nix symlink')
+            return True
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=True))
+            stack.enter_context(patch.object(qualification, 'native_runtime_tools', return_value=tools))
+            stack.enter_context(patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)))
+            stack.enter_context(patch.object(qualification, '_package_profile_paths', return_value=[tools]))
+            stack.enter_context(patch.object(qualification, '_package_nix_roots', return_value=selected_roots))
+            stack.enter_context(patch.object(qualification, '_package_loader_roots', return_value=[tools]))
+            stack.enter_context(patch.object(qualification, 'verify_registered_gc_roots'))
+            stack.enter_context(patch.object(qualification, '_package_root_present', side_effect=root_present))
+            stack.enter_context(patch.object(qualification, 'sha256', side_effect=read_hash))
+            stack.enter_context(patch.object(subprocess, 'run', side_effect=run))
+            stack.enter_context(patch.object(subprocess, 'check_output', side_effect=output_command))
+            authority = qualification.declare_compiler_service_source(SimpleNamespace(
+                frontend=frontend, worker=worker, ghc_libdir=libdir, runtime_tools=tools,
+                profile='fast-dev', output=output))
+            record_path = output / 'compiler-service-source.json'
+            record = json.loads(record_path.read_text())
+            def acquire_args(epoch='03'):
+                owner = root / ('service-' + epoch)
+                owner.mkdir(mode=0o700)
+                return SimpleNamespace(record=record_path, record_sha256=original_hash(record_path),
+                                       source_id=record['source_id'], profile_id=record['profile_id'],
+                                       service_epoch=epoch * 32, owner_directory=owner)
+            yield SimpleNamespace(authority=authority, record=record, record_path=record_path,
+                                  output=output, acquire_args=acquire_args, commands=commands, run=run)
+
+    def retirement_args(self, acquire):
+        receipt = acquire.owner_directory / 'package-source/receipt.json'
+        receipt_hash = qualification.sha256(receipt)
+        complete = acquire.owner_directory / 'compiler-service-complete-retirement.json'
+        qualification.write_private_json(complete, {
+            'schema': 1, 'kind': 'compiler-service-complete-retirement', 'complete': True,
+            'service_epoch': acquire.service_epoch, 'source_id': acquire.source_id,
+            'profile_id': acquire.profile_id, 'receipt_sha256': receipt_hash})
+        return SimpleNamespace(receipt=receipt, receipt_sha256=receipt_hash, complete_retirement=complete)
+
+    def test_actual_declaration_acquisition_and_exact_retirement(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            authority = json.loads(provider.authority.read_text())
+            self.assertEqual(authority['schema'], 2)
+            self.assertEqual(authority['package_source']['source_id'], list(bytes.fromhex(provider.record['source_id'])))
+            config = (provider.output / 'compiler-service-source.bin').read_bytes()
+            self.assertEqual(config[:9], b'TPSCF001\0')
+            profile = (provider.output / 'compiler-package-profile-v1').read_bytes()
+            self.assertNotIn(bytes.fromhex(provider.record['source_id']), profile)
+            acquire = provider.acquire_args()
+            wire = qualification.acquire_compiler_service_source(acquire)
+            self.assertEqual(wire[:8], b'TPSRC001')
+            self.assertEqual(wire[8:40], bytes.fromhex(acquire.service_epoch))
+            receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
+            self.assertEqual((receipt['acquire_count'], receipt['retained_root_count'], receipt['unique_store_objects']), (1, 2, 2))
+            self.assertEqual(receipt['nar_serialized_bytes'], 34)
+            self.assertEqual(receipt['provider_profile_hash_passes'], 2)
+            release = self.retirement_args(acquire)
+            settled = qualification.release_compiler_service_source(release)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'released')
+            self.assertEqual(qualification.release_compiler_service_source(release), settled)
+            self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
+
+    def test_partial_registration_is_owned_and_settled_before_boot(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            count = 0
+            def fail_second(command, **kwargs):
+                nonlocal count
+                if '--add-root' in command:
+                    count += 1
+                    if count == 2:
+                        # Nix may register the root and fail before returning.
+                        provider.run(command, **kwargs)
+                        raise subprocess.CalledProcessError(1, command)
+                return provider.run(command, **kwargs)
+            with patch.object(subprocess, 'run', side_effect=fail_second), self.assertRaises(subprocess.CalledProcessError):
+                qualification.acquire_compiler_service_source(acquire)
+            state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
+            self.assertEqual(state['status'], 'preboot-released')
+            self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
+            self.assertFalse((acquire.owner_directory / 'package-source/receipt.json').exists())
+
+    def test_ambiguous_partial_registration_retains_plan_and_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            def ambiguous(command, **kwargs):
+                target = Path(command[command.index('--add-root') + 1])
+                target.write_text('not an issued symlink')
+                raise subprocess.CalledProcessError(1, command)
+            with patch.object(subprocess, 'run', side_effect=ambiguous), self.assertRaises(subprocess.CalledProcessError):
+                qualification.acquire_compiler_service_source(acquire)
+            state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
+            self.assertEqual(state['status'], 'retained-unknown')
+            self.assertTrue(state['roots'])
+
+    def test_retirement_other_epoch_refuses_before_root_removal(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            complete = json.loads(release.complete_retirement.read_text())
+            complete['service_epoch'] = '04' * 32
+            qualification.write_private_json(release.complete_retirement, complete)
+            with self.assertRaisesRegex(ValueError, 'exact complete parent'):
+                qualification.release_compiler_service_source(release)
+            self.assertEqual(len(list((acquire.owner_directory / 'package-source/gc-roots').iterdir())), 2)
+
+    def test_partial_release_resumes_only_its_exact_progress(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            original_unlink, count = Path.unlink, 0
+            def unlink(path, *args, **kwargs):
+                nonlocal count
+                if path.parent.name == 'gc-roots':
+                    count += 1
+                    if count == 2:
+                        raise PermissionError('controlled second root failure')
+                return original_unlink(path, *args, **kwargs)
+            with patch.object(Path, 'unlink', new=unlink), self.assertRaises(PermissionError):
+                qualification.release_compiler_service_source(release)
+            settled = qualification.release_compiler_service_source(release)
+            result = json.loads(settled.read_text())
+            self.assertEqual((result['status'], result['release_count']), ('released', 1))
+
+    def test_resumed_absent_root_is_synced_before_release_is_published(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            original_sync, fail = qualification._sync_directory, True
+            def sync(path):
+                nonlocal fail
+                if path.name == 'gc-roots' and fail:
+                    fail = False
+                    raise OSError('controlled directory fsync failure after unlink')
+                original_sync(path)
+            with patch.object(qualification, '_sync_directory', side_effect=sync), self.assertRaises(OSError):
+                qualification.release_compiler_service_source(release)
+            with patch.object(qualification, '_sync_directory', wraps=original_sync) as observed:
+                settled = qualification.release_compiler_service_source(release)
+            self.assertGreaterEqual(sum(call.args[0].name == 'gc-roots' for call in observed.call_args_list), 2)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'released')
+
+    def test_declaration_retains_alias_source_root_in_final_selection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.declared_provider(root, retain_alias=True) as provider:
+                self.assertIn(str(root / 'immutable-alias-fixture'), provider.record['nix_closure']['roots'])
+                self.assertIn(str(root / 'runtime-tools-fixture'), provider.record['nix_closure']['roots'])
+                acquire = provider.acquire_args()
+                qualification.acquire_compiler_service_source(acquire)
+                receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
+                self.assertEqual(receipt['retained_root_count'], 3)
+                alias_root = next(item for item in receipt['roots'] if item['store_path'] == str(root / 'immutable-alias-fixture'))
+                self.assertEqual(Path(alias_root['path']).readlink(), root / 'immutable-alias-fixture')
+                settled = qualification.release_compiler_service_source(self.retirement_args(acquire))
+                self.assertEqual(json.loads(settled.read_text())['status'], 'released')
+                with patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)):
+                    closure, pins = qualification.pin_nix_closure(
+                        root / 'frozen', root / 'runtime-tools-fixture', [root / 'runtime-tools-fixture'],
+                        retained_alias_roots=[root / 'immutable-alias-fixture'])
+                self.assertIn(str(root / 'immutable-alias-fixture'), closure['roots'])
+                self.assertTrue(any(Path(item['path']).readlink() == root / 'immutable-alias-fixture' for item in pins))
+
+    def test_changed_profile_refuses_before_service_side_effects(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            (provider.output / 'compiler-package-profile-v1').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'input changed: profile_path'):
+                qualification.acquire_compiler_service_source(acquire)
+            self.assertFalse((acquire.owner_directory / 'package-source').exists())
+
+    def test_profile_reader_rejects_counts_duplicates_trailing_and_budget(self):
+        body = self.profile_body(Path('/nix/store/example/lib'))
+        unit = qualification._package_frame('base-actual-unit') + qualification._package_frame('actual-abi') + struct.pack('<I', 0) * 4
+        duplicate = body[:-len(unit) - 4] + struct.pack('<I', 2) + unit * 2
+        self.assertEqual(qualification.package_profile_facts(body)['units'][0]['unit_id'], 'base-actual-unit')
+        for invalid in (body[:-1], body + b'extra', duplicate, b'TPGHC001' + struct.pack('<I', 0xffffffff),
+                        b'x' * (qualification.PACKAGE_PROFILE_LIMIT + 1)):
+            with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
+                qualification.package_profile_facts(invalid)
+
+    def test_profile_capture_refuses_ambient_native_loader_overrides(self):
+        for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'):
+            with patch.dict(os.environ, {name: '/mutable'}, clear=True), self.assertRaisesRegex(ValueError, name):
+                qualification._package_environment(Path('/nix/store/example/lib'))
+
+    def test_immutable_alias_owners_survive_and_mutable_hops_with_dotdot_refuse(self):
+        a, b = Path('/nix/store/source'), Path('/nix/store/target')
+        aliases = {a: str(b), b / 'settings': str(b / 'actual-settings')}
+        def info(path):
+            return SimpleNamespace(st_mode=stat.S_IFLNK if path in aliases else stat.S_IFDIR)
+        with patch.object(Path, 'lstat', new=info), patch.object(os, 'readlink', side_effect=lambda path: aliases[path]):
+            self.assertEqual(qualification._package_nix_roots(a / 'settings'), [a, b])
+            aliases[a] = str(b / 'link/../settings')
+            aliases[b / 'link'] = '/tmp/mutable/subdir'
+            with self.assertRaisesRegex(ValueError, 'mutable'):
+                qualification._package_nix_roots(a / 'settings')
 
 
 if __name__ == '__main__':

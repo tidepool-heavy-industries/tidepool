@@ -24,6 +24,36 @@ swarm-build bash scripts/buck2-run.sh run --local-only -c remote.enabled=false \
 
 These script controls complement actual frozen consumer execution.
 
+`//build/package:compiler_service_deployment` declares the supported Nix-only
+compiler package profile without assembling the browser-bearing bundle. Its
+`compiler-deployment.json` is schema 2; `compiler-service-source.bin` is the
+closed frontend configuration selected by `TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG`.
+Configuration describes an expectation. The actual service constructor acquires
+one epoch-owned root set, and fresh worker GHC boot validates the profile before
+the service issues readiness. Schema 1 remains ObservationOnly.
+
+The qualifier's `declare-compiler-service-source` producer captures the matched
+worker's actual expanded GHC unit facts. `acquire-compiler-service-source` verifies
+the sealed source record, imports the immutable profile with `--add-fixed sha256`,
+checks the returned store path and file hash, then registers its roots. Its private
+plan precedes Nix side effects. Failed preboot acquisitions settle only exact
+newly owned symlinks; ambiguous state retains the plan and roots.
+`release-compiler-service-source` requires the existing complete parent retirement
+record bound to the exact epoch, source, profile and acquisition receipt. It
+persists progress before unlinking roots. Root uncertainty prevents normal owner
+directory cleanup. Clients, slots and transaction END do not acquire or release
+these roots.
+
+Profiles reject ambient `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`. Nix alias
+origins and targets are retained separately; a path through mutable storage is
+unsupported. The 16 MiB capture/profile control budget bounds metadata, not the
+retained package closure. Receipts report unique store objects and NAR serialized
+bytes; those bytes are not a filesystem allocation measurement. Frozen profiles
+retain a descriptor locator without hashing the descriptor recursively; actual
+service acquisition re-verifies that descriptor and its sealed source record.
+Provider controls with mocked compiler/Nix processes do not establish real worker
+boot, PublicModule execution or complete descendant retirement evidence.
+
 Both native bundles require executable `bash`, `python3`, `dirname`, `git`,
 `bwrap`, `tmux`, `systemd-run`, `systemctl`, `nix` and `nix-store` in their declared
 runtime-tools closure. Qualification checks these inputs during assembly,

@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_admission_preserves_both_original_and_consumed_identity() {
+    fn configured_identity_validation_accepts_the_matching_pair() {
         configured_deployment()
             .verify_identities([3; 32], [4; 32])
             .unwrap();

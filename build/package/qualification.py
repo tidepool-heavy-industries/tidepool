@@ -382,6 +382,7 @@ def write_private_json(path: Path, value: dict) -> None:
         closing.close()
         os.replace(temporary, path)
         os.chmod(path, 0o600)
+        _sync_directory(path.parent)
     except BaseException as primary:
         secondary = []
         if output is not None or fd is not None:
@@ -405,6 +406,14 @@ def write_private_json(path: Path, value: dict) -> None:
                 secondary.insert(0, primary.__cause__)
             raise primary from BaseExceptionGroup("private receipt cleanup failures", secondary)
         raise
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 def process_start_identity(pid: int) -> dict:
     """Bind a local PID to this boot and its kernel start-time tick."""
@@ -817,19 +826,468 @@ def nix_metadata(tools: Path, roots: list[str]) -> dict:
         raise ValueError("declared Nix closure lacks complete SHA-256 NAR evidence")
     return {"roots": roots, "closure": closure, "nar_hashes": dict(zip(closure, hashes))}
 
-def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict, list[dict]]:
+def pin_nix_closure(root: Path, tools: Path, selected: list[Path], *,
+                    retained_alias_roots: list[Path] = ()) -> tuple[dict, list[dict]]:
     roots = sorted({str(store_root(path)) for path in selected})
+    roots = sorted(set(roots) | {str(owner) for path in retained_alias_roots for owner in _package_nix_roots(path)})
     pinned = []
     for selected_root in roots:
         target = root / "share/exomonad/gc-roots" / hashlib.sha256(selected_root.encode()).hexdigest()
         target.parent.mkdir(parents=True, exist_ok=True)
         command = [str(tools / "bin/nix-store"), "--add-root", str(target), "--indirect", "--realise", selected_root]
         subprocess.run(command, check=True, capture_output=True, timeout=60)
-        if target.resolve(strict=True) != Path(selected_root):
+        if target.resolve(strict=True) != Path(selected_root) and not _package_root_present({"path": str(target), "store_path": selected_root}):
             raise ValueError(f"Nix did not retain the requested deployment root: {target}")
         pinned.append({"path": str(target), "store_path": selected_root, "command": command, "exit_code": 0})
     verify_registered_gc_roots(tools, pinned)
     return nix_metadata(tools, roots), pinned
+
+
+# These are bounded service-control messages, not a package database format.
+PACKAGE_PROFILE_LIMIT = 16 * 1024 * 1024
+PACKAGE_PROFILE_DOMAIN = b"Tidepool GHC supported package profile v1\0"
+PACKAGE_SOURCE_DOMAIN = b"Tidepool compiler service package source v1\0"
+PACKAGE_ROOTED_ENVIRONMENT = (
+    "TIDEPOOL_COMPILER_PACKAGE_PROFILE", "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256",
+    "TIDEPOOL_COMPILER_SERVICE_EPOCH", "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID",
+    "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID", "TIDEPOOL_COMPILER_WORKER_INSTANCE",
+)
+
+
+class _PackageProfileReader:
+    def __init__(self, body: bytes):
+        if len(body) > PACKAGE_PROFILE_LIMIT:
+            raise ValueError(f"package profile has {len(body)} bytes; bound {PACKAGE_PROFILE_LIMIT}")
+        self.body, self.position = body, 0
+
+    def take(self, size: int) -> bytes:
+        end = self.position + size
+        if end > len(self.body):
+            raise ValueError("truncated package profile")
+        value, self.position = self.body[self.position:end], end
+        return value
+
+    def count(self, minimum_bytes: int) -> int:
+        count = struct.unpack("<I", self.take(4))[0]
+        if count > (len(self.body) - self.position) // minimum_bytes:
+            raise ValueError("package profile count exceeds remaining bytes")
+        return count
+
+    def text(self) -> str:
+        size = struct.unpack("<I", self.take(4))[0]
+        value = self.take(size).decode("utf-8")
+        if not value or "\0" in value:
+            raise ValueError("empty or NUL-containing package profile field")
+        return value
+
+    def finish(self) -> None:
+        if self.position != len(self.body):
+            raise ValueError("trailing package profile bytes")
+
+
+def _package_frame(value: bytes | str) -> bytes:
+    value = value.encode() if isinstance(value, str) else value
+    return struct.pack("<I", len(value)) + value
+
+
+def package_profile_facts(body: bytes) -> dict:
+    """Read the actual worker's closed GHC facts; never guess package.conf expansion."""
+    reader = _PackageProfileReader(body)
+    if reader.take(8) != b"TPGHC001":
+        raise ValueError("unsupported GHC package profile")
+    result = dict(zip(("ghc_version", "target", "libdir", "global_database"),
+                      (reader.text() for _ in range(4))))
+    units = []
+    for _ in range(reader.count(24)):
+        unit = {"unit_id": reader.text(), "abi": reader.text()}
+        for field in ("import_dirs", "static_library_dirs", "dynamic_library_dirs", "include_dirs"):
+            unit[field] = [reader.text() for _ in range(reader.count(5))]
+        units.append(unit)
+    reader.finish()
+    if not units or [u["unit_id"] for u in units] != sorted({u["unit_id"] for u in units}):
+        raise ValueError("GHC package profile requires nonempty sorted unique actual units")
+    result["units"] = units
+    return result
+
+
+def _package_nix_roots(path: Path) -> list[Path]:
+    """Retain each immutable alias owner as well as its target; no mutable hops."""
+    pending = path.parts
+    if pending[:3] != ("/", "nix", "store") or len(pending) < 4:
+        raise ValueError(f"supported package path is outside immutable Nix storage: {path}")
+    pending, current, roots, links = list(pending[3:]), Path("/nix/store"), set(), 0
+    while pending:
+        component = pending.pop(0)
+        if component == "..":
+            if current == Path("/nix/store"):
+                raise ValueError(f"supported package alias crosses mutable storage: {path}")
+            current = current.parent
+            continue
+        current /= component
+        roots.add(Path(*current.parts[:4]))
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            links += 1
+            if links > 40:  # Linux pathname-resolution symlink limit.
+                raise ValueError(f"supported package path exceeds symlink resolution limit: {path}")
+            target = Path(os.readlink(current))
+            if target.is_absolute():
+                if target.parts[:3] != ("/", "nix", "store") or len(target.parts) < 4:
+                    raise ValueError(f"supported package alias crosses mutable storage: {current}")
+                pending = list(target.parts[3:]) + pending
+                current = Path("/nix/store")
+            else:
+                pending = list(target.parts) + pending
+                current = current.parent
+    return sorted(roots)
+
+
+def _package_profile_paths(facts: dict) -> list[Path]:
+    values = [facts["libdir"], facts["global_database"]]
+    values += [path for unit in facts["units"]
+               for field in ("import_dirs", "static_library_dirs", "dynamic_library_dirs", "include_dirs")
+               for path in unit[field]]
+    result = []
+    for value in values:
+        path = Path(value)
+        result.extend(_package_nix_roots(path))
+    # GHC's fixed settings file may be an immutable Nix symlink. Its issuer
+    # path and canonical target are both covered; mutable/external aliases fail.
+    settings = Path(facts["libdir"]) / "settings"
+    result.extend(_package_nix_roots(settings))
+    return result
+
+
+def _package_environment(ghc_libdir: Path) -> dict:
+    for name in ("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"):
+        if os.environ.get(name):
+            raise ValueError(f"supported package profile refuses ambient {name}")
+    environment = execution_environment({"environment": {"TIDEPOOL_GHC_LIBDIR": str(ghc_libdir)}})
+    for name in (*PACKAGE_ROOTED_ENVIRONMENT, "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"):
+        environment.pop(name, None)
+    return environment
+
+
+def _package_loader_roots(programs: list[Path], environment: dict) -> list[Path]:
+    result = []
+    for program in programs:
+        interpreter = elf_interpreter(program)
+        if interpreter is None:
+            continue
+        loader = nix_path(Path(interpreter))
+        result.extend(_package_nix_roots(Path(interpreter)))
+        loaded = subprocess.run([str(loader), "--list", str(program)], env=environment,
+                                capture_output=True, text=True, check=True, timeout=60)
+        if "not found" in loaded.stdout:
+            raise ValueError(f"unresolved supported package loader dependency: {program}")
+        for match in re.finditer(r"(?:=>\s+)?(/[^\s]+)\s+\(0x", loaded.stdout):
+            result.extend(_package_nix_roots(Path(match[1])))
+    return result
+
+
+def _package_nar_bytes(tools: Path, closure: list[str]) -> int:
+    values = subprocess.check_output([str(tools / "bin/nix-store"), "--query", "--size", *closure],
+                                     text=True, timeout=60).splitlines()
+    if len(values) != len(closure) or any(not value.isdecimal() for value in values):
+        raise ValueError("package closure lacks complete NAR serialized size evidence")
+    return sum(map(int, values))
+
+
+def _package_source_id(record: dict) -> str:
+    facts = {key: value for key, value in record.items() if key != "source_id"}
+    return hashlib.sha256(PACKAGE_SOURCE_DOMAIN + _canonical_json(facts)).hexdigest()
+
+
+def declare_compiler_service_source(args) -> Path:
+    """Declare one supported profile. Retention starts only at actual service acquisition."""
+    tools, libdir = native_runtime_tools(args.runtime_tools), nix_path(args.ghc_libdir)
+    frontend, worker = args.frontend.resolve(strict=True), args.worker.resolve(strict=True)
+    output = args.output.absolute()
+    if output != output.resolve():
+        raise ValueError("compiler service declaration requires a canonical final output path")
+    output.mkdir(parents=True, exist_ok=False)
+    environment = _package_environment(libdir)
+    authority_path = output / "compiler-deployment.json"
+    subprocess.run([str(frontend), "--compiler-deployment-manifest", str(authority_path)],
+                   env={**environment, "TIDEPOOL_EXTRACT_WORKER": str(worker)}, check=True, timeout=60)
+    authority = json.loads(authority_path.read_text())
+    if authority.get("schema") != 1 or any(authority.get(key) != str(value) for key, value in
+            (("frontend_path", frontend), ("worker_path", worker), ("ghc_libdir", libdir))):
+        raise ValueError("compiler service declaration does not match actual frontend/worker/libdir")
+    with tempfile.TemporaryFile() as captured:
+        subprocess.run([str(worker), "--capture-supported-package-profile-v1"], env=environment,
+                       stdout=captured, check=True, timeout=120)
+        captured.seek(0)
+        body = captured.read(PACKAGE_PROFILE_LIMIT + 1)
+    facts = package_profile_facts(body)
+    if facts["libdir"] != str(libdir):
+        raise ValueError("captured GHC profile used another libdir")
+    selected = _package_profile_paths(facts)
+    selected += [tools]
+    # The configured compiler's own iserv participates in package/native loading.
+    iserv = libdir.parent / "bin/ghc-iserv"
+    if not iserv.is_file():
+        raise ValueError(f"supported compiler lacks its fixed ghc-iserv: {iserv}")
+    selected += [*_package_nix_roots(iserv), *_package_loader_roots([frontend, worker, iserv], environment)]
+    roots = sorted({str(root) for path in selected for root in _package_nix_roots(path)})
+    closure = nix_metadata(tools, roots)
+    wrapper = (b"TPSPF001" + _package_frame(body) + struct.pack("<I", len(closure["closure"]))
+               + b"".join(_package_frame(path) for path in closure["closure"]))
+    if len(wrapper) > PACKAGE_PROFILE_LIMIT:
+        raise ValueError(f"package profile wrapper has {len(wrapper)} bytes; bound {PACKAGE_PROFILE_LIMIT}")
+    profile = output / "compiler-package-profile-v1"
+    profile.write_bytes(wrapper)
+    profile_hash = sha256(profile)
+    profile_store = subprocess.check_output(
+        [str(tools / "bin/nix-store"), "--print-fixed-path", "sha256", profile_hash, profile.name],
+        text=True, timeout=60).strip()
+    if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-compiler-package-profile-v1", profile_store):
+        raise ValueError("Nix did not predict the immutable package profile path")
+    provider = output / "qualification.py"
+    shutil.copyfile(Path(__file__).resolve(), provider)
+    record = {
+        "schema": 1, "kind": "compiler-service-package-source", "build_profile": args.profile,
+        "frontend_path": str(frontend), "frontend_sha256": sha256(frontend),
+        "worker_path": str(worker), "worker_sha256": sha256(worker),
+        "producer_identity": authority["producer_identity"],
+        "consumed_worker_identity": authority["consumed_worker_identity"],
+        "ghc_libdir": str(libdir), "runtime_tools": str(tools),
+        "provider_path": str(provider), "provider_sha256": sha256(provider),
+        "python_path": str(nix_path(tools / "bin/python3")),
+        "profile_path": str(profile), "profile_sha256": profile_hash,
+        "profile_store_path": profile_store,
+        "profile_id": hashlib.sha256(PACKAGE_PROFILE_DOMAIN + body).hexdigest(),
+        "capture_bytes": len(body), "profile_bytes": len(wrapper), "profile_bound_bytes": PACKAGE_PROFILE_LIMIT,
+        "nix_closure": closure, "nar_serialized_bytes": _package_nar_bytes(tools, closure["closure"]),
+    }
+    frozen_descriptor = getattr(args, "frozen_descriptor", None)
+    record["declaration"] = ({"kind": "frozen-native-bundle", "descriptor": str(frozen_descriptor),
+                              "source_oid": args.source_oid, "build_contract_sha256": args.build_contract_sha256}
+                             if frozen_descriptor is not None else {"kind": "declared-native-configuration"})
+    record["source_id"] = _package_source_id(record)
+    record_path = output / "compiler-service-source.json"
+    write_json(record_path, record)
+    authority.update(schema=2, package_source={
+        "source_id": list(bytes.fromhex(record["source_id"])),
+        "supported_profile_id": list(bytes.fromhex(record["profile_id"])),
+        "record_path": str(record_path), "record_sha256": list(bytes.fromhex(sha256(record_path))),
+    })
+    write_json(authority_path, authority)
+    configuration = (b"TPSCF001" + bytes([int(frozen_descriptor is not None)]) + _package_frame(record["python_path"])
+                     + _package_frame(str(provider)) + _package_frame(str(record_path))
+                     + bytes.fromhex(sha256(record_path)) + bytes.fromhex(record["source_id"])
+                     + bytes.fromhex(record["profile_id"]))
+    (output / "compiler-service-source.bin").write_bytes(configuration)
+    return authority_path
+
+
+def _package_digest(value: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None or value == "0" * 64:
+        raise ValueError("package source requires a nonzero lowercase SHA-256 identity")
+    return value
+
+
+def _private_package_directory(path: Path) -> Path:
+    if not path.is_absolute() or path != path.resolve(strict=True):
+        raise ValueError("package source owner directory must be canonical")
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("package source owner directory must be private to the current Unix owner")
+    return path
+
+
+def _private_package_record(path: Path) -> dict:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("package source receipt must be a private regular owner file")
+    return json.loads(path.read_text())
+
+
+def _verify_package_source_record(args) -> tuple[dict, Path]:
+    record_path = args.record.resolve(strict=True)
+    if sha256(record_path) != _package_digest(args.record_sha256):
+        raise ValueError("compiler package source record changed")
+    record = json.loads(record_path.read_text())
+    if (record.get("schema") != 1 or record.get("kind") != "compiler-service-package-source"
+            or record.get("source_id") != _package_digest(args.source_id)
+            or record.get("profile_id") != _package_digest(args.profile_id)
+            or _package_source_id(record) != args.source_id):
+        raise ValueError("compiler package source association mismatch")
+    declaration = record.get("declaration")
+    if declaration == {"kind": "declared-native-configuration"}:
+        pass
+    elif isinstance(declaration, dict) and declaration.get("kind") == "frozen-native-bundle":
+        descriptor_path = Path(declaration["descriptor"])
+        descriptor = verify(descriptor_path)
+        if (descriptor.get("compiler_service_source") != {
+                "record_path": str(record_path), "record_sha256": args.record_sha256,
+                "source_id": args.source_id, "profile_id": args.profile_id}
+                or descriptor["source_oid"] != declaration["source_oid"]
+                or sha256(Path(descriptor["bundle_root"]) / "share/exomonad/native-build-contract.json") != declaration["build_contract_sha256"]):
+            raise ValueError("frozen descriptor does not own the configured compiler package source")
+    else:
+        raise ValueError("unsupported compiler package source declaration")
+    for path_key, seal_key in (("frontend_path", "frontend_sha256"), ("worker_path", "worker_sha256"),
+                               ("provider_path", "provider_sha256"), ("profile_path", "profile_sha256")):
+        if sha256(Path(record[path_key])) != record[seal_key]:
+            raise ValueError(f"compiler package source input changed: {path_key}")
+    tools = native_runtime_tools(Path(record["runtime_tools"]))
+    if nix_metadata(tools, record["nix_closure"]["roots"]) != record["nix_closure"]:
+        raise ValueError("compiler package source Nix closure changed")
+    _package_environment(Path(record["ghc_libdir"]))
+    return record, tools
+
+
+def _package_root_present(item: dict) -> bool:
+    target = Path(item["path"])
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISLNK(info.st_mode) or target.readlink() != Path(item["store_path"]):
+        raise ValueError(f"package root is not the issued exact symlink: {target}")
+    _package_nix_roots(Path(item["store_path"]))
+    return True
+
+
+def _settle_preboot_package_roots(state: dict, plan: Path) -> None:
+    """Only this fresh, unpublished acquisition owns these exact root names."""
+    try:
+        # Observe all before removal; one ambiguous root keeps the owner intact.
+        present = [item for item in state["roots"] if _package_root_present(item)]
+        for item in present:
+            Path(item["path"]).unlink()
+        if (plan.parent / "gc-roots").exists():
+            _sync_directory(plan.parent / "gc-roots")
+        for item in state["roots"]:
+            item["state"] = "preboot-released"
+        state["status"] = "preboot-released"
+    except BaseException as cleanup_error:
+        state.update(status="retained-unknown", cleanup_failure=type(cleanup_error).__name__ + ": " + str(cleanup_error))
+    write_private_json(plan, state)
+
+
+def acquire_compiler_service_source(args) -> bytes:
+    record, tools = _verify_package_source_record(args)
+    epoch = _package_digest(args.service_epoch)
+    owner = _private_package_directory(args.owner_directory)
+    root = owner / "package-source"
+    root.mkdir(mode=0o700, exist_ok=False)
+    _sync_directory(owner)
+    profile_store = record["profile_store_path"]
+    roots = sorted({*record["nix_closure"]["roots"], profile_store})
+    planned = [{"path": str(root / "gc-roots" / hashlib.sha256(value.encode()).hexdigest()),
+                "store_path": value, "state": "planned"} for value in roots]
+    state = {"schema": 1, "kind": "compiler-service-package-acquisition", "status": "acquiring",
+             "service_epoch": epoch, "source_id": args.source_id, "profile_id": args.profile_id,
+             "source_record_sha256": args.record_sha256, "runtime_tools": str(tools),
+             "roots": planned, "acquire_count": 1, "release_count": 0,
+             "capture_bytes": record["capture_bytes"], "profile_declaration_write_bytes": record["profile_bytes"],
+             "provider_profile_hash_passes": 1, "provider_profile_hash_bytes": record["profile_bytes"],
+             "nix_profile_import_attempts": 0,
+             "base_nar_serialized_bytes": record["nar_serialized_bytes"]}
+    plan = root / "acquisition.json"
+    # The durable plan precedes --add AND the first root registration. No failure
+    # can turn a partially registered root set into an unowned ordinary miss.
+    write_private_json(plan, state)
+    try:
+        state["nix_profile_import_attempts"] = 1
+        write_private_json(plan, state)
+        added = subprocess.check_output([str(tools / "bin/nix-store"), "--add-fixed", "sha256", record["profile_path"]],
+                                        text=True, timeout=60).strip()
+        if added != profile_store:
+            raise ValueError("Nix-added immutable profile path differs from the declared profile")
+        state["provider_profile_hash_passes"] += 1
+        state["provider_profile_hash_bytes"] += record["profile_bytes"]
+        if sha256(Path(added)) != record["profile_sha256"]:
+            raise ValueError("Nix-added immutable profile differs from the declared profile")
+        (root / "gc-roots").mkdir(mode=0o700)
+        for item in planned:
+            item["state"] = "registering"
+            write_private_json(plan, state)
+            subprocess.run([str(tools / "bin/nix-store"), "--add-root", item["path"],
+                            "--indirect", "--realise", item["store_path"]],
+                           check=True, capture_output=True, timeout=60)
+            if not _package_root_present(item):
+                raise ValueError("Nix registered another service package root")
+            item["state"] = "registered"
+            write_private_json(plan, state)
+        verify_registered_gc_roots(tools, planned)
+        closure = nix_metadata(tools, roots)
+        state.update(status="acquired", nix_closure=closure,
+                     nar_serialized_bytes=_package_nar_bytes(tools, closure["closure"]),
+                     unique_store_objects=len(closure["closure"]), retained_root_count=len(roots),
+                     immutable_profile_path=profile_store, immutable_profile_sha256=record["profile_sha256"])
+        write_private_json(plan, state)
+        receipt = root / "receipt.json"
+        write_private_json(receipt, state)
+        return (b"TPSRC001" + bytes.fromhex(epoch) + bytes.fromhex(args.source_id) + bytes.fromhex(args.profile_id)
+                + _package_frame(str(receipt)) + bytes.fromhex(sha256(receipt))
+                + _package_frame(profile_store) + bytes.fromhex(record["profile_sha256"]))
+    except BaseException as error:
+        state.update(status="retained-unknown", failure=type(error).__name__ + ": " + str(error))
+        # Keep planned and observed state distinct, including the root whose
+        # command failed. Inaccessible state is never evidence of no roots.
+        _settle_preboot_package_roots(state, plan)
+        raise
+
+
+def release_compiler_service_source(args) -> Path:
+    receipt = args.receipt.absolute()
+    _private_package_directory(receipt.parent)
+    if sha256(receipt) != _package_digest(args.receipt_sha256):
+        raise ValueError("compiler package source receipt changed")
+    state = _private_package_record(receipt)
+    complete_path = args.complete_retirement.absolute()
+    if complete_path != receipt.parent.parent / "compiler-service-complete-retirement.json":
+        raise ValueError("compiler package release requires the issued parent control record")
+    _private_package_directory(complete_path.parent)
+    complete = _private_package_record(complete_path)
+    expected = {"schema": 1, "kind": "compiler-service-complete-retirement", "complete": True,
+                "receipt_sha256": args.receipt_sha256,
+                **{key: state[key] for key in ("service_epoch", "source_id", "profile_id")}}
+    if complete != expected or state.get("status") != "acquired" or state.get("release_count") != 0:
+        raise ValueError("compiler package release lacks the exact complete parent retirement")
+    if receipt.name != "receipt.json" or receipt.parent.name != "package-source":
+        raise ValueError("compiler package release receipt is outside its issued owner")
+    settlement = receipt.parent / "release.json"
+    prior = _private_package_record(settlement) if settlement.exists() else None
+    if prior is not None:
+        if any(prior.get(key) != state.get(key) for key in ("service_epoch", "source_id", "profile_id")) or prior.get("complete_retirement_sha256") != sha256(complete_path):
+            raise ValueError("compiler package release progress belongs to another retirement")
+        if prior.get("status") == "released":
+            return settlement
+        state = prior
+    roots = state["roots"]
+    for item in roots:
+        target = receipt.parent / "gc-roots" / hashlib.sha256(item["store_path"].encode()).hexdigest()
+        if item["path"] != str(target) or item["state"] not in ("registered", "releasing", "released"):
+            raise ValueError("compiler package release root differs from the issued plan")
+        present = _package_root_present(item)
+        if item["state"] == "released" and present:
+            raise ValueError("compiler package root reappeared after release")
+        if item["state"] == "registered" and not present:
+            raise ValueError("compiler package release cannot confirm exact retained root")
+    result = {**state, "status": "releasing", "complete_retirement_sha256": sha256(complete_path)}
+    write_private_json(settlement, result)
+    try:
+        for item in roots:
+            if item["state"] == "released":
+                continue
+            item["state"] = "releasing"
+            write_private_json(settlement, result)
+            if _package_root_present(item):
+                Path(item["path"]).unlink()
+            _sync_directory(Path(item["path"]).parent)
+            item["state"] = "released"
+            write_private_json(settlement, result)
+        result.update(status="released", release_count=1, retained_root_count=0)
+        write_private_json(settlement, result)
+    except BaseException as error:
+        result.update(status="retained-unknown", failure=type(error).__name__ + ": " + str(error))
+        write_private_json(settlement, result)
+        raise
+    return settlement
 
 def catalog_source_inventory(root: Path) -> dict:
     """Retained source names are original evidence, so aliases are forbidden."""
@@ -1030,7 +1488,8 @@ def verify_registered_gc_roots(tools: Path, pins: list[dict],
     expected = set()
     for pinned in pins:
         target = Path(pinned["path"])
-        if not target.is_absolute() or target.resolve(strict=True) != Path(pinned["store_path"]):
+        if not target.is_absolute() or (target.resolve(strict=True) != Path(pinned["store_path"])
+                                      and not _package_root_present(pinned)):
             raise ValueError("deployment Nix GC root was removed or changed")
         expected.add((str(target), pinned["store_path"]))
     if not expected:
@@ -1740,6 +2199,12 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     }
+    service_config = root / "share/exomonad/compiler-service/compiler-service-source.bin"
+    if service_config.is_file():
+        # This explicit profile is checked against actual loader maps during
+        # freeze. Schema1 bundles retain their existing loader environment.
+        environment.pop("LD_LIBRARY_PATH")
+        environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = str(service_config)
 
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     environment.update(offline_compilers(contract.get("offline_compilers")))
@@ -2010,6 +2475,18 @@ def freeze(args) -> Path:
     for key, selected in (("frontend_path", environment["TIDEPOOL_EXTRACT"]), ("worker_path", environment["TIDEPOOL_EXTRACT_WORKER"]), ("ghc_libdir", environment["TIDEPOOL_GHC_LIBDIR"])):
         if authority[key] != selected:
             raise ValueError(f"compiler manifest does not bind its final deployment path: {key}")
+    declare_compiler_service_source(argparse.Namespace(
+        frontend=Path(environment["TIDEPOOL_EXTRACT"]), worker=Path(environment["TIDEPOOL_EXTRACT_WORKER"]),
+        ghc_libdir=Path(environment["TIDEPOOL_GHC_LIBDIR"]), runtime_tools=tools,
+        output=root / "share/exomonad/compiler-service", profile=args.expect_profile,
+        frozen_descriptor=root / DESCRIPTOR, source_oid=oid,
+        build_contract_sha256=sha256(root / "share/exomonad/native-build-contract.json")))
+    shutil.copyfile(root / "share/exomonad/compiler-service/compiler-deployment.json", compiler)
+    service_record_path = root / "share/exomonad/compiler-service/compiler-service-source.json"
+    service_record = json.loads(service_record_path.read_text())
+    environment.pop("LD_LIBRARY_PATH")
+    environment["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = str(
+        root / "share/exomonad/compiler-service/compiler-service-source.bin")
     external = {}
     for key in ("TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", *OFFLINE_COMPILERS):
         path = nix_path(Path(environment[key]))
@@ -2018,13 +2495,15 @@ def freeze(args) -> Path:
     external["runtime_tools"] = {"path": str(tools), "store_path": str(store_root(tools))}
     evidence = loader_evidence(root, execution_environment({"environment": environment}))
     selected = [Path(item["path"]) for item in external.values()]
+    selected += [Path(path) for path in service_record["nix_closure"]["roots"]]
     for item in evidence.values():
         if item["linkage"] == "dynamic":
             selected.append(Path(item["loader"]))
             selected.extend(Path(path) for path in item["libraries"] if path.startswith("/nix/store/"))
     if contract["stdlib_mode"] == "catalog-backed":
         selected.append(Path(contract["native_catalog"]["source_selection"]["snapshot_root"]))
-    closure, gc_roots = pin_nix_closure(root, tools, selected)
+    closure, gc_roots = pin_nix_closure(root, tools, selected,
+                                      retained_alias_roots=[Path(path) for path in service_record["nix_closure"]["roots"]])
     if contract["stdlib_mode"] == "catalog-backed":
         transfer_catalog_retention(root, contract, gc_roots, tools)
     copied_log = root / "share/exomonad/build.log"
@@ -2041,6 +2520,9 @@ def freeze(args) -> Path:
         "environment": environment, "external_inputs": external, "elf_runtime": evidence,
         "nix_closure": closure, "gc_roots": gc_roots,
         "programs": programs(root), "cohorts": cohorts(),
+        "compiler_service_source": {
+            "record_path": str(service_record_path), "record_sha256": sha256(service_record_path),
+            "source_id": service_record["source_id"], "profile_id": service_record["profile_id"]},
     }
     descriptor["inventory"] = inventory(root, [DESCRIPTOR])
     descriptor["inventory_sha256"] = digest_inventory(descriptor["inventory"])
@@ -2098,6 +2580,17 @@ def verify(path: Path) -> dict:
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     registered_roots = _RegisteredGcRoots(tools, descriptor["nix_closure"]["roots"])
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
+    if "compiler_service_source" in descriptor:
+        service = descriptor["compiler_service_source"]
+        record_path = root / "share/exomonad/compiler-service/compiler-service-source.json"
+        if service.get("record_path") != str(record_path) or sha256(record_path) != service.get("record_sha256"):
+            raise ValueError("frozen compiler package source record changed")
+        record = json.loads(record_path.read_text())
+        if (record.get("source_id") != service.get("source_id") or _package_source_id(record) != service.get("source_id")
+                or record.get("profile_id") != service.get("profile_id")
+                or record.get("declaration", {}).get("descriptor") != str(path)):
+            raise ValueError("frozen compiler package source association changed")
+        expected_roots.update(record["nix_closure"]["roots"])
     verified_catalog = None
     if descriptor["stdlib_mode"] == "catalog-backed":
         verified_catalog = _verify_native_catalog_bundle(
@@ -2116,7 +2609,8 @@ def verify(path: Path) -> dict:
     if len(descriptor["gc_roots"]) != len(expected_gc_roots) or {item["path"]: item["store_path"] for item in descriptor["gc_roots"]} != expected_gc_roots:
         raise ValueError("deployment must pin exactly its declared Nix runtime roots")
     for pinned in descriptor["gc_roots"]:
-        if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
+        if (Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"])
+                and not _package_root_present(pinned)):
             raise ValueError("deployment Nix GC root was removed or changed")
     verify_registered_gc_roots(tools, descriptor["gc_roots"], registered_roots)
     expected_environment = _native_environment(root, verified_catalog, tools)
@@ -2636,6 +3130,19 @@ def run_catalog_gate(args) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    package_declaration = commands.add_parser("declare-compiler-service-source")
+    for key in ("frontend", "worker", "ghc-libdir", "runtime-tools", "output"):
+        package_declaration.add_argument("--" + key, required=True, type=Path)
+    package_declaration.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
+    package_acquire = commands.add_parser("acquire-compiler-service-source")
+    package_acquire.add_argument("--record", required=True, type=Path)
+    package_acquire.add_argument("--owner-directory", required=True, type=Path)
+    for key in ("record-sha256", "source-id", "profile-id", "service-epoch"):
+        package_acquire.add_argument("--" + key, required=True)
+    package_release = commands.add_parser("release-compiler-service-source")
+    for key in ("receipt", "complete-retirement"):
+        package_release.add_argument("--" + key, required=True, type=Path)
+    package_release.add_argument("--receipt-sha256", required=True)
     snapshot = commands.add_parser("snapshot-sources")
     for key in ("sources", "effects", "jev-sources", "cohort", "root-entry-source", "workbench-entry-source", "async-workbench-entry-source", "output"):
         snapshot.add_argument("--" + key, required=True, type=Path)
@@ -2705,7 +3212,13 @@ def main(argv=None) -> int:
                          help="private run-owner.json from the running qualification")
     args = parser.parse_args(argv)
     try:
-        if args.command == "snapshot-sources":
+        if args.command == "declare-compiler-service-source":
+            print(declare_compiler_service_source(args))
+        elif args.command == "acquire-compiler-service-source":
+            sys.stdout.buffer.write(acquire_compiler_service_source(args))
+        elif args.command == "release-compiler-service-source":
+            print(release_compiler_service_source(args))
+        elif args.command == "snapshot-sources":
             snapshot_catalog_sources(args)
         elif args.command == "retain-sources":
             print(retain_catalog_sources(args))
