@@ -228,24 +228,12 @@ impl RunControlClient {
         reservation: ActorRef,
         operation: RootOperation,
     ) -> Result<RootOperationResult, DirectoryError> {
-        let receiver = self
-            .ask(|reply| RunControlMessage::BeginPreparation {
-                reservation: Some(reservation),
-                intent: PreparationIntent::Creation,
-                operation,
-                reply,
-            })
-            .await??;
-        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
-        if delivery.is_error() {
-            return Ok(delivery.accept());
-        }
-        self.ask(|reply| RunControlMessage::AcceptPreparation {
-            id: delivery.id,
-            reply,
-        })
-        .await??;
-        Ok(delivery.accept())
+        self.prepare_owned_root(
+            RootPreparationOwner::Worker(reservation),
+            PreparationIntent::Creation,
+            operation,
+        )
+        .await
     }
 
     pub(crate) async fn generation_population(

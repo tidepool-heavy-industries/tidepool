@@ -353,12 +353,19 @@ enum PreparationIntent {
     Creation,
     ExistingInput,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootPreparationOwner {
+    Run,
+    Worker(ActorRef),
+    NativeResource(ActorRef),
+}
 enum PreparationPhase {
     Running,
     Accepted,
     Settled(crate::CleanupComponentOutcome),
 }
 struct RootPreparationRecord {
+    owner: RootPreparationOwner,
     phase: PreparationPhase,
     compiler: RetainedActorExit,
     placement: Option<crate::ActorPlacement>,
@@ -556,6 +563,11 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    #[cfg(test)]
+    ObserveActorPreparations {
+        actor: ActorRef,
+        reply: oneshot::Sender<Vec<(u64, bool)>>,
+    },
     GenerationPopulation {
         dependency: GenerationDependency,
         reply: oneshot::Sender<GenerationPopulation>,
@@ -733,7 +745,7 @@ pub(super) enum RunControlMessage {
         reply: oneshot::Sender<()>,
     },
     BeginPreparation {
-        reservation: Option<ActorRef>,
+        owner: RootPreparationOwner,
         intent: PreparationIntent,
         operation: RootOperation,
         reply: oneshot::Sender<Result<oneshot::Receiver<RootDelivery>, DirectoryError>>,
@@ -905,6 +917,19 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            #[cfg(test)]
+            RunControlMessage::ObserveActorPreparations { actor, reply } => {
+                let _ = reply.send(
+                    state
+                        .preparations
+                        .iter()
+                        .filter_map(|(id, record)| {
+                            (record.owner == RootPreparationOwner::NativeResource(actor))
+                                .then_some((*id, record.dependency.is_some()))
+                        })
+                        .collect(),
+                );
+            }
             RunControlMessage::GenerationPopulation { dependency, reply } => {
                 let _ = reply.send(state.generation_population(dependency));
             }
@@ -1363,11 +1388,10 @@ impl Actor for RunControl {
                 reply,
             } => {
                 let result = if !state.entries.contains_key(&parent)
-                    || state
-                        .preparations
-                        .get(&preparation)
-                        .is_none_or(|record| matches!(record.phase, PreparationPhase::Settled(_)))
-                {
+                    || state.preparations.get(&preparation).is_none_or(|record| {
+                        record.owner != RootPreparationOwner::NativeResource(parent)
+                            || matches!(record.phase, PreparationPhase::Settled(_))
+                    }) {
                     Err(DirectoryError::Unauthorized { actor: parent })
                 } else if state.resources.contains_key(&resource.cell.get_id()) {
                     Err(DirectoryError::Unauthorized { actor: parent })
@@ -1680,7 +1704,7 @@ impl Actor for RunControl {
                 let _ = reply.send(());
             }
             RunControlMessage::BeginPreparation {
-                reservation,
+                owner,
                 intent,
                 operation,
                 reply,
@@ -1696,11 +1720,21 @@ impl Actor for RunControl {
                     let _ = reply.send(Err(DirectoryError::Closed));
                     return Ok(());
                 }
+                if let RootPreparationOwner::NativeResource(parent) = owner {
+                    if !state.entries.contains_key(&parent) {
+                        let _ = reply.send(Err(DirectoryError::Unauthorized { actor: parent }));
+                        return Ok(());
+                    }
+                }
                 let id = state.next_preparation;
                 state.next_preparation = state
                     .next_preparation
                     .checked_add(1)
                     .ok_or("root preparation identity exhausted")?;
+                let reservation = match owner {
+                    RootPreparationOwner::Worker(actor) => Some(actor),
+                    RootPreparationOwner::Run | RootPreparationOwner::NativeResource(_) => None,
+                };
                 let dependency = if let Some(actor) = reservation {
                     let Some(record) = state.reservations.get_mut(&actor) else {
                         let _ = reply.send(Err(DirectoryError::Unauthorized { actor }));
@@ -1721,6 +1755,7 @@ impl Actor for RunControl {
                 state.preparations.insert(
                     id,
                     RootPreparationRecord {
+                        owner,
                         phase: PreparationPhase::Running,
                         compiler: compiler.clone(),
                         placement: None,
@@ -2601,10 +2636,46 @@ impl RunControlClient {
         &self,
         operation: RootOperation,
     ) -> Result<RootOperationResult, DirectoryError> {
+        self.prepare_owned_root(
+            RootPreparationOwner::Run,
+            PreparationIntent::Creation,
+            operation,
+        )
+        .await
+    }
+
+    pub(super) async fn prepare_actor_resource(
+        &self,
+        parent: ActorRef,
+        operation: RootOperation,
+    ) -> Result<RootOperationResult, DirectoryError> {
+        self.prepare_owned_root(
+            RootPreparationOwner::NativeResource(parent),
+            PreparationIntent::Creation,
+            operation,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn actor_preparation_observations(
+        &self,
+        actor: ActorRef,
+    ) -> Result<Vec<(u64, bool)>, DirectoryError> {
+        self.ask(|reply| RunControlMessage::ObserveActorPreparations { actor, reply })
+            .await
+    }
+
+    async fn prepare_owned_root(
+        &self,
+        owner: RootPreparationOwner,
+        intent: PreparationIntent,
+        operation: RootOperation,
+    ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
             .ask(|reply| RunControlMessage::BeginPreparation {
-                reservation: None,
-                intent: PreparationIntent::Creation,
+                owner,
+                intent,
                 operation,
                 reply,
             })
@@ -2624,24 +2695,12 @@ impl RunControlClient {
         &self,
         operation: RootOperation,
     ) -> Result<RootOperationResult, DirectoryError> {
-        let receiver = self
-            .ask(|reply| RunControlMessage::BeginPreparation {
-                reservation: None,
-                intent: PreparationIntent::ExistingInput,
-                operation,
-                reply,
-            })
-            .await??;
-        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
-        if delivery.is_error() {
-            return Ok(delivery.accept());
-        }
-        self.ask(|reply| RunControlMessage::AcceptPreparation {
-            id: delivery.id,
-            reply,
-        })
-        .await??;
-        Ok(delivery.accept())
+        self.prepare_owned_root(
+            RootPreparationOwner::Run,
+            PreparationIntent::ExistingInput,
+            operation,
+        )
+        .await
     }
     pub(crate) async fn reserve_existing_input(
         &self,
