@@ -776,7 +776,7 @@ fn binding_capture_refusal(estimated: u64, allowance: u64) -> CompileError {
 // The separate row-fact check includes its exact requirements. If real workloads
 // hit this pessimistic reservation, use actual-path preflight in Materializer.
 fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64, CompileError> {
-    let cid_link = 9 + 9 + 39;
+    let cid_link: u64 = 9 + 9 + 39;
     let hamt_node = 9 + (9 + 4) + 9;
     let routing = 52 * (hamt_node + cid_link);
     let key_bucket_heads = 5 * 9;
