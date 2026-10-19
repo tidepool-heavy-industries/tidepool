@@ -1445,8 +1445,8 @@ data WorldResolution = WorldResolved WorldModuleReceipt | WorldAbsent | WorldRej
 worldModuleReceipt :: HscEnv -> Map.Map Module WorldHomeSource -> Module -> IO WorldModuleReceipt
 worldModuleReceipt env selected owner
   | isReservedSessionModuleName (moduleNameString (moduleName owner)) = throwIO WorldQueryUnsupported
-  | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
-      maybe (throwIO WorldQueryCorrupt) (pure . WorldModuleReceipt owner . Just) (Map.lookup owner selected)
+  | Just source <- Map.lookup owner selected = pure (WorldModuleReceipt owner (Just source))
+  | isHomeUnit (hsc_home_unit env) (moduleUnit owner) = throwIO WorldQueryCorrupt
   | otherwise = pure (WorldModuleReceipt owner Nothing)
 
 handleWorldQueryFailure :: WorldInputFacts -> WorldPublicModuleRequest -> Ghc BS.ByteString -> Ghc BS.ByteString
