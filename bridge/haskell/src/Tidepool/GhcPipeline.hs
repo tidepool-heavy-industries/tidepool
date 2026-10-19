@@ -5482,11 +5482,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                         -- The shared reservation remains conservative until cleanup
                                         -- succeeds; failure retains it and retires this worker.
                                         writeIORef universe retired
-                                        forM_ evicted $ \old@(HeldCompilerWorld oldFacts oldReference _ _) ->
-                                          observeCompilerWorld timing retired WorldEvicted
-                                            (worldInputsIdentity oldFacts) oldReference (Just old)
                                         failures <- attemptReleases
-                                          [(CompilerScopeRestore,retireCompilerWorldBacking timing retired old) | old <- evicted]
+                                          [(CompilerScopeRestore, do
+                                              observeCompilerWorld timing retired WorldEvicted
+                                                (worldInputsIdentity oldFacts) oldReference (Just old)
+                                              retireCompilerWorldBacking timing retired old)
+                                          | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
                                         released <- captureCompletion (pure ())
                                         finishCompletion (appendCleanupFailures released failures)
                                         -- No fallible or interruptible work follows decoder commit.
