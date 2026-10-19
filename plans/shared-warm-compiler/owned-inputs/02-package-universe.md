@@ -1,5 +1,12 @@
 # Assignment 02 — own the consumed package universe
 
+Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
+Rust retains primary notebook selections, execution provenance and atomic
+publication; Haskell owns compiler-derived worlds and invalidation. The
+paired owner review must classify mixed structures before moving or deleting
+them. The previous field/path inventory below remains investigative evidence,
+not a requirement to preserve its host-side decomposition.
+
 Base: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. Future implementation assignment; no pinning, toolchain change or executed check is authorized by this document alone. Follow [supervisor integration](README.md) and coordinate shared Haskell/protocol edits with warm-workers.
 
 Primary goal: stop repeated package-interface reads, hashing and sidecar decoding only when a real owner guarantees that host verification and GHC consume the same immutable package bytes. Secondary questions are lazy/transitive package loading and complete home-owner negative dependencies. Do not turn a successful path/hash observation into a cross-request lease.
