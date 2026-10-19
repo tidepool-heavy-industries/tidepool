@@ -356,12 +356,13 @@ fn runtime_info_is_read_only_actor_routed_and_reuses_startup_observation() {
     assert_eq!(variants.len(), 2);
     assert_eq!(variants[0].ctor, "RuntimeStartupNotAdmitted");
     assert_eq!(variants[1].ctor, "RuntimeStartupObserved");
-    assert_eq!(
-        variants[1].fields,
-        tidepool_protocol::types::VariantFields::Positional(vec![HsType::Named(
-            "InitialContextObservation"
-        ),])
-    );
+    let tidepool_protocol::types::VariantFields::Positional(fields) = &variants[1].fields else {
+        panic!("startup observation must retain the existing typed payload")
+    };
+    assert!(matches!(
+        fields.as_slice(),
+        [HsType::Named("InitialContextObservation")]
+    ));
     assert!(effect
         .external_types
         .iter()

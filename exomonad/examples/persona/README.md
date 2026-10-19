@@ -83,6 +83,22 @@ including the supplied extension, and returns the publication outcome with its
 actual resolved file reference. Existing files produce a conflict. Directory
 separators and traversal names refuse; filesystem authority remains with File.
 `Persona.Orientation.startup` supplies their complete text as initial context.
+For an optional runtime-aware arrival, set `[haskell].spec` in
+`.exomonad/config.toml` to `"Persona.Spec.runtimeSpec"` before the next fresh
+launch. That spec selects `Persona.Orientation.startupWithRuntime`, which composes
+memory chosen by the authored policy with a separate `runtime at arrival` section.
+It reports the executing spec/source generation, declared tools, configured
+provider/model/effort, and startup evidence as observed during initialization.
+At that point startup is preparing; the completed publication receipt can be
+queried afterward with `getRuntimeInfo`. Configured inference is distinct from
+the effective selection of a later model request. No memory is selected by the
+runtime observer. This optional policy is not selected by the default config.
+
+The runtime section has an explicit arrival-only lifetime. Sections are published
+as one startup context block, so `Persona.Context.refresh` replaces that block
+with current memory. Use `Persona.Orientation.renderRuntime` or `getRuntimeInfo`
+again to compose current runtime evidence into a later context edit.
+
 `Persona.Context.refresh` explicitly reads the current files and replaces that
 authored block using its issued context reference. A missing or unpublished
 block refuses; writing memory does not automatically refresh the current view.

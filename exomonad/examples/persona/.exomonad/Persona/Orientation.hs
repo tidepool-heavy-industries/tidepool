@@ -41,6 +41,8 @@ startup _ = do
 
 -- | Opt-in authored composition. Runtime observations are separate from memory
 -- selection; a startup query reports its current phase, not future publication.
+-- This runtime section is arrival-only: Context.refresh replaces the aggregate
+-- startup block with memory. Call renderRuntime again for a fresh observation.
 renderRuntime :: Member RuntimeInfo effects => Eff effects (Either RuntimeInfoError Text)
 renderRuntime = fmap (T.pack . show) <$> E.getRuntimeInfo
 
