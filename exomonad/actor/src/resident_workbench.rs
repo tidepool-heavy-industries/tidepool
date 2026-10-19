@@ -17302,8 +17302,8 @@ pub(crate) mod request_tests {
                 HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
             }
-            assert!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte) > 0,
-                "cold runtime namespace was captured before the source-domain refusal");
+            assert_eq!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte), 0,
+                "unsupported source refuses before typed bindings are encoded by the cold builder");
             let facade_body = "{-# LANGUAGE PackageImports #-}\nmodule Facade (module M) where\nimport \"base\" Data.Maybe as M\n";
             let home_body = "module GHC.Internal.Maybe (HomeMaybe(..)) where\ndata HomeMaybe = Just Bool\n";
             let (reexports, _reexport_owner) = world_query_test_source_files(&[vec![("Facade.hs", facade_body), ("GHC/Internal/Maybe.hs", home_body)]]);
