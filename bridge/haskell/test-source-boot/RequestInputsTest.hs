@@ -557,7 +557,7 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
   let replaceField name replacement = TMap [(key,if key == TString name then replacement else old) | (key,old) <- fields]
       wrongProducer = BS.unpack (BS.cons (BS.head producer `xor` 1) (BS.tail producer))
       contextMutations =
-        [("version",replaceField "version" (TInt 4),"unsupported compiler world descriptor version")
+        [("version",replaceField "version" (TInt 5),"unsupported compiler world descriptor version")
         ,("producer",replaceField "producer" (TList (map (TInt . fromIntegral) wrongProducer)),"compiler world context producer differs")
         ,("missing-field",TMap (filter ((/= TString "roles") . fst) fields),"invalid compiler world descriptor fields")
         ,("unknown-field",TMap [(if key == TString "roles" then TString "wrong" else key,value) | (key,value) <- fields],"unsupported compiler world descriptor field")]
@@ -719,7 +719,13 @@ worldPrimaryChargeOracle contextRoot associationRoot pairs = do
     bytes <- size cid
     kind <- field "kind" role
     extra <- case kind of
-      TString "published_source_original" -> linked "selection" role >>= selection
+      TString "published_source_original" -> do
+        selected <- linked "selection" role >>= selection
+        authorityCID <- linked "native_authority" role
+        authority <- value authorityCID
+        authorityBytes <- size authorityCID
+        authorityMaps <- forM ["offers","native_availability","input_decisions"] $ \name -> linked name authority >>= hamt
+        pure (plus selected (foldl plus (authorityBytes,1) (map snd authorityMaps)))
       _ -> pure (0,0)
     pure (plus (bytes,1) extra)
   lexicalFacts <- forM (fst (maps !! 1)) $ \(_,reference) -> do
