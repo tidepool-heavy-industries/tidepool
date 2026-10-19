@@ -2091,7 +2091,7 @@ mod normalized_dependency_tests {
     use crate::certified_products::tests::{
         original_groups_fixture_with_interface, recovered_witness_fixtures,
     };
-    use crate::certified_products::{PendingImportOwner, fixture_finalized_product};
+    use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
     use crate::declaration_context::{
         ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
     };
@@ -2248,12 +2248,10 @@ mod normalized_dependency_tests {
         assert!(!Arc::ptr_eq(&mixed, &reduced));
         assert!(reduced.identity.get().is_none());
         assert_eq!(reduced.reachable, closed.reachable);
-        assert!(
-            !reduced
-                .reachable
-                .iter()
-                .any(|node| node.artifact() == sibling_id)
-        );
+        assert!(!reduced
+            .reachable
+            .iter()
+            .any(|node| node.artifact() == sibling_id));
         assert!(reduced.offer().same_issuance(&broad_offer));
         assert_ne!(reduced.identity().unwrap(), mixed_identity);
         assert_ne!(
@@ -2376,13 +2374,11 @@ mod normalized_dependency_tests {
             .unwrap();
         let retained = types.retain_template_availability(&complete).unwrap();
         assert_eq!(retained.projection().snapshot_roles().len(), 1);
-        assert!(
-            retained
-                .projection()
-                .roles()
-                .iter()
-                .all(|role| role.original().is_none())
-        );
+        assert!(retained
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
         let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
             .unwrap()
             .descriptor
@@ -2459,42 +2455,36 @@ mod normalized_dependency_tests {
             }
         }
         let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
-        assert!(
-            !catalog
-                .groups(
-                    NativeGroupKey {
-                        artifact: hidden_id,
-                        original_ordinal: 7
-                    },
-                    products[0].owner()
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            catalog
-                .groups(
-                    NativeGroupKey {
-                        artifact: hidden_id,
-                        original_ordinal: 9
-                    },
-                    products[0].owner()
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            catalog
-                .groups(
-                    NativeGroupKey {
-                        artifact: sibling_id,
-                        original_ordinal: 11
-                    },
-                    products[2].owner()
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 7
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 9
+                },
+                products[0].owner()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .groups(
+                NativeGroupKey {
+                    artifact: sibling_id,
+                    original_ordinal: 11
+                },
+                products[2].owner()
+            )
+            .unwrap()
+            .is_empty());
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&retained)
@@ -2509,12 +2499,10 @@ mod normalized_dependency_tests {
             .expect("retained R carries dependency H without an H role");
         assert!(hidden.permits(7));
         assert!(!hidden.permits(9));
-        assert!(
-            request
-                .compiler_inputs()
-                .native_availability(sibling_id)
-                .is_none()
-        );
+        assert!(request
+            .compiler_inputs()
+            .native_availability(sibling_id)
+            .is_none());
         assert!(request.groups.is_empty());
 
         let parent = complete.artifacts();
@@ -2565,11 +2553,9 @@ mod normalized_dependency_tests {
                 issuer_closure
             );
             let verified = &acquired.bindings[demanded.first().unwrap()];
-            assert!(
-                verified
-                    .closure
-                    .contains(&InventoryNodeKey::Group(verified.binding))
-            );
+            assert!(verified
+                .closure
+                .contains(&InventoryNodeKey::Group(verified.binding)));
             // The old consumer is an independently executed closure oracle.
             // Count it separately so a zero-work assertion has a positive control.
             let before_reference = state.graph_visits.load(Ordering::Relaxed);
@@ -2777,12 +2763,10 @@ mod normalized_dependency_tests {
                 &selection,
             )
             .unwrap();
-        assert!(
-            admitted
-                .artifacts
-                .roots()
-                .contains(&InventoryNodeKey::Group(expected_group))
-        );
+        assert!(admitted
+            .artifacts
+            .roots()
+            .contains(&InventoryNodeKey::Group(expected_group)));
         assert!(!admitted.artifacts.namespace().contains_key(&hidden_id));
         assert_eq!(receiving.capture_graph_selection(), before_receiving);
 

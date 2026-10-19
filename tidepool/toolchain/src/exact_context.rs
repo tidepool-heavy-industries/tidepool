@@ -10,9 +10,9 @@ use cid::Cid;
 use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 use fvm_ipld_encoding::DAG_CBOR;
 use fvm_ipld_hamt::{BytesKey, Config, Hamt};
-use imbl::{OrdMap, ordmap::DiffItem};
+use imbl::{ordmap::DiffItem, OrdMap};
 use multihash_codetable::{Code, MultihashDigest};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,

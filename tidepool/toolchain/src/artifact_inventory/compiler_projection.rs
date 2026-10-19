@@ -2921,11 +2921,9 @@ mod tests {
             for binding in before.namespace {
                 assert_eq!(actual.artifacts.namespace()[&binding.artifact], binding);
             }
-            assert!(
-                old_edges
-                    .iter()
-                    .all(|edge| actual.artifacts.binding_dependencies().contains(edge))
-            );
+            assert!(old_edges
+                .iter()
+                .all(|edge| actual.artifacts.binding_dependencies().contains(edge)));
             let expected_new_edge = (
                 InventoryNodeKey::Artifact(actual.artifacts.namespace()[&value.artifact_id()]),
                 InventoryNodeKey::Artifact(required_binding),
@@ -3300,14 +3298,12 @@ mod tests {
             let owner = selected.descriptor.owner.clone();
             let narrowed = interfaces.support_for_owners(vec![owner.clone()]).unwrap();
             let candidate = inventory.metrics();
-            assert!(
-                narrowed
-                    .artifacts
-                    .reads
-                    .read_projection
-                    .get()
-                    .is_none_or(|projection| projection.metadata.get().is_none())
-            );
+            assert!(narrowed
+                .artifacts
+                .reads
+                .read_projection
+                .get()
+                .is_none_or(|projection| projection.metadata.get().is_none()));
             for (owner, (binding, bytes)) in &expected_issued {
                 let row = &narrowed.selected[owner];
                 assert_eq!(row.interface.0, *binding);
@@ -3354,14 +3350,12 @@ mod tests {
                 after.graph_visits - candidate.graph_visits,
                 after.entry_handle_copies - candidate.entry_handle_copies
             );
-            assert!(
-                interfaces
-                    .support_for_owners(vec![ExactModuleIdentity {
-                        unit: "unit".into(),
-                        module: "Absent".into()
-                    }])
-                    .is_err()
-            );
+            assert!(interfaces
+                .support_for_owners(vec![ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: "Absent".into()
+                }])
+                .is_err());
             let owners = BTreeSet::from([owner]);
             let source = support.source_support(&owners).unwrap();
             let legacy = support
@@ -3506,12 +3500,10 @@ mod tests {
                     .collect::<BTreeSet<_>>(),
                 expected.keys().cloned().collect()
             );
-            assert!(
-                selected_support
-                    .artifacts
-                    .selected_native_groups()
-                    .is_empty()
-            );
+            assert!(selected_support
+                .artifacts
+                .selected_native_groups()
+                .is_empty());
 
             let after_narrowing = inventory.metrics();
             eprintln!(
@@ -3536,13 +3528,11 @@ mod tests {
                 &reusable.selected.home_units,
                 &interface_only.selected.home_units
             ));
-            assert!(
-                interface_only
-                    .projection
-                    .roles()
-                    .iter()
-                    .all(|role| role.original().is_none())
-            );
+            assert!(interface_only
+                .projection
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
             assert_eq!(
                 interface_only
                     .projection
@@ -3660,18 +3650,14 @@ mod tests {
             materialization_parents: vec![],
             materialization: Mutex::new(BTreeMap::new()),
         });
-        assert!(
-            narrowed
-                .lease
-                .payloads
-                .contains_key(&excluded.descriptor.id)
-        );
-        assert!(
-            narrowed
-                .retained_payloads()
-                .get(&excluded.descriptor.id)
-                .is_none()
-        );
+        assert!(narrowed
+            .lease
+            .payloads
+            .contains_key(&excluded.descriptor.id));
+        assert!(narrowed
+            .retained_payloads()
+            .get(&excluded.descriptor.id)
+            .is_none());
         let valid = CompilerInputProjection::from_issued_entries(&[selected.clone()]).unwrap();
         valid.validate(&narrowed).unwrap();
         valid.validate_associations(&narrowed).unwrap();
@@ -3873,12 +3859,10 @@ mod tests {
                     required_ordinal: 7,
                 },
             );
-            assert!(
-                historical
-                    .artifacts
-                    .binding_dependencies()
-                    .contains(&expected_edge)
-            );
+            assert!(historical
+                .artifacts
+                .binding_dependencies()
+                .contains(&expected_edge));
             let expected_edges = winner
                 .artifacts
                 .binding_dependencies()
@@ -3984,15 +3968,13 @@ mod tests {
                 selected_groups.contains(&historical_parent),
                 "the losing parent's exact Group remains selected through its actual caller root"
             );
-            assert!(
-                expected_edges.is_subset(
-                    &joined
-                        .artifacts
-                        .binding_dependencies()
-                        .into_iter()
-                        .collect()
-                )
-            );
+            assert!(expected_edges.is_subset(
+                &joined
+                    .artifacts
+                    .binding_dependencies()
+                    .into_iter()
+                    .collect()
+            ));
             let reverse = historical.merge(&winner).unwrap();
             assert_eq!(pair(&reverse), pair(&historical));
             assert_eq!(
@@ -4002,12 +3984,10 @@ mod tests {
             drop(reverse);
             drop(winner);
             drop(historical);
-            assert!(
-                joined
-                    .artifacts
-                    .binding_dependencies()
-                    .contains(&expected_edge)
-            );
+            assert!(joined
+                .artifacts
+                .binding_dependencies()
+                .contains(&expected_edge));
         }
     }
 
@@ -4152,7 +4132,7 @@ mod tests {
         use crate::certified_products::tests::{
             original_groups_fixture_with_interface, recovered_witness_fixtures,
         };
-        use crate::certified_products::{PendingImportOwner, fixture_finalized_product};
+        use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
         let product = |module: &str, ordinal, imports| {
             fixture_finalized_product(
                 original_groups_fixture_with_interface(
