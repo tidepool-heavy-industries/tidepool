@@ -1507,6 +1507,35 @@ struct NativeAvailabilityOwnerWire {
     product_sha256: [u8; 32],
 }
 
+pub(crate) mod serde_cached_home_owner {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        NativeAvailabilityOwnerWire {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            module_version: owner.module_version.0,
+            skinny_iface_sha256: owner.skinny_iface_sha256,
+            product_sha256: owner.product_sha256,
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<tidepool_repr::execution_schema::CachedHomeOwner, D::Error> {
+        let owner = NativeAvailabilityOwnerWire::deserialize(deserializer)?;
+        Ok(tidepool_repr::execution_schema::CachedHomeOwner {
+            unit: owner.unit,
+            module: owner.module,
+            module_version: tidepool_repr::execution_schema::ModuleVersion(owner.module_version),
+            skinny_iface_sha256: owner.skinny_iface_sha256,
+            product_sha256: owner.product_sha256,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeAvailabilityWire {

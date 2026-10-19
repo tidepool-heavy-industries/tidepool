@@ -637,7 +637,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3, 4] {
+    for version in [2, 3, 4, 5] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -647,12 +647,12 @@ fn old_selection_and_context_versions_are_rejected() {
             lexical: lexical.root().clone(),
             offers: lexical.root().clone(),
             native_availability: lexical.root().clone(),
-            input_decisions: None,
+            input_decisions: lexical.root().clone(),
         };
         let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
         install(&store, materializer.finish().unwrap());
         assert!(
-            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 5 with normalized native availability")
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 6 with publication native authority")
         );
     }
 }

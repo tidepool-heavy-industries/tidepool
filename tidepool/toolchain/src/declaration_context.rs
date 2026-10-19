@@ -1248,6 +1248,7 @@ impl NativeContributionSnapshotFacts {
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeAvailabilitySnapshotFacts {
     pub(crate) original: ArtifactId,
+    #[serde(with="crate::exact_context::serde_cached_home_owner")]
     pub(crate) owner: tidepool_repr::execution_schema::CachedHomeOwner,
     pub(crate) mode: NativeTransportMode,
     #[serde(with = "crate::exact_context::serde_ord_map")]
@@ -14029,6 +14030,7 @@ mod tests {
             original_input_identity,
             selection,
             selection_sha256,
+            ..
         } = &roles[0]
         else {
             panic!("issuer must retain published policy")

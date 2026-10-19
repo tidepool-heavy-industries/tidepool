@@ -734,7 +734,7 @@ impl CompilerSourceSupport {
                     input_decisions: self.input_decisions.facts.clone(),
                 },
             )
-            .map_err(failure)?,
+            .map_err(|error| failure(&error.to_string()))?,
         );
         Ok(self)
     }
