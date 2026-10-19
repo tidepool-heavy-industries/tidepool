@@ -15542,6 +15542,43 @@ mod tests {
                 actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
                 actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
             );
+            if actual_support.artifacts() != expected_support.artifacts() {
+                eprintln!(
+                    "publication artifacts actual={:?} expected={:?}",
+                    actual_support
+                        .artifacts()
+                        .entries()
+                        .iter()
+                        .map(|entry| &entry.descriptor)
+                        .collect::<Vec<_>>(),
+                    expected_support
+                        .artifacts()
+                        .entries()
+                        .iter()
+                        .map(|entry| &entry.descriptor)
+                        .collect::<Vec<_>>()
+                );
+                eprintln!(
+                    "publication graph actual={:?} expected={:?}",
+                    actual_support.artifacts().capture_graph_selection(),
+                    expected_support.artifacts().capture_graph_selection()
+                );
+            }
+            if actual_support.native_offers() != expected_support.native_offers() {
+                eprintln!(
+                    "publication offer facts actual={:?} expected={:?}",
+                    actual_support
+                        .native_offers()
+                        .iter()
+                        .map(|offer| offer.snapshot_facts())
+                        .collect::<Vec<_>>(),
+                    expected_support
+                        .native_offers()
+                        .iter()
+                        .map(|offer| offer.snapshot_facts())
+                        .collect::<Vec<_>>()
+                );
+            }
             if actual_support.native_availability() != expected_support.native_availability() {
                 eprintln!(
                     "publication native rows actual={:?} expected={:?}",
