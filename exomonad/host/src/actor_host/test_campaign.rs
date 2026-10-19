@@ -2104,6 +2104,36 @@ impl HostedScriptRound {
         );
     }
 
+    /// Submit ordered synchronous custom calls in one provider response.
+    pub fn sync_calls_named(self, calls: &[(&str, &str, &str)]) {
+        assert!(!calls.is_empty());
+        let mut ids = std::collections::HashSet::new();
+        let items = calls
+            .iter()
+            .map(|(call_id, name, source)| {
+                assert!(
+                    ids.insert(*call_id),
+                    "distinct calls need distinct identities"
+                );
+                self.assert_advertised(call_id, name, "custom");
+                harness::item::Item(serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "input": source,
+                    "async": false,
+                }))
+            })
+            .collect();
+        self.reply
+            .send(harness::transport::ResponsesTurn {
+                response_id: format!("script-batch-{}", calls[0].0),
+                items,
+                usage: Default::default(),
+            })
+            .expect("production provider request remains live");
+    }
+
     pub fn async_call(self, call_id: &str, source: &str) {
         self.cell(call_id, source, harness::item::ToolExecution::Asynchronous);
     }

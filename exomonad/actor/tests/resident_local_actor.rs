@@ -920,9 +920,7 @@ async fn resident_either_text_display_expands_the_retained_value() {
                 current["expansions"][0][0].as_i64().unwrap(),
             )
             .await
-            .expect("navigate the issued display without compiling another cell")
-            .into_json()
-            .expect("display expansion response");
+            .expect("navigate the issued display without compiling another cell");
         current = page(&reply);
     }
     assert!(

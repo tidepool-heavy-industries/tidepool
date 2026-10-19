@@ -6196,7 +6196,10 @@ where
             ResidentActorBoundary::RuntimeInfo { continuation } => {
                 let answer = self.runtime_info(effect_owner.issued_snapshot());
                 let runner = self.environment.runner.clone();
-                let operation = Box::pin(async move {
+                let operation: futures_util::future::BoxFuture<
+                    'static,
+                    commands::CommandResolution,
+                > = Box::pin(async move {
                     let disposition = if answer.is_ok() {
                         WorkbenchOperationDisposition::Read
                     } else {
