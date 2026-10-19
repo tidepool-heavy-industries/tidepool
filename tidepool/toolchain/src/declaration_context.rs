@@ -17389,7 +17389,40 @@ mod tests {
                         crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
                     )
                     .unwrap();
-                let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                let requirements =
+                    crate::certified_products::original_native_requirements(&product).unwrap();
+                let value_owner = identity("fixture", "Value");
+                assert!(!requirements.artifact_edges.is_empty());
+                assert!(requirements.artifact_edges.iter().all(|(owner, edge)| owner
+                    == &value_owner
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeBinding { .. }
+                    )));
+                let interfaces = context
+                    .compiler_source_support()
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(vec![value_owner])
+                    .unwrap();
+                assert!(interfaces
+                    .projection()
+                    .roles()
+                    .iter()
+                    .all(|role| role.original().is_none()));
+                let original = entry.descriptor.id;
+                let projection = interfaces
+                    .projection()
+                    .merge(&CompilerInputProjection::from_issued_entries(&[entry]).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    projection
+                        .roles()
+                        .iter()
+                        .filter_map(CompilerInputRole::original)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([original])
+                );
                 let selected =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
@@ -17976,31 +18009,65 @@ mod tests {
         let native = crate::certified_products::tests::recovered_witness_fixtures(&[native])
             .remove(0)
             .product;
-        let support = {
-            let entry = Arc::new(
-                ArtifactEntry::original(initial.owner.facts.producer, native.clone()).unwrap(),
-            );
-            let artifacts = initial
-                .artifact_view()
-                .inventory()
-                .admit_shared_with_demand(
-                    initial.artifact_view(),
-                    vec![entry.clone()],
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selected =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &artifacts.metadata_snapshot(),
-                    &PackageInterfaceValidation::default().inventory,
-                )
-                .unwrap();
-            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                .unwrap()
-        };
+        let support =
+            {
+                let entry = Arc::new(
+                    ArtifactEntry::original(initial.owner.facts.producer, native.clone()).unwrap(),
+                );
+                let artifacts = initial
+                    .artifact_view()
+                    .inventory()
+                    .admit_shared_with_demand(
+                        initial.artifact_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let requirements =
+                    crate::certified_products::original_native_requirements(&native).unwrap();
+                let value_owner = identity("fixture", "Value");
+                assert!(!requirements.artifact_edges.is_empty());
+                assert!(requirements.artifact_edges.iter().all(|(owner, edge)| owner
+                    == &value_owner
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeBinding { .. }
+                    )));
+                let interfaces = initial
+                    .compiler_source_support()
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(vec![value_owner])
+                    .unwrap();
+                assert!(interfaces
+                    .projection()
+                    .roles()
+                    .iter()
+                    .all(|role| role.original().is_none()));
+                let original = entry.descriptor.id;
+                let projection = interfaces
+                    .projection()
+                    .merge(&CompilerInputProjection::from_issued_entries(&[entry]).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    projection
+                        .roles()
+                        .iter()
+                        .filter_map(CompilerInputRole::original)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([original])
+                );
+                let selected =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &artifacts.metadata_snapshot(),
+                        &PackageInterfaceValidation::default().inventory,
+                    )
+                    .unwrap();
+                let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            };
         let context = Arc::new(
             initial
                 .as_ref()
