@@ -595,23 +595,36 @@ mod tests {
             fallback_module_name: "InheritedFacadeConsumer",
         };
         let compiled = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &invocation,
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &invocation,
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         })
         .unwrap();
-        let value = crate::run_compiled_target(
-            &compiled,
-            crate::session::PREPARED_SCAFFOLD_TARGET,
-            crate::DEFAULT_NURSERY_SIZE,
-            &mut frunk::HNil,
-            &(),
-            |_| {},
-        )
-        .unwrap();
+        let value = compiled
+            .run(
+                crate::session::PREPARED_SCAFFOLD_TARGET,
+                crate::DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .unwrap();
         assert_eq!(value.to_json(), serde_json::json!(42));
 
         let refused_source = source.replace(
@@ -619,18 +632,36 @@ mod tests {
             "hiddenNumber (Hidden (41 :: HiddenPayload Bool))",
         );
         let refused = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &CompileInvocation {
-                    source: &refused_source,
-                    ..invocation
-                },
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &CompileInvocation {
+                                    source: &refused_source,
+                                    ..invocation
+                                },
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         });
         assert!(
-            matches!(&refused, Err(crate::CompileError::Diagnostics(_))),
+            matches!(
+                &refused,
+                Err(crate::RuntimeError::Compile(
+                    crate::CompileError::Diagnostics(_)
+                ))
+            ),
             "{:?}",
             refused.err()
         );
@@ -639,26 +670,39 @@ mod tests {
         let explicit_source =
             refused_source.replace(narrowed.module_name(), inherited.module_name());
         let explicit = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &CompileInvocation {
-                    source: &explicit_source,
-                    ..invocation
-                },
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &CompileInvocation {
+                                    source: &explicit_source,
+                                    ..invocation
+                                },
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         })
         .unwrap();
-        let value = crate::run_compiled_target(
-            &explicit,
-            crate::session::PREPARED_SCAFFOLD_TARGET,
-            crate::DEFAULT_NURSERY_SIZE,
-            &mut frunk::HNil,
-            &(),
-            |_| {},
-        )
-        .unwrap();
+        let value = explicit
+            .run(
+                crate::session::PREPARED_SCAFFOLD_TARGET,
+                crate::DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .unwrap();
         assert_eq!(value.to_json(), serde_json::json!(141));
 
         let original_source = refused_source.replace(

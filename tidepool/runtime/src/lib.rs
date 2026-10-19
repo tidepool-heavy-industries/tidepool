@@ -14,6 +14,7 @@
 //! classifier from there.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 pub use tidepool_bridge::HaskellValue;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
@@ -87,6 +88,15 @@ pub enum RuntimeError {
     /// Error during Haskell compilation.
     #[error(transparent)]
     Compile(#[from] CompileError),
+    #[error(transparent)]
+    SourceAdmission(#[from] session::SourceAdmissionError),
+    #[error(transparent)]
+    Session(#[from] session::SessionError),
+    #[error("compiler preparation did not close cleanly: {close:?}; action: {primary:?}")]
+    CompilerClose {
+        primary: Option<Box<RuntimeError>>,
+        close: CompilerTransactionClose,
+    },
     /// A runtime or effect-handler failure from prepared execution.
     #[error(transparent)]
     Jit(#[from] EffectError),
@@ -150,8 +160,8 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// `source` must include the scaffold produced by
 /// [`session::assemble_expression_module`] (or an equivalent owning assembler).
 /// The entry is always [`session::PREPARED_SCAFFOLD_TARGET`]. To compile and
-/// execute a selected named target, use [`compile_targets`] followed by
-/// [`run_compiled_target`]. `include` supplies the Haskell module search paths;
+/// execute a selected named target, use [`compile_runtime_targets`] followed by
+/// [`RuntimePreparedTargets::run`]. `include` supplies the Haskell module search paths;
 /// `handlers` and `user` provide effect dispatch and its context. `settlement`
 /// receives the compiler transaction close observation.
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
@@ -206,15 +216,17 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         .iter()
         .map(|path| path.to_path_buf())
         .collect::<Vec<_>>();
-    let artifacts = compile_targets(
-        source,
-        &[session::PREPARED_SCAFFOLD_TARGET],
-        &include_owned,
+    let prepared = compile_runtime_targets(
+        &artifacts::CompileInvocation {
+            source,
+            targets: &[session::PREPARED_SCAFFOLD_TARGET],
+            include: &include_owned,
+            fallback_module_name: "Input",
+        },
         |_, _, _| {},
         settlement,
     )?;
-    run_compiled_target(
-        &artifacts,
+    prepared.run(
         session::PREPARED_SCAFFOLD_TARGET,
         nursery_size,
         handlers,
@@ -223,24 +235,180 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     )
 }
 
-/// Run an ordinary compiler target with its complete certified source closure.
-/// Source groups and the target install together through the resident linker,
-/// with fresh mutable state for this one-shot execution.
-pub fn run_compiled_target<U, H: DispatchEffect<U>>(
-    artifacts: &CompiledArtifacts,
-    target: &str,
-    nursery_size: usize,
-    handlers: &mut H,
-    user: &U,
-    on_ready: impl FnOnce(CancelHandle),
-) -> Result<EvalResult, RuntimeError> {
-    let mut state = session::PersistentSession::new(None, nursery_size);
-    let program = install_compiled_target(&mut state, artifacts, target)?;
-    let table = state.session_table().clone();
-    let engine = state.require_prepared()?;
-    let result = run_installed_program(engine, program, &table, handlers, user, on_ready);
-    engine.unpin(program);
-    result.map(|value| EvalResult::new(value, table, artifacts.warnings.warnings.clone()))
+/// Compiler output awaiting the END of its exact source transaction.
+/// Only the fresh scoped producer constructs this intermediate product.
+pub struct RuntimePreparedTargetsDraft {
+    artifacts: CompiledArtifacts,
+    source: Arc<session::RuntimeLexicalScopeLease>,
+    origin: CompilerTransactionOrigin,
+}
+
+/// Named targets issued by fresh compilation under their original source owner.
+/// Read-only artifact access cannot issue a new execution product.
+pub struct RuntimePreparedTargets {
+    artifacts: CompiledArtifacts,
+    source: Arc<session::RuntimeLexicalScopeLease>,
+    // Standalone compilation owns the issuing session as well as its lease.
+    _standalone: Option<parking_lot::Mutex<session::PersistentSession>>,
+}
+
+impl std::fmt::Debug for RuntimePreparedTargets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimePreparedTargets")
+            .field("artifacts", &self.artifacts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Compile fresh source inside the borrowed physical transaction. The result
+/// remains unsealed until `finish_runtime_targets` observes that owner's END.
+pub fn prepare_runtime_targets_in_context(
+    owner: &session::RuntimeSourceCompilerTransaction,
+    invocation: &artifacts::CompileInvocation<'_>,
+    context: Arc<tidepool_toolchain::declaration_context::ExactDeclarationContext>,
+    on_stage: impl FnMut(&str, std::time::Duration, u64),
+    report: &mut dyn FnMut(CompilerTransactionClose),
+) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
+    prepare_runtime_targets(owner, invocation, Some(context), on_stage, report)
+}
+
+fn prepare_runtime_targets(
+    owner: &session::RuntimeSourceCompilerTransaction,
+    invocation: &artifacts::CompileInvocation<'_>,
+    context: Option<Arc<tidepool_toolchain::declaration_context::ExactDeclarationContext>>,
+    on_stage: impl FnMut(&str, std::time::Duration, u64),
+    report: &mut dyn FnMut(CompilerTransactionClose),
+) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
+    let source = owner.admitted_original_source()?;
+    let artifacts = match context {
+        Some(context) => {
+            artifacts::compile_invocation_in_context(invocation, context, on_stage, report)?
+        }
+        None => artifacts::compile_invocation(invocation, on_stage, report)?,
+    };
+    Ok(RuntimePreparedTargetsDraft {
+        artifacts,
+        source,
+        origin: CompilerTransactionOrigin::current()
+            .ok_or(session::SourceAdmissionError::MissingTransaction)?,
+    })
+}
+
+pub fn finish_runtime_targets(
+    settled: CompilerTransactionSettled<Result<RuntimePreparedTargetsDraft, RuntimeError>>,
+) -> Result<RuntimePreparedTargets, RuntimeError> {
+    let same_owner = settled
+        .action()
+        .as_ref()
+        .is_ok_and(|draft| settled.belongs_to(&draft.origin));
+    let cancellation = settled.host_admission_cancellation().cloned();
+    let outcome = settled.into_outcome();
+    if !matches!(
+        outcome.close,
+        CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+    ) {
+        return Err(RuntimeError::CompilerClose {
+            primary: outcome.action.err().map(Box::new),
+            close: outcome.close,
+        });
+    }
+    let draft = outcome.action?;
+    if !same_owner {
+        return Err(CompileError::CompilerPublication(
+            CompilerTransactionPublicationError::DifferentOwner,
+        )
+        .into());
+    }
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+        CompilerTransactionPublicationError::MissingOwner,
+    ))?;
+    cancellation.checkpoint().map_err(CompileError::from)?;
+    Ok(RuntimePreparedTargets {
+        artifacts: draft.artifacts,
+        source: draft.source,
+        _standalone: None,
+    })
+}
+
+/// Standalone named-target compilation owns its actual session before source
+/// work starts, then retains it for every later execution of the sealed product.
+pub fn compile_runtime_targets(
+    invocation: &artifacts::CompileInvocation<'_>,
+    on_stage: impl FnMut(&str, std::time::Duration, u64),
+    settlement: &mut dyn FnMut(CompilerTransactionClose),
+) -> Result<RuntimePreparedTargets, RuntimeError> {
+    let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
+    let source = state.mint_isolated_scope_with_lease()?;
+    let settled = source.with_source_compiler_transaction(
+        artifacts::CompileWorkload::Foreground,
+        CompilerTransactionCancellation::new(),
+        None,
+        settlement,
+        |owner, report| prepare_runtime_targets(owner, invocation, None, on_stage, report),
+    )?;
+    let mut prepared = finish_runtime_targets(settled)?;
+    prepared._standalone = Some(parking_lot::Mutex::new(state));
+    Ok(prepared)
+}
+
+impl RuntimePreparedTargets {
+    pub fn artifacts(&self) -> &CompiledArtifacts {
+        &self.artifacts
+    }
+
+    fn install_in(
+        &self,
+        state: &mut session::PersistentSession,
+        target: &str,
+    ) -> Result<
+        (
+            tidepool_codegen::prepared_program::ProgramId,
+            Arc<session::RuntimeLexicalScopeLease>,
+        ),
+        RuntimeError,
+    > {
+        let placement = state.mint_isolated_scope_with_lease()?;
+        let settled = state.with_source_compiler_transaction(
+            self.source.clone(),
+            artifacts::CompileWorkload::Foreground,
+            CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| {
+                state.admit_source_lease(placement.clone())?;
+                install_compiled_target(state, &self.artifacts, target, placement.scope())
+            },
+        )?;
+        let outcome = settled.into_outcome();
+        if !matches!(
+            outcome.close,
+            CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+        ) {
+            return Err(RuntimeError::CompilerClose {
+                primary: outcome.action.err().map(Box::new),
+                close: outcome.close,
+            });
+        }
+        let program = outcome.action?;
+        Ok((program, placement))
+    }
+
+    pub fn run<U, H: DispatchEffect<U>>(
+        &self,
+        target: &str,
+        nursery_size: usize,
+        handlers: &mut H,
+        user: &U,
+        on_ready: impl FnOnce(CancelHandle),
+    ) -> Result<EvalResult, RuntimeError> {
+        let mut state = session::PersistentSession::new(None, nursery_size);
+        let (program, _placement) = self.install_in(&mut state, target)?;
+        let table = state.session_table().clone();
+        let engine = state.require_prepared()?;
+        let result = run_installed_program(engine, program, &table, handlers, user, on_ready);
+        engine.unpin(program);
+        result.map(|value| EvalResult::new(value, table, self.artifacts.warnings.warnings.clone()))
+    }
 }
 
 /// Install an ordinary compiler target with its complete certified closure in
@@ -249,9 +417,9 @@ fn install_compiled_target(
     state: &mut session::PersistentSession,
     artifacts: &CompiledArtifacts,
     target: &str,
+    scope: tidepool_codegen::scope::ScopeId,
 ) -> Result<tidepool_codegen::prepared_program::ProgramId, RuntimeError> {
     use session::prepared::CertifiedTargetImage;
-    use tidepool_codegen::scope::ScopeId;
 
     if artifacts.warnings.has_io {
         return Err(CompileError::IOTypeDetected.into());
@@ -265,11 +433,8 @@ fn install_compiled_target(
         .map_err(tidepool_repr::serial::ReadError::ConstructorMetadata)
         .map_err(CompileError::from)?;
     let certification = session::turn::TurnCertification::from_artifacts(artifacts, target);
-    let resolved = state.resolve_certification_in(
-        ScopeId::ROOT,
-        target.prepared.prepared(),
-        &certification,
-    )?;
+    let resolved =
+        state.resolve_certification_in(scope, target.prepared.prepared(), &certification)?;
     let registry = state.certified_image_registry();
     let (target, demanded) = CertifiedTargetImage::compile_scoped(
         target.prepared.prepared().clone(),
@@ -277,7 +442,7 @@ fn install_compiled_target(
         &registry,
     )?;
     let (program, _) = state.install_certified_turn_in(
-        ScopeId::ROOT,
+        scope,
         &artifacts.table,
         target,
         &resolved.target_owners,
@@ -509,7 +674,7 @@ mod tests {
         let source = include_str!("fixtures/ConstructorAdmissionRecipe.hs");
         for _ in 0..2 {
             let mut artifacts = tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::compile_invocation(
+                compile_runtime_targets(
                     &tidepool_toolchain::artifacts::CompileInvocation {
                         source,
                         targets: &["__prepared"],
@@ -521,11 +686,14 @@ mod tests {
                 )
             })
             .unwrap();
-            let target = artifacts.targets["__prepared"].prepared.prepared();
+            let target = artifacts.artifacts.targets["__prepared"]
+                .prepared
+                .prepared();
             let mut target_metadata = DataConTable::new();
             target_metadata
                 .extend_checked(
                     artifacts
+                        .artifacts
                         .table
                         .iter()
                         .filter(|row| {
@@ -538,26 +706,26 @@ mod tests {
                 )
                 .unwrap();
             target_metadata.validate_program(target).unwrap();
-            artifacts.table = target_metadata;
+            artifacts.artifacts.table = target_metadata;
             let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
-            let program = install_compiled_target(&mut state, &artifacts, "__prepared").unwrap();
+            let (program, _placement) = artifacts.install_in(&mut state, "__prepared").unwrap();
             let root = state.session_table().get_by_name("RecipeRoot").unwrap();
             assert_eq!(root.0, 18361356118689931113);
             assert!(
-                artifacts.table.get(root).is_none(),
+                artifacts.artifacts.table.get(root).is_none(),
                 "RecipeRoot is absent from target metadata"
             );
             assert!(state.prepared_mut().unwrap().unpin(program));
             let mut handlers = frunk::hlist![RootHandler(0)];
-            let result = run_compiled_target(
-                &artifacts,
-                "__prepared",
-                DEFAULT_NURSERY_SIZE,
-                &mut handlers,
-                &(),
-                |_| {},
-            )
-            .unwrap();
+            let result = artifacts
+                .run(
+                    "__prepared",
+                    DEFAULT_NURSERY_SIZE,
+                    &mut handlers,
+                    &(),
+                    |_| {},
+                )
+                .unwrap();
             assert_eq!(handlers.head.0, 1);
             assert_eq!(result.to_json(), serde_json::json!(42));
         }
@@ -576,7 +744,7 @@ mod tests {
         let source = include_str!("fixtures/ConstructorAdmissionConsumer.hs");
         let compile = || {
             tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::compile_invocation(
+                compile_runtime_targets(
                     &tidepool_toolchain::artifacts::CompileInvocation {
                         source,
                         targets: &["__prepared"],
@@ -596,11 +764,14 @@ mod tests {
             // Compiler targets may omit rows owned only by cached originals.
             // Keep this control deterministic by retaining only target rows;
             // the actual admitted declarations remain unchanged.
-            let target = artifacts.targets["__prepared"].prepared.prepared();
+            let target = artifacts.artifacts.targets["__prepared"]
+                .prepared
+                .prepared();
             let mut target_metadata = DataConTable::new();
             target_metadata
                 .extend_checked(
                     artifacts
+                        .artifacts
                         .table
                         .iter()
                         .filter(|row| {
@@ -613,33 +784,33 @@ mod tests {
                 )
                 .unwrap();
             target_metadata.validate_program(target).unwrap();
-            artifacts.table = target_metadata;
+            artifacts.artifacts.table = target_metadata;
             let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
-            let program = install_compiled_target(&mut state, &artifacts, "__prepared").unwrap();
+            let (program, _placement) = artifacts.install_in(&mut state, "__prepared").unwrap();
             let id = state
                 .session_table()
                 .get_by_name("Ticket")
                 .expect("installed dependency constructor");
-            assert!(artifacts.targets["__prepared"]
+            assert!(artifacts.artifacts.targets["__prepared"]
                 .prepared
                 .prepared()
                 .constructors()
                 .iter()
                 .all(|declaration| declaration.host_id != id));
             assert!(
-                artifacts.table.get(id).is_none(),
+                artifacts.artifacts.table.get(id).is_none(),
                 "target metadata omits dependency-only row"
             );
             assert!(state.prepared_mut().unwrap().unpin(program));
-            let result = run_compiled_target(
-                &artifacts,
-                "__prepared",
-                DEFAULT_NURSERY_SIZE,
-                &mut frunk::HNil,
-                &(),
-                |_| {},
-            )
-            .unwrap();
+            let result = artifacts
+                .run(
+                    "__prepared",
+                    DEFAULT_NURSERY_SIZE,
+                    &mut frunk::HNil,
+                    &(),
+                    |_| {},
+                )
+                .unwrap();
             assert_eq!(result.table().get(id).unwrap().name, "Ticket");
             assert_eq!(
                 result.to_json(),
@@ -647,7 +818,7 @@ mod tests {
             );
             // Warning production is covered independently; this control checks
             // that the target harness retains all fields of the execution result.
-            artifacts.warnings.warnings = vec!["constructor admission warning".into()];
+            artifacts.artifacts.warnings.warnings = vec!["constructor admission warning".into()];
             let through_consumer = tidepool_testing::eval_harness::EvalHarness::new().run_target(
                 &artifacts,
                 "__prepared",
@@ -656,11 +827,11 @@ mod tests {
             assert_eq!(through_consumer.json(), result.to_json());
             assert_eq!(
                 through_consumer.result().warnings(),
-                artifacts.warnings.warnings,
+                artifacts.artifacts.warnings.warnings,
             );
             let retained = through_consumer.expect("retained target result");
             assert_eq!(retained.table().get(id).unwrap().name, "Ticket");
-            assert_eq!(retained.warnings(), artifacts.warnings.warnings);
+            assert_eq!(retained.warnings(), artifacts.artifacts.warnings.warnings);
         }
     }
 
@@ -669,7 +840,7 @@ mod tests {
         tidepool_testing::eval_harness::require_extract();
         let source = "module NominalAdmissionControl where\nresult = Just (42 :: Int)\n";
         let mut artifacts = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::compile_invocation(
+            compile_runtime_targets(
                 &tidepool_toolchain::artifacts::CompileInvocation {
                     source,
                     targets: &["result"],
@@ -681,8 +852,8 @@ mod tests {
             )
         })
         .unwrap();
-        let target = artifacts.targets["result"].prepared.prepared();
-        artifacts.table.validate_program(target).unwrap();
+        let target = artifacts.artifacts.targets["result"].prepared.prepared();
+        artifacts.artifacts.table.validate_program(target).unwrap();
         let declared = target
             .constructors()
             .first()
@@ -690,16 +861,16 @@ mod tests {
             .clone();
         let mut changed = tidepool_repr::DataConTable::new();
         changed
-            .extend_checked(artifacts.table.iter().cloned().map(|mut row| {
+            .extend_checked(artifacts.artifacts.table.iter().cloned().map(|mut row| {
                 if row.id == declared.host_id {
                     row.identity.symbol.unit.push_str("-foreign");
                 }
                 row
             }))
             .unwrap();
-        artifacts.table = changed;
+        artifacts.artifacts.table = changed;
         let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
-        let error = install_compiled_target(&mut state, &artifacts, "result").unwrap_err();
+        let error = artifacts.install_in(&mut state, "result").unwrap_err();
         assert!(matches!(
             error,
             RuntimeError::Compile(CompileError::ReadError(
