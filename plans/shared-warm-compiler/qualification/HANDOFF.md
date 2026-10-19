@@ -3,7 +3,7 @@
 Owner `/root/warm_compiler_campaign/qualification`; parent
 `/root/warm_compiler_campaign`. Area checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-qualification-20261019`, branch
-`feature/shared-warm/qualification`, source contract
+`qualification/self-native-pairing-guard` (original feature branch preserved), source contract
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. One allocated independent child,
 `capture_sensitivity`, is reactivated for the approved production-constructor
 discriminator; no further descendants granted.
@@ -175,34 +175,51 @@ remove obsolete alternate authorities/adapters and explicitly version or refuse
 old persisted authority. Preserve immutable baseline, user files and evidence;
 new service qualification must enter the new real production owner.
 
-Current approved successor: exact `278cd12c95b148532af9fc9232a02fff82eedfa7`
-(owning production trees equal `f088e3e7837c72cf0e82aab8e71a2687d767da34`).
-The reserved child owns a bounded opt-in trace discriminator in existing
-inspection/value-extension/authored-fallback/catalog-private constructors.
-Synthetic native fixtures cannot faithfully carry the frozen catalog plus issued
-checked-value history; the authorized tracing fallback preserves real issuers.
-No policy edits or new authority factory. Stage roles, exact root/required edges
-and omissions remain explicit. Private `native-constructor-discriminator/PLAN.json`
-records controls/resource proposal. Exact candidate
-`e00aaedb8310ecf847dc39ebd2bf81fdafb667e5` received independent supervisor and
-campaign full-delta source acceptance, without findings. The reserved child owns
-the approved 12 GiB-memory / 32 GiB-growth native compile/resources/three-control
-lane through terminal success: production/cfg(test) compilation0 (331.479 s),
-declared resources0 (121.679 s), three adjacent controls selected/executed/passed3.
-Unit binary112007200 B SHA-256
-`400cae1f2d01166346cf6ed457352647a4835dcf0db8757a75f0b76aa9db4e07`;
-`native-constructor-discriminator/NATIVE-RESULT.json` binds actual reports,
-commands and cgroups. Supervisor independently verified all report hashes/counts
-and binary bytes. Process cleanup confirmed; hosted/compiler not observed for
-these compiler-free unit controls; diagnostics complete. Source review and these
-controls do not observe first promotion. Own build-scope peak5712482304 B,
-output growth1995157504 B; retained idle daemon remains globally accounted.
-All small-lane commands settled. Full bundle and
-exact frozen rerun require a separate fresh 24 GiB admission. The released small
-lane has priority reassigned to the host source/digest producer; no full-bundle
-work starts until campaign's concrete heavy-lane release event. The concrete plan
-is `native-constructor-discriminator/FROZEN-REPRO-PLAN.json`. Missing/truncated
-stage facts remain unknown. No first-promotion claim precedes actual execution.
+## Available custody and selected originals
+
+Frozen trace source `428b1b6fb10a20db993d3a1b7bd81ce856a5f0d9` compiled,
+froze and verified, then stronger shared-source Persona executed/failed1. Its
+available catalog B first becomes Original in the Candidate complete-native issuer;
+an earlier surviving Operators root retains exact required A groups7/2. The
+constructed conflict is genuine; equal interfaces cannot authorize substitution.
+The exact frozen failure and issuer/source/edge packet remain immutable. All three
+cleanup domains were confirmed; diagnostic detail is incomplete. This is a producer
+role finding, not a validator failure or optional-root waiver.
+
+The repair distinguishes the existing availability-only candidate producer from an
+explicit selected output. Authenticated candidate custody retains receiving roles;
+actual selected fresh outputs enter through CertifiedSourceSelection/from_selection.
+No cfg(test) strong issuer may survive merely to preserve obsolete tests. Main
+fixture migrations use actual closed outputs and preserve refusal, physical owner,
+retained-history and source-policy checks. NativeBinding closure is authenticated,
+not assumed from broad custody.
+
+Latest executed source `62249c33186fe957bcd3212eca7ff5f8863859a6` compiled production
+and cfg(test), then executed8 controls:4 passed,4 failed. The actual Request
+permission matrix is ONE passing test with24 internal states (16accepted,
+8typed refusals). Normalized winner transfer, closed Support and Resume passed.
+Exact raw-rebound inventory refusal, scoped-carrier choice, genuine-new-output
+setup and pairing authored-fallback assertions remain under bounded fixture review.
+The terminal receipt is `native-constructor-discriminator/retry-6224/TERMINAL.json`,
+SHA-256 `2b4e8bcf627dcbbb49f88d76ca5412f5548b2d5077ef60dc5695b44b36817fb8`.
+No failed assertion is waived by source review.
+
+Earlier exact `ef797f477bb410c7fb98dad9b267cb32d93cfbc4` compiled and ran18 Rust
+controls (16passed,2failed). All13 finite main fixture consumers and actual physical
+RetainedArtifactRow Weak/path lifetime checks passed. Its declared SOURCE boot reuse
+Tasty leaf passed1 through ordinary NativeScopeBase/Owner products and the actual
+Rust native-scope issuer. The separate empty-binder leaf passed1; an unsupported
+runner option refused with0execution. Haskell structured cleanup is UNKNOWN.
+Receipt `retry-ef797/TERMINAL.json` SHA-256
+`843a4ce6ee37501cc95f760e0c8cc6336f91af7b130b7a1baf4c863d0bae7a49` binds source,
+per-case reports and source-specific artifact/resource hashes. These are bounded
+component outcomes, not repaired frozen Persona, performance or release evidence.
+
+The active source frontier is fixture migration, exact issuer/permission tests,
+obsolete authority removal and final owning compilation/counts. Main remaining
+physical/source fixtures have a concrete closed-output candidate; the reserved child
+owns Request-history transposition and independent wire/topology oracles. Their
+successor evidence must precede source fold and the exact joined frozen rerun.
 
 The next demand-service event is campaign/host/warm source owners producing the concrete joined
 query/check/execute consumer and root/campaign resolves the exact frozen native

@@ -135,10 +135,13 @@ intentionally distinct runtime consumption, explicitly unsupported, or obsolete/
 Unclassified supported reconstruction fronts block migration acceptance. Current map
 entries are source observations and open dispositions, not successful migrations.
 
-The bounded production trace candidate `e00aaedb83` received independent supervisor
-and campaign source acceptance. Production/cfg(test) and declared resources compiled;
-three maintained optional-root, required-conflict and candidate-history controls each
-executed/passed1 (3/3). Their binary/source/report receipts remain separate from the
-unexecuted exact frozen constructor reproduction. No first-promotion finding or repair
-is inferred from these compiler-free component controls. The full frozen lane awaits
-its own resource-release event.
+The actual frozen428b trace now observes the first B Original promotion in the
+availability-only Candidate constructor, while an earlier Operators issuance retains
+required A7/A2. Strict refusal remains valid. Typed availability custody repair and
+finite fixture migration are under component qualification; exact joined frozen
+Persona still must execute successfully. At exact62249, production/cfg(test) compiled
+and8 controls executed4PASS/4FAIL. The passing Request matrix covers24 internal
+states, not24 maintained test executions. Exactef797 additionally passed the declared
+SOURCE boot reuse native-scope leaf1; empty-binder1 and a procedure refusal0 remain
+separate. No component count grants frontend, performance, release or deployment
+acceptance. Private exact receipts are linked from the owning handoff.

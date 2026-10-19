@@ -311,3 +311,15 @@ Supported unclassified reconstruction routes remain blockers. Cold first capture
 may visit the primary snapshot once; historical binding support stays separate from
 current compiler selection. The fixed query and appended-cell measurements include
 successor and durable publication work. Query-only success is partial delivery.
+
+
+The bounded qualification repair separates `CandidateSet.contextual_native_availability`
+from explicitly selected compiler outputs. `OriginalCompilerInputs::from_candidates`
+authenticates and carries custody under receiving roles; it does not select every
+available catalog body as a new Original. Actual selected outputs retain the
+`CertifiedSourceSelection` / `from_selection` issuer and exact historical dependencies.
+This source observation is specific to the qualification probe (latest executed
+62249), whose8 controls passed4 and failed4. The actual frozen428b path remains a
+required rerun after integration. No full-map, FD, encoding or hydration work reduction
+is inferred from this role correction; the service and actor migration rows above
+remain open until their actual consumers and counters execute.
