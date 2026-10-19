@@ -7,7 +7,7 @@ module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestIn
 import Tidepool.RequestCompletion (finishCompletion)
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, readMVar, threadDelay)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
@@ -558,12 +558,17 @@ failRetainedCountWrite asynchronous action = do
       reached <- newEmptyMVar
       blocked <- newEmptyMVar
       done <- newEmptyMVar
+      let retire reader = do
+            settled <- timeout 5000000 (killThread reader >> readMVar done)
+            case settled of
+              Nothing -> fail "publication fault observer did not join its acquisition thread"
+              Just _ -> pure ()
       bracket (forkIO (try (withRetainedCountFault fired
-          (putMVar reached () >> takeMVar blocked) action) >>= putMVar done)) killThread $ \reader -> do
+          (putMVar reached () >> takeMVar blocked) action) >>= putMVar done)) retire $ \reader -> do
         observed <- timeout 5000000 (takeMVar reached)
         unless (observed == Just ()) (fail "publication cancellation did not reach its timing write")
         killThread reader
-        timeout 5000000 (takeMVar done) >>= maybe
+        timeout 5000000 (readMVar done) >>= maybe
           (fail "publication cancellation did not settle") pure
     else try (withRetainedCountFault fired
       (throwIO (userError "injected retained-count write failure")) action)
