@@ -4615,9 +4615,26 @@ mod checkpoint_scope_tests {
         let other = publication_session(&recovery, root.path(), 421);
         assert!(!other.inspection_world_base_is_current(&admitted.base, &source, &original_source));
         let tip = session.lib().scope_tip(scope);
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "changed", 999);
-        session.bind_in(scope, entry).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                original_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "changed", 999,
+                    );
+                    session.bind_in(scope, entry)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action.unwrap();
         assert_eq!(session.lib().scope_tip(scope), tip);
         assert!(!session.inspection_world_base_is_current(
             &admitted.base,
