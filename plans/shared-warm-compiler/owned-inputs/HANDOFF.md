@@ -8,10 +8,14 @@ selected canonical/value/lexical census is separate from type-name home units,
 custody and demand. No live host or deployment changes.
 
 Area checkout `/srv/swarm/checkouts/tidepool-shared-warm-owned-inputs-20261019`,
-branch `feature/shared-warm/owned-inputs`, remains docs only over the base.
+branch `feature/shared-warm/owned-inputs`, contains the complete reviewed row history.
 Complete reviewed row ancestry through5113 was folded at
 `2970ef611b886db472872c9e85aae7ec58efa66d`. Complete integration packet:
-`INTEGRATION.md`. Campaign owns the receiving merge and joined qualification.
+`INTEGRATION.md`. Campaign receiving fold completed at
+`f088e3e7837c72cf0e82aab8e71a2687d767da34` alongside host b5 and worker0bd.
+Its owning supervisor observes the active joined production/cfgtest and runner
+resource build with -j1, then actual row/runtime/host/protocol cases. Area local
+passes do not establish that joined result.
 
 ## Current source and evidence
 
@@ -78,16 +82,22 @@ choices were reported to parent; both existing grants are retained.
 | Identity | Model / effort | Current assignment |
 | --- | --- | --- |
 | owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Completed5113 repair/native gates; dormant reserved for actual integration findings |
-| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Completed package proposal and5113 review; dormant reserved for contract/implementation review |
+| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Completed revised service-owner proposal and5113 source/native review; dormant reserved |
 
+Root/user architecture amendment PAUSES all new shared host/worker/package APIs
+pending bounded C2/C5 review. No package source/API implementation is authorized.
 No current admitted deployment object owns package-source lifetime. Reviewer
 must propose borrowing a real provider interval or extending the existing
 offline qualification pin provider with independently registered execution-owned
 pins BEFORE fresh worker boot. A path/manifest/hash witness cannot bless old EPS
 or lazy state. Actual DB/interface/native path coverage and worker/iserv lifetime
 are required; mutable/uncovered inputs retain existing observation checks. Source
-or API implementation requires bounded contract approval; supervisor owns that
-successor, coordinated with host/warm owners. No new runtime Nix service/registry.
+or API implementation awaits the C2/C5 decision and explicit bounded contract
+approval; supervisor owns an approved successor coordinated with host/warm owners.
+Revised private PACKAGE-SOURCE-SERVICE-OPTION.md supersedes per-host durable-pin
+proposal: transfer an actual deployment/service retention obligation, or register
+one set per actual service epoch with complete normal retirement and uncertainty
+retention. No code, root registration or new runtime service/registry occurred.
 
 ## Resources, boundaries and continuation
 
@@ -118,9 +128,12 @@ and FD enumeration remain; no O(delta), latency or release claim is made.
 
 Rows and reviewer delivered their terminal events; all source/native clients
 settled and row lane released (daemon current2,653,343,744bytes). Supervisor
-folded the complete accepted ancestry. Campaign reviews/integrates this area
-revision and owns joined checks. Root/campaign next decide the bounded package
-proposal; supervisor owns approved source-retention implementation successor. Producers check
+folded the complete accepted ancestry. Campaign accepted/integrated area f3309fed5252b5afad30d57c1dea08dcabc22c18
+and owns the joined checks. Awaited event: its supervisor sends exact joined
+compile/test terminal evidence or a concrete integration finding, then area
+reconciles or repairs its owned cone. Root/campaign separately produce the C2/C5
+service-boundary decision; package proposal remains held. Both children delivered
+terminal outcomes and are dormant with grants retained; neither owns live jobs. Producers check
 recipient status and use send_message for running recipients, followup_task for
 dormant ones. Every outcome requires a terminal event. No periodic polling or
 implicit continuation; external process observers remain attached until terminal.
