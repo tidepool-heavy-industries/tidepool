@@ -121,6 +121,88 @@ fn names(value: &Value) -> Vec<String> {
         .collect()
 }
 
+enum FixtureIntent {
+    Ordinary,
+    Published {
+        target: ExactModuleIdentity,
+        roots: Vec<ExactModuleIdentity>,
+    },
+}
+
+fn fixture_intent(fields: &[Value]) -> FixtureIntent {
+    match fields.first().map(text_field) {
+        Some("TPSOURCEBOOTFIXTURE4") => {
+            assert_eq!(fields.len(), 10, "ordinary fixture request tuple");
+            FixtureIntent::Ordinary
+        }
+        Some("TPSOURCEBOOTPUBLISHED1") => {
+            assert_eq!(fields.len(), 12, "published fixture request tuple");
+            assert!(
+                fields[1].as_text().is_some_and(|path| !path.is_empty())
+                    && fields[9].as_text().is_some_and(|path| !path.is_empty())
+                    && fields[6].as_bool() == Some(true),
+                "published fixture requires source, capture and scope delivery"
+            );
+            assert!(
+                [3, 4, 5, 8].into_iter().all(|index| names(&fields[index]).is_empty()),
+                "published fixture cannot combine candidate, interface, native or lexical selections"
+            );
+            let target = text_field(&fields[10]);
+            let roots = names(&fields[11]);
+            assert!(
+                !target.is_empty()
+                    && !roots.is_empty()
+                    && roots.iter().all(|root| !root.is_empty())
+                    && roots.iter().collect::<BTreeSet<_>>().len() == roots.len(),
+                "published fixture requires a target and unique nonempty publication roots"
+            );
+            FixtureIntent::Published {
+                target: ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: target.into(),
+                },
+                roots: roots
+                    .into_iter()
+                    .map(|module| ExactModuleIdentity {
+                        unit: "main".into(),
+                        module,
+                    })
+                    .collect(),
+            }
+        }
+        _ => panic!("unknown source-boot fixture request tag"),
+    }
+}
+
+fn fixture_source_imports(
+    certified: &CertifiedProducts,
+) -> BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> {
+    certified
+        .module_interfaces
+        .iter()
+        .filter_map(|interface| {
+            let edges = interface.source_imports()?;
+            Some((
+                ExactModuleIdentity {
+                    unit: interface.unit().to_owned(),
+                    module: interface.module().to_owned(),
+                },
+                edges
+                    .iter()
+                    .filter_map(|edge| {
+                        Some(ExactModuleIdentity {
+                            unit: edge.home_unit.as_ref()?.clone(),
+                            module: edge.module.clone(),
+                        })
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
 // The complete certified view owns interface closure and original import
 // evidence. Selecting lexical visibility never selects a native implementation.
 fn admit_fixture_scope(
@@ -164,30 +246,7 @@ fn admit_fixture_scope(
         // Canonical interfaces retain authenticated source imports even
         // when a source-only owner has no executable recovery graph.
         // Native ownership and implementation roles remain separate.
-        let imports = certified
-            .module_interfaces
-            .iter()
-            .filter_map(|interface| {
-                let edges = interface.source_imports()?;
-                Some((
-                    ExactModuleIdentity {
-                        unit: interface.unit().to_owned(),
-                        module: interface.module().to_owned(),
-                    },
-                    edges
-                        .iter()
-                        .filter_map(|edge| {
-                            Some(ExactModuleIdentity {
-                                unit: edge.home_unit.as_ref()?.clone(),
-                                module: edge.module.clone(),
-                            })
-                        })
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                ))
-            })
-            .collect();
+        let imports = fixture_source_imports(certified);
         let surface = crate::declaration_join::source_lexical_closure(
             lexical_roots,
             &imports,
@@ -487,8 +546,7 @@ fn source_boot_candidate_packet_producer() {
     let mut outputs = Vec::new();
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("fixture request tuple");
-    assert_eq!(fields.len(), 10);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE4");
+    let intent = fixture_intent(fields);
     let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
     let producer = endpoint.identity().producer_bytes();
     assert_eq!(text_field(&fields[7]), endpoint.identity().producer_hex());
@@ -578,13 +636,73 @@ fn source_boot_candidate_packet_producer() {
                 "completed originals cannot acquire an ordinary source replay recipe"
             );
         }
-        let context = admit_fixture_scope(
-            producer_sha,
-            &certified,
-            &exact_owners,
-            &native_owners,
-            &lexical_roots,
-        );
+        let context = match &intent {
+            FixtureIntent::Ordinary => admit_fixture_scope(
+                producer_sha,
+                &certified,
+                &exact_owners,
+                &native_owners,
+                &lexical_roots,
+            ),
+            FixtureIntent::Published { target, roots } => {
+                let completed_targets = evidence
+                    .modules
+                    .iter()
+                    .filter(|module| {
+                        !module.boot && module.source == Path::new(crate::cache::GENERATED_SOURCE)
+                    })
+                    .map(|module| ExactModuleIdentity {
+                        unit: module.unit.clone(),
+                        module: module.module.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    completed_targets.as_slice(),
+                    std::slice::from_ref(target),
+                    "published target must be the authenticated completed source owner"
+                );
+                let view = certified_product_artifact_view(
+                    producer_sha,
+                    &certified.recovery_products,
+                    &certified.module_interfaces,
+                    None,
+                )
+                .unwrap();
+                let surface = crate::declaration_join::source_lexical_closure(
+                    std::slice::from_ref(target),
+                    &fixture_source_imports(&certified),
+                    &[],
+                    &view.retained_source_implementations(),
+                )
+                .expect("published fixture requires its certified target lexical closure");
+                let required = surface
+                    .lexical
+                    .iter()
+                    .map(|node| node.owner.clone())
+                    .collect::<Vec<_>>();
+                let source_context = ExactDeclarationContext::from_source_selection(
+                    producer_sha,
+                    &certified.source_selection,
+                    &view,
+                    surface.lexical,
+                    target.clone(),
+                    &required,
+                )
+                .expect("published fixture requires actual completed source selection");
+                let revision = hex::encode(Sha256::digest(source.as_bytes()));
+                let input_identity = hex::encode(completion.request_sha);
+                let mut published = empty_fixture_scope(producer_sha);
+                for root in roots {
+                    let issued = source_context.issue_published_source_original(
+                        &revision, &input_identity, root,
+                    ).expect("publication root must be a genuine direct import of the completed target");
+                    published = published
+                        .with_published_source_originals(&issued)
+                        .expect("actual published fixture selections must compose");
+                }
+                published
+            }
+        };
         if !requested.is_empty() {
             let manifest = publish_fixture_candidates(
                 producer,
@@ -737,6 +855,76 @@ fn source_boot_authored_declaration_packet_producer() {
     write_fixture_scope_output(&packet, &scope.manifest);
     completion.publish(&[scope.manifest.clone(), packet.join("delivery.cbor")]);
     println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
+}
+
+#[test]
+fn published_fixture_intent_refuses_malformed_or_combined_selections() {
+    let ordinary = vec![
+        Value::Text("TPSOURCEBOOTFIXTURE4".into()),
+        Value::Null,
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Bool(false),
+        Value::Text("producer".into()),
+        Value::Array(vec![]),
+        Value::Null,
+    ];
+    assert!(matches!(fixture_intent(&ordinary), FixtureIntent::Ordinary));
+    let mut published = ordinary.clone();
+    published[0] = Value::Text("TPSOURCEBOOTPUBLISHED1".into());
+    published[1] = Value::Text("/fixture/source.hs".into());
+    published[6] = Value::Bool(true);
+    published[9] = Value::Text("/fixture/capture".into());
+    published.extend([
+        Value::Text("CompletedTarget".into()),
+        Value::Array(vec![Value::Text("PublishedRoot".into())]),
+    ]);
+    assert!(
+        matches!(fixture_intent(&published), FixtureIntent::Published { target, roots }
+        if target == (ExactModuleIdentity { unit: "main".into(), module: "CompletedTarget".into() })
+        && roots == vec![ExactModuleIdentity { unit: "main".into(), module: "PublishedRoot".into() }])
+    );
+    let mut mutations = Vec::new();
+    let mut unknown = ordinary.clone();
+    unknown[0] = Value::Text("unknown".into());
+    mutations.push(unknown);
+    mutations.push(published[..10].to_vec());
+    let mut ordinary_extra = published.clone();
+    ordinary_extra[0] = ordinary[0].clone();
+    mutations.push(ordinary_extra);
+    for index in [1, 9] {
+        let mut missing = published.clone();
+        missing[index] = Value::Null;
+        mutations.push(missing);
+    }
+    let mut no_scope = published.clone();
+    no_scope[6] = Value::Bool(false);
+    mutations.push(no_scope);
+    for index in [3, 4, 5, 8] {
+        let mut combined = published.clone();
+        combined[index] = Value::Array(vec![Value::Text("other selection".into())]);
+        mutations.push(combined);
+    }
+    let mut no_target = published.clone();
+    no_target[10] = Value::Text(String::new());
+    mutations.push(no_target);
+    for roots in [
+        vec![],
+        vec![Value::Text(String::new())],
+        vec![
+            Value::Text("PublishedRoot".into()),
+            Value::Text("PublishedRoot".into()),
+        ],
+    ] {
+        let mut invalid = published.clone();
+        invalid[11] = Value::Array(roots);
+        mutations.push(invalid);
+    }
+    for fields in mutations {
+        assert!(std::panic::catch_unwind(|| fixture_intent(&fields)).is_err());
+    }
 }
 
 #[test]
