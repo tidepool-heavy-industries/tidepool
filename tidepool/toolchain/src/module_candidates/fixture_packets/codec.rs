@@ -329,7 +329,9 @@ fn source_boot_codec_packet_producer() {
         }
         CodecRequest::WorldBlocks => {
             let store = fvm_ipld_blockstore::MemoryBlockstore::new();
-            let facts = (0..32)
+            // More than 32 buckets * three inline entries guarantees a real
+            // child block for the missing-child integrity control.
+            let facts = (0..128)
                 .map(|n| (format!("fact-{n}"), format!("value-{n}")))
                 .collect::<imbl::OrdMap<_, _>>();
             let mut materializer = crate::exact_context::Materializer::new(&store);
