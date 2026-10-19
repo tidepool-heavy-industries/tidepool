@@ -1,5 +1,9 @@
 //! Exomonad host composition, provider integration, and operator interfaces.
 
+// Embedded actor admission retains nested persistent compiler-world facts.
+// Keep their Send/Sync proofs within the compiler trait-solver recursion budget.
+#![recursion_limit = "256"]
+
 pub mod actor_host;
 pub mod exomonad;
 pub mod haskell_sources;
