@@ -3858,12 +3858,6 @@ impl ArtifactInventory {
         }
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = source.projection().merge(&issued)?;
-        let retained_owners = parent
-            .lease
-            .payloads
-            .values()
-            .map(|entry| &entry.descriptor.owner)
-            .collect::<BTreeSet<_>>();
         let mut reason = None;
         let mut appended = BTreeMap::new();
         let mut repeated = BTreeMap::new();
@@ -3889,7 +3883,7 @@ impl ArtifactInventory {
                     }
                 }
                 reason.get_or_insert(ValueInterfaceGeneralAdmission::UnselectedRepeat(*id));
-            } else if retained_owners.contains(&entry.descriptor.owner) {
+            } else if parent.lease.has_acquired_owner(&entry.descriptor.owner) {
                 // Hidden canonical/native children can lack compiler roles.
                 // A projection-only freshness check cannot exclude them.
                 reason.get_or_insert_with(|| {
@@ -5242,6 +5236,9 @@ struct ViewLease {
     admission_roots: imbl::OrdSet<InventoryNodeKey>,
     selection: Arc<ExactSelectionSnapshot>,
     payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    // Counts distinct acquired payload IDs, including hidden custody. Several
+    // canonical/native payloads may share one owner independently of selection.
+    acquired_owner_counts: imbl::OrdMap<ExactModuleIdentity, usize>,
     inventory: ArtifactInventory,
     materialization_sources: imbl::OrdMap<MaterializationCacheId, MaterializationSource>,
     materialization: MaterializationSource,
@@ -5484,7 +5481,50 @@ impl ViewReadProjection {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ACQUIRED_OWNER_INDEX_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACQUIRED_OWNER_INDEX_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl ViewLease {
+    fn has_acquired_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        #[cfg(test)]
+        ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.set(count.get() + 1));
+        self.acquired_owner_counts.contains_key(owner)
+    }
+
+    fn insert_payload(
+        payloads: &mut imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, usize>,
+        id: ArtifactId,
+        entry: Arc<ArtifactEntry>,
+    ) {
+        let owner = entry.descriptor.owner.clone();
+        if let Some(previous) = payloads.insert(id, entry) {
+            if previous.descriptor.owner == owner {
+                return;
+            }
+            Self::release_payload_owner(owner_counts, &previous.descriptor.owner);
+        }
+        *owner_counts.entry(owner).or_insert(0) += 1;
+        #[cfg(test)]
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(count.get() + 1));
+    }
+
+    fn release_payload_owner(
+        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, usize>,
+        owner: &ExactModuleIdentity,
+    ) {
+        let count = owner_counts.get_mut(owner).expect("acquired payload owner");
+        *count -= 1;
+        if *count == 0 {
+            owner_counts.remove(owner);
+        }
+        #[cfg(test)]
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(count.get() + 1));
+    }
+
     /// Retain payload and acquisition owners after the admission solver has
     /// authenticated these exact bindings. No derived view closure is needed.
     fn from_issued_draft(lease: ViewDraft, introduced: BTreeSet<ArtifactId>) -> Arc<Self> {
@@ -5493,10 +5533,20 @@ impl ViewLease {
             .first()
             .map(|parent| parent.payloads.clone())
             .unwrap_or_default();
+        let mut acquired_owner_counts = lease
+            .parents
+            .first()
+            .map(|parent| parent.acquired_owner_counts.clone())
+            .unwrap_or_default();
         for parent in lease.parents.iter().skip(1) {
             for (id, entry) in &parent.payloads {
                 if !payloads.contains_key(id) {
-                    payloads.insert(*id, Arc::clone(entry));
+                    Self::insert_payload(
+                        &mut payloads,
+                        &mut acquired_owner_counts,
+                        *id,
+                        Arc::clone(entry),
+                    );
                 }
             }
         }
@@ -5506,7 +5556,12 @@ impl ViewLease {
                     .get(id)
                     .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
             {
-                payloads.insert(*id, Arc::clone(entry));
+                Self::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    *id,
+                    Arc::clone(entry),
+                );
             }
         }
         let mut state = lease.inventory.0.lock().expect("inventory lock");
@@ -5529,7 +5584,12 @@ impl ViewLease {
         }
         for id in &introduced {
             if !payloads.contains_key(id) {
-                payloads.insert(*id, state.interned(id).expect("issued payload custody"));
+                Self::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    *id,
+                    state.interned(id).expect("issued payload custody"),
+                );
             }
         }
         // Shared cache owners retain paths independently of artifact views and
@@ -5554,6 +5614,7 @@ impl ViewLease {
             admission_roots: lease.roots.into_iter().collect(),
             selection: lease.selection,
             payloads,
+            acquired_owner_counts,
             inventory: lease.inventory.clone(),
             materialization_sources,
             materialization: MaterializationSource {
@@ -7276,6 +7337,7 @@ impl ArtifactView {
             }
             let lease = Arc::get_mut(&mut retained.lease).expect("new selection lease");
             lease.payloads = self.lease.payloads.clone();
+            lease.acquired_owner_counts = self.lease.acquired_owner_counts.clone();
             for id in lease
                 .payloads
                 .keys()
@@ -7283,7 +7345,11 @@ impl ArtifactView {
                 .copied()
                 .collect::<Vec<_>>()
             {
-                lease.payloads.remove(&id);
+                let removed = lease.payloads.remove(&id).expect("unselected payload");
+                ViewLease::release_payload_owner(
+                    &mut lease.acquired_owner_counts,
+                    &removed.descriptor.owner,
+                );
             }
         }
         {
@@ -8316,6 +8382,239 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acquired_owner_oracle(view: &ArtifactView) -> BTreeMap<ExactModuleIdentity, usize> {
+        let mut counts = BTreeMap::new();
+        for entry in view.lease.payloads.values() {
+            *counts.entry(entry.descriptor.owner.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn acquired_owner_value(name: &str) -> Arc<crate::recovery_artifacts::CertifiedValueInterface> {
+        let interface = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "unit",
+            name,
+            BTreeMap::new(),
+        );
+        Arc::new(
+            crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+                [2; 32],
+                ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: name.into(),
+                },
+                interface.interface_bytes().to_vec(),
+                interface.package_imports_bytes().to_vec(),
+                vec![],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn acquired_owner_index_preserves_hidden_collision_and_last_payload_removal() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(native_entry("HiddenOwner", &[]));
+        let owner = native.descriptor.owner.clone();
+        let canonical = match &native.payload {
+            ArtifactPayload::Original(product) => {
+                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap())
+            }
+            _ => unreachable!(),
+        };
+        let other = Arc::new(entry("OtherOwner", &[]));
+        let other_id = other.descriptor.id;
+        let broad = inventory
+            .admit_shared(&inventory.empty_view(), vec![native, other])
+            .unwrap();
+        assert_eq!(broad.lease.acquired_owner_counts.get(&owner), Some(&2));
+        let canonical_only = broad.select_roots(vec![canonical]).unwrap();
+        assert_eq!(
+            canonical_only.lease.acquired_owner_counts.get(&owner),
+            Some(&1)
+        );
+        let without_owner = broad.select_roots(vec![other_id]).unwrap();
+        assert!(!without_owner.lease.has_acquired_owner(&owner));
+        let value = acquired_owner_value("HiddenOwner");
+        for view in [&broad, &canonical_only] {
+            let source = CompilerSourceSupport::empty().retain_custody(view).unwrap();
+            assert!(!source.projection().snapshot_roles().contains_key(&owner));
+            let incoming = Arc::new(ArtifactEntry::interface(
+                value.interface().clone(),
+                JoinedInterfaceRole::ValueInterface,
+                vec![],
+            ));
+            ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.set(0));
+            assert!(
+                matches!(source.artifacts().inventory().prepare_value_interface_append(&source, vec![incoming]).unwrap(),
+                ValueInterfaceAdmission::General { reason: ValueInterfaceGeneralAdmission::RetainedOwner(ref hidden), .. } if hidden == &owner)
+            );
+            assert_eq!(ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.get()), 1);
+        }
+        let source = CompilerSourceSupport::empty()
+            .retain_custody(&without_owner)
+            .unwrap();
+        let foreign = ArtifactInventory::default();
+        let incoming = Arc::new(ArtifactEntry::interface(
+            value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.set(0));
+        assert!(foreign
+            .prepare_value_interface_append(&source, vec![incoming])
+            .is_err());
+        assert_eq!(ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.get()), 0);
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        let appended = source.admit_value_interfaces(&[value]).unwrap();
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 1);
+        assert_eq!(
+            appended.artifacts().lease.acquired_owner_counts.get(&owner),
+            Some(&1)
+        );
+        let sibling = broad.clone();
+        drop(broad);
+        drop(canonical_only);
+        assert_eq!(sibling.lease.acquired_owner_counts.get(&owner), Some(&2));
+        assert!(!without_owner.lease.has_acquired_owner(&owner));
+        for view in [&sibling, &without_owner, appended.artifacts()] {
+            assert_eq!(
+                view.lease
+                    .acquired_owner_counts
+                    .iter()
+                    .map(|(owner, count)| (owner.clone(), *count))
+                    .collect::<BTreeMap<_, _>>(),
+                acquired_owner_oracle(view)
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn acquired_owner_index_matches_payloads_through_view_histories(
+            initial in 1usize..25,
+            history in proptest::collection::vec((0usize..8, 0usize..8, 0u8..4, proptest::bool::ANY), 1..13),
+        ) {
+            let inventory = ArtifactInventory::default();
+            let entries = (0..initial).map(|index| Arc::new(entry(&format!("Initial{index}"), &[]))).collect();
+            let mut views = vec![inventory.admit_shared(&inventory.empty_view(), entries).unwrap()];
+            let mut operations = [0usize; 4];
+            let mut dropped = 0usize;
+            for (step, (parent, partner, action, remove_parent)) in history.into_iter().enumerate() {
+                operations[action as usize] += 1;
+                let parent = parent % views.len();
+                let next = match action {
+                    0 => {
+                        let ids = views[parent].lease.payloads.keys().copied().collect::<Vec<_>>();
+                        let selected = partner % (ids.len() + 1);
+                        views[parent].select_roots(if selected == ids.len() { vec![] } else { vec![ids[selected]] }).unwrap()
+                    }
+                    1 => views[parent].retain_custody(&views[partner % views.len()]).unwrap(),
+                    2 => views[parent].clone(),
+                    _ => {
+                        let source = CompilerSourceSupport::empty().retain_custody(&views[parent]).unwrap();
+                        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+                        let appended = source.admit_value_interfaces(&[acquired_owner_value(&format!("Appended{step}"))]).unwrap();
+                        proptest::prop_assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 1);
+                        appended.artifacts().clone()
+                    }
+                };
+                views.push(next);
+                if remove_parent { views.remove(parent); dropped += 1; }
+                for view in &views {
+                    let actual = view.lease.acquired_owner_counts.iter().map(|(owner, count)| (owner.clone(), *count)).collect::<BTreeMap<_, _>>();
+                    proptest::prop_assert_eq!(actual, acquired_owner_oracle(view));
+                    let candidate = step % initial;
+                    let value = acquired_owner_value(&format!("Initial{candidate}"));
+                    let source = CompilerSourceSupport::empty().retain_custody(view).unwrap();
+                    let owner = ExactModuleIdentity { unit: "unit".into(), module: format!("Initial{candidate}") };
+                    let acquired = acquired_owner_oracle(view).contains_key(&owner);
+                    let entry = Arc::new(ArtifactEntry::interface(value.interface().clone(), JoinedInterfaceRole::ValueInterface, vec![]));
+                    let admission = source.artifacts().inventory().prepare_value_interface_append(&source, vec![entry]).unwrap();
+                    proptest::prop_assert_eq!(matches!(admission, ValueInterfaceAdmission::General {
+                        reason: ValueInterfaceGeneralAdmission::RetainedOwner(_), ..
+                    }), acquired);
+                }
+            }
+            eprintln!("acquired-owner-history initial={initial} restrict_retain_fork_append={operations:?} dropped={dropped} surviving={}", views.len());
+        }
+    }
+
+    #[test]
+    fn acquired_owner_index_deduplicates_parents_and_replaces_acquisition() {
+        let inventory = ArtifactInventory::default();
+        let acquire = || {
+            inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![Arc::new(entry("AcquiredAgain", &[]))],
+                )
+                .unwrap()
+        };
+        let first = acquire();
+        let second = acquire();
+        let id = *first.lease.payloads.keys().next().unwrap();
+        let owner = first.lease.payloads[&id].descriptor.owner.clone();
+        let before = Arc::clone(&first.lease.payloads[&id]);
+        let replacement = Arc::clone(&second.lease.payloads[&id]);
+        assert_eq!(before, replacement);
+        assert!(
+            !Arc::ptr_eq(&before, &replacement),
+            "independent ingress retains its acquired facade owner"
+        );
+        // Exercise the component constructor with two authenticated overlapping
+        // parents and an exact acquisition replacement. Graph authority is unchanged.
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        let replaced = ArtifactView::new(ViewDraft {
+            roots: first.roots().to_vec(),
+            selection: Arc::clone(&first.lease.selection),
+            inventory: inventory.clone(),
+            parents: vec![Arc::clone(&first.lease), Arc::clone(&second.lease)],
+            issuing_payloads: BTreeMap::from([(id, Arc::clone(&replacement))]),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        assert!(Arc::ptr_eq(&replaced.lease.payloads[&id], &replacement));
+        assert_eq!(replaced.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
+        assert_eq!(
+            replaced
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, count)| (owner.clone(), *count))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&replaced)
+        );
+        let source = CompilerSourceSupport::empty()
+            .retain_custody(&replaced)
+            .unwrap();
+        let value = acquired_owner_value("AcquiredAgain");
+        let entry = Arc::new(ArtifactEntry::interface(
+            value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        assert!(matches!(
+            source
+                .artifacts()
+                .inventory()
+                .prepare_value_interface_append(&source, vec![entry])
+                .unwrap(),
+            ValueInterfaceAdmission::General {
+                reason: ValueInterfaceGeneralAdmission::RetainedOwner(_),
+                ..
+            }
+        ));
+        let empty = replaced.select_roots(vec![]).unwrap();
+        assert!(!empty.lease.has_acquired_owner(&owner));
+        drop(replaced);
+        assert_eq!(first.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(second.lease.acquired_owner_counts.get(&owner), Some(&1));
+    }
 
     #[test]
     fn retained_custody_keeps_duplicate_native_bindings_without_namespace_roles() {
