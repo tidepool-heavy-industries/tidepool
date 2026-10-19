@@ -527,12 +527,65 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         ArtifactPayload::Original(product) => product.clone(),
         _ => unreachable!(),
     };
-    let mut context = Arc::new(
+    let b_product = product(&b);
+    let a_product = product(&a);
+    assert!(b_product.original_native().unwrap().groups.is_empty());
+    assert!(a_product.original_native().unwrap().groups.is_empty());
+    assert!(b_product
+        .execution_source()
+        .unwrap()
+        .required_original_graphs(b_product.owner())
+        .is_empty());
+    assert_eq!(
+        a_product
+            .execution_source()
+            .unwrap()
+            .required_original_graphs(a_product.owner()),
+        vec![(b_product.owner().clone(), graph_b.digest())]
+    );
+    let mut context = Arc::new({
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![b.clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[b.clone()]).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let output = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        assert_eq!(
+            output
+                .role_projection()
+                .roles()
+                .iter()
+                .filter_map(CompilerInputRole::original)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([b.descriptor.id])
+        );
+        assert!(output
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            output.native_availability().snapshot_facts().unwrap()[&b.descriptor.id].mode,
+            NativeTransportMode::Full
+        );
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap();
         ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([7; 32], &[product(&b)])
-            .unwrap(),
-    );
+            .extend_issued_compiler_support(&support)
+            .unwrap()
+    });
     // This exercises the actual materialization issuer with already certified
     // fixture originals. It needs no compiler endpoint or new proof factory.
     let materialize = |context: &Arc<ExactDeclarationContext>| {
@@ -599,13 +652,52 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let unrelated_directory = unrelated.directory().path().to_path_buf();
     let weak_unrelated = Arc::downgrade(&unrelated);
     drop(unrelated);
-    context = Arc::new(
+    context = Arc::new({
+        let physical = context
+            .artifact_view()
+            .inventory()
+            .admit_shared_with_demand(
+                context.artifact_view(),
+                vec![a.clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[a.clone()]).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let output = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        assert_eq!(
+            output
+                .role_projection()
+                .roles()
+                .iter()
+                .filter_map(CompilerInputRole::original)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([a.descriptor.id]),
+            "the exact sealed B source graph is custody; B is not another new output"
+        );
+        assert!(output
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            output.native_availability().snapshot_facts().unwrap()[&a.descriptor.id].mode,
+            NativeTransportMode::Full
+        );
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap();
         context
             .as_ref()
             .clone()
-            .extend_checked_original_products([7; 32], &[product(&a)])
-            .unwrap(),
-    );
+            .extend_issued_compiler_support(&support)
+            .unwrap()
+    });
     let current = materialize(&context);
     let a_path = current.graph_paths[&graph_a.digest()].path.clone();
     let a_directory = current.directory().path().to_path_buf();
