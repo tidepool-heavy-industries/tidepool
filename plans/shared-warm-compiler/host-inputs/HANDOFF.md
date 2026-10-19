@@ -259,12 +259,13 @@ omission or permanently unsupported migration shortcut. Query eea remains immuta
 selection_oracle owns independent Warm old-profile diagnostic/producer repair
 review, then exact typed consumer review. Diagnostic8e259's initial source receipt
 was qualified after a confirmed non-UTF-8 Path serialization panic in optional
-capture. Warm repaired it with fallible conversion00e9; its adjacent oversize test
-still needs to restore a valid path so the test reaches its intended budget check.
-Canonical producer repair367 admits the actual endpoint's canonical identity before
-cold root sealing, instead of raw producer bytes or an empty zero-producer root.
-Exact repaired source review, owning compilation and actual Rooted retry remain
-pending; the historical eea rejection branch is still unobserved. The genuine Rooted query retry
+capture. Warm repaired it with fallible conversion00e9 and restored the independent
+oversize-control premise45f. Exact45f090a4bfe6322c951b659128172337aa707f50 has
+independent source acceptance. Canonical producer repair367 admits the actual
+endpoint's canonical identity before cold root sealing, instead of raw producer
+bytes or an empty zero-producer root. Warm owns the active old-profile native gate;
+its qualified terminal event triggers the priority HOST join and genuine Rooted
+retry. The historical eea rejection branch is still unobserved. The genuine Rooted query retry
 preempts independent work once the reviewed exact dependency is ready. No active
 HOST native job exists; source-only changes still require production and cfg-test
 consumer compilation and meaningful counted controls under fresh admission. Paused old 02A is
