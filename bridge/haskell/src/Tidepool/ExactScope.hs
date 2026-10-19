@@ -1246,7 +1246,17 @@ scopeValueInterfaces scope = case scopePurpose scope of
 -- The exact scope separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
-readExactScope path = newExactInputOwner >>= \owner -> readExactScopeWithOwner owner path
+readExactScope path = do
+  result <- newExactInputOwner >>= \owner -> readExactScopeWithOwner owner path
+  case result of
+    Left reason -> pure (Left reason)
+    Right scope -> case scopeCapturedInputs scope of
+      Nothing -> pure (Left "exact scope lacks its captured input owner")
+      Just captured -> do
+        -- This scope owns the decoder; no inactive universe retains it.
+        -- Its live reads may share decoded facts even without retained images.
+        decoder <- newRequestIfaceDecoder
+        pure (Right (retainCapturedInputsUsing captured decoder scope))
 
 readExactScopeWithOwner :: ExactInputOwner -> FilePath -> IO (Either String ExactScope)
 readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
