@@ -1030,16 +1030,6 @@ impl CheckedNativeAvailability {
         })
     }
 
-    pub(crate) fn validate(
-        self,
-        baseline_groups: &BTreeSet<NativeGroupKey>,
-        preferred: &[QualifiedNativeAvailability],
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let advertised = self.advertised_groups(baseline_groups)?;
-        self.validate_advertised(advertised, preferred, validation)
-    }
-
     pub(crate) fn validate_request(
         self,
         baseline_groups: &BTreeSet<NativeGroupKey>,

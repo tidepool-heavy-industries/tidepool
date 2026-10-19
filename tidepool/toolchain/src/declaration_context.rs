@@ -479,62 +479,6 @@ fn retain_native_offers(
     context.retain_issued_offer_custody(offers.iter().cloned())
 }
 
-/// Carry choices already issued by each input before their custody is merged.
-/// An original with no bound group must remain availability only; the merged
-/// view cannot supply a new choice for it.
-fn carry_native_original_requirements(
-    projection: &CompilerInputProjection,
-    preferred: &[crate::artifact_inventory::NativeOriginalRequirement],
-) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
-    use crate::artifact_inventory::NativeOriginalRequirement;
-    let mut requirements = Vec::new();
-    for role in projection.roles() {
-        if let Some(requirement) = NativeOriginalRequirement::from_role(role.clone()) {
-            if !requirements.contains(&requirement) {
-                requirements.push(requirement);
-            }
-            continue;
-        }
-        let Some(original) = role.original() else {
-            continue;
-        };
-        for requirement in preferred.iter().filter(|fact| fact.original == original) {
-            if !requirements.contains(requirement) {
-                requirements.push(requirement.clone());
-            }
-        }
-    }
-    requirements
-}
-
-/// Capture native choices for an offer before its private custody is merged.
-/// The offer can be only part of the eventual compiler namespace; validate that
-/// namespace after all inputs arrive rather than inferring choices from it.
-fn capture_native_original_requirements(
-    projection: &CompilerInputProjection,
-    artifacts: &ArtifactView,
-    preferred: &[crate::artifact_inventory::NativeOriginalRequirement],
-) -> Result<Vec<crate::artifact_inventory::NativeOriginalRequirement>, CompileError> {
-    let mut requirements = carry_native_original_requirements(projection, preferred);
-    let bound = projection.within_view(artifacts);
-    for role in bound.roles() {
-        let Some(original) = role.original() else {
-            continue;
-        };
-        if requirements.iter().any(|fact| fact.original == original) {
-            continue;
-        }
-        if let Some(requirement) =
-            crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                original, artifacts,
-            )?
-        {
-            requirements.push(requirement);
-        }
-    }
-    Ok(requirements)
-}
-
 /// One strict output issuer binds source decisions and the target view to its
 /// completed compiler inputs. Publication borrows this owner without reissuance.
 #[derive(Debug)]
@@ -573,26 +517,6 @@ impl IssuedOriginalOutput {
 impl OriginalCompilerInputs {
     pub(crate) fn native_availability(&self) -> &RequestNativeAvailability {
         &self.native_availability
-    }
-
-    /// Issue a fresh candidate owner from checked products and source support.
-    /// Equal payloads do not preserve a prior offer's exact issuance. Transfer
-    /// an existing selected issuance with `from_selection` instead.
-    #[cfg(test)]
-    pub(crate) fn issue_candidate_from_support(
-        support: &crate::artifact_inventory::CompilerSourceSupport,
-        producer: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
-    ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability_with_source(
-            support.artifacts(),
-            support.projection(),
-            producer,
-            CompleteAvailabilitySource::Candidate {
-                source: support,
-                products,
-            },
-        )
     }
 
     pub(crate) fn issued_input_decisions(
@@ -823,85 +747,6 @@ impl OriginalCompilerInputs {
         }
     }
 
-    fn with_checked_candidate_products(
-        context: &ExactDeclarationContext,
-        producer: CanonicalProducerIdentity,
-        configured: &[CertifiedRecoveryProduct],
-    ) -> Result<Option<Self>, CompileError> {
-        let mut carried = Self::reuse_selected_authored(context)?;
-        trace_native_input_roles(
-            "candidate_after_authored_reuse",
-            carried.as_ref().map(|input| &input.projection),
-        );
-        let metadata = context.compiler_metadata_snapshot()?;
-        let mut reused = BTreeSet::new();
-        let mut fresh = Vec::new();
-        for product in configured {
-            let owner = identity(&product.owner().unit, &product.owner().module);
-            let is_selected = metadata.entries.get(&owner).is_some_and(|entry| {
-                matches!(&entry.payload, ArtifactPayload::Original(selected)
-                    if selected.same_durable_artifact(product))
-            });
-            if is_selected {
-                if metadata.entries[&owner].descriptor.producer_sha256 != producer.sha256() {
-                    return Err(failure(
-                        "reused candidate belongs to another canonical producer",
-                    ));
-                }
-                reused.insert(owner);
-            } else {
-                fresh.push(product.clone());
-            }
-        }
-        if !reused.is_empty() {
-            let source = &context.owner.facts.compiler_support;
-            let projection = source.projection().for_source_owners(&reused);
-            let reused = Self {
-                native_availability: source.native_availability().clone(),
-                demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
-                projection,
-                artifacts: source.artifacts().clone(),
-                native_offers: source.native_offers().to_vec(),
-            };
-            carried = Some(match carried {
-                Some(carried) => reused.merge(&carried)?,
-                None => reused,
-            });
-        }
-        if fresh.is_empty() {
-            trace_native_input_roles(
-                "candidate_private_composition",
-                carried.as_ref().map(|input| &input.projection),
-            );
-            return Ok(carried);
-        }
-        let configured = Self::issue_complete_native_availability_with_source(
-            context.owner.facts.compiler_support.artifacts(),
-            context.owner.facts.compiler_support.projection(),
-            producer.sha256(),
-            CompleteAvailabilitySource::Candidate {
-                source: &context.owner.facts.compiler_support,
-                products: &fresh,
-            },
-        )?;
-        trace_native_input_roles("candidate_fresh_fragment", Some(&configured.projection));
-        let result = match carried {
-            Some(carried) => carried.merge(&configured)?,
-            None => configured,
-        };
-        trace_native_input_roles("candidate_private_composition", Some(&result.projection));
-        Ok(Some(result))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_selected_authored_declarations(
-        context: &ExactDeclarationContext,
-        producer: CanonicalProducerIdentity,
-        configured: &[CertifiedRecoveryProduct],
-    ) -> Result<Option<Self>, CompileError> {
-        Self::with_checked_candidate_products(context, producer, configured)
-    }
-
     pub(crate) fn from_selection(
         selection: &crate::certified_products::CertifiedSourceSelection,
         artifacts: &ArtifactView,
@@ -939,11 +784,11 @@ impl OriginalCompilerInputs {
                 .module_interface()
                 .ok_or_else(|| failure("complete native product has no canonical owner"))?
                 .producer_sha256();
-            let issued = Self::issue_complete_native_availability_with_source(
+            let issued = Self::issue_completed_native_availability(
                 &artifacts,
                 &projection,
                 producer,
-                CompleteAvailabilitySource::Request(complete),
+                complete,
             )?;
             native_availability = native_availability
                 .merge(&issued.native_availability)?
@@ -980,52 +825,25 @@ impl OriginalCompilerInputs {
         })
     }
 
-    /// Issue fresh candidate availability against this context's checked support.
-    /// Exact canonical equality permits the private type-role upgrade, but does
-    /// not preserve an earlier offer's issuance or grant lexical/instance authority.
-    /// Use `from_selection` to transfer an existing selected issuance.
-    #[cfg(test)]
-    pub(crate) fn issue_candidate_from_context(
-        context: &ExactDeclarationContext,
-        producer: CanonicalProducerIdentity,
-        products: &[CertifiedRecoveryProduct],
-    ) -> Result<Self, CompileError> {
-        Self::issue_candidate_from_support(
-            context.compiler_source_support(),
-            producer.sha256(),
-            products,
-        )
-    }
-
-    fn issue_complete_native_availability_with_source(
+    /// Complete native availability from the exact output entries and input
+    /// decisions retained by one certified physical request.
+    fn issue_completed_native_availability(
         inventory: &ArtifactView,
         baseline: &CompilerInputProjection,
         producer_sha256: [u8; 32],
-        source: CompleteAvailabilitySource<'_>,
+        completed: CompletedRequestNativeProducts<'_>,
     ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.complete_native_availability",
             "projection",
         );
-        let count = match &source {
-            CompleteAvailabilitySource::Candidate { products, .. } => products.len(),
-            CompleteAvailabilitySource::Request(completed) => completed.entries.len(),
-        };
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
-        let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
         timing.advance("entries");
         let mut entries = Vec::new();
-        for index in 0..count {
-            let (product, completed_entry) = match &source {
-                CompleteAvailabilitySource::Candidate { products, .. } => (&products[index], None),
-                CompleteAvailabilitySource::Request(completed) => {
-                    let entry = &completed.entries[index];
-                    let ArtifactPayload::Original(product) = &entry.payload else {
-                        return Err(failure("complete native selection lacks original payload"));
-                    };
-                    (product, Some(entry))
-                }
+        for entry in &completed.entries {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("complete native selection lacks original payload"));
             };
             let _ = crate::certified_products::original_available_groups(product)
                 .map_err(compiler_evidence_failure)?;
@@ -1042,100 +860,30 @@ impl OriginalCompilerInputs {
                             "private native availability competes with selected original",
                         ));
                     }
-                } else if matches!(&source, CompleteAvailabilitySource::Candidate { .. })
-                    && retained.ambiguous_native_owners.contains(&owner)
-                {
-                    return Err(failure(
-                        "private native availability has ambiguous retained originals",
-                    ));
                 }
-            } else if matches!(&source, CompleteAvailabilitySource::Candidate { .. })
-                && retained.ambiguous_native_owners.contains(&owner)
-            {
-                return Err(failure(
-                    "private native availability has ambiguous retained originals",
-                ));
             }
-            entries.push(match completed_entry {
-                Some(entry) => {
-                    // The completed selection carries its already admitted facts and
-                    // acquisition owner; native permission still comes from the solver.
-                    let canonical = product.module_interface().ok_or_else(|| {
-                        failure("native product lacks its canonical finalized module")
-                    })?;
-                    if canonical.producer_sha256() != producer_sha256 {
-                        return Err(failure("native product has another canonical producer"));
-                    }
-                    Arc::clone(entry)
-                }
-                None => Arc::new(ArtifactEntry::original_with_validation(
-                    producer_sha256,
-                    product.clone(),
-                    &mut validation,
-                )?),
-            });
+            // Preserve the already admitted facts and acquisition owner. Native
+            // permission still comes from the request's checked row catalog.
+            let canonical = product
+                .module_interface()
+                .ok_or_else(|| failure("native product lacks its canonical finalized module"))?;
+            if canonical.producer_sha256() != producer_sha256 {
+                return Err(failure("native product has another canonical producer"));
+            }
+            entries.push(Arc::clone(entry));
         }
         timing.advance("requirements_and_dependency_catalog");
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let (native_original_requirements, dependency_offers) = match &source {
-            CompleteAvailabilitySource::Candidate { source, .. } => {
-                // Candidate issuance consumes exact selected external demand.
-                // An explicit empty decision cannot fall back to role policy.
-                let preferred = baseline
-                    .roles()
-                    .into_iter()
-                    .filter_map(|role| role.original())
-                    .map(|original| {
-                        crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                            original,
-                            source.artifacts(),
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                let requirements =
-                    capture_native_original_requirements(&projection, inventory, &preferred)?;
-                let mut offers = Vec::new();
-                for proof in preferred.iter().chain(&requirements) {
-                    let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-                        proof.original,
-                        inventory,
-                        Some(proof.clone()),
-                    )?;
-                    if !offers.contains(&offer) {
-                        offers.push(offer);
-                    }
-                }
-                (requirements, offers)
-            }
-            // The request already owns checked physical rows and their opaque
-            // offers. Its selected view deliberately need not own their Groups.
-            CompleteAvailabilitySource::Request(_) => (Vec::new(), Vec::new()),
-        };
         trace_native_input_roles("native_issuance_baseline", Some(baseline));
         trace_native_input_roles("native_issuance_fragment", Some(&projection));
         let effective = baseline.merge(&projection)?;
         trace_native_input_roles("native_issuance_effective_roles", Some(&effective));
-        let dependencies = match &source {
-            CompleteAvailabilitySource::Candidate { source, .. } => {
-                crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
-            }
-            CompleteAvailabilitySource::Request(completed) => {
-                crate::artifact_inventory::NativeDependencyCatalog::from_request(
-                    completed.continuation,
-                )
-            }
-        };
-        // Physical request permissions are already frozen in its row catalog.
+        let dependencies = crate::artifact_inventory::NativeDependencyCatalog::from_request(
+            completed.continuation,
+        );
         // Raw parent proofs cannot become namespace grants during reissuance.
-        let namespace_offers = match &source {
-            CompleteAvailabilitySource::Request(_) => &[][..],
-            _ => dependency_offers.as_slice(),
-        };
+        let namespace_offers = &[];
         timing.advance("namespace_admission");
-        // Available code retains custody without selecting executable groups.
         let mut artifacts = effective.admit_interfaces_with_native_offers(
             inventory,
             entries.clone(),
@@ -1150,29 +898,13 @@ impl OriginalCompilerInputs {
             &dependencies,
         )?;
         timing.advance("validate_bodies");
-        let validated = match &source {
-            CompleteAvailabilitySource::Candidate { .. } => {
-                let qualifications = native_original_requirements
-                    .iter()
-                    .map(|proof| proof.qualify_availability(&artifacts))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                checked.validate(
-                    &selected.retained.selected_native_groups,
-                    &qualifications,
-                    &mut validation,
-                )?
-            }
-            CompleteAvailabilitySource::Request(_) => checked.validate_request(
-                &selected.retained.selected_native_groups,
-                &dependencies,
-                &effective,
-                &artifacts,
-                &mut validation,
-            )?,
-        };
+        let validated = checked.validate_request(
+            &selected.retained.selected_native_groups,
+            &dependencies,
+            &effective,
+            &artifacts,
+            &mut validation,
+        )?;
         timing.advance("retain_offers");
         artifacts = artifacts.retain_issued_offer_custody(validated.offers().iter().cloned())?;
         timing.advance("normalize_rows");
@@ -1347,14 +1079,6 @@ impl<'a> ContinuationNativeInputs<'a> {
 struct CompletedRequestNativeProducts<'a> {
     continuation: &'a ContinuationNativeInputs<'a>,
     entries: Vec<Arc<ArtifactEntry>>,
-}
-
-enum CompleteAvailabilitySource<'a> {
-    Candidate {
-        source: &'a crate::artifact_inventory::CompilerSourceSupport,
-        products: &'a [CertifiedRecoveryProduct],
-    },
-    Request(CompletedRequestNativeProducts<'a>),
 }
 
 impl NativeTransportAvailability {
@@ -8221,24 +7945,6 @@ impl ExactDeclarationContext {
     ) -> Result<Self, CompileError> {
         let lexical = compose_lexical_nodes(self.owner.facts.lexical.iter().chain(lexical))?;
         self.extend(&[], joins, lexical)
-    }
-
-    /// Admit the original supporting homes sealed by the same checked-cell
-    /// transaction. Lexical exposure remains a separate caller-selected graph.
-    #[cfg(test)]
-    pub(crate) fn extend_checked_original_products(
-        mut self,
-        producer_sha256: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
-    ) -> Result<Self, CompileError> {
-        self = self.admit_producer(producer_sha256)?;
-        let updated = self
-            .owner
-            .facts
-            .compiler_support
-            .admit_available_checked_products(producer_sha256, products)?;
-        self = self.rebuild(|facts| facts.compiler_support = updated);
-        self.finish()
     }
 
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {

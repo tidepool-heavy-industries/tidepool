@@ -9728,11 +9728,11 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     );
     assert_eq!(*entry, reference);
     let calls = original_entry_construction_calls();
-    let issued = OriginalCompilerInputs::issue_complete_native_availability_with_source(
+    let issued = OriginalCompilerInputs::issue_completed_native_availability(
         &view,
         &projection,
         producer.sha256(),
-        CompleteAvailabilitySource::Request(completed),
+        completed,
     )
     .unwrap();
     assert_eq!(original_entry_construction_calls() - calls, 0);
@@ -9762,11 +9762,11 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
 
     let wrong = continuation.complete_products(&view).unwrap();
     assert!(
-        matches!(OriginalCompilerInputs::issue_complete_native_availability_with_source(
-        &view, &projection, [255; 32], CompleteAvailabilitySource::Request(wrong),
+        matches!(OriginalCompilerInputs::issue_completed_native_availability(
+        &view, &projection, [255; 32], wrong,
     ), Err(CompileError::ExtractFailed(detail)) if detail.contains("native product has another canonical producer"))
     );
-    let candidate_calls = original_entry_construction_calls();
+    let fresh_output_calls = original_entry_construction_calls();
     (|| -> Result<OriginalCompilerInputs, CompileError> {
         let fixture_products: &[CertifiedRecoveryProduct] = &[native.clone()];
         let entries = fixture_products
@@ -9793,8 +9793,8 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     })()
     .unwrap();
     assert!(
-        original_entry_construction_calls() > candidate_calls,
-        "Candidate retains ordinary construction"
+        original_entry_construction_calls() > fresh_output_calls,
+        "independently selected fresh output retains ordinary construction"
     );
 
     drop(reference);
