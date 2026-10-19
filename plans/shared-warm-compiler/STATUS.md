@@ -132,7 +132,8 @@ query does not qualify the original ordinary-cell timing goal or incremental GHC
 
 User requested resumable backend/account handoffs at natural boundaries, without
 stopping implementation or interrupting builds. All five area supervisors ACKed
-propagation to every reserved leaf, including completed/unmerged candidates.
+propagation; current durable records are verified for all five supervisors and all
+nine reserved leaves, including every completed/unmerged candidate.
 [HANDOFF.md](HANDOFF.md) owns the campaign resume sequence and links exact area
 handoffs as they settle. Handoffs separate source, compilation and executed evidence;
 retain checkout/branch/OID/dirty state, review/fold obligations, commands, dependencies

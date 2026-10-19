@@ -91,10 +91,21 @@ or zero matches never count as execution. Publish only reviewable checkpoints:
 
 ## Area handoffs
 
-Every supervisor received the exact user handoff request and ACKed it; completed
-leaves were reactivated only for concrete durable handoffs within existing grants.
-Current authoritative paths and remaining gaps are retained in private
-`campaign/HANDOFF-INDEX.json`, updated from area terminal packets. Committed area
+Current durable records are verified for all five supervisors and all nine leaves,
+including every completed/unmerged candidate. Completed leaves were reactivated
+only for concrete handoffs within existing grants. Exact source/hashes and any
+later gaps are retained in private `campaign/HANDOFF-INDEX.json`, updated from
+area terminal packets. Current supervisor entry points:
+
+| Area | Current handoff |
+| --- | --- |
+| Host | `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019/plans/shared-warm-compiler/host-inputs/HANDOFF.md` |
+| Owned inputs | `owned-inputs/SERVICE-SOURCE-CONTINUATION.json`, section `backend_account_handoff` in campaign evidence root |
+| Warm workers | `warm-workers/HANDOFF.md` in campaign evidence root |
+| Reload | `reload/BACKEND-HANDOFF.json` in campaign evidence root |
+| Qualification | `/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/SUPERVISOR-HANDOFF.md` |
+
+ Committed area
 handoffs in this checkout describe only their integrated histories; unmerged source
 handoffs live in the owning checkout or private evidence, as the index states.
 Do not treat an old integrated area snapshot as current unmerged implementation.
