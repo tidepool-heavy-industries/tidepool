@@ -2257,7 +2257,7 @@ data OfferedWorldInputs = OfferedWorldInputs BS.ByteString FilePath BS.ByteStrin
 type OfferedWorldRow = ((InterfaceRow,ParsedInterfaceEvidence),BS.ByteString)
 
 data WorldRestoration = WorldRestoration BS.ByteString BS.ByteString BS.ByteString BS.ByteString
-  BS.ByteString BS.ByteString BS.ByteString
+  BS.ByteString BS.ByteString BS.ByteString BS.ByteString
 
 worldCorrupt :: String -> IO a
 worldCorrupt = throwIO . WorldInputsFailure WorldInputsCorrupt
@@ -2281,13 +2281,13 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
-      WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility visibleSeal blockSeal <-
+      WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility baseSeal visibleSeal blockSeal <-
         decodeWorldBytes decodeWorldRestoration restoration
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
-      let canonicalRestoration = toStrictByteString (E.encodeListLen 9 <> text "TPCWREST" <> E.encodeWord 1
+      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 2
             <> E.encodeBytes expectedPrimary <> E.encodeBytes domainSeal <> E.encodeBytes expectedProducer
             <> E.encodeBytes expectedProfile <> E.encodeBytes expectedVisibility
-            <> E.encodeBytes visibleSeal <> E.encodeBytes blockSeal)
+            <> E.encodeBytes baseSeal <> E.encodeBytes visibleSeal <> E.encodeBytes blockSeal)
       unless (restoration == canonicalRestoration && primary == expectedPrimary && producer == expectedProducer && profile == expectedProfile
           && visibility == expectedVisibility && worldSourceDomainSha256 sources == domainSeal
           && SHA.hash (toStrictByteString (E.encodeListLen (fromIntegral (length blocks))
@@ -2296,14 +2296,11 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       let images = case acquisition of ContinueOwnedOriginals values -> values; FreshFiles -> []
       when (case acquisition of FreshFiles -> True; _ -> False)
         (worldCorrupt "world descriptor requires owned original acquisition")
-      rowImages <- mapM (worldRowImage producer images) (baseRows ++ visibleRows)
-      let visibleImages = drop (length baseRows) rowImages
-          rowRefs = E.encodeListLen (fromIntegral (length visibleRows))
-            <> foldMap (\(((row,_),_),image) -> let (unit,name) = rowOwner row in
-              E.encodeListLen 4 <> text unit <> text name <> E.encodeBytes producer <> E.encodeBytes image)
-              (zip visibleRows visibleImages)
-      unless (SHA.hash (toStrictByteString rowRefs) == visibleSeal)
-        (worldCorrupt "visible world rows differ from restoration")
+      mapM_ (worldRowImage producer images) (baseRows ++ visibleRows)
+      actualBaseSeal <- worldSemanticRowsSeal producer baseRows
+      actualVisibleSeal <- worldSemanticRowsSeal producer visibleRows
+      unless (actualBaseSeal == baseSeal && actualVisibleSeal == visibleSeal)
+        (worldCorrupt "semantic world rows differ from restoration")
       RetainedOriginalInputs retained _ _ _ _ <- readMVar state
       let available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
             emptyCapturedOriginalContent retained
@@ -2344,6 +2341,27 @@ decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict 
   Right (remaining,value) | BL.null remaining -> pure value
   Right _ -> worldCorrupt "world input has trailing bytes"
 
+-- Bind semantic evidence as well as its immutable image. In particular, the
+-- same image cannot change a source-original absence hint into passive join
+-- evidence. Receiving paths and arena aliases do not change logical identity.
+worldSemanticRowsSeal :: BS.ByteString -> [OfferedWorldRow] -> IO BS.ByteString
+worldSemanticRowsSeal producer rows = do
+  encoded <- forM rows $ \((row@(iface,_,_),evidence),image) -> do
+    role <- case evidence of
+      ParsedModuleEvidence descriptor -> case descriptorPurpose descriptor of
+        ScopeInterface SourceOriginalRole -> pure "module"
+        ScopeInterface NativeDeclarationRole -> pure "native-declaration"
+        CandidateCarrier -> worldCorrupt "world row has no semantic scope role"
+      ParsedJoinEvidence -> pure "join"
+      ParsedValueEvidence -> pure "value"
+    let (unit,name) = rowOwner row
+        required = Set.toAscList (Set.fromList (exactRequirements iface))
+    pure (E.encodeListLen 6 <> text unit <> text name <> E.encodeBytes producer <> E.encodeBytes image
+      <> text role <> E.encodeListLen (fromIntegral (length required))
+      <> foldMap (\(ownerUnit,ownerName) -> E.encodeListLen 2 <> text ownerUnit <> text ownerName) required)
+  pure (SHA.hash (toStrictByteString (E.encodeListLen (fromIntegral (length rows)) <> mconcat encoded)))
+  where text = E.encodeString . T.pack
+
 worldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO BS.ByteString
 worldRowImage producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
   [seal] -> either worldCorrupt pure (unhexDigest seal)
@@ -2364,7 +2382,7 @@ decodeWorldInputs payloadBytes = do
   array 11
   magic <- string
   version <- decodeWord
-  unless (magic == "TPCWORLD" && version == 1) (fail "unsupported compiler world descriptor")
+  unless (magic == "TPCWORLD" && version == 2) (fail "unsupported compiler world descriptor")
   restoration <- decodeBytes
   source <- absolute
   producer <- rawWorldDigest
@@ -2384,12 +2402,12 @@ decodeWorldInputs payloadBytes = do
 
 decodeWorldRestoration :: Decoder s WorldRestoration
 decodeWorldRestoration = do
-  array 9
+  array 10
   magic <- string
   version <- decodeWord
-  unless (magic == "TPCWREST" && version == 1) (fail "unsupported compiler world restoration")
+  unless (magic == "TPCWREST" && version == 2) (fail "unsupported compiler world restoration")
   WorldRestoration <$> decodeBytes <*> rawWorldDigest <*> rawWorldDigest <*> rawWorldDigest
-    <*> decodeBytes <*> rawWorldDigest <*> rawWorldDigest
+    <*> decodeBytes <*> rawWorldDigest <*> rawWorldDigest <*> rawWorldDigest
 
 rawWorldDigest :: Decoder s BS.ByteString
 rawWorldDigest = decodeBytes >>= \bytes -> if BS.length bytes == 32 then pure bytes else fail "invalid world digest"

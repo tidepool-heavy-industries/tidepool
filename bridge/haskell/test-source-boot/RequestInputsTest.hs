@@ -11,6 +11,8 @@ import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, 
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
+import qualified Crypto.Hash.SHA256 as SHA
+import Numeric (readHex)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
@@ -67,7 +69,8 @@ import Tidepool.ExactScope
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
-  , exactInputRetentionLimits, commitWorldInputRetention )
+  , exactInputRetentionLimits, commitWorldInputRetention
+  , readWorldInputsWithOwner, WorldInputFacts, worldInputsIdentityBytes, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -368,6 +371,115 @@ capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> 
   scope <- readExactScope path >>= either fail pure
   missingCapturedProofPartsRefuse scope
 
+-- Raw transport mutations enter the actual cold reader using independently
+-- issued canonical rows and their live sealed acquisition. This issues no
+-- rooted boot, compiler world realization, hold, or Ready authority.
+semanticWorldBindingControls :: FilePath -> FilePath -> IO ()
+semanticWorldBindingControls work scopePath = do
+  (scope,fixture) <- readScopeCodecFixture scopePath
+  rows <- case scopeCodecField ScopeCodecInterfaces fixture of
+    TList values | length values == 2 -> pure values
+    _ -> fail "world semantic binding control requires two genuine rows"
+  (arenas,images) <- case scopeCodecAcquisition fixture of
+    Just (ContinueCodecOriginals a (TList values)) -> pure (a,values)
+    _ -> fail "world semantic binding control requires genuine sealed images"
+  producer <- rawHex (scopeProducerSha256 scope)
+  offered <- forM rows $ \row -> case row of
+    TList [u,n,_,_,_,_,_,_] -> case [seal | TList [_,u',n',TString seal,_] <- images, u == u', n == n'] of
+      [seal] -> TList . (row:) . pure . TBytes <$> rawHex (T.unpack seal)
+      _ -> fail "genuine row does not have one exact image"
+    _ -> fail "genuine world row shape changed"
+  let sources = "TPCSRC01" <> BS.replicate 8 0
+      sourcePath = work </> "world-seal-sources.bin"
+      primary = "opaque-context-codec-reference"
+      body = "cold codec binding only"
+      profile = BS.replicate 32 97
+      blocks = TList [TList [TBytes primary,TBytes body]]
+      acquisition = TList [TString "continue-originals",arenas,TList images]
+      base = offered
+      visible = reverse offered
+      encode = toStrictByteString . encodeTerm
+      text = TString . T.pack
+      rowProjection (TList [TList [u,n,_,_,TList requires,_,_,TList (role:_)],image]) =
+        TList [u,n,TBytes producer,image,role,TList (sortOn ownerKey requires)]
+      rowProjection _ = error "test world row projection needs the genuine eight-field row"
+      ownerKey (TList [TString u,TString n]) = (u,n)
+      ownerKey _ = error "test world requirement projection needs an exact owner"
+      seal rs = SHA.hash (encode (TList (map rowProjection rs)))
+      restoration version bs vs = encode (TList
+        [TString "TPCWREST",TInt version,TBytes primary,TBytes (SHA.hash sources),TBytes producer
+        ,TBytes profile,TBytes BS.empty,TBytes (seal bs),TBytes (seal vs)
+        ,TBytes (SHA.hash (encode (TList [TList [TBytes primary,TBytes (SHA.hash body)]])))])
+      product = restoration 2 base visible
+      packet version receipt bs vs inputs = TList
+        [TString "TPCWORLD",TInt version,TBytes receipt,text sourcePath,TBytes producer,TBytes profile
+        ,TList [TList bs,TList vs],inputs,TBytes BS.empty,TBytes primary,blocks]
+      readPacket label term = do
+        let path = work </> (label ++ ".world.cbor")
+        BS.writeFile path (encode term)
+        owner <- newExactInputOwner
+        readWorldInputsWithOwner owner path
+      requireCorrupt expected label term = do
+        result <- try (readPacket label term) :: IO (Either WorldInputsFailure WorldInputFacts)
+        case result of
+          Left (WorldInputsFailure WorldInputsCorrupt reason)
+            | maybe True (== reason) expected -> pure ()
+          Left failure -> throwIO failure
+          Right _ -> fail ("world semantic receipt accepted mutation: " ++ label)
+      replaceFirst value (_:rest) = value:rest
+      replaceFirst _ [] = error "world row control requires a nonempty list"
+      retag (TList [TList [u,n,path,sha,requires,packages,packageSha,_],image]) =
+        TList [TList [u,n,path,sha,requires,packages,packageSha,TList [TString "join"]],image]
+      retag _ = error "world role control requires a genuine row"
+      changeRequires (TList [TList [u,n,path,sha,TList requires,packages,packageSha,evidence],image]) =
+        TList [TList [u,n,path,sha,TList (TList [TString "other-unit",TString "Other.Module"]:requires),packages,packageSha,evidence],image]
+      changeRequires _ = error "world requirement control requires a genuine row"
+  BS.writeFile sourcePath sources
+  original <- readPacket "world-seal-valid" (packet 2 product base visible acquisition)
+  unless (worldInputsIdentityBytes original == SHA.hash product)
+    (fail "cold world reader changed its exact restoration identity")
+  forM_ [("base",base,\rs -> (rs,visible)),("visible",visible,\rs -> (base,rs))] $ \(which,selected,replace) -> do
+    let mutations = [("drop",tail selected),("reorder",reverse selected)
+          ,("retag",replaceFirst (retag (head selected)) selected)
+          ,("valid-swap",replaceFirst (last selected) selected)
+          ,("requires",replaceFirst (changeRequires (head selected)) selected)]
+    forM_ mutations $ \(kind,changed) -> do
+      let (bs,vs) = replace changed
+          label = which ++ "-" ++ kind
+      requireCorrupt (Just "semantic world rows differ from restoration") label (packet 2 product bs vs acquisition)
+      -- The strongest retag/swap controls are valid passive rows: only the
+      -- original logical receipt is wrong. A newly bound receipt admits them.
+      when (kind == "retag" || kind == "valid-swap") $ do
+        rebound <- readPacket (label ++ "-rebound") (packet 2 (restoration 2 bs vs) bs vs acquisition)
+        unless (worldInputsIdentityBytes rebound /= worldInputsIdentityBytes original)
+          (fail "semantic row replacement retained the old logical identity")
+  duplicate <- case [TList [TList [u,n,path,sha,TList (required:requires),packages,packageSha,evidence],image]
+      | TList [TList [u,n,path,sha,TList requires@(required:_),packages,packageSha,evidence],image] <- base] of
+    row:_ -> pure row
+    [] -> fail "world duplicate-requirement control requires a genuine dependency"
+  requireCorrupt Nothing "duplicate-requires"
+    (packet 2 (restoration 2 (replaceFirst duplicate base) visible) (replaceFirst duplicate base) visible acquisition)
+  requireCorrupt Nothing "old-descriptor" (packet 1 product base visible acquisition)
+  requireCorrupt Nothing "old-restoration" (packet 2 (restoration 1 base visible) base visible acquisition)
+  let paths = Set.toAscList (Set.fromList
+        [path | TList [_,_,_,_,TList parts] <- images
+        ,TList [_,TString path,_,_,_,_] <- parts])
+      aliases = Map.fromList [(path,T.pack (work </> ("not-on-disk-world-input-" ++ show i)))
+        | (i,path) <- zip [0 :: Int ..] paths]
+      relocate (TString value) = TString (Map.findWithDefault value value aliases)
+      relocate (TList values) = TList (map relocate values)
+      relocate other = other
+  aliased <- readPacket "world-alias-stable"
+    (packet 2 product (map relocate base) (map relocate visible) (relocate acquisition))
+  unless (worldInputsIdentityBytes aliased == worldInputsIdentityBytes original)
+    (fail "physical world row aliases changed logical identity")
+  where
+    rawHex [] = pure BS.empty
+    rawHex (a:b:rest) = case readHex [a,b] of
+      [(byte,"")] -> BS.cons byte <$> rawHex rest
+      _ -> fail "genuine producer/image has a malformed SHA"
+    rawHex _ = fail "genuine producer/image has an odd SHA length"
+
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
@@ -385,6 +497,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "file-only fixture claimed owned continuation reuse")
     owner <- newExactInputOwner
     firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
+    semanticWorldBindingControls work firstPath
     missingOwnedPartsRefuse firstPath
     capturedProofScope <- readExactScope firstPath >>= either fail pure
     missingCapturedProofPartsRefuse capturedProofScope
