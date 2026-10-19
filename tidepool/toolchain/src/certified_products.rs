@@ -14924,10 +14924,18 @@ pub(crate) mod tests {
                     .unwrap();
             let native_rows = wire.as_array().unwrap()[6].as_array().unwrap();
             if interface_only && !full {
-                assert!(
-                    native_rows.is_empty(),
-                    "a type-only owner without an offer supplies no native body"
-                );
+                // Recovery may retain a bounded-empty authenticated row after
+                // demoting the compiler role. It grants no executable ordinal.
+                assert!(native_rows.len() <= 1);
+                for row in native_rows {
+                    let row = row.as_array().unwrap();
+                    assert_eq!(row[6], value_array([]));
+                    assert_eq!(
+                        row[8],
+                        value_array([value_text("issued-groups"), value_array([])])
+                    );
+                    assert_eq!(row[9], value_text("private-native"));
+                }
             } else {
                 assert_eq!(native_rows.len(), 1);
                 let row = native_rows[0].as_array().unwrap();

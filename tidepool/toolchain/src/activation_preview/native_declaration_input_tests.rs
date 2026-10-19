@@ -239,17 +239,52 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                 );
                 return None;
             }
-            // The manifest advertises ordinals; authenticated original groups
-            // retain their independent binder identities and definitions.
+            let owner = ExactModuleIdentity {
+                unit: original.owner().unit.clone(),
+                module: original.owner().module.clone(),
+            };
+            let explicit_original = context
+                .compiler_input_projection()
+                .snapshot_roles()
+                .get(&owner)
+                .is_some_and(|role| role.original().is_some());
+            // The recovered fixture selects no executable groups. Its explicit
+            // Original keeps that bounded-empty permission; authored fallback
+            // under an interface-only role carries its complete sparse offer.
             assert_eq!(
                 row[6],
-                Value::Array(
+                Value::Array(if explicit_original {
+                    Vec::new()
+                } else {
                     [3u32, 17]
                         .map(|ordinal| Value::Integer(ordinal.into()))
                         .into()
-                ),
-                "complete sparse native availability census"
+                }),
+                "advertised ordinals follow the fixture's issued role and permission"
             );
+            assert_eq!(
+                row[8],
+                if explicit_original {
+                    Value::Array(vec![
+                        Value::Text("issued-groups".into()),
+                        Value::Array(vec![]),
+                    ])
+                } else {
+                    Value::Array(vec![Value::Text("full-carrier".into())])
+                }
+            );
+            assert_eq!(
+                row[9],
+                Value::Text(
+                    if explicit_original {
+                        "compiler-original"
+                    } else {
+                        "private-native"
+                    }
+                    .into()
+                )
+            );
+            // Authenticate the complete sparse body independently of demand.
             let groups = crate::certified_products::original_available_groups(original)
                 .unwrap()
                 .collect::<Vec<_>>();
