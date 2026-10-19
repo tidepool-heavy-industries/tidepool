@@ -359,6 +359,8 @@ impl RuntimeSourceFence {
     /// callback may hold its actual publication compare guard through commit.
     /// No issuer/ancestor gate may be acquired inside it. Error, panic or a
     /// missing commit leaves the fence closed. Commit must be its last action.
+    /// Borrow cleanup custody: dropping a last source claim or lexical owner in
+    /// the callback, including during unwind, can reacquire these held locks.
     /// Success reopens only this gate; future work admits the full source chain.
     pub fn reopen_with<E>(
         self,
