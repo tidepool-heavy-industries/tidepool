@@ -1125,6 +1125,38 @@ pub enum HelperBody {
 }
 
 impl Helper {
+    /// Signature derived from the typed helper shape and its owning verb.
+    #[must_use]
+    pub fn signature(&self, eff: &Effect) -> String {
+        let signature = if let HelperBody::Projection { arg, fields, .. } = &self.body {
+            format!("{} -> {}", arg.render(), eff.project(arg, fields).unwrap().render())
+        } else {
+            let verb = eff.verb(self.ctor.expect("non-projection helper has a verb")).unwrap();
+            if matches!(self.body, HelperBody::AsyncSpawnBody { .. }) {
+                render_member_signature(&[HsType::app(HsType::app(HsType::Named("Eff"), HsType::Var("effs")), HsType::Unit)], eff.name, &HsType::Int)
+            } else {
+                let args: Vec<_> = verb.args.iter().map(|a| a.ty.clone()).collect();
+                let result = match &self.body {
+                    HelperBody::IntDecode { result_type, .. } => HsType::Named(result_type),
+                    HelperBody::NullaryLiftEither => verb.ret.clone(),
+                    _ => verb.result_type(),
+                };
+                let mut extra = Vec::new();
+                for ty in args.iter().chain(std::iter::once(&result)) {
+                    for variable in free_type_vars(ty) {
+                        if !extra.contains(&variable) { extra.push(variable); }
+                    }
+                }
+                if matches!(self.body, HelperBody::IntDecode { .. }) {
+                    render_member_signature_with(&[], &args, &eff.head(), &result)
+                } else {
+                    render_member_signature_with(&extra, &args, eff.name, &result)
+                }
+            }
+        };
+        format!("{} :: {}", self.name, signature)
+    }
+
     /// The helper's rendered Haskell: doc block (if any), signature, body.
     ///
     /// # Panics
@@ -1323,4 +1355,26 @@ pub enum OuterEffect {
     Model,
     /// The admitted cell's editable context document and next-model choice.
     ContextReadWrite,
+}
+
+#[cfg(test)]
+mod documentation_signature_tests {
+    #[test]
+    fn structured_helper_signatures_match_compiled_surface() {
+        let mut checked = 0;
+        for effect in crate::effects::all() {
+            for helper in &effect.helpers {
+                let signature = helper.signature(&effect);
+                assert!(
+                    helper.render(&effect).lines().any(|line| line == signature),
+                    "{}.{} documentation differs from compiled source: {}",
+                    effect.name,
+                    helper.name,
+                    signature
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
 }

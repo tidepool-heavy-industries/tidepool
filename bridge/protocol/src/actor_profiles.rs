@@ -845,7 +845,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     }
     rust.push_str("            _ => ActorEffectKey::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(\n                &name,\n            ))\n            .map(Self::Actor),\n        }\n    }\n}\n");
     let mut bridge = crate::gen::header("//! ", "Nominal actor effect key bridge");
-    bridge.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ActorEffectKeyWire {\n");
+    bridge.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell, tidepool_bridge_derive::ToHaskell)]\npub enum ActorEffectKeyWire {\n");
     let mut bridge_effects = actor.clone();
     bridge_effects.sort_by_key(|effect| effect.bridge_order);
     for effect in &bridge_effects {
@@ -865,12 +865,17 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             effect.constructor, effect.constructor
         ));
     }
-    bridge.push_str("        }\n    }\n}\n\nimpl From<ActorEffectKeyWire> for crate::ActorEffectKey {\n    fn from(value: ActorEffectKeyWire) -> Self {\n        match value {\n");
+    bridge.push_str("        }\n    }\n}\n\nimpl From<ActorEffectKeyWire> for exomonad_tool::ActorEffectKey {\n    fn from(value: ActorEffectKeyWire) -> Self {\n        match value {\n");
     for effect in &bridge_effects {
         bridge.push_str(&format!(
             "            ActorEffectKeyWire::{} => Self::{},\n",
             effect.constructor, effect.identity.rust_wire
         ));
+    }
+    bridge.push_str("        }\n    }\n}\n");
+    bridge.push_str("\nimpl From<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {\n    fn from(value: exomonad_tool::ActorEffectKey) -> Self {\n        match value {\n");
+    for effect in &bridge_effects {
+        bridge.push_str(&format!("            exomonad_tool::ActorEffectKey::{} => Self::{},\n", effect.identity.rust_wire, effect.constructor));
     }
     bridge.push_str("        }\n    }\n}\n");
     let mut profiles = crate::gen::header("//! ", "Default actor effects");
@@ -1004,8 +1009,12 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
 
     vec![
         GeneratedFile {
-            path: "exomonad/actor/src/generated/nominal_keys.rs".into(),
+            path: "tidepool/bridge-effects/src/generated/nominal_keys.rs".into(),
             contents: bridge,
+        },
+        GeneratedFile {
+            path: "exomonad/actor/src/generated/nominal_keys.rs".into(),
+            contents: "pub use tidepool_bridge_effects::ActorEffectKeyWire;\n".into(),
         },
         GeneratedFile {
             path: "exomonad/tool/src/generated/effect_keys.rs".into(),

@@ -303,3 +303,44 @@ mod family_tests {
         assert_ne!(openai.model_permission, argon.model_permission);
     }
 }
+
+/// Structured callable metadata generated from the owning typed schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectOperationDocumentation {
+    pub name: String,
+    pub signature: String,
+    pub contract: Vec<String>,
+    pub source: Option<String>,
+    pub examples: Vec<String>,
+}
+
+/// Documentation facts for a declaration with a structured schema owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectDocumentationFacts {
+    pub description: String,
+    pub prompt_card: Option<String>,
+    pub imports: Vec<String>,
+    pub operations: Vec<EffectOperationDocumentation>,
+}
+
+/// Project facts from the selected declaration; unavailable schema metadata is explicit.
+#[must_use]
+pub fn effect_documentation(decl: &EffectDecl) -> Option<EffectDocumentationFacts> {
+    Some(EffectDocumentationFacts {
+        description: decl.description.into(),
+        prompt_card: decl.prompt_card.map(Into::into),
+        imports: decl.extra_imports.iter().map(|value| (*value).into()).collect(),
+        operations: crate::generated::operation_documentation(decl.type_name)?,
+    })
+}
+
+/// Resolve a nominal selected row key through the existing declaration catalogue.
+#[must_use]
+pub fn effect_documentation_for(key: exomonad_tool::ActorEffectKey) -> Option<EffectDocumentationFacts> {
+    let identity = key.nominal_identity()?;
+    let mut declaration = crate::all_decls().into_iter().find(|decl| decl.type_name == identity.name)?;
+    if let Some(permission) = key.model_permission() {
+        declaration = declaration.for_model_permission(permission);
+    }
+    effect_documentation(&declaration)
+}

@@ -20,6 +20,10 @@ use tidepool_bridge_derive::{HaskellRecord, ToHaskell};
 pub mod generated;
 pub use generated::*;
 
+#[path = "generated/nominal_keys.rs"]
+mod nominal_keys;
+pub use nominal_keys::ActorEffectKeyWire;
+
 impl Backend {
     #[must_use]
     pub fn config_name(&self) -> &'static str {
