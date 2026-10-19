@@ -1,5 +1,5 @@
 module Tidepool.Introspection
-  ( InspectionResult (..), LookupAnswer(..),
+  ( InspectionResult (..),
     InfoEntry (..),
     TypeMatch (..),
     TypeMatchQuality (..),
@@ -15,15 +15,11 @@ module Tidepool.Introspection
     DeclarationInfo (..),
     IdentifierInfo (..),
     StructuredQueryError (..),
-    normalizeLookupWildcards,
+    normalizeInspectionWildcards,
     searchTypeMatches,
     InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc,
-    encodeInspectionResults, encodeHostedLookupOutput,
+    encodeInspectionResults,
     inspectPublicModuleExports,
-    SelectedMatches(..), SelectedLookupAnswer(..), HostedLookupAnswer(..), HostedOperationIdentity(..),
-    HostedLookupOutput(..), HostedDiscoverySelection(..), HostedDiscoveryCandidate(..), HostedFallback(..),
-    selectHostedAnswers, CandidateSeed(..), selectFairSeeds, finishHostedKnown,
-    needsHostedFallback, runHostedLookupDiscoveryGhc,
   )
 where
 
@@ -85,9 +81,8 @@ import GHC.Utils.Outputable
   )
 import Tidepool.ExtractRequest
   ( InspectionProvenance (..), InspectionRequest (..), StructuredInspection (..),
-    ExactNameInspection(..), LookupNameInspection(..), LookupNameMode(..),
-    StructuredNameNamespace (..), StructuredNameScope (..),
-    HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
+    ExactNameInspection(..),
+    StructuredNameNamespace (..), StructuredNameScope (..)
   )
 import GHC.Driver.Monad (reflectGhc, Session(..))
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
@@ -115,7 +110,6 @@ instance Show InfoEntry where
 
 data InspectionResult
   = InspectionType String String Availability
-  | InspectionLookup String [StructuredNameScope] LookupAnswer
   | InspectionInfo String [InfoEntry]
   | InspectionAmbiguous String [InfoEntry]
   | InspectionNotFound String
@@ -128,313 +122,6 @@ data InspectionResult
   | InspectionStructuredError StructuredQueryError
   deriving (Eq, Show)
 
--- A single compiler-issued decision, never a pair whose interpretation
--- depends on a caller reproducing source-shape rules.
-data LookupAnswer
-  = LookupInfo [InfoEntry]
-  | LookupAmbiguous [InfoEntry]
-  | LookupModule String [InfoEntry]
-  | LookupMissing [String]
-  | LookupModuleNotFound String
-  deriving (Eq, Show)
-
--- Hosted admission owns the retained entries and their complete observed count together.
--- Generic inspection continues to return the complete lists above.
-data SelectedMatches a = SelectedMatches
-  { selectedObserved :: Int, selectedEntries :: [a] }
-  deriving (Eq, Show)
-
-data SelectedLookupAnswer
-  = SelectedInfo (SelectedMatches InfoEntry)
-  | SelectedAmbiguous (SelectedMatches InfoEntry)
-  | SelectedModule String (SelectedMatches InfoEntry)
-  | SelectedMissing [String]
-  | SelectedModuleNotFound String
-  deriving (Eq, Show)
-
-data HostedOperationIdentity = HostedPrimaryIdentity Word32 | HostedReferenceIdentity [Word32]
-  deriving (Eq, Show)
-
-data HostedLookupAnswer
-  = HostedNameAnswer Word32 [StructuredNameScope] SelectedLookupAnswer
-  | HostedTypeAnswer Word32 (SelectedMatches TypeMatch)
-  | HostedReferenceAnswer [Word32] [StructuredNameScope] SelectedLookupAnswer
-  | HostedRejected HostedOperationIdentity String
-  deriving (Eq, Show)
-
-data HostedFallback
-  = HostedFallbackNotNeeded
-  | HostedFallbackZeroBudget
-  | HostedFallbackUnavailable String
-  | HostedFallbackAttempted [StructuredNameScope]
-  deriving (Eq, Show)
-
-data HostedDiscoveryCandidate = HostedDiscoveryCandidate
-  { hostedCandidateQuery :: String, hostedCandidateOrigins :: [String]
-  , hostedCandidateSummary :: String, hostedCandidateLocal :: Bool
-  , hostedCandidateReference :: Maybe IdentifierRef
-  } deriving (Eq, Show)
-
-data HostedDiscoverySelection = HostedDiscoverySelection
-  { hostedSelectedCandidates :: [HostedDiscoveryCandidate]
-  , hostedFallback :: HostedFallback
-  , hostedEligibleModuleCount :: Int, hostedSubmittedModuleCount :: Int
-  , hostedEnumeratedOccurrences :: Int, hostedDiscardedOccurrences :: Int
-  , hostedSelectionLimit :: Int, hostedSelectionIssue :: Maybe String
-  } deriving (Eq, Show)
-
-data HostedLookupOutput = HostedLookupOutput
-  { hostedLookupAnswers :: [HostedLookupAnswer]
-  , hostedLookupSelection :: Maybe HostedDiscoverySelection
-  } deriving (Eq, Show)
-
-selectHostedAnswers :: HostedLookupBatch -> [InspectionResult] -> Either String [HostedLookupAnswer]
-selectHostedAnswers batch answers
-  | length operations /= length answers = Left "hosted lookup worker omitted an operation answer"
-  | otherwise = mapM select (zip operations answers)
-  where
-    operations = hostedLookupOperations batch
-    select (operation, InspectionRejected diagnostic) = Right (HostedRejected (identity operation) diagnostic)
-    select (HostedLookupPrimary ordinal _ (HostedLookupName _), InspectionLookup _ scopes answer) =
-      Right (HostedNameAnswer ordinal scopes (selectName answer))
-    select (HostedLookupPrimary ordinal _ (HostedLookupTypeSearch _), InspectionTypeMatches _ matches) =
-      -- searchTypeMatchesWithContext already issues this exact documented rank order.
-      Right (HostedTypeAnswer ordinal (retain matches))
-    select (HostedLookupExactReference destinations _, InspectionLookup _ scopes answer) =
-      Right (HostedReferenceAnswer destinations scopes (selectName answer))
-    select _ = Left "hosted lookup worker returned an answer of another operation kind"
-    identity (HostedLookupPrimary ordinal _ _) = HostedPrimaryIdentity ordinal
-    identity (HostedLookupExactReference destinations _) = HostedReferenceIdentity destinations
-    retain entries = SelectedMatches (length entries) (take 20 entries)
-    selectName answer = case answer of
-      LookupInfo entries -> SelectedInfo (retain (sortOn infoRank entries))
-      LookupAmbiguous entries -> SelectedAmbiguous (retain (sortOn infoRank entries))
-      LookupModule owner entries -> SelectedModule owner (retain (sortOn infoRank entries))
-      LookupMissing names -> SelectedMissing names
-      LookupModuleNotFound owner -> SelectedModuleNotFound owner
-    -- All name/exact/module matches have Exact quality. Availability order is
-    -- shared with type search; remaining fields match the hosted presentation contract.
-    infoRank entry = (infoAvailability entry, infoName entry, infoModule entry, infoDisplay entry)
-
--- Only lightweight addresses, origins and projection handles participate in
--- admission. A payload (including a declaration renderer) is never inspected.
-data CandidateSeed a = CandidateSeed
-  { seedQuery :: String, seedReference :: Maybe IdentifierRef, seedOrigins :: [String]
-  , seedLocal :: Bool, seedOccurrence :: String, seedPayload :: a
-  } deriving (Eq, Show)
-
-seedIdentity :: CandidateSeed a -> (String, Maybe IdentifierRef)
-seedIdentity seed = (seedQuery seed, seedReference seed)
-
--- One mixed selector: canonical addresses per group, fair admission, and all
--- origins for retained addresses even after admission fills its shared budget.
-selectFairSeeds :: Int -> [[CandidateSeed a]] -> ([CandidateSeed a], Int, Int)
-selectFairSeeds limit groups = (map attachOrigins selected, enumerated, discarded)
-  where
-    enumerated = sum (map length groups)
-    canonical = map unique groups
-    unique = go Set.empty
-      where go _ [] = []
-            go seen (seed : rest)
-              | Set.member (seedIdentity seed) seen = go seen rest
-              | otherwise = seed : go (Set.insert (seedIdentity seed) seen) rest
-    interleave lists = case [(seed, rest) | seed : rest <- lists] of
-      [] -> []
-      rows -> map fst rows ++ interleave (map snd rows)
-    admitted = admit Set.empty 0 (interleave canonical)
-    selected = unique admitted
-    admit _ count _ | count >= max 0 limit = []
-    admit _ _ [] = []
-    admit seen count (seed : rest)
-      | Set.member (seedIdentity seed) seen = seed : admit seen count rest
-      | otherwise = seed : admit (Set.insert (seedIdentity seed) seen) (count + 1) rest
-    selectedKeys = Set.fromList (map seedIdentity selected)
-    -- Admitted duplicate origins retain their encounter order; remaining
-    -- original groups then join any still-unseen origins without rendering.
-    origins = foldl' addOrigins Map.empty (admitted ++ concat groups)
-    addOrigins found seed
-      | Set.member (seedIdentity seed) selectedKeys = Map.alter
-          (Just . maybe (seedOrigins seed) (\previous -> nub (previous ++ seedOrigins seed)))
-          (seedIdentity seed) found
-      | otherwise = found
-    attachOrigins seed = seed { seedOrigins = Map.findWithDefault [] (seedIdentity seed) origins }
-    discarded = length [() | seed <- concat groups, Set.notMember (seedIdentity seed) selectedKeys]
-
-nominalReference :: Name -> IdentifierNamespace -> IdentifierRef
-nominalReference name namespace = IdentifierRef
-  (maybe "" (moduleNameString . moduleName) (nameModule_maybe name))
-  (occNameString (nameOccName name)) namespace
-
-currentReference :: Name -> IdentifierNamespace -> IdentifierRef
-currentReference name namespace = IdentifierRef "" qualified namespace
-  where nominal = nominalReference name namespace
-        qualified = case identifierModule nominal of
-          "" -> identifierName nominal
-          owner -> owner ++ "." ++ identifierName nominal
-
-referenceQuery :: IdentifierRef -> String
-referenceQuery reference = case identifierModule reference of
-  "" -> identifierName reference
-  owner -> owner ++ "." ++ identifierName reference
-
-referenceLabel :: IdentifierNamespace -> String
-referenceLabel namespace = case namespace of
-  ValueIdentifier -> "Value"
-  TypeIdentifier -> "Type"
-  ConstructorIdentifier -> "Constructor"
-  FieldIdentifier -> "Field"
-
-selectedFoundReferences :: HostedLookupAnswer -> [IdentifierRef]
-selectedFoundReferences answer = case answer of
-  HostedNameAnswer _ _ selected -> found selected
-  HostedReferenceAnswer _ _ selected -> found selected
-  HostedTypeAnswer _ selected ->
-    [nominalReference (typeMatchNominalName entry) (typeMatchNamespace entry) | entry <- selectedEntries selected]
-  HostedRejected _ _ -> []
-  where
-    found (SelectedInfo selected) = map identity (selectedEntries selected)
-    found (SelectedModule _ selected) = map identity (selectedEntries selected)
-    found _ = []
-    identity entry = nominalReference (infoNominalName entry) (infoNamespace entry)
-
-hostedPrimaryPairs :: HostedLookupBatch -> [HostedLookupAnswer] -> [(Word32, String, HostedLookupQuery, HostedLookupAnswer)]
-hostedPrimaryPairs batch answers = sortOn (\(ordinal,_,_,_) -> ordinal)
-  [ (ordinal, origin, query, answer)
-  | (HostedLookupPrimary ordinal origin query, answer) <- zip (hostedLookupOperations batch) answers ]
-
-needsHostedFallback :: HostedLookupBatch -> [HostedLookupAnswer] -> Bool
-needsHostedFallback batch answers = maybe False ((> 0) . hostedCandidateLimit) (hostedLookupDiscovery batch)
-  && any missing (hostedPrimaryPairs batch answers)
-  where missing (_,_,HostedLookupName _,HostedNameAnswer _ _ (SelectedMissing _)) = True
-        missing (_,_,HostedLookupName _,HostedNameAnswer _ _ (SelectedModuleNotFound _)) = True
-        missing _ = False
-
--- Inventory projection payloads are supplied only for genuinely missed names.
--- Original-hit exclusion belongs only to known-reference seeds, as in the
--- prior mixed consumer; miss and ambiguity alternatives are not filtered by it.
-hostedGroups :: HostedLookupBatch -> [HostedLookupAnswer] -> (String -> [CandidateSeed a]) -> [[CandidateSeed (Either String a)]]
-hostedGroups batch answers missingSeeds = map group (hostedPrimaryPairs batch answers)
-  where
-    originals = Set.fromList (concatMap selectedFoundReferences answers)
-    group (_, origin, query, answer) = case answer of
-      HostedNameAnswer _ _ (SelectedInfo selected) -> references origin (concatMap infoReferences (selectedEntries selected))
-      HostedTypeAnswer _ selected -> references origin (concatMap typeMatchReferences (selectedEntries selected))
-      HostedNameAnswer _ scopes (SelectedAmbiguous selected) ->
-        [ candidate reference origin (Left (infoDisplay entry))
-        | entry <- selectedEntries selected
-        , let reference = case reverse scopes of
-                StructuredPublicModule owner : _ -> IdentifierRef owner (infoName entry) (infoNamespace entry)
-                _ -> currentReference (infoNominalName entry) (infoNamespace entry) ]
-      _ | isNameMiss query answer ->
-            [seed { seedOrigins = [origin], seedPayload = Right (seedPayload seed) } | seed <- missingSeeds origin]
-        | otherwise -> []
-    references origin refs =
-      [candidate reference origin (Left (referenceLabel (identifierNamespace reference) ++ " referenced by " ++ origin))
-      | reference <- refs, Set.notMember reference originals]
-    candidate reference origin payload = CandidateSeed (referenceQuery reference) (Just reference) [origin]
-      True (identifierName reference) payload
-    isNameMiss (HostedLookupName _) (HostedNameAnswer _ _ (SelectedMissing _)) = True
-    isNameMiss (HostedLookupName _) (HostedNameAnswer _ _ (SelectedModuleNotFound _)) = True
-    isNameMiss _ _ = False
-
-finishHostedKnown :: HostedLookupBatch -> [HostedLookupAnswer] -> Maybe String -> HostedLookupOutput
-finishHostedKnown batch answers metadataFailure = HostedLookupOutput answers $ do
-  policy <- hostedLookupDiscovery batch
-  let limit = fromIntegral (hostedCandidateLimit policy)
-      (selected, enumerated, discarded) = if limit == 0 then ([], 0, 0)
-        else selectFairSeeds limit (hostedGroups batch answers (const []))
-      candidates = [HostedDiscoveryCandidate (seedQuery seed) (seedOrigins seed) summary (seedLocal seed) (seedReference seed)
-        | seed <- selected, let summary = either id (const "") (seedPayload seed)]
-      hasName = any (\(_,_,query,_) -> case query of HostedLookupName _ -> True; _ -> False) (hostedPrimaryPairs batch answers)
-      fallback | limit == 0 = HostedFallbackZeroBudget
-               | Just failure <- metadataFailure, hasName = HostedFallbackUnavailable failure
-               | otherwise = HostedFallbackNotNeeded
-  pure (HostedDiscoverySelection candidates fallback (fromIntegral (hostedEligibleModules policy)) 0
-    enumerated discarded limit (case fallback of HostedFallbackUnavailable failure -> Just failure; _ -> Nothing))
-
-data DiscoveryDeclaration = DiscoveryDeclaration
-  { discoveryScopeIndex :: Int, discoveryScope :: StructuredNameScope
-  , discoveryVisibleNames :: [Name], discoveryName :: Name, discoveryThing :: TyThing
-  }
-
--- This owner is entered only while the admitted metadata completion remains
--- alive. Ranking touches scoped identities; only retained declarations render.
-runHostedLookupDiscoveryGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv
-  -> HostedLookupBatch -> [HostedLookupAnswer] -> Ghc HostedLookupOutput
-runHostedLookupDiscoveryGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv batch answers =
-  case hostedLookupDiscovery batch of
-    Nothing -> pure (finishHostedKnown batch answers Nothing)
-    Just policy
-      | hostedCandidateLimit policy == 0 || not (needsHostedFallback batch answers) ->
-          pure (finishHostedKnown batch answers Nothing)
-      | otherwise -> do
-          borrowed <- liftIO (forkExactContext hscEnv)
-          setSession borrowed
-          -- Summary projection has no availability or constraint demand.
-          let context = AvailabilityContext borrowed tcGblEnv Nothing Nothing work
-              scopes = hostedDiscoveryScopes policy
-              localBoundary = length (takeWhile (/= StructuredCurrentScope) scopes)
-          inventories <- forM (zip [0..] scopes) $ \(index, scope) -> do
-            (attempted, observed) <- visibleNamesInScope rdrEnv scope
-            case observed of
-              Left owner -> pure (attempted, Just ("discovery module unavailable: " ++ owner), [])
-              Right rawNames -> do
-                let visible = case scope of
-                      StructuredCurrentScope -> filter visibleInspectionName rawNames
-                      StructuredPublicModule _ -> rawNames
-                declarations <- fmap catMaybes $ forM visible $ \name -> do
-                  resolveNameWork context
-                  let local | nameIsLocalOrFrom (tcg_mod tcGblEnv) name = lookupTypeEnv (tcg_type_env tcGblEnv) name
-                            | otherwise = Nothing
-                  found <- case local of Just thing -> pure (Just thing); Nothing -> lookupName name
-                  pure (DiscoveryDeclaration index scope visible name <$> found)
-                pure (attempted, Nothing, declarations)
-          let attempted = nub (concat [observed | (observed, _, _) <- inventories])
-              issues = catMaybes [issue | (_, issue, _) <- inventories]
-              declarations = concat [entries | (_, _, entries) <- inventories]
-              inventorySeeds origin = sortOn (rank origin) (map (seed localBoundary) declarations)
-              groups = hostedGroups batch answers inventorySeeds
-              limit = fromIntegral (hostedCandidateLimit policy)
-              (selected, enumerated, discarded) = selectFairSeeds limit groups
-          candidates <- forM selected $ \chosen -> do
-            summary <- case seedPayload chosen of
-              Left known -> pure known
-              Right declaration -> do
-                richEntryWork context
-                pure (entryDisplay ExpandedEntry (discoveryVisibleNames declaration) (discoveryThing declaration))
-            pure (HostedDiscoveryCandidate (seedQuery chosen) (seedOrigins chosen) summary (seedLocal chosen) (seedReference chosen))
-          pure (HostedLookupOutput answers (Just (HostedDiscoverySelection candidates
-            (HostedFallbackAttempted attempted) (fromIntegral (hostedEligibleModules policy))
-            (length [() | StructuredPublicModule _ <- scopes]) enumerated discarded limit
-            (case issues of [] -> Nothing; _ -> Just (unlines issues)))))
-  where
-    seed boundary declaration = CandidateSeed (referenceQuery reference) (Just reference) []
-      (discoveryScopeIndex declaration <= boundary) (occNameString (nameOccName name)) declaration
-      where
-        name = discoveryName declaration
-        namespace = identifierNamespace (identifierRef name (discoveryThing declaration))
-        reference = case discoveryScope declaration of
-          StructuredCurrentScope -> currentReference name namespace
-          StructuredPublicModule owner -> IdentifierRef owner (occNameString (nameOccName name)) namespace
-    rank origin candidate =
-      (not (seedLocal candidate), editDistance (queryLeaf origin) (seedOccurrence candidate),
-        discoveryScopeIndex declaration, seedReference candidate, nameIdentity (discoveryName declaration),
-        nameIdentity . getName <$> tyThingParent_maybe (discoveryThing declaration))
-      where declaration = seedPayload candidate
-    queryLeaf = reverse . takeWhile (/= '.') . reverse
-    nameIdentity name =
-      (maybe "" (unitString . moduleUnit) owner, maybe "" (moduleNameString . moduleName) owner,
-        occNameString (nameOccName name))
-      where owner = nameModule_maybe name
-
--- Unicode-character Levenshtein distance, shared by all discovery miss groups.
-editDistance :: String -> String -> Int
-editDistance left right = last (foldl' advance [0..length right] (zip [1..] left))
-  where
-    advance previous (row, character) = scanl step row (zip3 right previous (tail previous))
-      where step before (other, diagonal, above) = minimum
-              [before + 1, above + 1, diagonal + if character == other then 0 else 1]
-
 data TypeMatchQuality
   = TypeMatchExact
   | TypeMatchUsable
@@ -446,9 +133,9 @@ data TypeMatchQuality
 -- constraint stays open because the call site decides it. That is a usable
 -- name, not an uncertain one, and it used to be reported as `Unknown`.
 --
--- The constructor order is the ranking: `Ord` is the sort key for type search
--- here and for hosted name selection, so a new constructor's
--- position is behaviour. The wire value is the constructor name itself.
+-- The constructor order is the ranking: `Ord` is the sort key for type
+-- search, so a new constructor's position is behaviour. The wire value is
+-- the constructor name itself.
 data Availability = Available | Polymorphic | Unknown | Unavailable
   deriving (Eq, Ord, Show)
 
@@ -597,12 +284,12 @@ richEntryWork context = observeWork context (\counts -> counts { workRichEntries
 
 -- | The sentinel is generated with a qualified Data.Proxy signature. Its
 -- argument is inspected as a GHC Type; rendered text never determines a row.
-lookupExecutionRow :: (GhcMonad m) => GlobalRdrEnv -> m (Maybe Type)
-lookupExecutionRow rdrEnv = do
+inspectionExecutionRow :: (GhcMonad m) => GlobalRdrEnv -> m (Maybe Type)
+inspectionExecutionRow rdrEnv = do
   let names =
         [ greName gre
         | gre <- globalRdrEnvElts rdrEnv,
-          any (matchesQuery "__tidepool_lookup_row") (greRdrNames gre)
+          any (matchesQuery "__tidepool_inspection_row") (greRdrNames gre)
         ]
   case nubBy (==) names of
     [name] -> do
@@ -728,8 +415,8 @@ signatureAvailability context signature = do
 -- variable. GHC then kind-checks and quantifies those variables normally.
 -- Rewriting the parsed tree preserves qualification and repeated named
 -- variables; rendered source never drives this transformation.
-normalizeLookupWildcards :: ParsedModule -> ParsedModule
-normalizeLookupWildcards parsed =
+normalizeInspectionWildcards :: ParsedModule -> ParsedModule
+normalizeInspectionWildcards parsed =
   let source = pm_parsed_source parsed
       occupied =
         Set.fromList $
@@ -754,17 +441,17 @@ normalizeLookupWildcards parsed =
     replaceWildcard other = pure other
 
     freshName occupied index =
-      let candidate = "__lookup_w" ++ show index
+      let candidate = "__inspection_w" ++ show index
        in if Set.member candidate occupied
             then freshName occupied (index + 1)
             else (index + 1, candidate)
 
--- | Match a checked lookup type against every value in the exact reader
+-- | Match a checked probe type against every value in the exact reader
 -- environment of the inspection module. Matching is entirely in memory:
 -- callers compile the query once, never once per candidate.
 searchTypeMatches :: (GhcMonad m) => HscEnv -> TcGblEnv -> GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatches hscEnv tcGblEnv rdrEnv queryBinder query = do
-  row <- lookupExecutionRow rdrEnv
+  row <- inspectionExecutionRow rdrEnv
   effTyCon <- lookupEffTyCon
   case (row, effTyCon) of
     (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
@@ -886,7 +573,7 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
   borrowed <- liftIO (forkExactContext hscEnv)
   setSession borrowed
   effTyCon <- lookupEffTyCon
-  row <- case Map.lookup "__tidepool_lookup_row" inspectionProbes of
+  row <- case Map.lookup "__tidepool_inspection_row" inspectionProbes of
     Just identifier -> Just <$> inspectionRow identifier
     Nothing -> pure Nothing
   case (row,effTyCon) of
@@ -904,12 +591,6 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
                 let display = renderType (idType identifier)
                 pure (typeIndex + 1, InspectionType expression display availability : results)
               Nothing -> missing binder
-      InspectLookupNameOf query -> do
-        result <- inspectLookupName context rdrEnv query
-        pure (typeIndex, result : results)
-      InspectExactNameOf query -> do
-        result <- inspectExactName context rdrEnv query
-        pure (typeIndex, result : results)
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
         pure (typeIndex, result : results)
@@ -939,9 +620,9 @@ inspectTypeSearch context rdrEnv inspectionProbes query =
     Just identifier ->
       InspectionTypeMatches query <$> searchTypeMatchesWithContext context rdrEnv
         (idName identifier) (idType identifier)
-    Nothing -> liftIO (ioError (userError ("lookup module did not expose " ++ binderName)))
+    Nothing -> liftIO (ioError (userError ("inspection module did not expose " ++ binderName)))
   where
-    binderName = "__tidepool_lookup_query"
+    binderName = "__tidepool_type_search_query"
 
 data StructuredMode = StructuredInfo | StructuredType
 
@@ -1193,10 +874,6 @@ exactThingMatches StructuredFieldName (AnId identifier) = isRecordSelector ident
 exactThingMatches StructuredFieldName _ = False
 exactThingMatches _ _ = True
 
-referenceThingMatches :: StructuredNameNamespace -> TyThing -> Bool
-referenceThingMatches StructuredValueName (AnId identifier) = not (isRecordSelector identifier)
-referenceThingMatches namespace thing = exactThingMatches namespace thing
-
 hasExportedParent :: [Name] -> TyThing -> Bool
 hasExportedParent exported thing = case tyThingParent_maybe thing of
   Just parent -> getName parent `elem` exported
@@ -1204,76 +881,6 @@ hasExportedParent exported thing = case tyThingParent_maybe thing of
 
 visibleInspectionName :: Name -> Bool
 visibleInspectionName = not . isPrefixOf "__tidepool_" . occNameString . nameOccName
-
-data NameProjection = CompactExportFallback | ExactReference deriving (Eq)
-
-selectExactName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> NameProjection -> ExactNameInspection -> m (NameSelection, [InfoEntry])
-selectExactName context rdrEnv projection query = do
-  let compact = projection == CompactExportFallback
-  observed <- namesInScope rdrEnv query
-  let selected@(NameSelection _ result) = case (projection, exactNameScope query, observed) of
-        (ExactReference, StructuredCurrentScope, NameSelection scopes (Right (names, visible))) ->
-          NameSelection scopes (Right (filter visibleInspectionName names, filter visibleInspectionName visible))
-        _ -> observed
-  entries <- case result of
-    Left _ -> pure []
-    Right (names, visible) -> entriesForMatching context
-      (if compact then ContextualEntry else ExpandedEntry)
-      (\thing -> (if compact then exactThingMatches else referenceThingMatches) (exactNameNamespace query) thing
-        && (not compact || not (hasExportedParent visible thing))) visible names
-  pure (selected, entries)
-
-exactLookupAnswer :: NameSelection -> [InfoEntry] -> LookupAnswer
-exactLookupAnswer (NameSelection _ (Left missing)) _ = LookupModuleNotFound missing
-exactLookupAnswer _ entries = case entries of
-  [] -> LookupMissing []
-  [_] -> LookupInfo entries
-  _ -> LookupAmbiguous entries
-
-inspectExactName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> ExactNameInspection -> m InspectionResult
-inspectExactName context rdrEnv query = do
-  (selected@(NameSelection scopes _), entries) <- selectExactName context rdrEnv ExactReference query
-  pure (InspectionLookup (exactNameQuery query) scopes (exactLookupAnswer selected entries))
-
-inspectLookupName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> LookupNameInspection -> m InspectionResult
-inspectLookupName context rdrEnv request = do
-  primary <- inspectName context rdrEnv (lookupNameQuery request)
-  case primary of
-    InspectionInfo _ entries -> pure (issued [StructuredCurrentScope] (LookupInfo entries))
-    InspectionAmbiguous _ entries -> pure (issued [StructuredCurrentScope] (LookupAmbiguous entries))
-    InspectionNotFound _ -> do
-      (selected@(NameSelection scopes _), entries) <- case lookupQualifierModule request of
-        Nothing -> pure (NameSelection [] (Right ([], [])), [])
-        Just owner -> selectExactName context rdrEnv CompactExportFallback
-          (ExactNameInspection (StructuredPublicModule owner) StructuredAnyName leaf)
-      let attempted = nub (StructuredCurrentScope : scopes)
-      case exactLookupAnswer selected entries of
-        answer@(LookupInfo _) -> pure (issued attempted answer)
-        answer@(LookupAmbiguous _) -> pure (issued attempted answer)
-        LookupMissing _ -> missing attempted selected
-        LookupModuleNotFound _ -> missing attempted selected
-        LookupModule _ _ -> liftIO (ioError (userError "exact lookup returned a module observation"))
-    _ -> liftIO (ioError (userError "reader lookup returned an invalid name observation"))
-  where
-    issued = InspectionLookup (lookupNameQuery request)
-    leaf = reverse (takeWhile (/= '.') (reverse (lookupNameQuery request)))
-    missing attempted (NameSelection _ selected) = case lookupNameMode request of
-      LookupNameOrModule -> do
-        result <- inspectModule context (lookupNameQuery request) False
-        case result of
-          InspectionBrowse owner _ entries -> pure (issued (nub (attempted ++ [StructuredPublicModule owner])) (LookupModule owner entries))
-          InspectionModuleNotFound owner scopes -> pure (issued (nub (attempted ++ scopes)) (LookupModuleNotFound owner))
-          _ -> liftIO (ioError (userError "module lookup returned an invalid module observation"))
-      LookupNameOnly -> do
-        names <- case selected of
-          Left _ -> pure []
-          Right (_, visible) -> fmap catMaybes $ forM visible $ \name -> do
-            resolveNameWork context
-            found <- lookupName name
-            pure $ case found of
-              Just thing | not (hasExportedParent visible thing) -> Just (occNameString (nameOccName name))
-              _ -> Nothing
-        pure (issued attempted (LookupMissing (sortOn id names)))
 
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> m InspectionResult
 inspectModule context requested expanded
@@ -1450,7 +1057,7 @@ renderUser = renderWithContext defaultSDocContext {sdocSuppressUniques = True} .
 tidyInspectionType :: Type -> Type
 tidyInspectionType = tidyOpenType emptyTidyEnv
 
--- | Matched inspection output discriminates complete and hosted products.
+-- | Matched inspection output for complete requests.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString
 encodeInspectionResults results = inspectionOutput
   (encodeListLen 2 <> encodeString "Complete" <> encodeList encodeResult results)
@@ -1458,63 +1065,11 @@ encodeInspectionResults results = inspectionOutput
 inspectionOutput :: Encoding -> BS.ByteString
 inspectionOutput body = toStrictByteString (encodeListLen 2 <> encodeString "TPINSP008" <> body)
 
-encodeHostedLookupOutput :: HostedLookupOutput -> BS.ByteString
-encodeHostedLookupOutput output = inspectionOutput $
-  encodeListLen 3 <> encodeString "HostedLookup"
-    <> encodeList encodeHostedAnswer (hostedLookupAnswers output)
-    <> maybe encodeNull encodeDiscoverySelection (hostedLookupSelection output)
-
-encodeHostedAnswer :: HostedLookupAnswer -> Encoding
-encodeHostedAnswer answer = case answer of
-  HostedNameAnswer ordinal scopes selected -> encodeListLen 4 <> encodeText "Name"
-    <> encodeWord32 ordinal <> encodeList encodeScope scopes <> encodeSelectedLookup selected
-  HostedTypeAnswer ordinal selected -> encodeListLen 3 <> encodeText "Type"
-    <> encodeWord32 ordinal <> encodeSelectedMatches encodeTypeMatch selected
-  HostedReferenceAnswer destinations scopes selected -> encodeListLen 4 <> encodeText "Reference"
-    <> encodeList encodeWord32 destinations <> encodeList encodeScope scopes <> encodeSelectedLookup selected
-  HostedRejected identity diagnostic -> encodeListLen 3 <> encodeText "Rejected"
-    <> (case identity of
-      HostedPrimaryIdentity ordinal -> encodeListLen 2 <> encodeText "Primary" <> encodeWord32 ordinal
-      HostedReferenceIdentity destinations -> encodeListLen 2 <> encodeText "Reference" <> encodeList encodeWord32 destinations)
-    <> encodeText diagnostic
-
-encodeSelectedMatches :: (a -> Encoding) -> SelectedMatches a -> Encoding
-encodeSelectedMatches encodeEntry selected = encodeListLen 3
-  <> encodeInt (selectedObserved selected) <> encodeInt 20 <> encodeList encodeEntry (selectedEntries selected)
-
-encodeSelectedLookup :: SelectedLookupAnswer -> Encoding
-encodeSelectedLookup answer = case answer of
-  SelectedInfo selected -> encodeListLen 2 <> encodeText "Info" <> encodeSelectedMatches encodeEntry selected
-  SelectedAmbiguous selected -> encodeListLen 2 <> encodeText "Ambiguous" <> encodeSelectedMatches encodeEntry selected
-  SelectedModule owner selected -> encodeListLen 3 <> encodeText "Module" <> encodeText owner <> encodeSelectedMatches encodeEntry selected
-  SelectedMissing names -> encodeListLen 2 <> encodeText "Missing" <> encodeTexts names
-  SelectedModuleNotFound owner -> encodeListLen 2 <> encodeText "ModuleNotFound" <> encodeText owner
-
-encodeDiscoverySelection :: HostedDiscoverySelection -> Encoding
-encodeDiscoverySelection selected = encodeListLen 9
-  <> encodeList encodeCandidate (hostedSelectedCandidates selected)
-  <> encodeFallback (hostedFallback selected)
-  <> encodeInt (hostedEligibleModuleCount selected) <> encodeInt (hostedSubmittedModuleCount selected)
-  <> encodeInt (hostedEnumeratedOccurrences selected) <> encodeInt (hostedDiscardedOccurrences selected)
-  <> encodeInt (hostedSelectionLimit selected) <> maybe encodeNull encodeText (hostedSelectionIssue selected)
-  <> encodeInt 128
-  where
-    encodeCandidate candidate = encodeListLen 5
-      <> encodeText (hostedCandidateQuery candidate) <> encodeTexts (hostedCandidateOrigins candidate)
-      <> encodeText (hostedCandidateSummary candidate) <> encodeBool (hostedCandidateLocal candidate)
-      <> maybe encodeNull encodeIdentifierRef (hostedCandidateReference candidate)
-    encodeFallback fallback = case fallback of
-      HostedFallbackNotNeeded -> encodeListLen 1 <> encodeText "NotNeeded"
-      HostedFallbackZeroBudget -> encodeListLen 1 <> encodeText "ZeroBudget"
-      HostedFallbackUnavailable diagnostic -> encodeListLen 2 <> encodeText "Unavailable" <> encodeText diagnostic
-      HostedFallbackAttempted scopes -> encodeListLen 2 <> encodeText "Attempted" <> encodeList encodeScope scopes
-
 encodeResult :: InspectionResult -> Encoding
 encodeResult inspection = case inspection of
   InspectionType expression display availability ->
     encodeListLen 4 <> encodeString "Type" <> encodeText expression <> encodeText display
       <> encodeAvailability availability
-  InspectionLookup query scopes answer -> encodeListLen 4 <> encodeString "Lookup" <> encodeText query <> encodeList encodeScope scopes <> encodeLookupAnswer answer
   InspectionInfo query entries ->
     encodeListLen 3 <> encodeString "Info" <> encodeText query <> encodeEntries entries
   InspectionAmbiguous query entries ->
@@ -1542,13 +1097,6 @@ encodeResult inspection = case inspection of
     encodeListLen 2 <> encodeString "StructuredTypeOk" <> encodeTypeInfo details
   InspectionStructuredError failure ->
     encodeListLen 2 <> encodeString "StructuredError" <> encodeStructuredError failure
-encodeLookupAnswer :: LookupAnswer -> Encoding
-encodeLookupAnswer answer = case answer of
-  LookupInfo entries -> encodeListLen 2 <> encodeText "Info" <> encodeEntries entries
-  LookupAmbiguous entries -> encodeListLen 2 <> encodeText "Ambiguous" <> encodeEntries entries
-  LookupModule owner entries -> encodeListLen 3 <> encodeText "Module" <> encodeText owner <> encodeEntries entries
-  LookupMissing names -> encodeListLen 2 <> encodeText "Missing" <> encodeTexts names
-  LookupModuleNotFound owner -> encodeListLen 2 <> encodeText "ModuleNotFound" <> encodeText owner
 encodeEntries :: [InfoEntry] -> Encoding
 encodeEntries entries =
   encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries

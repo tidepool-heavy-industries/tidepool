@@ -116,7 +116,7 @@ an abstract `Presented handler`. This required finishing constructor selects
 model-facing text while preserving the handler's semantic result. Use
 `presentWith id` for `Text`, `presentWith presentJson` for JSON, or
 `presentWith presentDisplay` for a `Display` value. For example,
-`lookup = presentWith id $ tool description handler`. A bare handler fails
+`greeting = presentWith id $ tool description handler`. A bare handler fails
 Haskell typechecking because the hosted field requires `Presented`. Native
 `HaskellCell`/`HaskellTool` fields and programmatic actor handlers do not use
 this wrapper. The after-tool hook receives `toolResultValue` as semantic JSON
@@ -225,7 +225,7 @@ tools and effects.
 For Git project implementation and delivery, `exomonad-project-work` describes
 an optional authored workflow for scaffolding, assigning ready work, reviewing
 exact candidates, repairing, and integrating with checks. General exploration
-and actor programming do not require project roles or group names. Check any declaration details not shown here with targeted lookup before using
+and actor programming do not require project roles or group names. Check any declaration details not shown here with targeted introspection before using
 them in a workspace.
 
 ## Compose commands and judgment
@@ -271,25 +271,28 @@ Handle refusal and retain cleanup; see `exomonad-define-actors`.
 
 ## Discover missing information
 
-Start with this guide and assignment. `doc <topic>` is lookup query text,
-never Haskell syntax. Use hosted `lookup` only if your active `AgentSpec`
-supplies it. When the admitted notebook lists `Lookup`, use
-`LookupApi.lookupRaw` with `LookupApi.lookupRequest`.
-`Prelude.lookup` performs ordinary list lookup. `doc topics` lists guides and
-skills; load an installed skill from `.agents/skills/<name>/SKILL.md` first.
+Start with this guide and assignment. `doc <topic>` names documentation and is
+never Haskell syntax. `doc topics` lists guides and skills; load an installed
+skill from `.agents/skills/<name>/SKILL.md` first.
 
-```haskell source=lookup
-import qualified Tidepool.Lookup.Tools as LookupTools
-topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
-display (LookupTools.renderBatch topics)
+When the admitted notebook lists `Introspection`, use qualified
+`Tidepool.Introspection.info` and `Tidepool.Introspection.typeOf` to inspect a
+name's structured declaration or canonical type. A `NameQuery` carries a scope
+(`CurrentScope` or `PublicModule "Project.Work"`), a namespace (`AnyName`,
+`ValueName`, `TypeName`, or `ConstructorName`), and the name. Use
+`currentScopeView` and `scopeBindings` to enumerate the current view,
+`moduleExports` to enumerate a public module's exports, `rowFit` to observe an
+identifier's fit against the executing actor's row, and `typeOfExpression` or
+`typeSearch` for compiled probes. A no-match result covers the attempted query;
+it does not establish that the capability is absent. Inspect close candidates,
+qualify the name, or browse its owning module.
+
+```haskell source=introspection
+import qualified Tidepool.Introspection as Introspection
+detail <- Introspection.info
+  (Introspection.NameQuery Introspection.CurrentScope Introspection.ValueName "readFile")
+display detail
 ```
-
-Lookup accepts Haskell symbol names (`Tidepool.Effects.Core.readFile`), module
-names, type queries prefixed with `::` (use `_` for unknown parts), and
-`doc <topic>`. A task description such as “read a file” is not a semantic
-search query. A no-match result covers the attempted names or type in the
-captured lookup view; it does not establish that the capability is absent.
-Inspect close candidates, qualify the name, or browse its owning module.
 
 Effect names are not module names:
 
@@ -302,14 +305,9 @@ Effect names are not module names:
 `Tidepool.Actor.Source` owns record-actor event sources. For checked file
 updates, the existing compiled recipe
 `.exomonad/workspace/checks/file-snapshot-example.hs` uses `Tidepool.File`.
-For a natural-language assessment composed with explicit symbol lookup, see
-`checks/jev-lookup-example.hs` and its prerequisites in `checks/jev-composition.md`
-under that same installed workspace directory.
-
-Hosted lookup may add up to four Jev-selected related declarations or
-alternatives; original failures remain. `doc workbench` describes navigation
-within retained results. `polymorphic` needs call-site
-constraints; `unknown` needs type information. `status` offers `summary`,
+`doc workbench` describes the notebook and its retained results. `polymorphic`
+inspection results need call-site constraints; `unknown` results need type
+information. `status` offers `summary`,
 `detailed`, `watches`, `recovery`, `lineage`, `trace` and `bindings` without
 compiling a cell.
 

@@ -1,5 +1,5 @@
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import qualified Tidepool.Model.Selection as Selection
 import qualified Tidepool.Internal.ModelControl as Control
 
@@ -12,7 +12,7 @@ Right laterWaveContext <- checkpoint currentModel "later-wave-context"
 Right laterDomainAgent <- spawnSubagent
   (ForkCtx laterWaveContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]))
     { spawnLabel = Just "domain"
     , spawnLifetime = ActorOwned
     , spawnModel = fixtureOpenAIEffort (Selection.OpenAIOptions Selection.OpenAILow)
@@ -21,7 +21,7 @@ Right laterDomainAgent <- spawnSubagent
 Right laterReviewAgent <- spawnSubagent
   (ForkCtx laterWaveContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]))
     { spawnLabel = Just "review"
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just laterReviewTask

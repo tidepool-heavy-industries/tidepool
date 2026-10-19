@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Console, Lookup)
+import Tidepool.Effects.Core (Commands, Console)
 import Tidepool.Actors.Exomonad
 
 capturedValue <- pure (x :: Int)
@@ -10,7 +10,7 @@ privateCapturedHelper :: Int -> Int
 privateCapturedHelper value = value + 1
 let capturedGetter = privateCapturedHelper capturedValue
 Right seed <- checkpoint currentModel "same-cell captured context"
-let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, Lookup, BoundWorktree]
+let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, BoundWorktree]
 Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
   ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "captured-alpha", spawnLifetime = ActorOwned })
 Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

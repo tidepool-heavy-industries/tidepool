@@ -498,7 +498,6 @@ struct ResidentEnvironment<H, O> {
     conversation_reader: Option<crate::ConversationReader>,
     result_reader: Option<crate::ResultInspectionReader>,
     operation_reader: Option<crate::OperationObservationReader>,
-    usage_pointers: crate::UsagePointerTable,
     recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
 
@@ -536,7 +535,6 @@ impl<H, O> ResidentEnvironment<H, O> {
             conversation_reader: None,
             result_reader: None,
             operation_reader: None,
-            usage_pointers: crate::UsagePointerTable::default(),
             recovery: None,
         }
     }
@@ -2345,7 +2343,6 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             conversation_reader: self.conversation_reader.clone(),
             result_reader: self.result_reader.clone(),
             operation_reader: self.operation_reader.clone(),
-            usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
     }
@@ -2387,8 +2384,8 @@ enum ResidentBoot {
 /// A lightweight, cloneable record of a typed request presented to this
 /// actor and not yet settled by a reply or cancellation acknowledgement.
 /// Tracked independently of `standing` (which owns the actual suspended
-/// continuation, in `ResidentStanding::Interactive`) so workbench and lookup
-/// selection can keep serving `respond`/`sessionReply`/`sessionInput`
+/// continuation, in `ResidentStanding::Interactive`) so workbench selection
+/// can keep serving `respond`/`sessionReply`/`sessionInput`
 /// bindings for the request even if `standing` itself has moved on to
 /// `Receiving` — the receive loop's own next-message wait does not by
 /// itself mean the earlier request was answered.
@@ -5480,15 +5477,14 @@ where
         self.installed_tools.clear();
     }
 
-    /// The workbench a cell, tool call, or lookup should run against right
+    /// The workbench a cell or tool call should run against right
     /// now, or `None` when nothing is installed to run one. A pending typed
     /// request's `respond`/`sessionReply`/`sessionInput`/`reportProgress`
     /// bindings are owed for as long as `outstanding_interactive` is set,
     /// independent of `standing`: a native delivery or mailbox turn that
     /// advances `standing` past `Interactive` to `Receiving` does not by
     /// itself mean the request was answered. The sole selection point for
-    /// both [`Self::execute_workbench`] and lookup resolution so the two
-    /// cannot drift.
+    /// [`Self::execute_workbench`].
     fn active_workbench(&self) -> Option<crate::ResidentActorWorkbench<H, O>> {
         let live_standing = !matches!(
             self.standing,
@@ -6172,17 +6168,9 @@ where
         let descriptor = self.descriptor.clone();
         let bound_worktree = self.launch_worktrees.first().cloned();
         let observation = self.runtime_observation.snapshot();
-        let workbench = self
-            .active_workbench()
-            .unwrap_or_else(|| environment.application_workbench());
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
         let interaction_control = effect_owner.interaction_control();
-        let lookup_source = environment.source_inspection.clone().zip(
-            effect_owner
-                .issued_snapshot()
-                .map(|issued| issued.installation().source().clone()),
-        );
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
@@ -6485,25 +6473,6 @@ where
                 environment
                     .runner
                     .resume_agent_observation(context.clone(), inspection.continuation, observation)
-                    .await
-            }),
-            ResidentActorBoundary::Lookup {
-                continuation,
-                request,
-            } => Box::pin(async move {
-                // Use the same selection as workbench cell execution: a
-                // lookup issued while a typed request is outstanding must
-                // see `respond`/`sessionReply`/`sessionInput`/
-                // `reportProgress` as bound, not report them missing.
-                workbench
-                    .resume_lookup(
-                        context.clone(),
-                        continuation,
-                        request,
-                        environment.usage_pointers.clone(),
-                        control.clone(),
-                        lookup_source,
-                    )
                     .await
             }),
             ResidentActorBoundary::Introspection {
@@ -8198,8 +8167,8 @@ where
                         // still unsettled (no reply, no cancellation
                         // acknowledgement). `outstanding_interactive` is
                         // tracked independently of `standing` precisely so
-                        // this is not a silent loss: workbench and lookup
-                        // selection keep serving that request's
+                        // this is not a silent loss: workbench selection
+                        // keeps serving that request's
                         // `respond`/`sessionReply`/`sessionInput` bindings
                         // until it settles, whatever `standing` reads.
                         tracing::info!(
@@ -14117,14 +14086,6 @@ where
         self
     }
 
-    /// Install the immutable usage pointers supplied by the facade's shipped
-    /// workspace. The actor kernel owns lookup behavior; the facade owns the
-    /// source inventory and its generated table.
-    pub fn with_usage_pointers(mut self, pointers: crate::UsagePointerTable) -> Self {
-        self.environment.usage_pointers = pointers;
-        self
-    }
-
     /// Install the composition root's [`crate::ChildSessionFactory`]. Omitted,
     /// every launch keeps running on the session that admitted it — today's
     /// behavior, unchanged. Call this before any actor is admitted: it
@@ -15824,88 +15785,6 @@ fn group_cell_warning_presentations(items: &mut [WorkbenchItemReceipt]) {
     }
 }
 
-#[cfg(test)]
-fn lookup_response(
-    prepared: Vec<crate::lookup_tool::PreparedLookup>,
-    inspected: Vec<tidepool_runtime::session::InspectionResult>,
-    live_modules: &[String],
-    workspace_modules: &[String],
-) -> crate::lookup_tool::LookupResponse {
-    use tidepool_runtime::session::inspection::{
-        HostedLookupAnswer, HostedOperationIdentity, SelectedLookupAnswer, SelectedMatches,
-    };
-    use tidepool_runtime::session::{InspectionResult, LookupAnswer};
-    fn selected<T>(entries: Vec<T>) -> SelectedMatches<T> {
-        // These presentation fixtures are complete prefixes, never inventories.
-        assert!(entries.len() <= 20);
-        SelectedMatches {
-            observed: entries.len(),
-            entries,
-            limit: 20,
-        }
-    }
-    let ordinals = prepared
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, query)| {
-            (!matches!(
-                query.kind,
-                crate::lookup_tool::PreparedLookupKind::Doc(_)
-                    | crate::lookup_tool::PreparedLookupKind::Rejected(_)
-            ))
-            .then_some(ordinal)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(ordinals.len(), inspected.len());
-    let inspected = ordinals
-        .into_iter()
-        .zip(inspected)
-        .map(|(ordinal, result)| {
-            let answer = match result {
-                InspectionResult::Lookup { scopes, answer, .. } => HostedLookupAnswer::Name {
-                    ordinal: ordinal as u32,
-                    scopes,
-                    answer: match answer {
-                        LookupAnswer::Info(entries) => {
-                            SelectedLookupAnswer::Info(selected(entries))
-                        }
-                        LookupAnswer::Ambiguous(entries) => {
-                            SelectedLookupAnswer::Ambiguous(selected(entries))
-                        }
-                        LookupAnswer::Module { module, entries } => SelectedLookupAnswer::Module {
-                            module,
-                            matches: selected(entries),
-                        },
-                        LookupAnswer::Missing { export_names } => {
-                            SelectedLookupAnswer::Missing { export_names }
-                        }
-                        LookupAnswer::ModuleNotFound(module) => {
-                            SelectedLookupAnswer::ModuleNotFound(module)
-                        }
-                    },
-                },
-                InspectionResult::TypeMatches { matches, .. } => HostedLookupAnswer::Type {
-                    ordinal: ordinal as u32,
-                    matches: selected(matches),
-                },
-                InspectionResult::Rejected { diagnostic } => HostedLookupAnswer::Rejected {
-                    operation: HostedOperationIdentity::Primary(ordinal as u32),
-                    diagnostic,
-                },
-                other => panic!("unexpected presentation fixture {other:?}"),
-            };
-            (ordinal, answer)
-        })
-        .collect();
-    crate::lookup_tool::resolve(
-        prepared,
-        inspected,
-        live_modules,
-        workspace_modules,
-        crate::UsagePointerTable::default(),
-    )
-}
-
 /// Retained exit observation also runs when forced owner loss bypasses the
 /// resident behavior's shutdown callbacks. Keep this task independent of the
 /// behavior and machine so it cannot retain the resources being retired.
@@ -16139,7 +16018,7 @@ mod tests {
     }
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
-        failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
+        failed_checkpoint_cleanup_response, settlement_refusal,
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
         ChildExitObservations,
     };
@@ -16270,8 +16149,8 @@ mod tests {
     use crate::resident_workbench::AgentStopProjection;
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
-        CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
-        InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
+        CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
+        TurnClassification, TurnKind,
         TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
         WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
         WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
@@ -16857,502 +16736,6 @@ mod tests {
         assert_eq!(effect["fields"]["disposition"], "Committed");
     }
 
-    #[test]
-    fn lookup_response_preserves_mixed_batch_and_actual_signature() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": [
-                "awaitSettled",
-                ":: NotInScope -> Int",
-                ":: Response result -> Await (Settlement result)"
-            ]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![
-                InspectionResult::Lookup {
-                    query: "awaitSettled".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![InfoEntry {
-                        references: vec![],
-                        name: "awaitSettled".into(),
-                        module: Some("Tidepool.Agent.Watch.Internal".into()),
-                        kind: "value".into(),
-                        display: "awaitSettled :: Response result -> Await (Settlement result)"
-                            .into(),
-                        availability: InspectionAvailability::Available,
-                    }]),
-                },
-                InspectionResult::Rejected {
-                    diagnostic: "NotInScope is not in scope".into(),
-                },
-                InspectionResult::TypeMatches {
-                    query: "Response result -> Await (Settlement result)".into(),
-                    matches: vec![TypeMatch {
-                        references: vec![],
-                        name: "awaitSettled".into(),
-                        module: Some("Tidepool.Agent.Watch.Internal".into()),
-                        signature: "Response result -> Await (Settlement result)".into(),
-                        quality: TypeMatchQuality::Exact,
-                        availability: InspectionAvailability::Available,
-                    }],
-                },
-            ],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 3);
-        assert!(matches!(
-            response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::Found { .. }
-        ));
-        assert!(matches!(
-            response.results[1].outcome,
-            crate::lookup_tool::LookupOutcome::Rejected { .. }
-        ));
-        assert!(matches!(
-            response.results[2].outcome,
-            crate::lookup_tool::LookupOutcome::Found { .. }
-        ));
-        assert!(response
-            .render_text()
-            .contains("awaitSettled :: Response result -> Await (Settlement result)"));
-        let structured = serde_json::to_value(&response).unwrap();
-        assert_eq!(
-            structured["results"][0]["outcome"]["matches"][0]["availability"],
-            "available"
-        );
-        assert_eq!(
-            structured["results"][2]["outcome"]["matches"][0]["availability"],
-            "available"
-        );
-    }
-
-    fn info_entry(name: &str, module: &str, kind: &str, display: &str) -> InfoEntry {
-        InfoEntry {
-            references: vec![],
-            name: name.into(),
-            module: Some(module.into()),
-            kind: kind.into(),
-            display: display.into(),
-            availability: InspectionAvailability::Available,
-        }
-    }
-
-    #[test]
-    fn module_shaped_lookup_renders_a_browse_result() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["Project.Investigate"]
-        }))
-        .unwrap();
-        assert_eq!(
-            prepared[0].kind,
-            crate::lookup_tool::PreparedLookupKind::Qualified("Project.Investigate".into())
-        );
-        let response = lookup_response(
-            prepared,
-            // The worker selected the module after both exact-name searches missed.
-            vec![InspectionResult::Lookup {
-                query: "Project.Investigate".into(),
-                scopes: vec![
-                    tidepool_runtime::session::NameScope::Current,
-                    tidepool_runtime::session::NameScope::PublicModule(
-                        "Project.Investigate".into(),
-                    ),
-                ],
-                answer: tidepool_runtime::session::LookupAnswer::Module {
-                    module: "Project.Investigate".into(),
-                    entries: vec![info_entry(
-                        "investigate",
-                        "Project.Investigate",
-                        "value",
-                        "investigate :: FilePath -> IO ()",
-                    )],
-                },
-            }],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 1);
-        assert!(matches!(
-            response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::Found { .. }
-        ));
-        assert!(response
-            .render_text()
-            .contains("investigate :: FilePath -> IO ()"));
-    }
-
-    /// The defect this path exists for: `Cmd.CommandResult` is a qualified type
-    /// and was answered `no match` because its spelling was read as a module.
-    #[test]
-    fn qualified_lookup_answers_the_name_when_no_such_module_exists() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["Cmd.CommandResult"]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![InspectionResult::Lookup {
-                query: "Cmd.CommandResult".into(),
-                scopes: vec![tidepool_runtime::session::NameScope::Current],
-                answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
-                    "CommandResult",
-                    "Tidepool.Command",
-                    "type",
-                    "data CommandResult",
-                )]),
-            }],
-            &[],
-            &[],
-        );
-        assert_eq!(
-            response.render_text(),
-            "Cmd.CommandResult\n  data CommandResult"
-        );
-    }
-
-    /// A name that is both a type and a value answers with both entries; the
-    /// module interpretation of the same batch must not displace either.
-    #[test]
-    fn qualified_lookup_keeps_every_entry_of_an_ambiguous_name() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["Cmd.RunResult"]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![InspectionResult::Lookup {
-                query: "Cmd.RunResult".into(),
-                scopes: vec![tidepool_runtime::session::NameScope::Current],
-                answer: tidepool_runtime::session::LookupAnswer::Ambiguous(vec![
-                    info_entry(
-                        "RunResult",
-                        "Tidepool.Command",
-                        "type",
-                        "data RunResult = RunResult",
-                    ),
-                    info_entry(
-                        "RunResult",
-                        "Tidepool.Command",
-                        "constructor",
-                        "RunResult :: Int -> RunResult",
-                    ),
-                ]),
-            }],
-            &[],
-            &[],
-        );
-        let crate::lookup_tool::LookupOutcome::Ambiguous { matches, .. } =
-            &response.results[0].outcome
-        else {
-            panic!("expected ambiguous, got {:?}", response.results[0].outcome);
-        };
-        assert_eq!(matches.len(), 2, "{matches:?}");
-        let rendered = response.render_text();
-        assert!(
-            rendered.contains("data RunResult = RunResult"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("RunResult :: Int -> RunResult"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn unresolved_module_shaped_lookup_reports_both_interpretations_it_tried() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["No.Such.Module"]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![InspectionResult::Lookup {
-                query: "No.Such.Module".into(),
-                scopes: vec![tidepool_runtime::session::NameScope::Current],
-                answer: tidepool_runtime::session::LookupAnswer::ModuleNotFound(
-                    "No.Such.Module".into(),
-                ),
-            }],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(
-            response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::NotFound {
-                attempted: vec![
-                    crate::lookup_tool::LookupInterpretation::Name,
-                    crate::lookup_tool::LookupInterpretation::Module,
-                ],
-                suggestions: Vec::new(),
-            }
-        );
-        assert_eq!(
-            response.render_text(),
-            "No.Such.Module\n  no match: not in scope as a name, and no module of that name"
-        );
-    }
-
-    /// A semantic name miss carries cheap export spellings for suggestions;
-    /// the following query keeps its own compiler-issued decision.
-    #[test]
-    fn qualifier_shaped_name_miss_suggests_close_exports_without_misaligning_the_batch() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["Cmd.exitCode", "awaitSettled"]
-        }))
-        .unwrap();
-        assert_eq!(
-            prepared[0].kind,
-            crate::lookup_tool::PreparedLookupKind::Name("Cmd.exitCode".into())
-        );
-        let response = lookup_response(
-            prepared,
-            vec![
-                InspectionResult::Lookup {
-                    query: "Cmd.exitCode".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Missing {
-                        export_names: vec!["commandExitCode".into(), "readStdout".into()],
-                    },
-                },
-                InspectionResult::Lookup {
-                    query: "awaitSettled".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
-                        "awaitSettled",
-                        "Tidepool.Agent.Watch",
-                        "value",
-                        "awaitSettled :: Int",
-                    )]),
-                },
-            ],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 2);
-        assert_eq!(
-            response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::NotFound {
-                attempted: vec![crate::lookup_tool::LookupInterpretation::Name],
-                suggestions: vec!["commandExitCode".into()],
-            }
-        );
-        assert!(matches!(
-            response.results[1].outcome,
-            crate::lookup_tool::LookupOutcome::Found { .. }
-        ));
-        let rendered = response.render_text();
-        assert!(
-            rendered.contains(
-                "Cmd.exitCode\n  no match: not in scope as a name; close: commandExitCode"
-            ),
-            "{rendered}"
-        );
-        assert!(rendered.contains("awaitSettled :: Int"), "{rendered}");
-    }
-
-    /// A successful qualified name needs one compiler decision.
-    #[test]
-    fn qualifier_shaped_name_hit_consumes_one_semantic_result() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["Cmd.readOutput"]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![InspectionResult::Lookup {
-                query: "Cmd.readOutput".into(),
-                scopes: vec![tidepool_runtime::session::NameScope::Current],
-                answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
-                    "readOutput",
-                    "Tidepool.Command",
-                    "value",
-                    "readOutput :: Job -> IO Text",
-                )]),
-            }],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 1);
-        assert!(matches!(
-            response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::Found { .. }
-        ));
-        assert!(response
-            .render_text()
-            .contains("readOutput :: Job -> IO Text"));
-    }
-
-    /// Local queries consume no compiler result; each name query consumes
-    /// its one issued decision in the original input order.
-    #[test]
-    fn a_mixed_batch_keeps_each_query_on_its_own_results() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": [
-                "doc topics", "", "Cmd.CommandResult", "Project.Investigate",
-                "Cmd.CommandExited", "Unknown.Module"
-            ]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![
-                InspectionResult::Lookup {
-                    query: "Cmd.CommandResult".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
-                        "CommandResult",
-                        "Tidepool.Command",
-                        "type",
-                        "data CommandResult",
-                    )]),
-                },
-                InspectionResult::Lookup {
-                    query: "Project.Investigate".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Module {
-                        module: "Project.Investigate".into(),
-                        entries: vec![info_entry(
-                            "investigate",
-                            "Project.Investigate",
-                            "value",
-                            "investigate :: FilePath -> IO ()",
-                        )],
-                    },
-                },
-                InspectionResult::Lookup {
-                    query: "Cmd.CommandExited".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Ambiguous(vec![info_entry(
-                        "CommandExited",
-                        "Tidepool.Command",
-                        "constructor",
-                        "CommandExited :: Int -> CommandOutcome",
-                    )]),
-                },
-                InspectionResult::Lookup {
-                    query: "Unknown.Module".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::ModuleNotFound(
-                        "Unknown.Module".into(),
-                    ),
-                },
-            ],
-            &[],
-            &[],
-        );
-        let queries: Vec<&str> = response
-            .results
-            .iter()
-            .map(|result| result.query.as_str())
-            .collect();
-        assert_eq!(
-            queries,
-            [
-                "doc topics",
-                "",
-                "Cmd.CommandResult",
-                "Project.Investigate",
-                "Cmd.CommandExited",
-                "Unknown.Module"
-            ]
-        );
-        assert!(matches!(
-            response.results[1].outcome,
-            crate::lookup_tool::LookupOutcome::Rejected { .. }
-        ));
-        assert!(matches!(
-            response.results[4].outcome,
-            crate::lookup_tool::LookupOutcome::Ambiguous { .. }
-        ));
-        assert_eq!(
-            response.results[5].outcome,
-            crate::lookup_tool::LookupOutcome::NotFound {
-                attempted: vec![
-                    crate::lookup_tool::LookupInterpretation::Name,
-                    crate::lookup_tool::LookupInterpretation::Module,
-                ],
-                suggestions: Vec::new(),
-            }
-        );
-        let rendered = response.render_text();
-        assert!(
-            rendered.contains("Cmd.CommandResult\n  data CommandResult"),
-            "{rendered}"
-        );
-        assert!(
-            rendered
-                .contains("Project.Investigate\n  [available] investigate :: FilePath -> IO ()"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("Cmd.CommandExited\n  CommandExited :: Int -> CommandOutcome"),
-            "{rendered}"
-        );
-    }
-
-    /// One query's inspection failing is not the batch failing: the results
-    /// that resolved are still rendered, in their own places.
-    #[test]
-    fn a_failed_query_leaves_the_rest_of_the_batch_rendered() {
-        let prepared = crate::lookup_tool::prepare(serde_json::json!({
-            "queries": ["awaitSettled", "Broken.Query", "Project.Investigate"]
-        }))
-        .unwrap();
-        let response = lookup_response(
-            prepared,
-            vec![
-                InspectionResult::Lookup {
-                    query: "awaitSettled".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
-                        "awaitSettled",
-                        "Tidepool.Agent.Watch",
-                        "value",
-                        "awaitSettled :: Int",
-                    )]),
-                },
-                InspectionResult::Rejected {
-                    diagnostic: "inspection unavailable".into(),
-                },
-                InspectionResult::Lookup {
-                    query: "Project.Investigate".into(),
-                    scopes: vec![tidepool_runtime::session::NameScope::Current],
-                    answer: tidepool_runtime::session::LookupAnswer::Module {
-                        module: "Project.Investigate".into(),
-                        entries: vec![info_entry(
-                            "investigate",
-                            "Project.Investigate",
-                            "value",
-                            "investigate :: FilePath -> IO ()",
-                        )],
-                    },
-                },
-            ],
-            &[],
-            &[],
-        );
-        assert_eq!(response.results.len(), 3);
-        assert!(matches!(
-            response.results[1].outcome,
-            crate::lookup_tool::LookupOutcome::Rejected { .. }
-        ));
-        let rendered = response.render_text();
-        assert!(
-            rendered.contains("[available] awaitSettled :: Int"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("error: inspection unavailable"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("investigate :: FilePath -> IO ()"),
-            "{rendered}"
-        );
-    }
 
     #[test]
     fn child_exit_observation_tracks_exact_processing_order() {

@@ -425,7 +425,6 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             let supplied_actor_effects = [
                 ActorEffectKey::Replies,
                 ActorEffectKey::Commands,
-                ActorEffectKey::Lookup,
                 ActorEffectKey::BoundWorktree,
             ];
             assert_eq!(

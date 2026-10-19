@@ -478,67 +478,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn persona_quickstart_displays_lookup_and_rejects_native_io() {
-    let files = tempfile::tempdir().unwrap();
-    let settings = hosted_test_settings(&files, 1);
-    let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        configure_persona(config, "AgentSpec.agentSpec", |_, _| {});
-    })
-    .await
-    .unwrap();
-    host.run_scenario(|host| Box::pin(async move {
-        host.input("Inspect the callable guide").await.unwrap();
-        let mut pending = VecDeque::new();
-        let root = harness::model::AgentPath("/root".into());
-        let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-        let source = include_str!("fixtures/api-guide/persona-lookup-display.hs");
-        assert!(round.request.instructions.contains(source),
-            "the actual Persona provider instructions must publish the executable emitter example");
-        let operation = round.operation("persona-lookup-display");
-        round.sync_call_named("persona-lookup-display", "haskell", source);
-        round = host.while_operation_succeeds(&operation,
-            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
-        let text = retained_committed_display_text(
-            &host.runtime.store(),
-            &harness::store::actor_output::ActorOutputOrigin {
-                run: host.runtime.run_identity().to_owned(),
-                native_actor: host.context.actor.identity().id.0,
-                incarnation: host.context.actor.identity().incarnation.0,
-            },
-            &round.settled_output("persona-lookup-display"),
-        );
-        assert!(text.contains("api-guide"), "lookup must emit its discovered guide: {text}");
-        for (call, source, diagnostic) in [
-            ("persona-native-io", "import qualified Data.Text as T\nimport qualified Prelude as P\nlet r = topics\nP.putStrLn (T.unpack (LookupTools.renderBatch r))\n", "native IO actions cannot run in notebook cells"),
-            ("persona-wrong-effect-row", "pure () :: Eff '[] ()\n", "Couldn't match type"),
-        ] {
-            let operation = round.operation(call);
-            round.sync_call_named(call, "haskell", source);
-            round = host.while_operation_succeeds(&operation,
-                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
-            super::test_campaign::require_ghc_compile_rejection(
-                &round.settled_output(call), &[diagnostic]).unwrap();
-        }
-        let operation = round.operation("persona-display-text-control");
-        round.sync_call_named("persona-display-text-control", "haskell", "display (\"lookup remains usable\" :: Text)\n");
-        round = host.while_operation_succeeds(&operation,
-            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
-        assert_eq!(retained_committed_display_text(
-            &host.runtime.store(),
-            &harness::store::actor_output::ActorOutputOrigin {
-                run: host.runtime.run_identity().to_owned(),
-                native_actor: host.context.actor.identity().id.0,
-                incarnation: host.context.actor.identity().incarnation.0,
-            },
-            &round.settled_output("persona-display-text-control"),
-        ), "lookup remains usable");
-        round.finish();
-    })).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
+async fn persona_with_shared_workspace_keeps_effects_and_later_cells_usable() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
@@ -618,70 +558,9 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
             assert!(pages[0].starts_with("Right "), "{pages:?}");
             assert!(pages[1].contains("curiosity-memory-original"), "{pages:?}");
 
-            let lookup = round.operation("persona-native-lookup-after-memory");
-            round.function(
-                "persona-native-lookup-after-memory",
-                "lookup",
-                json!({"queries": [
-                    "getRuntimeInfo", "Cmd.run", ":: Text -> Eff effs _", "forkAgent", "spawnAgent"
-                ]}),
-            );
-            round = host
-                .while_operation_succeeds(
-                    &lookup,
-                    next_hosted_script_round(&mut requests, &mut pending, &root),
-                )
-                .await
-                .unwrap();
-            let lookup_result = round.settled_output("persona-native-lookup-after-memory");
-            assert_eq!(lookup_result["status"], "committed", "{lookup_result:?}");
-            let [item] = lookup_result["items"].as_array().unwrap().as_slice() else {
-                panic!("one structured lookup item: {lookup_result:?}");
-            };
-            assert_eq!(item["status"], "committed", "{item:?}");
-            let output = item["output"]
-                .as_str()
-                .unwrap_or_else(|| panic!("presented native lookup output: {item:?}"));
-            assert!(
-                output.lines().any(|line| {
-                    line.contains("getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found]")
-                }) && !output.contains("Lookup issue:"),
-                "known symbol must resolve without a batch issue: {lookup_result:?}"
-            );
-
-            let notebook_lookup = round.operation("persona-notebook-lookup-after-native");
+            let pure = round.operation("persona-pure-after-effects");
             round.sync_call_named(
-                "persona-notebook-lookup-after-native",
-                "haskell",
-                "import qualified Tidepool.Lookup as LookupApi\n\
-                 import qualified Tidepool.Lookup.Tools as LookupTools\n\
-                 topics <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"getRuntimeInfo\", \"Cmd.run\", \":: Text -> Eff effs _\", \"forkAgent\", \"spawnAgent\"])\n\
-                 display (LookupTools.renderBatch topics)\n\
-                 display (case LookupApi.lookupIssue topics of { Nothing -> True; Just _ -> False })",
-            );
-            round = host
-                .while_operation_succeeds(
-                    &notebook_lookup,
-                    next_hosted_script_round(&mut requests, &mut pending, &root),
-                )
-                .await
-                .unwrap();
-            let notebook_result = round.settled_output("persona-notebook-lookup-after-native");
-            let notebook_pages = super::test_campaign::retained_committed_display_texts(
-                &host.runtime.store(),
-                &origin,
-                &notebook_result,
-            );
-            assert_eq!(notebook_pages.len(), 2, "{notebook_result:?}");
-            assert!(
-                notebook_pages[0].starts_with("getRuntimeInfo\n  [available] getRuntimeInfo ::"),
-                "notebook lookup lost known symbol: {notebook_pages:?}"
-            );
-            assert_eq!(notebook_pages[1], "True", "{notebook_pages:?}");
-
-            let pure = round.operation("persona-pure-after-lookup");
-            round.sync_call_named(
-                "persona-pure-after-lookup",
+                "persona-pure-after-effects",
                 "haskell",
                 "display (1 + 1 :: Int)",
             );
@@ -696,7 +575,7 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
                 retained_committed_display_text(
                     &host.runtime.store(),
                     &origin,
-                    &round.settled_output("persona-pure-after-lookup"),
+                    &round.settled_output("persona-pure-after-effects"),
                 ),
                 "2"
             );
@@ -707,7 +586,7 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() {
+async fn authored_persona_directory_reads_leave_later_cells_usable() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
@@ -777,20 +656,6 @@ async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() 
             vec![notes, memory, "2".to_owned()]);
 
         let installation = host.context.observer.installation(host.context.actor.identity()).await;
-        let lookup = super::test_campaign::dispatch_lookup(
-            installation.policy.as_ref(), &["getRuntimeInfo"],
-        ).await;
-        assert_eq!(lookup["status"], "committed", "{lookup}");
-        let [item] = lookup["items"].as_array().unwrap().as_slice() else {
-            panic!("one lookup result: {lookup}");
-        };
-        assert_eq!(item["status"], "committed", "{item}");
-        assert!(item["value"]["lookupCaptureSlot"].as_i64().is_some_and(|slot| slot > 0),
-            "lookup must retain its exact capture: {item}");
-        let found = item["output"].as_str().unwrap();
-        assert!(found.lines().any(|line| line.contains(
-            "getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found] [Signature"))
-            && !found.contains("no match:") && !found.contains("Lookup issue:"), "{found}");
         after_reuse.finish();
     })).await;
 }

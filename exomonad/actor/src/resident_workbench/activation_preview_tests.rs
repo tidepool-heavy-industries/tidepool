@@ -43,8 +43,8 @@ fn preview_bounds_preserve_unicode_and_mark_omission() {
         "a\n<additional detail omitted past the 2 bytes cap; expand with `display sessionInput`>"
     );
     assert_eq!(
-        bounded_activation_text("data R".into(), 4, false, "lookup R"),
-        "data\n<additional detail omitted past the 4 bytes cap; expand with `lookup R`>"
+        bounded_activation_text("data R".into(), 4, false, "inspect R"),
+        "data\n<additional detail omitted past the 4 bytes cap; expand with `inspect R`>"
     );
 }
 

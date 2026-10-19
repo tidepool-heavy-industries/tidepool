@@ -1,5 +1,5 @@
 pub(super) use super::test_campaign::{
-    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
+    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_status,
     dispatch_structured_tool,
 };
 use super::*;
@@ -681,13 +681,6 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
                     assert_eq!(next["status"], "committed", "{next:?}");
                     assert_eq!(next["items"][0]["output"], "42", "{next:?}");
                 }
-                let roster_type = dispatch_lookup(root.as_ref(), &["AgentRosterEntry"]).await;
-                assert!(
-                    roster_type["items"][0]["output"]
-                        .as_str()
-                        .is_some_and(|output| output.contains("rosterActorId")),
-                    "{roster_type}"
-                );
                 let status = dispatch_status(root.as_ref(), "detailed").await;
                 assert_ne!(status["status"], "failed", "{status:?}");
             })
@@ -1808,11 +1801,6 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
             },
         )
         .await;
-    let root_reply = dispatch_lookup(root.as_ref(), &["respond"]).await;
-    assert!(
-        root_reply.to_string().to_lowercase().contains("no match"),
-        "{root_reply:?}"
-    );
     let idle_setup = campaign.drive_native_admission(dispatch_haskell_script(
         root.as_ref(),
         "import qualified Tidepool.Agent.Contract as A\nRight idle <- spawnSubagent (FreshCtx \"idle notification recipient\") SameDir (defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies]))",

@@ -24,7 +24,7 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core
   ( Actor, ActorContext, AgentLaunch, AgentInspection, AgentControl, Commands
   , BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration
-  , Notifications, Jev, Console, Reflect, Lookup, Source, Journal, RepoEvent, GitRef (..))
+  , Notifications, Jev, Console, Reflect, Source, Journal, RepoEvent, GitRef (..))
 import Tidepool.Agent.Contract (AgentSpec)
 import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
@@ -39,7 +39,7 @@ import Exomonad.Workspace (workspacePrompt)
 type WorkspaceEffects =
   '[Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration
-   , Notifications, Jev, Commands, Console, Actor, Reflect, Lookup
+   , Notifications, Jev, Commands, Console, Actor, Reflect
    , Source, Journal, RepoEvent]
 
 workspaceAgentSpec :: AgentSpec (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
@@ -79,7 +79,7 @@ taskContext task = Text.unlines $
   , "Why: " <> rationale task
   , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
   , "Acceptance: " <> acceptance task
-  , "Use this task's source, ownership and acceptance. Relevant operations live in Project.Work; use their supplied examples and the lookup tool (names, modules, or a Hoogle-like type) when you need to check one."
+  , "Use this task's source, ownership and acceptance. Relevant operations live in Project.Work; use their supplied examples and qualified `Tidepool.Introspection.info` or `typeOf` when the notebook admits introspection."
   ] ++ map decisionContext (acceptedDecisions task)
 
 -- Only call after the owning decision and source incorporation have been checked.

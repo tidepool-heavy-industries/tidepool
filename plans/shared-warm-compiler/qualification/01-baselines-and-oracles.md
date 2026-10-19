@@ -25,9 +25,9 @@ The research basis is retained privately in
 and `shared-warm-lifecycle.md` beside it.
 
 At the planning base, the stronger
-`actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable`
+`actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable`
 case is pending. Check its actual terminal report before calling the baseline
-passing. Earlier successful startup or native/notebook lookup prefixes do not
+passing. Earlier successful startup or effect-cell prefixes do not
 establish the later pure cell. Keep presentation assertions aligned with each
 actual native/notebook renderer and inspect the internal typed outcome where
 that is the contract.
@@ -45,7 +45,7 @@ swarm-build just test-lib tidepool-toolchain \
   --exact declaration_context::native_availability_tests::private_transport_refuses_selected_dependency_product_and_interface_conflicts \
   --expected-count 1
 swarm-build just test-lib exomonad-host \
-  --exact actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable \
+  --exact actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable \
   --expected-count 1
 ```
 

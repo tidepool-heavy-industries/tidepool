@@ -124,17 +124,6 @@ async fn cell_compile_cost_measurement() {
                     }
                 }
 
-                // `lookup` and the after-tool slot are separate request sources; report
-                // what a bare lookup adds on its own.
-                let before = tidepool_extract_cmd::extract_spawn_count();
-                let started = Instant::now();
-                let _ = super::tests::dispatch_structured_tool(
-                    policy.as_ref(),
-                    "lookup",
-                    serde_json::json!({"queries": ["map"]}),
-                )
-                .await;
-                report(campaign, "lookup", None, None, before, started);
             })
         })
         .await;

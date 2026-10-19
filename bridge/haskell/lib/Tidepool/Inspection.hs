@@ -51,8 +51,6 @@ import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Records (WriteOutcome(..), FsError(..))
-import Tidepool.Lookup (LookupBatch(..), LookupResult(..))
-import Tidepool.Lookup.Navigation
 import Tidepool.Source (SourceWindow (..), sourceLines)
 import Tidepool.Inspection.Display
 import Tidepool.View.Types (View(..), viewTree)
@@ -160,19 +158,6 @@ instance Display FsError where
     FsIo detail -> application precedence "FsIo" [displayTreePrec 11 detail]
     FsDurabilityUnknown detail -> application precedence "FsDurabilityUnknown" [displayTreePrec 11 detail]
     FsNonUtf8Path detail -> application precedence "FsNonUtf8Path" [displayTreePrec 11 detail]
-
-instance Display LookupBatch where
-  displayTree batch = Constructor "LookupBatch"
-    [("batch", displayTree (lookupIdentity batch)), ("view", displayTree (lookupView batch)),
-     ("searchReceipt", TextLeaf (Text.pack (show (lookupSearchReceipt batch)))),
-     ("index", lookupIndexTree batch),
-     ("hits", Sequence "[" "]" [Constructor (hitQuery hit)
-        (case hitEntry hit of
-          Nothing -> [("outcome", displayTree (selectLookup batch (LookupSelection (LookupAddress (hitResult hit) 1 Signature) Nothing)))]
-          Just ordinal -> [(Text.pack (show part), displayTree (selectLookup batch (LookupSelection (LookupAddress (hitResult hit) ordinal part) Nothing)))
-                          | part <- hitSections hit])
-       | hit <- lookupIndex batch]),
-     ("issue", displayTree (lookupIssue batch))]
 
 instance Display WriteOutcome where
   displayTree (Written f c) = displayRecord 0 "Written" [("file", displayTree f), ("checks", displayTree c)]

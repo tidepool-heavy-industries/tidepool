@@ -7,7 +7,7 @@ actor's conversation, tools, hooks or workspace contents. Supply the actual
 input evidence; a path or revision alone does not supply its contents.
 
 The complete authored recipe is `Examples.ModelCallWorkflow` and
-`checks/model-call-example.hs`, discoverable through lookup examples for
+`checks/model-call-example.hs`, discoverable through its registered examples for
 `Tidepool.Model.invokeModel`, `textTurn`, `withModel` and `withLimits`. Its
 `noToolsTurn` uses `defaultSpec { specTools = NoTools }` and narrows
 `defaultLimits` to `requestLimit = Just 1` and `toolLimit = Just 0`.

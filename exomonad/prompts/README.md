@@ -13,8 +13,8 @@ fallback copy.
 | `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
 
 Hosted tool descriptions are owned by their declarations: `status` and `reload`
-in `exomonad/actor/src/*_tool.rs`; notebooks, commands and lookup in
-`bridge/haskell/lib/Tidepool/{Agent/Contract,Command/Tools,Lookup/Tools}.hs`.
+in `exomonad/actor/src/*_tool.rs`; notebooks and commands in
+`bridge/haskell/lib/Tidepool/{Agent/Contract,Command/Tools}.hs`.
 The host preserves the AgentSpec's typed declarations, including descriptions;
 editing a separate Markdown copy would not change those tools. Describe when to
 choose a tool, the evidence its result supplies, and the next decision after
@@ -55,7 +55,7 @@ actor-host checks.
 The host composes `base.md` followed by `api-guide.md` as the base selection,
 plus `agent.md` and host-owned invariant/tool guidance. Workspace `base`, `agent`
 and `[prompts].api_guide` overrides are relative to `.exomonad`. Without a profile
-guide the shared API guide is selected; it remains available through lookup
+guide the shared API guide is selected; it remains available through
 `doc api-guide`. Native multi-agent tooling remains disabled.
 
 An actor generation captures prompt bytes together with source and compatible

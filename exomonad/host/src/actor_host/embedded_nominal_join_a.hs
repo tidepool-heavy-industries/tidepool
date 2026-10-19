@@ -2,13 +2,13 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
 
 data M2JoinA = M2JoinA Int deriving (Show, Eq)
 m2JoinA <- do
   Right seed <- checkpoint currentModel "original nominal join inputs"
-  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]
   Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
     ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "original-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

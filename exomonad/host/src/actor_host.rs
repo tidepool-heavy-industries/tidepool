@@ -85,8 +85,6 @@ mod embedded_shutdown_tests;
 mod host_incarnation;
 
 #[cfg(test)]
-mod lookup_availability_tests;
-#[cfg(test)]
 mod m1_host_tests;
 
 #[cfg(test)]
@@ -1977,9 +1975,6 @@ async fn run_owned(
     )
     .await?;
     let forest = forest
-        .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
-            &config.workspace,
-        )?)
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(
@@ -4204,17 +4199,6 @@ fn orient_launch_instructions(
             tool.name(),
             effects.join(", "),
         ));
-        if tool
-            .effect_keys()
-            .contains(&exomonad_tool::ToolEffectKey::Actor(
-                exomonad_tool::ActorEffectKey::Lookup,
-            ))
-        {
-            instructions.push_str(&format!(
-                "\nDiscovery in {}: LookupApi.lookupRaw (LookupApi.lookupRequest [\"doc topics\"]).",
-                tool.name(),
-            ));
-        }
     }
     instructions
 }

@@ -43,8 +43,7 @@ M2_TESTS = [
     M2_COORDINATOR_TEST,
 ]
 UNIFIED_REGRESSION_TESTS = [
-    "actor_host::jev_tests::template_lookup_batches_related_declarations_and_recovers_from_jev_failure",
-    "actor_host::documentation_tests::published_lookup_and_reflect_examples_preserve_boundary_results",
+    "actor_host::documentation_tests::published_reflect_example_preserves_boundary_results",
     "actor_host::documentation_tests::published_human_form_example_handles_unbound_host",
     "actor_host::embedded_policy::operation_settlement_tests::schema_argument_and_selected_tool_refusals_acknowledge_only_issued_operations",
     "actor_host::embedded_policy::operation_settlement_tests::sealed_and_retired_mailboxes_keep_no_admission_acknowledgement",
@@ -79,7 +78,7 @@ OUTER_RESTART_TESTS = [
 PERSONA_STARTUP_TESTS = [
     "actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment",
     "actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control",
-    "actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable",
+    "actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable",
     "actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization",
     "actor_host::coherent_reload_acceptance_tests::coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work",
     "actor_host::embedded_recovery_tests::production_coherent_reload_recovers_published_configuration_without_recapturing_draft",
@@ -146,7 +145,7 @@ RESULT_DELIVERY_CASES = {
 HARNESS_PERFORMANCE_REPORTER = "scripts/harness-usecase-perf-report.py"
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
-    "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals",
+    "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_and_context_fork_execute_originals",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
 QUALIFICATION_SCHEMA = 5

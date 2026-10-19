@@ -1,7 +1,8 @@
 Raw Haskell, not GHCi. Batch work; split at decisions.
 Inspect receipts before retrying. `display value` gives bounded output.
-Use hosted `lookup`, or `LookupApi.lookupRaw`/`LookupApi.lookupRequest`
-with notebook `Lookup`. Query `doc workbench` for details.
+When the notebook admits `Introspection`, use qualified
+`Tidepool.Introspection.info` and `typeOf` for names and types. Query
+`doc workbench` for details.
 
 `haskell` is asynchronous; `haskell_sync` waits with the same effects.
 Only synchronous profiles admit `ContextReadWrite` (`setNextModel`, `setNextReasoning`).

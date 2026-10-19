@@ -840,16 +840,13 @@ test-suite model-turn-test
     Tidepool.Agent.Context
     JevPreparedTest
     JevRecordingTest
-    LookupEvidenceTest
     Fixture.JevPreparedWorkflow
     Coordination
     ContextWorkflow
     Examples.ModelCallWorkflow
     Examples.JevComposedWorkflow
     Project.EvidencePattern
-    Project.Lookup
     Project.ConversationContext
-    Tidepool.Lookup.Tools
     Jev.Recording
     Fixture.JevFormWorkflow
     FormJevDialogueTest
@@ -908,10 +905,7 @@ test-suite model-turn-test
     Tidepool.FilePath
     Tidepool.File
     Tidepool.Inspection
-    Tidepool.Lookup
     Tidepool.Text.Navigation
-    Tidepool.Lookup.Navigation
-    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1076,10 +1070,7 @@ test-suite automation-helper-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
-    Tidepool.Lookup
     Tidepool.Text.Navigation
-    Tidepool.Lookup.Navigation
-    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1153,10 +1144,7 @@ test-suite browser-scenario-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
-    Tidepool.Lookup
     Tidepool.Text.Navigation
-    Tidepool.Lookup.Navigation
-    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1224,10 +1212,7 @@ test-suite command-tools-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
-    Tidepool.Lookup
     Tidepool.Text.Navigation
-    Tidepool.Lookup.Navigation
-    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1263,8 +1248,6 @@ test-suite tool-profiles-contract
     Tidepool.Actors.Workbench
     Tidepool.Actors.Internal.Agent
     Tidepool.Agent.Session
-    LookupNavigationTest
-    Project.RetainedLookupExample
     Tidepool.Actor.Internal
     Tidepool.Model.Selection
     Tidepool.Internal.ModelControl
@@ -1300,11 +1283,7 @@ test-suite tool-profiles-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
-    Tidepool.Lookup
     Tidepool.Text.Navigation
-    Tidepool.Lookup.Navigation
-    Tidepool.Lookup.Tools
-    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree

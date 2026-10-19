@@ -27,30 +27,6 @@
       "requirements": "Requires FsRead, FsWrite and Console. Uses and replaces the named scratch note. Read contents and version together, commit to that captured destination, and observe stale-write refusal. Only filesystem-effect writers participate in the shared advisory lock; external writers are outside the guarantee."
     },
     {
-      "module": "Tidepool.Lookup.Navigation",
-      "name": "lookupIndex",
-      "namespace": "value",
-      "source": "Project/RetainedLookupExample.hs",
-      "prerequisites": [],
-      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
-    },
-    {
-      "module": "Tidepool.Lookup.Navigation",
-      "name": "selectLookup",
-      "namespace": "value",
-      "source": "Project/RetainedLookupExample.hs",
-      "prerequisites": [],
-      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
-    },
-    {
-      "module": "Tidepool.Lookup.Navigation",
-      "name": "selectLookupMany",
-      "namespace": "value",
-      "source": "Project/RetainedLookupExample.hs",
-      "prerequisites": [],
-      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
-    },
-    {
       "module": "Tidepool.Actors.Internal.Agent",
       "name": "requestWithReplyTool",
       "namespace": "value",
@@ -68,7 +44,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -83,7 +58,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -98,7 +72,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -113,7 +86,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -128,27 +100,11 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
       ],
       "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
-    },
-    {
-      "module": "Examples.JevComposedWorkflow",
-      "name": "captureThenAssess",
-      "namespace": "value",
-      "source": "checks/jev-lookup-example.hs",
-      "prerequisites": [
-        "Examples/JevComposedWorkflow.hs",
-        "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
-        "Project/ConversationContext.hs",
-        "Jev/Operators.hs",
-        "Jev/Recording.hs"
-      ],
-      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
     },
     {
       "module": "Jev.Operators",
@@ -158,7 +114,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -173,7 +128,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs",
@@ -189,43 +143,12 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs",
         "checks/jev-recording-save-example.hs"
       ],
       "requirements": "First run checks/jev-recording-save-example.hs. Edit a continuation payload in Examples/JevComposedWorkflow.hs and publish changed source through ordinary source reload before reconstructing this program. Requires FsRead and Console, pinned Jev.Core source root and matched Tidepool native JSON runtime. Replay makes zero provider calls; no Jev credential is needed. Payload-only changes are accepted; changed question/evidence/model is refused. See checks/jev-composition.md."
-    },
-    {
-      "module": "Project.Lookup",
-      "name": "capture",
-      "namespace": "value",
-      "source": "checks/jev-lookup-example.hs",
-      "prerequisites": [
-        "Examples/JevComposedWorkflow.hs",
-        "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
-        "Project/ConversationContext.hs",
-        "Jev/Operators.hs",
-        "Jev/Recording.hs"
-      ],
-      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
-    },
-    {
-      "module": "Tidepool.Lookup.Tools",
-      "name": "captureWith",
-      "namespace": "value",
-      "source": "checks/jev-lookup-example.hs",
-      "prerequisites": [
-        "Examples/JevComposedWorkflow.hs",
-        "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
-        "Project/ConversationContext.hs",
-        "Jev/Operators.hs",
-        "Jev/Recording.hs"
-      ],
-      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
     },
     {
       "module": "Jev.Recording",
@@ -235,7 +158,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs"
@@ -250,7 +172,6 @@
       "prerequisites": [
         "Examples/JevComposedWorkflow.hs",
         "Project/EvidencePattern.hs",
-        "Project/Lookup.hs",
         "Project/ConversationContext.hs",
         "Jev/Operators.hs",
         "Jev/Recording.hs",

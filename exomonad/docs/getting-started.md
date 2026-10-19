@@ -160,17 +160,10 @@ Every installed function tool must select its model-facing text with
 `presentWith`: use `presentWith id` for `Text` and `presentWith presentJson` for
 structured output. The typed result remains separate from that text.
 
-## Migrating an existing workspace lookup
-
-`lookup` is now supplied by the workspace agent spec rather than installed
-as a special hosted tool. Existing workspaces must provide `Project.Lookup`
-and register its tool in their `Project.Tools` and `AgentSpec`, following the
-shared workspace's `Project.Tools`.
-Use the argument object `{"queries": ["name", "Module.name"]}`.
-The tool preserves original lookup results and may add up to four related
-declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
-remain raw. Standalone `exomonad check` is optional for diagnosis; `reload`
-performs authoritative candidate validation before publication.
+Programmatic `Tidepool.Introspection.info` and `typeOf` return structured
+declarations and canonical types when the notebook admits `Introspection`.
+Standalone `exomonad check` is optional for diagnosis; `reload` performs
+authoritative candidate validation before publication.
 
 ## `exomonad check`: typecheck the workspace without starting anything
 

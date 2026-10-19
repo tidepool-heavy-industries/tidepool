@@ -2,10 +2,10 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
 
-let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]
 Right firstAgent <- spawnSubagent (FreshCtx "Complete the first custody assignment.") (ForkWorktree projectHead)
   ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "first", spawnLifetime = ActorOwned })
 Right secondAgent <- spawnSubagent (FreshCtx "Complete the second custody assignment.") (ForkWorktree projectHead)

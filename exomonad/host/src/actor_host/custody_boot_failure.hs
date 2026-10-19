@@ -2,10 +2,10 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
 
-let brokenSpec = (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree])
+let brokenSpec = (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree])
       { A.specTools = error "intentional Haskell installer failure after custody installation" }
 Right workerAgent <- spawnSubagent (FreshCtx "Run the failing native installer.")
   (ForkWorktree projectHead)

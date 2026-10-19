@@ -22,7 +22,7 @@ or rerun startup. Use `display value` for bounded structured
 output, and `display (show value)` for Haskell's textual `Show` form.
 
 The APIs in this skill are **shipped** and need no project module. Most names
-are already in scope; the raw lookup API below and `Jev` and `Commands`
+are already in scope; `Tidepool.Introspection`, `Jev` and `Commands`
 (effect types from `Tidepool.Effects.Core`) need imports. Names from
 `.exomonad/workspace/Project`, such as
 `coordinationActor`, `Outcome` and `Candidate`, are **example-only** and are
@@ -36,19 +36,20 @@ let findings = [Finding "src/Retry.hs" 12, Finding "src/Fetch.hs" 44]
 display (map renderFindingLocation findings)
 ```
 
-## Look up a name from a cell
+## Inspect a name from a cell
 
-The hosted `lookup` tool is not a Haskell function. Import the raw lookup API,
-then use its default request constructor:
+When the notebook admits `Introspection`, import the module qualified and query
+the caller's current scope:
 
 ```haskell
-import Tidepool.Lookup (lookupRaw, lookupRequest)
-found <- lookupRaw (lookupRequest ["Cmd.quiet"])
+import qualified Tidepool.Introspection as Introspection
+found <- Introspection.info (Introspection.here "Cmd.quiet")
 display found
 ```
 
-`lookupRequest` uses the shipped hosted tool's defaults; use `LookupRequest`
-directly when a request needs custom discovery, view, candidate limit, or references.
+`Introspection.here` queries the current lexical scope; `Introspection.inModule`
+selects a public module explicitly. `Introspection.typeOf` returns the canonical
+type.
 
 Leading `LANGUAGE` and `OPTIONS_GHC` pragmas apply to this cell only and must
 come first; imports persist. No pragmas or imports after executable source, no

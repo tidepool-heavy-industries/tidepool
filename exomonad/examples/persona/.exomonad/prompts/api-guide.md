@@ -73,7 +73,7 @@ rather than rerunning it. The notebook also admits `Commands`, so command
 observations can remain bound as typed values. The profile omits general HTTP.
 Helpers using `Persona.Spec.helperSpec`
 read shared files and return findings; they do not write memory or mount forms.
-Use lookup availability and operation receipts for actual runtime admission;
+Use effect availability and operation receipts for actual runtime admission;
 reference material describes a vocabulary, not a grant.
 
 ## Lifecycle map
@@ -120,24 +120,12 @@ activate authored text. Read `.exomonad/Persona/Orientation.hs` and
 
 ## Exact discovery
 
-The installed `lookup` and `readLookup` tools resolve API details and revisit
-retained results without another notebook compilation. `lookup` returns an exact
-actor/incarnation/slot receipt; pass that identity to `readLookup` for the index,
-sections, receipt or selection trace. No semantic enrichment policy is installed.
+`doc <topic>` names documentation and is not Haskell syntax. When the admitted
+notebook lists `Introspection`, use qualified `Tidepool.Introspection.info` and
+`typeOf` to inspect names such as `Files.readFile` or `Persona.Web.search` for
+their declarations.
 
-`doc <topic>` is query text, not Haskell syntax. In this notebook use
-`LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])`, then display the
-result. `LookupTools.renderBatch` formats it as text:
-
-```haskell source=persona-lookup-display
-import qualified Tidepool.Lookup.Tools as LookupTools
-topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
-display (LookupTools.renderBatch topics)
-```
-
-Lookup names such as `Files.readFile` or `Persona.Web.search` for their declarations.
-
-| Question | Lookup query |
+| Question | Documentation |
 | --- | --- |
 | Full shared callable examples | `doc api-guide` |
 | Notebook publication and reload | `doc workbench`, `doc exomonad-agent-spec` |

@@ -191,12 +191,6 @@ async fn production_harness_notebook_usecase_phases() {
             asynchronous: false,
         },
         Phase {
-            name: "lookup-retained",
-            source: "inspected <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"perfSamples\", \"perfAction\"])\n_ <- display (show inspected)",
-            expected: "perfSamples",
-            asynchronous: false,
-        },
-        Phase {
             name: "reuse-retained",
             source: "value <- perfAction\n_ <- display (value + 36 :: Int)",
             expected: "42",
@@ -412,14 +406,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             &test_campaign::actor_output_origin(fixture.runtime.run_identity(), actor),
             &output,
         );
-        if phase.name == "lookup-retained" {
-            assert!(
-                displayed.contains("perfSamples") && displayed.contains("perfAction"),
-                "{output}"
-            );
-        } else {
-            assert_eq!(displayed, phase.expected, "{output}");
-        }
+        assert_eq!(displayed, phase.expected, "{output}");
         assert_eq!(round.request.session_id, session);
         assert_eq!(fixture.context.actor.identity(), actor);
         let logical_compiler_requests = tidepool_extract_cmd::extract_spawn_count() - before;

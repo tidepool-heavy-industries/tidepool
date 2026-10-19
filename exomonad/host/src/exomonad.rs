@@ -2814,7 +2814,7 @@ pub fn exomonad_compiler_log_path(workspace: &Path, run_id: &str) -> PathBuf {
 
 /// The run-local structured trace: one JSON object per line, holding the span
 /// tree (run, actor, tool call, cell, input unit) and the `exomonad::content`
-/// target that carries cell source, receipts, lookup traffic and diagnostics.
+/// target that carries cell source, receipts, inspection traffic and diagnostics.
 pub fn exomonad_trace_path(workspace: &Path, run_id: &str) -> PathBuf {
     exomonad_state_root(workspace)
         .join("logs")
@@ -3796,7 +3796,6 @@ mod tests {
             tools.contains("shell :: Command.ShellTools mode"),
             "{tools}"
         );
-        assert!(tools.contains("inspection = Lookup.tools"), "{tools}");
         assert_eq!(
             std::fs::read_to_string(
                 workspace

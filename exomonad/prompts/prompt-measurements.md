@@ -21,7 +21,7 @@ first useful action, method, and adaptation fit the evidence available at the ti
 - **Handoff quality:** have a recipient reproduce or decide from the delivered
   artifact and its retained evidence. Track missing preconditions, unresolved
   hypotheses presented as findings, and local checks mistaken for combined acceptance.
-- **Orientation calls:** count `doc`, lookup, and status calls spent locating
+- **Orientation calls:** count `doc`, introspection, and status calls spent locating
   guidance or checking mechanics, grouped by task type.
 - **Rejected cells:** count admission rejections and the number of repair cells
   before a useful result, separating syntax/type errors from unclear contracts.

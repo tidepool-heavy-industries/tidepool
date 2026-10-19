@@ -17,12 +17,10 @@ as values, and retain results for later projections. Measure latency and usage
 for the workload you are building.
 
 Installed, editable compositions live in `Examples.JevComposedWorkflow`; see
-`checks/jev-composition.md` and the symbol-linked lookup example bundles. Its
+`checks/jev-composition.md` and the symbol-linked example bundles. Its
 batch example retains the complete `Evaluation`, inspects every choice mass
 with original typed payloads, compares caller-defined policies, and runs an
-action only explicitly. Its lookup example ranks, expands within a bounded
-exact view, then reassesses while retaining the pool, failures and judgments.
-Its recording example saves ordinary JSON through filesystem effects, reloads
+action only explicitly. Its recording example saves ordinary JSON through filesystem effects, reloads
 changed source, reconstructs and replays without provider calls. Payload-only
 edits are allowed; changed question, evidence or model is refused. These are
 optional functions to adapt, with source/effect prerequisites stated beside the

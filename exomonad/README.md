@@ -17,10 +17,8 @@ for `Text`, `presentJson` for JSON, or `presentDisplay` for an existing
 `Display` rendering. The structured result remains separate for hooks and
 programmatic callers. The example
 workspace's [Shell presenter](examples/workspace/.exomonad/Project/Shell.hs)
-receives typed command observations and retained output; its
-[Lookup selector](examples/workspace/.exomonad/Project/Lookup.hs) receives
-typed lookup results and candidates. These are the examples for presenting or
-selecting tool results inside the tool itself.
+receives typed command observations and retained output. This is the example for
+presenting tool results inside the tool itself.
 
 An after-tool hook observes a completed call; it does not rewrite that tool's
 result. Keep presentation in the typed tool seam and recurring coordination in

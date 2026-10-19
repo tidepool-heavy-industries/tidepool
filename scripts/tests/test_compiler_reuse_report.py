@@ -125,7 +125,7 @@ class ReuseEvidenceControls(unittest.TestCase):
 
     def test_cycle_purpose_conflicts_are_refused_within_worker(self):
         end = packet('complete', items=0)
-        end['purpose'] = 'lookup_type'
+        end['purpose'] = 'inspection_type'
         report = REPORT.analyze(trace(completed([packet()]) + [end]))
         self.assertEqual(report['status'], 'incomplete')
         rows = trace(completed([packet()])) + trace([end], ordinal=2)

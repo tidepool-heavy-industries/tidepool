@@ -1,7 +1,7 @@
 -- | Request-local inspection orchestration. Compilation can be shared only
 -- for the same generated source and the same wildcard-normalization policy.
 module Tidepool.InspectionRunner
-  ( runInspectionRequests, runHostedLookupRequests, HostedMetadataEnvironment(..)
+  ( runInspectionRequests
   , isInspectionTypeQuery ) where
 
 import Control.Exception (SomeException, throwIO, try)
@@ -9,20 +9,12 @@ import Control.Monad (foldM)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Tidepool.ExtractRequest
-  ( InspectionRequest(..), WorkerRequest(..), HostedLookupBatch(..)
-  , HostedLookupOperation(..), HostedLookupQuery(..), validateRequestShape )
+  ( InspectionRequest(..), WorkerRequest(..) )
 import Tidepool.GhcPipeline (CompilePurpose(..))
-import Tidepool.Introspection (InspectionResult(..), HostedLookupAnswer, selectHostedAnswers)
+import Tidepool.Introspection (InspectionResult(..))
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics, renderInspectionDiagnostics)
 
 data SourcePolicy = PreserveSource | NormalizeWildcards deriving (Eq, Ord)
-
--- The successful environment is the exact admitted metadata cohort, not any
--- other successful probe. A failed cohort never acquires fallback authority.
-data HostedMetadataEnvironment environment
-  = NoHostedMetadata
-  | HostedMetadataRejected String
-  | HostedMetadataReady environment
 
 isInspectionTypeQuery :: InspectionRequest -> Bool
 isInspectionTypeQuery (InspectTypeOf _) = True
@@ -34,9 +26,6 @@ runInspectionRequests ::
   (environment -> [InspectionRequest] -> IO [InspectionResult]) ->
   IO [InspectionResult]
 runInspectionRequests args compile inspect = do
-  case requestHostedLookup args of
-    Just _ -> fail "complete inspection cannot consume a hosted lookup batch"
-    Nothing -> pure ()
   let queries = requestInspections args
   requireSources (requestFiles args) queries
   let singletons = snd <$> runSingletons (requestInspectionStrict args) (requestFiles args) queries compile inspect
@@ -56,35 +45,6 @@ runInspectionRequests args compile inspect = do
                   Nothing -> throwIO exception
             Right environment -> inspect environment queries
       | otherwise -> fail "inspection type batch requires at least two type queries and no other query kinds"
-
-runHostedLookupRequests ::
-  WorkerRequest ->
-  (CompilePurpose -> FilePath -> IO environment) ->
-  (environment -> [InspectionRequest] -> IO [InspectionResult]) ->
-  (HostedMetadataEnvironment environment -> [HostedLookupAnswer] -> IO output) ->
-  IO output
-runHostedLookupRequests args compile inspect finish = do
-  either (fail . show) pure (validateRequestShape args)
-  batch <- maybe (fail "hosted lookup request is missing its batch") pure (requestHostedLookup args)
-  let operations = hostedLookupOperations batch
-      queries = map operationQuery operations
-  (environments, results) <- runSingletons (requestInspectionStrict args) (requestFiles args) queries compile inspect
-  selected <- either fail pure (selectHostedAnswers batch results)
-  metadata <- case [path | (path, operation) <- zip (requestFiles args) operations, metadataOperation operation] of
-    [] -> pure NoHostedMetadata
-    path : _ -> case Map.lookup (PreserveSource, path) environments of
-      Nothing -> fail "hosted lookup lost its admitted metadata cohort"
-      Just (Right environment) -> pure (HostedMetadataReady environment)
-      Just (Left exception) -> case sourceFailureDiagnostics exception of
-        Just diagnostics -> pure (HostedMetadataRejected (renderInspectionDiagnostics diagnostics))
-        Nothing -> throwIO exception
-  finish metadata selected
-  where
-    operationQuery (HostedLookupPrimary _ _ (HostedLookupName query)) = InspectLookupNameOf query
-    operationQuery (HostedLookupPrimary _ _ (HostedLookupTypeSearch query)) = InspectTypeSearch query
-    operationQuery (HostedLookupExactReference _ query) = InspectExactNameOf query
-    metadataOperation (HostedLookupPrimary _ _ (HostedLookupTypeSearch _)) = False
-    metadataOperation _ = True
 
 requireSources :: [FilePath] -> [InspectionRequest] -> IO ()
 requireSources paths queries
@@ -106,7 +66,7 @@ runSingletons strict paths queries compile inspect = do
             InspectTypeSearch _ -> NormalizeWildcards
             _ -> PreserveSource
           purpose = case policy of
-            NormalizeWildcards -> LookupTypeCompile
+            NormalizeWildcards -> InspectionTypeCompile
             PreserveSource -> GeneralCompile
           key = (policy, path)
       compiled <- case Map.lookup key environments of

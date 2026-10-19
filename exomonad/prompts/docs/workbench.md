@@ -131,29 +131,13 @@ normalized by GHC and apply only to this cell. Put neither pragmas nor imports
 after executable source. CPP and custom preprocessors are unavailable. Cells do
 not accept colon commands or `:{` / `:}` delimiters.
 
-Opaque functions are useful values. Ask `lookup` for a name or use a
-`::type` query to search callable names (wildcard unknown parts with `_`, e.g.
-`:: Cmd.Command -> _`). Query `doc` for the available guides or
-`doc workbench` for this one. The `status` tool defaults to `summary`; its
+Opaque functions are useful values. When the admitted notebook lists
+`Introspection`, ask qualified `Tidepool.Introspection.info` for a name's
+declaration or `Tidepool.Introspection.typeOf` for its canonical type. Query
+`doc` for the available guides or `doc workbench` for this one. The `status`
+tool defaults to `summary`; its
 `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views answer runtime
 questions without disturbing the cell.
-
-The hosted `lookup` tool is not a Haskell function. From a cell, use
-`lookupRaw (lookupRequest ["Cmd.quiet"])`; `lookupRequest` supplies the shipped
-hosted tool's defaults. Use `LookupRequest` directly for custom lookup options.
-
-Where the active `AgentSpec` mounts `Tidepool.Lookup.Tools`, lookup returns a
-`LookupCaptureReceipt`; its `readLookup` tool reads that exact retained capture.
-`LookupIndex` lists sections; `LookupSections` selects primary or related
-results with optional line ranges. `LookupSearch` performs literal text search
-within one retained section with a context radius and match limit; `LookupText`
-reuses the returned match or context ranges. `LookupReceipt` and
-`LookupSelectionTrace` expose the capture and selection evidence. These reads
-perform no new API search. From Haskell, `Tidepool.Lookup.Navigation` provides
-`lookupCaptureIndex`, `selectLookupCapture`, `searchLookupCapture`, and
-`selectLookupCaptureText` over a retained capture. Full example and bundle
-sections remain available when no line range is supplied; preserve their source
-and view identities when reusing selections.
 
 `display value` emits bounded structured output and returns an opaque
 `DisplayHandle value`. `expansions handle` lists the available field keys and

@@ -16,7 +16,7 @@ systemd_slice = "swarm.slice"
 source_roots = ["."]
 modules = [
   "Exomonad.Contrib.Types", "Exomonad.Contrib.Actors", "Project.Work", "Exomonad.Contrib.Routing", "Project.DecisionAnswers", "Project.Observe",
-  "Project.Shell", "Project.Sift", "Project.Lookup", "Project.ConversationContext", "Project.Reflex", "Project.Evidence",
+  "Project.Shell", "Project.Sift", "Project.ConversationContext", "Project.Reflex", "Project.Evidence",
   "Project.Investigate", "Exomonad.Contrib.Merge", "Project.ReviewPolicy", "Project.Search", "Project.History",
   "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.SupervisionProfiles",
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults", "Exomonad.Contrib.CheckPlan", "Project.TestEvidence",

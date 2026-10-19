@@ -396,7 +396,6 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                     "Project.Observe".into(),
                     "Project.Shell".into(),
                     "Project.Sift".into(),
-                    "Project.Lookup".into(),
                     "Project.Reflex".into(),
                     "Project.Evidence".into(),
                     "Project.Investigate".into(),

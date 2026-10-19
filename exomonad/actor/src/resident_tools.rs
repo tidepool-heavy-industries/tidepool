@@ -1837,7 +1837,7 @@ mod tests {
         .is_err());
 
         let valid = declaration(
-            "lookup",
+            "inspect",
             exomonad_tool::ToolKind::Call,
             serde_json::json!({"type": "object", "properties": {}}),
         );

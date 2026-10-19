@@ -215,7 +215,7 @@ async fn expansion_fences_immediate_handler_with_compiler_owner(
 ) {
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+        .with_imports("qualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
 
     let fixture = prepare_callback_fixture(
         source.clone(),
@@ -281,7 +281,7 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
 ) {
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
+        .with_imports("qualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
 
     let mut fixture = prepare_callback_fixture(
         source.clone(),
@@ -353,76 +353,21 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
 }
 
 #[tokio::test]
-async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
+async fn filesystem_errors_retain_expandable_display() {
     crate::resident_workbench::with_test_compiler_owner(
-        filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation,
+        filesystem_errors_retain_expandable_display_with_preparation,
     )
     .await;
 }
 
-async fn filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation(
+async fn filesystem_errors_retain_expandable_display_with_preparation(
     preparation: crate::CompilerPreparationClient,
 ) {
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
-
-    let fixture = prepare_callback_fixture(
-        source.clone(),
-        tidepool_testing::fixture_source(
-            "exomonad/actor/src/resident_workbench/display_lookup_errors.hs",
-        ),
-        false,
-    )
-    .await;
-    assert!(
-        fixture.initial.text.contains("retained-query"),
-        "{}",
-        fixture.initial.text
-    );
-    assert!(fixture
-        .initial
-        .expansions
-        .iter()
-        .any(|(_, label)| label == "index" || label == "hits"));
-    assert!(!fixture.initial.unavailable);
-    assert!(!fixture.initial.expansions.is_empty());
-    let mut pending = fixture.initial.expansions.clone();
-    let mut rendered = fixture.initial.text.clone();
-    let mut callback = fixture.callback.clone();
-    for _ in 0..64 {
-        let Some((key, _)) = pending.first().cloned() else {
-            break;
-        };
-        let (page, retained) = fixture
-            .runner
-            .expand_display(
-                fixture.execution.context.clone(),
-                callback,
-                (1, 1, 1),
-                key,
-                8192,
-            )
-            .await
-            .unwrap();
-        assert!(!page.unavailable);
-        rendered.push_str(&page.text);
-        pending = page.expansions;
-        callback = Arc::new(retained);
-    }
-    assert!(pending.is_empty(), "expansion did not settle");
-    for name in [
-        "retained-query",
-        "end-of-retained-query",
-        "second-query",
-        "missing-api",
-        "retained contract hash token",
-    ] {
-        assert!(rendered.contains(name), "missing {name}: {rendered}");
-    }
-    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        .bind_preparation(preparation);
     let errors = prepare_callback_fixture(
-        source.clone(),
+        source,
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
         ),
@@ -446,97 +391,4 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display_with_prepa
         );
     }
     assert!(errors.initial.text.contains("Right (Left"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn retained_lookup_selection_revisits_and_expands_without_lookup_or_effects() {
-    crate::resident_workbench::with_test_compiler_owner(
-        retained_lookup_selection_with_compiler_owner,
-    )
-    .await;
-}
-
-async fn retained_lookup_selection_with_compiler_owner(
-    preparation: crate::CompilerPreparationClient,
-) {
-    let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
-    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
-        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nqualified Data.Text.Lazy as LazyText\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)").bind_preparation(preparation);
-
-    let fixture = prepare_callback_fixture(
-        source.clone(),
-        tidepool_testing::fixture_source(
-            "exomonad/actor/src/resident_workbench/display_lookup_navigation.hs",
-        ),
-        false,
-    )
-    .await;
-    assert!(fixture.initial.text.contains("original-capture"));
-    let selection = |section: serde_json::Value| {
-        serde_json::json!({
-            "address":{"resultOrdinal":1,"entryOrdinal":1,"section":section},"lineWindow":null
-        })
-    };
-    let request = serde_json::json!([
-        selection(serde_json::json!({"tag":"Contract"})),
-        selection(serde_json::json!({"tag":"Setup","contents":1})),
-        selection(serde_json::json!({"tag":"Example"}))
-    ])
-    .to_string();
-    let identity = (1, 1, 1);
-    let mut callback = fixture.callback.clone();
-    for _ in 0..2 {
-        let (page, retained) = fixture
-            .runner
-            .navigate_display(
-                fixture.execution.context.clone(),
-                callback,
-                identity,
-                0,
-                Some(request.clone()),
-                8192,
-            )
-            .await
-            .unwrap();
-        assert!(!page.unavailable);
-        let mut text = page.text;
-        let mut keys = page.expansions;
-        callback = Arc::new(retained);
-        for _ in 0..128 {
-            let Some((key, _)) = keys.first() else {
-                break;
-            };
-            let (page, retained) = fixture
-                .runner
-                .expand_display(
-                    fixture.execution.context.clone(),
-                    callback,
-                    identity,
-                    *key,
-                    8192,
-                )
-                .await
-                .unwrap();
-            assert!(!page.unavailable);
-            text.push_str(&page.text);
-            keys = page.expansions;
-            callback = Arc::new(retained);
-        }
-        assert!(keys.is_empty());
-        for marker in [
-            "original-capture",
-            "main-digest",
-            "exact-owner-contract-marker",
-            "complete-setup-marker",
-            "last-main-marker",
-        ] {
-            assert!(text.contains(marker), "missing {marker}: {text}");
-        }
-    }
-    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-    assert!(fixture.output.snapshot().is_empty());
-    crate::resident_actor::assert_selectable_display_lifetime(
-        Arc::try_unwrap(callback).expect("last returned callback has one native owner"),
-        fixture.execution,
-    );
 }

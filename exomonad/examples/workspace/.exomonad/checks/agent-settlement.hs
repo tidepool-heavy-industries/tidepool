@@ -1,7 +1,7 @@
 joinedScoutSettlements <- await
-  ((,) <$> settlement compilerRequestHandle <*> settlement lookupRequestHandle)
+  ((,) <$> settlement compilerRequestHandle <*> settlement introspectionRequestHandle)
 case joinedScoutSettlements of
   Left observationFailure ->
     display ("Await failed: " <> T.pack (show observationFailure))
-  Right (compilerSettlement, lookupSettlement) ->
-    display (T.pack (show (compilerSettlement, lookupSettlement)))
+  Right (compilerSettlement, introspectionSettlement) ->
+    display (T.pack (show (compilerSettlement, introspectionSettlement)))

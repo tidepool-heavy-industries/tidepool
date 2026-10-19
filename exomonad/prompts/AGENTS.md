@@ -72,7 +72,7 @@ Run `actor_host::documentation_tests::published_notebook_sources_match_authored_
 the affected `published_*` resident consumer tests, and the prompt catalog tests
 when changing those examples or prompt composition. Request success, retained
 target cancellation, unavailable forms, complete command stdout without replay,
-lookup discovery, and unbound reflection have separate consumer assertions.
+introspection discovery, and unbound reflection have separate consumer assertions.
 The canonical `Examples.JevPreparedWorkflow` and `Examples.JevFormWorkflow`
 modules own Jev/form composition; their host tests (`JevPreparedTest`,
 `FormLifecycleTest`, `FormJevDialogueTest`) and native

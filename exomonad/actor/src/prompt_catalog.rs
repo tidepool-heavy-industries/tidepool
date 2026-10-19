@@ -174,12 +174,12 @@ pub(crate) fn workbench_doc(
         }
         "help" | "topics" => {
             let mut body = String::from(
-                "Exomonad topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, model-call, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
+                "Exomonad topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, model-call, jev, actors, reflect. Use hosted `introspection` for compiler queries and `doc <topic>` for documentation.\n\
                  Use `doc <skill-name>` to read a bundled skill without filesystem access. Jev reference: `doc exomonad-jev/references/recent-changes.md`. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
-                    "\nWorkspace modules (compiled into this session; lookup a name to browse it): ",
+                    "\nWorkspace modules (compiled into this session; use introspection to browse names): ",
                 );
                 body.push_str(&workspace_modules.join(", "));
             }

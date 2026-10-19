@@ -133,7 +133,6 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'exomonad/actor/src/request/fixtures/watch-route.hs',
         'exomonad/actor/src/resident_actor/jev_recording_semantics.hs',
         'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs',
-        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs',
         'exomonad/actor/src/request/fixtures/result-receiver.hs',
         'exomonad/actor/src/request/fixtures/result-request.hs',
         'exomonad/actor/src/resident_workbench/replacement_inputs.hs',

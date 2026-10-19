@@ -50,15 +50,6 @@ publication, and inference settlement remain distinct operations.
   Ordinary respond and route callbacks cannot bypass JSON-tool admission for a
   request created with requestWithReplyTool. Its admitted overlay uses a private
   typed entry into the same claim owner; ordinary Haskell requests are unchanged.
-- Lookup retains evidence separately from presentation. Direct and exact
-  reference expansions share identity-based example enrichment. Search receipts
-  distinguish requested, executed, bounded, omitted, and unknown coverage;
-  discarded search candidates are not retained display continuations.
-  Authored enrichment retains each request's original receipt and view. A refused
-  followup cannot masquerade as accepted search work or erase the primary
-  retained evidence. Hosted lookup returns a typed capture receipt containing
-  its existing display identity; render prose from that receipt, never parse
-  prose to recover it. No new display authority or document registry is needed.
 
 ## Decisions for implementation
 
@@ -74,10 +65,9 @@ publication, and inference settlement remain distinct operations.
   with duplicate keys or missing/repeated fields. Intentional transparent and
   nullary encodings remain distinct. Check exact JSON facts, not only round trips
   through a shared defective encoder and decoder.
-- Retained lookup composition belongs to the authored capture owner, not to a
-  recursive native receipt protocol. Keep primary and related batches immutable;
-  navigation preserves each excerpt's issuing identity and view. A typed capture
-  result makes the real hosted test independent of incidental display wording.
+- Retained inspection composition belongs to the authored capture owner, not to
+  a recursive native receipt protocol. A typed capture result makes the real
+  hosted test independent of incidental display wording.
 - Keep the scripted researcher tutorial small and complete. Edge-case lifecycle
   controls belong beside it, through the same real Harness-issued request token.
   Use a custom decoder control to distinguish schema validity from authored
@@ -92,7 +82,6 @@ publication, and inference settlement remain distinct operations.
 | Prepared spec and preflight | account_switch_review |
 | Native request reply and provider adapter | queue_ownership_review |
 | Harness terminal admission | response_continuation_owner |
-| Retained navigation, enrichment and search receipts | lookup_semantic_contracts |
 | Persona.Spec, actor_host composition, compiled examples and joined scenarios | persona_kaizen_api |
 | Independent boundary reviews | queue_failure_review and queue_surface_review |
 | Release fixture migration and qualification | delivery_coordinator |
@@ -149,10 +138,7 @@ available RAM. Share interface changes before editing overlapping consumers.
    whole-Persona spec validation, and installed file-tool execution after an
    intentional notebook compilation refusal. Count logical compiler requests,
    including requests served by an already-running daemon.
-4. Finish lookup receipt composition and the real hosted lookup fixture. Use
-   typed capture identity to navigate the retained content, exact examples and
-   refusal receipts; no character-offset arithmetic or rendered-text ID parsing.
-5. Integrate source-reviewed parcels, compile the joined production and test
+4. Integrate source-reviewed parcels, compile the joined production and test
    consumers, and regenerate metadata using its actual owning producers. Use
    source-only integration plus the returned warm delivery checkout; avoid a
    second cold release build. Preserve every existing branch and authored file.
@@ -201,7 +187,7 @@ separate claims.
 
 ## Deferred
 
-No new compiler architecture, patch parser, document registry, automatic memory
-policy, or semantic lookup workflow. A pinned package discovery index is a
+No new compiler architecture, patch parser, document registry, or automatic
+memory policy. A pinned package discovery index is a
 separate measured experiment. Broader findings need an exact reproducer and
 proposal; they do not silently expand this delivery.
