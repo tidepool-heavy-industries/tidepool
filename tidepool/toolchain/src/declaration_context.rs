@@ -17036,6 +17036,8 @@ mod tests {
         let support = private_support
             .retain_custody(request.compiler_inputs().artifacts())
             .unwrap()
+            .retain_custody(next.artifact_view())
+            .unwrap()
             .select_support_roots(vec![id])
             .unwrap();
         captured = captured.rebuild(|facts| {
@@ -17045,19 +17047,17 @@ mod tests {
         drop(private_support);
         captured.normalize().unwrap();
         let captured = Arc::new(captured);
-        let materialized = captured
-            .artifact_view()
-            .retained_materialization(&captured.compiler_metadata_snapshot().unwrap())
-            .unwrap();
         let mut captured_row = None;
-        if let Some(materialized) = &materialized {
-            materialized.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+        request.materialization.as_ref().unwrap().visit_owners(
+            &mut BTreeSet::new(),
+            &mut |owner| {
                 if let Some(row) = owner.rows.get(&id) {
                     captured_row = Some((row.interface.path.clone(), Arc::downgrade(row)));
                 }
-            });
-        }
-        drop(materialized);
+            },
+        );
+        let (captured_path, physical_row) = captured_row.unwrap();
+        assert_eq!(captured_path, file.path);
         let selected_owner = Arc::downgrade(
             &captured
                 .compiler_metadata_snapshot()
@@ -17079,16 +17079,7 @@ mod tests {
         drop(next);
         drop(descendant);
         drop(ancestor);
-        eprintln!(
-            "detached physical custody: request_file={:?}; late_file={:?}; captured_row={:?}",
-            file.path,
-            late_file.path,
-            captured_row.as_ref().map(|(path, owner)| (
-                path,
-                path.exists(),
-                owner.upgrade().is_some()
-            ))
-        );
+        assert!(physical_row.upgrade().is_some());
         assert!(
             file.path.exists(),
             "detached selection owns its selected file"
@@ -17108,6 +17099,7 @@ mod tests {
         drop(restored);
         drop(captured);
         assert!(!file.path.exists());
+        assert!(physical_row.upgrade().is_none());
         assert!(selected_owner.upgrade().is_none());
         assert!(!proof.scopes.is_empty());
     }
