@@ -3,7 +3,7 @@
 Owner `/root/warm_compiler_campaign/qualification`; parent
 `/root/warm_compiler_campaign`. Area checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-qualification-20261019`, branch
-`feature/shared-warm/qualification`, source contract
+`qualification/self-native-pairing-guard` (original feature branch preserved), source contract
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. One allocated independent child,
 `capture_sensitivity`, is reactivated for the approved production-constructor
 discriminator; no further descendants granted.
@@ -174,79 +174,88 @@ remove obsolete alternate authorities/adapters and explicitly version or refuse
 old persisted authority. Preserve immutable baseline, user files and evidence;
 new service qualification must enter the new real production owner.
 
-Current approved successor: exact `278cd12c95b148532af9fc9232a02fff82eedfa7`
-(owning production trees equal `f088e3e7837c72cf0e82aab8e71a2687d767da34`).
-The reserved child owns a bounded opt-in trace discriminator in existing
-inspection/value-extension/authored-fallback/catalog-private constructors.
-Synthetic native fixtures cannot faithfully carry the frozen catalog plus issued
-checked-value history; the authorized tracing fallback preserves real issuers.
-No policy edits or new authority factory. Stage roles, exact root/required edges
-and omissions remain explicit. Private `native-constructor-discriminator/PLAN.json`
-records controls/resource proposal. Exact candidate
-`e00aaedb8310ecf847dc39ebd2bf81fdafb667e5` received independent supervisor and
-campaign full-delta source acceptance, without findings. The reserved child owns
-the approved 12 GiB-memory / 32 GiB-growth native compile/resources/three-control
-lane through terminal success: production/cfg(test) compilation0 (331.479 s),
-declared resources0 (121.679 s), three adjacent controls selected/executed/passed3.
-Unit binary112007200 B SHA-256
-`400cae1f2d01166346cf6ed457352647a4835dcf0db8757a75f0b76aa9db4e07`;
-`native-constructor-discriminator/NATIVE-RESULT.json` binds actual reports,
-commands and cgroups. Supervisor independently verified all report hashes/counts
-and binary bytes. Process cleanup confirmed; hosted/compiler not observed for
-these compiler-free unit controls; diagnostics complete. Source review and these
-controls do not observe first promotion. Own build-scope peak5712482304 B,
-output growth1995157504 B; retained idle daemon remains globally accounted.
-All small-lane commands settled. The area joined this accepted source at
-`428b1b6fb10a20db993d3a1b7bd81ce856a5f0d9`. Its production/test tree matches
-accepted e00; documentation and plan changes have separate ownership.
+## Available custody and selected originals
 
-After a separate fresh admission, source-retention, native bundle, freeze and
-bundled verify passed for exact `428b`, fast-dev, workspace ce60 and Harness1893773e.
-Bundle compilation took 852.603 s, 953 local actions; own scope peak 10707906560 B
-and terminal output 9930018816 allocated B. Initial output and transient scratch
-peak were not measured, so terminal bytes are not exact growth or a peak bound.
-The descriptor SHA-256 is
-`0df0d478672886b1b289dc0fd02244f203d3547e9aeea3487ff0a1418081e24d`.
+Frozen trace source `428b1b6fb10a20db993d3a1b7bd81ce856a5f0d9` compiled,
+froze and verified, then stronger shared-source Persona executed/failed1. Its
+available catalog B first becomes Original in the Candidate complete-native issuer;
+an earlier surviving Operators root retains exact required A groups7/2. The
+constructed conflict is genuine; equal interfaces cannot authorize substitution.
+The exact frozen failure and issuer/source/edge packet remain immutable. All three
+cleanup domains were confirmed; diagnostic detail is incomplete. This is a producer
+role finding, not a validator failure or optional-root waiver.
 
-The frozen stronger shared-source Persona selected/executed 1, passed 0, failed 1:
-runner 1 / libtest 101, cohort 158.235 s. Startup and Files/Memory succeeded; all five
-native lookup answers failed the strict exact A/B dependency check before physical
-submission. Notebook and pure continuation were not reached. Process, hosted and
-compiler cleanup are confirmed. Diagnostics remain incomplete: the complete
-48,425,868-byte compiler trace contains 29,357 physical timing records but the
-runner retains 178 detail records. Request counts/aggregates are complete; that
-does not make the detail sample complete. Raw host trace 728745362 B, SHA-256
-`5c6712f9da0ebe1d510ebf95cbe260540cca773743c1792a5f7176e1e44d3046`, is retained.
-`native-constructor-discriminator/FROZEN-TERMINAL-428b.json` binds exact commands,
-build/freeze/verify/case reports, hashes, resource limits and cleanup. All commands
-settled; the 10 GiB hosted allowance is released. The owned idle Buck daemon remains
-accounted globally. This cohort has no timing measurement scope or speedup claim.
+The repair distinguishes the existing availability-only candidate producer from an
+explicit selected output. Authenticated candidate custody retains receiving roles;
+actual selected fresh outputs enter through CertifiedSourceSelection/from_selection.
+No cfg(test) strong issuer may survive merely to preserve obsolete tests. Main
+fixture migrations use actual closed outputs and preserve refusal, physical owner,
+retained-history and source-policy checks. NativeBinding closure is authenticated,
+not assumed from broad custody.
 
-The actual same-lookup trace distinguishes the first role promotion. Tidepool is
-InterfaceOnly before/after checked-value extension, authored fallback/reuse and
-native-issuance baseline. First B
-`b066e6ae5e384a107c168a4cb734d4f6644a13bab165a0790273b91267028061`
-Original appears in Candidate issuance fragment 47131 / effective 47174. The same
-invocation is bracketed by candidate reuse 46716 and fresh fragment 47287, whose
-production emitter follows the explicit Candidate call. A Request-only temporary
-promotion is a separate concern, not this observed cause. B survives private
-composition and closure; strict refusal requires A
-`2f5bc68307fd56079c70f4b946ac2bb1aeb9260c8c29e3f4c16753eb6b38bbcc`.
+Prior executed source `6d93cc5fac1474c3f4c1a4620b1299bbd67964e6` compiled
+production and cfg(test), then selected/executed/passed two maintained tests:
+the generated publication/recovery property and the repeated retained-core history.
+Receipt `retry-6d93/TERMINAL.json` SHA-256
+`312a9a77c914ee37076a25b870d7898e84115fbae9753e8903066c7a15dc582d`
+binds binary SHA-256 `293538c8b0a4853855b373c00d9a62ce9040ae1fac4c73ab14d9b09808a29646`.
+Property callbacks and internal histories are not additional test executions.
 
-Current composed availability closure 48462 includes direct Operators 137/146 with
-exact issued edges to A7/A2. Operators is nevertheless Full/InterfaceOnly with
-no selected Original: the existing canonical role policy makes it direct. This
-proves a constructed closure obligation, not that the lookup explicitly demanded
-executable Operators. Optional availability-root pollution therefore remains a
-caller-demand question; the validator correctly refuses the constructed facts.
-The existing candidate producer explicitly labels protected native closure rows
-AvailabilityOnly; from_candidates instead sends them through fresh Original
-issuance. The narrow proposed repair separates contextual availability custody
-from selected fresh outputs at the production owner. It must preserve explicit
-fresh B selection through certified physical outputs and genuine A/B refusal;
-no interface-equality substitution or conflict-specific suppression is authorized.
-The reserved leaf owns the exact issuer packet and typed repair proposal, then
-independent review and separately admitted checks. No frozen retry precedes repair.
+Exact `e47c4e31a13f6fc3f39d326da4a65fa0721ade82` compiled and executed five:
+three passed (full real compiler source-proof pairing, retained-generation permissions,
+and selected-issuer/historical-offer custody), two failed at fixture assumptions
+subsequently corrected and executed at `6d93`. Its receipt SHA-256 is
+`e34ac89356ed440df82f76df56f60a8f44dc27dc41e844b255155c77d5d03f6f`.
+Exact `6be02773285fd4c4971cd66cf837e986ff8ce8b7` separately passed the real
+compiled Request native-permission test: one maintained test with two internal
+controls, exact required A2 typed refusal and independently issued Full-A success.
+Its receipt SHA-256 is
+`2ded3dd3c81c74c07ba0926343fd3cfc127a40f779c12d66b008d28822fdb7c1`.
+The paired test's old closed-C+A missing-Input premise was removed only after
+this actual replacement executed and received independent source review.
+
+Both physical custody histories passed at `8ffc`; exact-root deterministic and
+shrinking Request histories, physical source-graph lifetime and the 24-state
+independent literal-wire matrix passed at `d710`. The matrix is one maintained
+test with 16 accepted states and eight typed refusals. A mistyped selector earlier
+refused with zero execution; compile-format failures also remain separate.
+All cited process cleanup was confirmed; compiler cleanup was not observed.
+The real GHC reports retain incomplete diagnostic evidence. These component
+receipts do not establish a repaired frozen bundle or performance improvement.
+
+The strict publication-context test still fails. Actual `6be` reconstructs an older
+Alpha/Beta publication with later InlineConsumer canonical/original payloads and
+its Full-7 offer. Selected roles, normalized availability, decisions, lexical facts,
+templates and instance environment remain equal; logical custody, offers and
+semantic identity differ. Independent review confirmed the all-current-offers
+reattachment. A same-node Full-to-Partial witness proves graph membership cannot
+recover birth modes. The approved exact birth-owner repair is a separate,
+unimplemented production cone with Context6/role-native-authority codec work;
+its live capture must borrow maintained persistent facts without a domain fold.
+The immutable baseline and strict equality/native refusal remain unchanged.
+
+The available-custody foundation is being prepared independently of that later
+publication defect. Its alternate test issuers and obsolete caller migrations
+must be removed, compiled and receive complete-history independent review before
+an upward fold. No final area/frozen/service/ordinary-cell/performance acceptance
+follows from the component passes above.
+
+Earlier exact `ef797f477bb410c7fb98dad9b267cb32d93cfbc4` compiled and ran18 Rust
+controls (16passed,2failed). All13 finite main fixture consumers and actual physical
+RetainedArtifactRow Weak/path lifetime checks passed. Its declared SOURCE boot reuse
+Tasty leaf passed1 through ordinary NativeScopeBase/Owner products and the actual
+Rust native-scope issuer. The separate empty-binder leaf passed1; an unsupported
+runner option refused with0execution. Haskell structured cleanup is UNKNOWN.
+Receipt `retry-ef797/TERMINAL.json` SHA-256
+`843a4ce6ee37501cc95f760e0c8cc6336f91af7b130b7a1baf4c863d0bae7a49` binds source,
+per-case reports and source-specific artifact/resource hashes. These are bounded
+component outcomes, not repaired frozen Persona, performance or release evidence.
+
+The active source frontier is fixture migration, exact issuer/permission tests,
+obsolete authority removal and final owning compilation/counts. Main remaining
+physical/source fixtures have a concrete closed-output candidate; the reserved child
+owns Request-history transposition and independent wire/topology oracles. Their
+successor evidence must precede source fold and the exact joined frozen rerun.
 
 The next demand-service event is campaign/host/warm source owners producing the concrete joined
 query/check/execute consumer and root/campaign resolves the exact frozen native
@@ -286,3 +295,28 @@ bounded top-down scratch analysis by checkout/output owner, active versus idle
 users, required independent products/evidence and exact possible reclaim
 boundaries. Analysis only: no deletion, GC, unmount or stopping others.
 Deployment and live Persona changes remain outside qualification authorization.
+
+## Separable availability foundation checkpoint
+
+Exact `d334ef5af9b40578c86f9e93e37571e5d1a2cee2` includes the reviewed
+`91d6ba6ceb733794c63da1d07d18efc7ec2087e1` retirement stack. Production and
+all owning cfg(test) callers compile. The three changed owning controls selected,
+executed and passed 3/3: carried dependency proof through the actual private Request,
+completed entry acquisition/lifetime, and empty producer-pin Request preparation.
+The first contains three internal preference histories; these are one libtest.
+`retry-d334/TERMINAL.json` SHA-256
+`90eabdf2806384752a03b6ad9e6eb3bcbd222d22dbb0cf3cf97dffe2610c97c2` binds
+commands, reports and binary
+`3b5e7c26532419f8bdb2e9e84e4d60cdaabc970fd179af043104901529a35fd5`.
+Process cleanup is confirmed, compiler cleanup not observed, diagnostics complete.
+All commands settled; qualification foreground allowance is zero.
+
+The obsolete Candidate authority factory, wrappers, enum and alternative validator
+are removed. Actual Request completion retains its admitted entries, canonical and
+producer checks, independent row permissions and strict selected-input validation.
+Retired histories have source-specific actual Request replacements above; unrelated
+primitive malformed-offer, narrowing, restoration and ambiguity controls remain.
+The upward checkpoint needs independent full-history campaign review and joined
+compilation. It does not include the later publication-native-authority repair,
+whose actual strict context-equality failure remains open. Frozen Persona, ordinary
+cell/service migration and matched performance remain unqualified.

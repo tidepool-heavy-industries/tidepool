@@ -10,7 +10,7 @@ use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 const PRODUCER: &[u8] = b"distinct-original-candidate-history";
 
 #[test]
-fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody() {
+fn candidate_availability_preserves_roles_and_historical_custody() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let products = [141, 142].map(|version| {
         fixture_finalized_product(
@@ -75,7 +75,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-history-does-not-read-manifest"),
         by_owner: BTreeMap::new(),
-        native_availability: vec![products[1].clone()],
+        contextual_native_availability: vec![products[1].clone()],
         catalog_owner: None,
         input_transport: Vec::new(),
     };
@@ -90,7 +90,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
         );
         assert!(context.artifact_view().selected_native_groups().is_empty());
         let inputs = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-            .expect("the candidate owner issues B without promoting historical A")
+            .expect("available B adds custody without selecting an Original")
             .unwrap();
         assert_eq!(
             inputs
@@ -99,7 +99,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
                 .iter()
                 .filter_map(|role| role.original())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([b.descriptor.id])
+            BTreeSet::new()
         );
         assert!(
             inputs
@@ -108,20 +108,18 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
                 .is_empty(),
             "fresh availability does not select executable demand"
         );
-        let [offered_b] = inputs.issued_offers() else {
-            panic!("one fresh B offer")
-        };
-        assert_eq!(offered_b.original(), b.descriptor.id);
-        assert!(offered_b.is_full());
-        assert_eq!(
-            offered_b
-                .issued_group_carriers()
-                .unwrap()
-                .keys()
-                .map(|group| (group.binding.artifact(), group.original_ordinal))
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([(b.descriptor.id, 7), (b.descriptor.id, 9001)])
-        );
+        assert!(inputs
+            .issued_artifacts()
+            .artifact_ids()
+            .contains(&b.descriptor.id));
+        assert!(inputs
+            .native_availability()
+            .rows()
+            .all(|row| row.original.descriptor.id != b.descriptor.id));
+        assert!(inputs
+            .issued_offers()
+            .iter()
+            .all(|offer| offer.original() != b.descriptor.id));
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context))
             .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(inputs))
@@ -156,8 +154,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
             );
         }
     };
-    // This positive control establishes B through the actual candidate issuer,
-    // rather than inferring a winner from equal canonical interfaces.
+    // Availability retains certified B bytes independently of compiler roles.
     assert_candidate(context(vec![]), false);
     for copies in [1, 2] {
         let live = context(vec![offer.clone(); copies]);
@@ -200,8 +197,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
         assert_candidate(cold, true);
         assert_eq!(offer.snapshot_facts(), original_offer);
     }
-    // An explicit incompatible current claim still refuses; availability does
-    // not authorize changing an already selected native original.
+    // Optional availability cannot compete with an explicitly selected A.
     let selected_a = ExactDeclarationContext::from_facts(DeclarationContextFacts {
         producer: producer.sha256(),
         compiler_support: issue_fixture_compiler_support(
@@ -213,5 +209,25 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
-    assert!(OriginalCompilerInputs::from_candidates(&selected_a, producer, &candidates).is_err());
+    let input = OriginalCompilerInputs::from_candidates(&selected_a, producer, &candidates)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        input.role_projection(),
+        selected_a.compiler_input_projection()
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(selected_a))
+        .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(input))
+        .unwrap();
+    assert!(request
+        .compiler_inputs()
+        .projection()
+        .roles()
+        .iter()
+        .any(|role| role.original() == Some(a.descriptor.id)));
+    assert!(request
+        .compiler_inputs()
+        .native_availability(b.descriptor.id)
+        .is_none());
 }

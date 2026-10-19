@@ -110,7 +110,7 @@ environments or construct a new graph/availability authority.
 | **Scoped parent membership** — `ArtifactInventory::issue_selected_custody` in [`artifact_inventory.rs`](../tidepool/toolchain/src/artifact_inventory.rs) | Per-chosen-input `admitted_closure` plus subset scan becomes exact parent-node membership | Prior original-role, ordinal and state-existence checks/refusal order remain; later `required_nodes` union remains. Independent proof-row fixed point covers ordinary/preseeded views, merge, hidden custody, writer/hydration/recovery, equal payload/different scope and proof-only siblings. |
 | **Shared immutable validation facts** — `validate_available_originals_with_validation`, `OriginalValidationInventory` in [`certified_products.rs`](../tidepool/toolchain/src/certified_products.rs) | Repeated available-owner census and authenticated group lookup across availability roots | Facts may be shared; each root's advertised/private permission predicate and import validation remain separate. First-root sorted refusal order is preserved. A cached fact from an earlier private root cannot grant a later unqualified root permission. |
 | **Carried verified closure** — `bind_input_demand`, `VerifiedNativeBinding`, `bind_fresh_product_dependencies` in [`native_availability.rs`](../tidepool/toolchain/src/artifact_inventory/native_availability.rs) | Immediate repeated installed closure walks for already checked bindings | Private binding+closure is minted only after installed-closure equality; consumed within that acquisition. Declared namespace checks, exact group/carrier identity, later root attribution and payload lifetime remain. |
-| **Carried admitted entries** — `CertifiedSourceSelection::complete_native_entries`, `CompletedRequestNativeProducts`, `issue_complete_native_availability_with_source` | Request completion no longer reconstructs `ArtifactEntry::original_with_validation` from its already admitted product | Carry actual `Arc<ArtifactEntry>` including acquisition owner; producer/source/canonical/completeness and solver permission checks remain. Candidate input still uses physical construction/validation. Interner pointer equality alone would not prove construction was skipped. |
+| **Carried admitted entries** — `CertifiedSourceSelection::complete_native_entries`, `CompletedRequestNativeProducts`, `issue_completed_native_availability` | Request completion no longer reconstructs `ArtifactEntry::original_with_validation` from its already admitted product | Carry actual `Arc<ArtifactEntry>` including acquisition owner; producer/source/canonical/completeness and solver permission checks remain. The obsolete Candidate issuer is deleted; availability-only catalog ingress authenticates custody without minting Original roles. Actual selected fresh outputs enter through `CertifiedSourceSelection` and `from_selection`. Interner pointer equality alone would not prove construction was skipped. |
 
 ## Reading timers without double counting
 
@@ -318,3 +318,22 @@ Supported unclassified reconstruction routes remain blockers. Cold first capture
 may visit the primary snapshot once; historical binding support stays separate from
 current compiler selection. The fixed query and appended-cell measurements include
 successor and durable publication work. Query-only success is partial delivery.
+
+
+The bounded qualification repair separates `CandidateSet.contextual_native_availability`
+from explicitly selected compiler outputs. `OriginalCompilerInputs::from_candidates`
+authenticates and carries custody under receiving roles; it does not select every
+available catalog body as a new Original. Actual selected outputs retain the
+`CertifiedSourceSelection` / `from_selection` issuer and exact historical dependencies.
+This source observation is specific to the qualification foundation: actual compiled
+Request permission refusal/Full positive and full source-proof pairing have executed;
+retained-generation, scoped-issuer, physical lifetime and independent generated histories
+have source-specific passing receipts in the qualification handoff. Alternate test issuers
+and obsolete callers still require removal, owning compilation and complete-history review.
+A separate strict publication-context failure remains: saved root reconstruction reattaches
+later unrelated offers as logical custody. Exact birth offer/mode/decision ownership and
+Context6 restoration are approved but unimplemented; no map entry claims they exist.
+The actual frozen428b path remains a
+required rerun after integration. No full-map, FD, encoding or hydration work reduction
+is inferred from this role correction; the service and actor migration rows above
+remain open until their actual consumers and counters execute.

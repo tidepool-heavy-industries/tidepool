@@ -145,10 +145,12 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[3; 32])
                 .sha256();
         let public = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(producer, &[])
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                producer,
+                &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                crate::artifact_inventory::CompilerInputProjection::default(),
+            )
+            .unwrap(),
         );
         let request = public
             .prepare_compilation_with_private_input(
