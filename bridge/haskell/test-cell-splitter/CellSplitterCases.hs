@@ -88,6 +88,7 @@ import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
   , encodeEnsureExactInputsOutcomeWithin
   , WorldPublicModuleRequest(..), WorldQueryMode(..)
+  , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , StructuredInspection(..), InspectionProvenance(..)
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
@@ -993,7 +994,7 @@ checkingSourceRequestRoundTrip = do
       hostedFields = [Input "metadata.hs", Input "type.hs", Input "metadata.hs", HostedLookup hosted, InspectOut "out.cbor"]
   [_, hostedPayload] <- pure (workerArgv hostedFields)
   assertEqual "hosted codec matches independently encoded shared Rust fixture"
-    "545052455130323300010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72" hostedPayload
+    "545052455130323400010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72" hostedPayload
   case workerRequestFromArgv (workerArgv hostedFields) of
     Right (Just request) -> do
       assertEqual "hosted keeps original gapped ordinals and separate reference domain" (Just hosted) (requestHostedLookup request)
@@ -1025,7 +1026,7 @@ checkingSourceRequestRoundTrip = do
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
   assertEqual "source-free request matches independent Rust fixture"
-    "54505245513032330001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
+    "54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
   forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")] $ \inputs ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
@@ -1084,7 +1085,7 @@ checkingSourceRequestRoundTrip = do
           (InspectionProvenance 1 "display-only")) "answer.bin"
   [_, queryPayload] <- pure (workerArgv [WorldPublicModule query])
   assertEqual "world public query matches the frozen field 58 byte layout"
-    "5450524551303233000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
+    "5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
   forM_ [WorldStructuredInfo, WorldStructuredType] $ \mode -> do
     let selected = query { worldQueryMode = mode }
     case workerRequestFromArgv (workerArgv [WorldPublicModule selected]) of
@@ -1103,6 +1104,38 @@ checkingSourceRequestRoundTrip = do
       case workerRequestFromArgv (workerArgv [WorldPublicModule invalid]) of
         Left _ -> pure ()
         other -> fail ("invalid world query accepted: " ++ show other)
+
+  let cellRecipe = WorldCellRecipe "x <- pure 1" "{{CELL_IMPORTS}}\n{{CELL_BODY}}" [("bind","module Bind where")]
+      cellPlan = WorldCellPlanRequest world "held" cellRecipe "plan.cbor"
+      cellPrepare = WorldCellPrepareRequest world "held" cellRecipe "plan-receipt" (BS.replicate 32 98)
+        [(0,PlannedBind 7),(1,PlannedExpression 8 "it")] "operation" "prepared.cbor"
+      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72")
+              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
+  forM_ cases $ \(field,operation,expected) -> do
+    [flag,payload] <- pure (workerArgv [field])
+    assertEqual "held cell operation matches independent Rust framing" expected payload
+    case workerRequestFromArgv [flag,payload] of
+      Right (Just request) -> assertEqual "held cell admits exactly its own operation" (Right operation) (admitRequestOperation request)
+      other -> fail ("held cell codec rejected data fixture: " ++ show other)
+    forM_ [0 .. length payload - 1] $ \end -> case workerRequestFromArgv [flag,take end payload] of
+      Left _ -> pure ()
+      _ -> fail "truncated held cell request accepted"
+    forM_ [Input "ambient.hs",Include "ambient",WorldCellPlan cellPlan,WorldCellPrepare cellPrepare] $ \extra ->
+      forM_ [[field,extra],[extra,field]] $ \mixed -> case workerRequestFromArgv (workerArgv mixed) of
+        Left _ -> pure ()
+        _ -> fail "mixed held cell request accepted"
+  forM_ [cellPlan {worldCellPlanRecipe=cellRecipe {worldCellSource=replicate (1024*1024+1) 'λ'}}
+        ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("bind","one"),("bind","two")]}}
+        ,cellPlan {worldCellPlanOutput=replicate 65537 'x'}] $ \invalid ->
+    case workerRequestFromArgv (workerArgv [WorldCellPlan invalid]) of
+      Left _ -> pure ()
+      _ -> fail "over-budget or duplicate held cell recipe accepted"
+  forM_ [cellPrepare {worldCellPrepareSlots=[(0,PlannedBind 7),(0,PlannedExpression 8 "it")]}
+        ,cellPrepare {worldCellPrepareSlots=reverse (worldCellPrepareSlots cellPrepare)}
+        ,cellPrepare {worldCellPrepareAdmission=BS.replicate 31 98}] $ \invalid ->
+    case workerRequestFromArgv (workerArgv [WorldCellPrepare invalid]) of
+      Left _ -> pure ()
+      _ -> fail "malformed held cell reservation accepted"
 
 portableOutputRequestValidation :: IO ()
 portableOutputRequestValidation = do

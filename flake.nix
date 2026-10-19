@@ -253,6 +253,7 @@
             selective
             errors
             cryptohash-sha256
+            crypton
             cborg
             syb
             witherable

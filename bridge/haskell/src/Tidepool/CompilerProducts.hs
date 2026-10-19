@@ -687,13 +687,15 @@ writeCertifiedSegmentProducts includes originals directory prepared context = do
   pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs)
 
 writeCertifiedSegmentItemProducts
-  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO ()
+  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO FilePath
 writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _ _) directory program = do
   context <- maybe (fail "item output lacks its segment original certification") pure
     (certifiedTargetContext originals)
   certified <- encodeCertifiedItemProducts (prHscEnv (pprPipelineResult prepared)) context program
   bytes <- either fail pure certified
-  BS.writeFile (directory </> "certified-products.cbor") bytes
+  let name = "certified-products.cbor"
+  BS.writeFile (directory </> name) bytes
+  pure name
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
 publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs) = do

@@ -113,11 +113,27 @@ qualification.
 
 ## Exact-scope transport
 
-Worker requests use `TPREQ023`. Field 57 acquires one world without source
+Worker requests use `TPREQ024`. Field 57 acquires one world without source
 request fields; field 58 queries public module metadata through the same
-`CompilerRequest` executor admission. `TPCWORLD` custody keeps base and unmerged
+`CompilerRequest` executor admission. Fields 59 and 60 carry the held-world
+cell plan and preparation recipes. Runtime owns reservation/adoption authority;
+parser receipts, admission digests and prepared item descriptions are correlated
+data. Preparation uses operation-local compiler/recovery state and actual typed
+outputs. The initial cell slice explicitly refuses nonempty unprepared primary
+or binding contexts, declarations and multiple inference segments; it does not
+select Originals from passive rows or adapt them into an ExactScope. A completed
+item description is not a published runtime successor. Source request builders
+preflight binary framing plus hex expansion against the same daemon receive
+budget before appending bulk fields; the transport still charges actual cwd.
+`TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
-select compiler Originals or native groups. The logical world retains raw
+select compiler Originals or native groups. Cold block admission verifies the
+fixed CIDv1/DAG-CBOR/Blake2b-256 family with declared crypton, every body digest
+and root-reachable child membership. A SHA transfer seal cannot replace CID
+verification. Integrity controls consume actual Rust Materializer blocks, not
+handwritten content addresses; changing this dependency requires a fresh matched
+package-profile/provider/boot qualification before rooted reuse.
+The logical world retains raw
 immutable facts; its universe realization owns NameCache-bound interfaces, and
 the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;

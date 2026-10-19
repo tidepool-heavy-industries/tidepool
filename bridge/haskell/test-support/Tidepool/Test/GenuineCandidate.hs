@@ -7,7 +7,7 @@ module Tidepool.Test.GenuineCandidate
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
-  , writeGenuineExecutionScope
+  , writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -65,10 +65,12 @@ data FixtureSelection = FixtureSelection
 data FixtureDelivery
   = CandidateDelivery { fixtureDeliveryRoot :: FilePath }
   | ScopeDelivery { fixtureDeliveryRoot :: FilePath }
+  | WorldContextDelivery { fixtureDeliveryRoot :: FilePath }
 
 data FixtureOutput
   = CandidateManifestOutput BS.ByteString
   | ScopeOutput FilePath
+  | ScopeContextOutput FilePath BS.ByteString
 
 captureCompilerFixture :: FixtureCompilerInput -> PreparedPipelineResult -> IO CapturedCompilerFixture
 captureCompilerFixture input prepared = do
@@ -93,7 +95,7 @@ writeGenuineCandidateManifestFor names work capture = do
   output <- deliverCapturedFixture capture (FixtureSelection names [] [] []) (CandidateDelivery work)
   case output of
     CandidateManifestOutput bytes -> BS.writeFile (work </> "module-candidates.cbor") bytes
-    ScopeOutput _ -> fail "fixture delivery omitted its requested candidate manifest"
+    _ -> fail "fixture delivery omitted its requested candidate manifest"
 
 writeGenuineMetadataScope :: FilePath -> [String] -> CapturedCompilerFixture -> IO FilePath
 writeGenuineMetadataScope work names capture = scopeOutput $
@@ -115,6 +117,16 @@ writeGenuineExecutionScope nativeOwners lexicalRoots work capture = scopeOutput 
   deliverCapturedFixture capture (FixtureSelection [] nativeOwners nativeOwners lexicalRoots)
     (ScopeDelivery work)
 
+-- One completion delivers the original scope and its materialized context DATA.
+-- The parcel gains no scope authority; both outputs keep their existing owners.
+writeGenuineExecutionScopeWithContext :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO (FilePath,BS.ByteString)
+writeGenuineExecutionScopeWithContext nativeOwners lexicalRoots work capture = do
+  output <- deliverCapturedFixture capture
+    (FixtureSelection [] nativeOwners nativeOwners lexicalRoots) (WorldContextDelivery work)
+  case output of
+    ScopeContextOutput path bytes -> pure (path,bytes)
+    _ -> fail "fixture delivery omitted its requested scope and context parcel"
+
 writeGenuineCandidateLexicalScope
   :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO FilePath
 writeGenuineCandidateLexicalScope candidates lexicalOwners work capture = scopeOutput $
@@ -123,7 +135,7 @@ writeGenuineCandidateLexicalScope candidates lexicalOwners work capture = scopeO
 scopeOutput :: IO FixtureOutput -> IO FilePath
 scopeOutput action = action >>= \output -> case output of
   ScopeOutput path -> pure path
-  CandidateManifestOutput _ -> fail "fixture delivery omitted its requested original scope"
+  _ -> fail "fixture delivery omitted its requested original scope"
 
 -- The production request owns both graph descriptors and its manifest. Return
 -- its actual path rather than relocating one part of the issued resource.
@@ -168,15 +180,21 @@ writePacket delivery input selection = do
       includes = maybe [] (fixtureIncludeRoots . capturedInput) input
       source = (fixtureSourcePath . capturedInput) <$> input
       capture = capturedPacket <$> input
-      wantsScope = case delivery of ScopeDelivery _ -> True; CandidateDelivery _ -> False
+      wantsScope = case delivery of CandidateDelivery _ -> False; _ -> True
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
     (encodeListLen 10 <> text "TPSOURCEBOOTFIXTURE4" <> optional source
       <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)
       <> names (fixtureNativeOwners selection) <> encodeBool wantsScope
       <> text producer <> names (fixtureLexicalRoots selection) <> optional capture))
   completion <- runPacketProducer OriginalProductsProducer packet
-  if wantsScope then readScopeOutput packet completion
-    else CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
+  case delivery of
+    WorldContextDelivery _ -> do
+      scoped <- readScopeOutput packet completion
+      case scoped of
+        ScopeOutput path -> ScopeContextOutput path <$> completedPacketOutput completion (packet </> "world-context-blocks.cbor")
+        _ -> fail "fixture delivery omitted its requested original scope"
+    ScopeDelivery _ -> readScopeOutput packet completion
+    CandidateDelivery _ -> CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
 
 -- Select the actual checked root; projection policy and all emission belong to
 -- the same internal compiler owner used by the production worker.

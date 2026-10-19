@@ -162,6 +162,8 @@ enum CodecOperation {
     ScopeEmpty,
     #[serde(rename = "world-blocks")]
     WorldBlocks,
+    #[serde(rename = "world-context-blocks")]
+    WorldContextBlocks,
     CellPurpose,
     ReceiptFacts,
     CertificateFacts,
@@ -211,6 +213,7 @@ enum CodecRequest {
     Candidate(CandidateCase),
     ScopeEmpty,
     WorldBlocks,
+    WorldContextBlocks(NativeBytes),
     CellPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
@@ -265,6 +268,10 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
         CodecOperation::WorldBlocks => {
             let _: [String; 0] = decode_arguments(&arguments, 0);
             CodecRequest::WorldBlocks
+        }
+        CodecOperation::WorldContextBlocks => {
+            let [producer]: [NativeBytes; 1] = decode_arguments(&arguments, 1);
+            CodecRequest::WorldContextBlocks(producer)
         }
         CodecOperation::CellPurpose => {
             let (includes, values) = decode_arguments(&arguments, 2);
@@ -356,6 +363,17 @@ fn source_boot_codec_packet_producer() {
             ciborium::ser::into_writer(&parcel, &mut encoded).unwrap();
             assert!(encoded.len() <= MANIFEST_LIMIT, "world block parcel bound");
             let output = root.join("world-blocks.cbor");
+            tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
+            output
+        }
+        CodecRequest::WorldContextBlocks(producer) => {
+            let producer: [u8; 32] = producer
+                .0
+                .try_into()
+                .expect("context fixture producer length");
+            let context = super::empty_fixture_scope(producer);
+            let encoded = super::materialize_fixture_context(&context);
+            let output = root.join("world-context-blocks.cbor");
             tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
             output
         }
