@@ -80,6 +80,8 @@ the Store. Component campaigns use `TestCampaign::drive_actor_output` while
 awaiting any operation that can publish output, including named authored tool
 handlers.
 
+Provider-facing tool output, direct typed dispatch results, and notebook display projections are distinct contracts. Assert each through its actual consumer: do not expect internal semantic fields in a presented response or reuse one renderer's exact text for another. Failed presentation assertions must retain the observed result so they cannot be mistaken for compiler or execution failures.
+
 Model-free `TestCampaign` setup that spawns native children must await the
 operation through `drive_native_admission`. It acknowledges native installations,
 retains their deployment events for assertions, and drives output. Tests of
