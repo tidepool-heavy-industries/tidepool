@@ -368,10 +368,23 @@ fn bind_input_demand(
             if outgoing(InventoryNodeKey::Artifact(carrier))
                 .into_iter()
                 .any(|(target, edge)| {
-                    matches!(target, InventoryNodeKey::Artifact(binding)
-                    if binding.artifact == canonical
-                    && namespace.get(&canonical).is_none_or(|selected| *selected == binding))
-                        && edge == ArtifactDependency::Interface
+                    let InventoryNodeKey::Artifact(binding) = target else {
+                        return false;
+                    };
+                    if binding.artifact != canonical || edge != ArtifactDependency::Interface {
+                        return false;
+                    }
+                    let matches = namespace
+                        .get(&canonical)
+                        .is_none_or(|selected| *selected == binding);
+                    if !matches {
+                        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                            stage = "input_demand_canonical_scope", ?key, ?group, ?carrier,
+                            issued_canonical = ?binding,
+                            selected_canonical = ?namespace.get(&canonical),
+                            "issued native carrier has another canonical binding scope");
+                    }
+                    matches
                 })
             {
                 compatible.push((group, payloads, owned, retained_offer));
