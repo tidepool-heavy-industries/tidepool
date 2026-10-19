@@ -67,15 +67,34 @@ errors or bypass source admission. The independent frontend block now precedes
 history growth so its result is not hidden by a later fixture failure. All
 assertions remain; direct-client counters stay distinct from frontend work.
 
-Actor cfg-test-only incremental compile is ACTIVE at frozen db1, session2046;
-selected_root owns its terminal result and the serial Rooted2 retry if compilation
-passes. HOST14GiB TOTAL/8GiB growth is active, with fresh full-grant projection
-80,085,237,760 bytes below85,899,345,920 pressure. Campaign12699, new Reload14,
-Warm8 ADD and known qualification8 ADD were included; idle scopes remain global.
-Only HOST LIVE entry was changed. The subsequent service command is:
+Actor cfg-test-only incremental compile PASSED at db1, exit0/one local action/
+91.45s. Actual Rooted retry executed2, passed1 and failed1, exit1/15.83s. Moving
+the frontend earlier exposed its source-admission fixture mismatch before prepare:
+`WorkbenchCompilationAuthority::for_test` always admits an empty default source,
+but this context carries Complete captured source. The guard correctly refused;
+no frontend effect, growing-history, transfer or fences were reached. Source-domain
+case passed again unchanged. Both process/compiler cleanup and complete retirement
+are confirmed. First diagnostic summary is complete; second retains the172-record
+summary limit. `WORLD-QUERY-DB1-TERMINAL.json` records all exact outcomes.
+
+All HOST native clients are terminal and allowance is0/0. Last idle query scope
+current is2,711,740,416 bytes, cumulative peak11,383,582,720 bytes. Fresh admission
+is required before another retry. selected_root traces the actual production
+source admission path: retain the SAME source issuer in the existing fixture
+owner, validate its capsule through ActorSourceLayerResolver, then perform actual
+public-owner/private-scope/WorkbenchCompilationAuthority::admit setup. Do not
+drop the Complete layer, weaken the generic helper, or mint authority directly.
+Complete source excludes mutable base includes: the first case must capture its
+actual declared effects/orchestration/prelude/actor support under the same strict
+source owner before the first world open. No ambient fallback or new scanner.
+Exact constructor/caller packet and independent review precede the next compile.
+The unchanged service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
-Campaign's separate frozen joined12699 observer continues unchanged. Emit exact
-terminal/source/count/hash/resource events to campaign and affected Warm owner.
+Campaign's separate exact6f9 joined12699 also completed: ten labels compiled,
+154 workflow and four component controls passed; actualRooted2 reproduced the
+prior345 Replies/Watches failure. Its14GiB grant is released; idle daemon stays
+global. Emit each consequential new source/count/hash/resource result to campaign
+and the affected Warm owner.
 
 ## Qualified foundations and boundary
 
