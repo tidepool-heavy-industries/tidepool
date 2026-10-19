@@ -444,6 +444,7 @@ fn context_types() -> Vec<TypeDef> {
             doc: &["Why an exact hosted context checkpoint cannot be captured or used."],
         },
         crate::actor_profiles::actor_key_definition(),
+        crate::actor_profiles::tool_key_definition(),
     ]
 }
 

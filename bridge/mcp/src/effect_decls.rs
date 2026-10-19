@@ -336,11 +336,14 @@ pub fn effect_documentation(decl: &EffectDecl) -> Option<EffectDocumentationFact
 
 /// Resolve a nominal selected row key through the existing declaration catalogue.
 #[must_use]
-pub fn effect_documentation_for(key: exomonad_tool::ActorEffectKey) -> Option<EffectDocumentationFacts> {
+pub fn effect_documentation_for(key: impl Into<exomonad_tool::ToolEffectKey>) -> Option<EffectDocumentationFacts> {
+    let key = key.into();
     let identity = key.nominal_identity()?;
     let mut declaration = crate::all_decls().into_iter().find(|decl| decl.type_name == identity.name)?;
-    if let Some(permission) = key.model_permission() {
-        declaration = declaration.for_model_permission(permission);
+    if let exomonad_tool::ToolEffectKey::Actor(actor) = key {
+        if let Some(permission) = actor.model_permission() {
+            declaration = declaration.for_model_permission(permission);
+        }
     }
     effect_documentation(&declaration)
 }
@@ -363,5 +366,7 @@ mod documentation_tests {
         let fs = super::effect_documentation_for(ActorEffectKey::FsRead).unwrap();
         assert!(!fs.description.is_empty());
         assert!(super::effect_documentation_for(ActorEffectKey::Replies).is_none());
+        assert!(super::effect_documentation_for(exomonad_tool::ToolEffectKey::ContextReadWrite).is_some());
+        assert!(super::effect_documentation_for(exomonad_tool::ToolEffectKey::Reload).is_some());
     }
 }

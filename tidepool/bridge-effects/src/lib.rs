@@ -22,7 +22,7 @@ pub use generated::*;
 
 #[path = "generated/nominal_keys.rs"]
 mod nominal_keys;
-pub use nominal_keys::ActorEffectKeyWire;
+pub use nominal_keys::{ActorEffectKeyWire, ToolEffectKeyWire};
 
 impl Backend {
     #[must_use]
@@ -664,5 +664,10 @@ mod nominal_wire_tests {
             assert_eq!(exomonad_tool::ActorEffectKey::from(wire), *key);
         }
         assert!(super::ActorEffectKeyWire::try_from(exomonad_tool::ActorEffectKey::Forks).is_err());
+        for key in exomonad_tool::ToolEffectKey::ALL {
+            let wire = super::ToolEffectKeyWire::try_from(*key).unwrap();
+            assert_eq!(exomonad_tool::ToolEffectKey::from(wire), *key);
+        }
+        assert!(super::ToolEffectKeyWire::try_from(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)).is_err());
     }
 }
