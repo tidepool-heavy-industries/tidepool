@@ -1,9 +1,9 @@
 # Warm worker implementation handoff
 
 Owner `/root/warm_compiler_campaign/warm_workers`; one reserved implementation
-leaf `warm_workers/protocol` (Sol high). Checkout
-`tidepool-shared-warm-warm-workers-20261019`, branch
-`feature/shared-warm/warm-workers`. Campaign owns shared contracts/integration.
+leaf `warm_workers/protocol` (Sol high). Qualified frontier checkout `tidepool-shared-warm-cell-world-20261019`, branch
+`feature/shared-warm/cell-world`. The old-profile query branch remains at
+`e2cf815e647977735e1d66c99042e58c7fdf9b77`. Campaign owns integration.
 
 ## Reviewable candidate and evidence
 
@@ -38,12 +38,33 @@ retirement and native interrupted finalization retry. Original failed epoch's
 73 pins remain retained. That evidence does not establish persistent-world
 query or eviction correctness.
 
-## Current observer and required gates
+## Qualified reachable-block frontier
 
-All warm native commands are terminal; the prospective 8 GiB additional memory
-and 2 GiB growth grant is released. Campaign LIVE warm entry is zero. Idle Buck
-PID4101866 remains in `/build.slice/inanna-build-1792404990-4101779.scope` and its
-memory remains in global accounting. No command is orphaned.
+Production `acb2822312` extends the source-accepted `b41c77a587` frontier.
+The existing Materializer now owns only blocks reachable from current roots;
+forks share immutable bytes, repeated root/child references retain exact incoming
+counts, and an update links new roots before releasing old roots. The actual cold
+world constructor consumes this owner. No ordinary successor claim follows from
+this cold integration.
+
+`cell/RUST-FRONTIER-NATIVE-acb.json` (SHA256
+`4cfb90a00ca47246938114b123bf2fdaa49fdcb76f7863c3d8623c346dc5b1b1`)
+retains build logs, five counted reports and their streams. The first cold build
+at b41 compiled production but failed cfg(test) on ambiguous fixture map types;
+acb adds the explicit String map type and the retry compiled both targets.
+All five frontier controls passed, including independent full-recomputation
+histories, obsolete-path release, actual changed-path visits/hash bytes, partial
+missing-child failure isolation, and malformed CID links. The runner built its
+declared old-profile compiler resources; it did not execute a Rooted world.
+
+All Warm commands are terminal. The 8 GiB additional/8 GiB growth lane is
+released in LIVE. New cell Buck PID240441 remains idle in
+`/build.slice/inanna-build-1792415180-240365.scope`; observed scope peak was
+6,142,877,696 bytes and retained Buck outputs 2,033,111,040 bytes. Its actual GHC
+process cgroup was not captured before exit; Buck's cgroup was verified. Compiler
+and hosted cleanup remain not_observed in these representation test reports.
+
+## Required joined gates
 
 Actual Rooted public-module query and genuine world retention histories remain
 unqualified: Resident hit; eviction to same-world NeedsAcquisition/Complete;
@@ -80,3 +101,13 @@ whole support fold, or hidden full ExactCompilationRequest reconstruction.
 Before yielding, name the awaited event, producer, recipient and continuation.
 Wake dormant owners with followup_task. Campaign folds only after its current
 source-frozen gate settles; no deployment or live Persona changes are authorized.
+
+Source-only successor parcels stay separate from this qualified candidate:
+`ce8d0af8f0` in `tidepool-shared-warm-cell-bindings-20261019` replaces opaque
+visibility with actual typed occurrence/symbol/session/scope/checked-row data;
+independent review and compilation are pending. `5f8e7e2cef` in
+`tidepool-shared-warm-worker-cell-20261019` adds declared crypton and independent
+cold CID hashing; source review accepted it, but no new dependency realization,
+profile capture or boot qualification has occurred. The protocol leaf is active
+on exact HAMT/schema parsing and genuine ContextDescriptor fixtures. Keep HOST's
+old-profile query and retention controls independent of this new dependency.
