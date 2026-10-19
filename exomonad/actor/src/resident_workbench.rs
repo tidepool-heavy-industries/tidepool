@@ -17224,6 +17224,20 @@ pub(crate) mod request_tests {
                     } else {
                         let failure = resumed.expect_err("a wrong expected name must fail before commit");
                         assert!(matches!(&failure, ResidentActorWorkbenchError::Delivered(error) if error.is_language_failure()), "{failure:?}");
+                        use tidepool_runtime::session::PreparedRuntimeError;
+                        let execution = match &failure {
+                            ResidentActorWorkbenchError::Delivered(ResidentError::Prepared(PreparedRuntimeError::Run(execution)))
+                            | ResidentActorWorkbenchError::Delivered(ResidentError::Run(tidepool_runtime::RuntimeError::Prepared(PreparedRuntimeError::Run(execution)))) => execution,
+                            _ => panic!("wrong-name guard did not fail in execution: {failure:?}"),
+                        };
+                        let tidepool_codegen::prepared_program::ExecutionError::Runtime(execution) = execution else {
+                            panic!("wrong-name guard did not raise its authored exception: {execution:?}");
+                        };
+                        let (tidepool_codegen::host_fns::RuntimeError::UserErrorMsg(message)
+                            | tidepool_codegen::host_fns::RuntimeError::RaisedExceptionMessage(message)) = &execution.cause else {
+                            panic!("wrong-name guard exception message was not retained: {execution:?}");
+                        };
+                        assert_eq!(message.lines().next(), Some("wrong world query answer"), "{message}");
                         frontend.access.with_machine(frontend_context, |session, context, _| {
                             assert!(session.workbench_bindings_in(context.placement.lexical_scope)
                                 .iter().all(|binding| binding.name != "frontendAnswer"));
