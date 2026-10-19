@@ -222,6 +222,8 @@ pub struct PersistentSession {
     pub(super) source_claim: Option<super::RuntimeSourceClaim>,
     pub(super) source_refusal: Option<super::SourceAdmissionError>,
     pub(super) source_context_active: bool,
+    pub(super) source_admission_hook: Option<super::SourceAdmissionHook>,
+    pub(super) source_hook_admitted: bool,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
     /// The resident machine — `None` before the first turn bootstraps it,
@@ -373,6 +375,8 @@ impl PersistentSession {
             source_claim: None,
             source_refusal: None,
             source_context_active: false,
+            source_admission_hook: None,
+            source_hook_admitted: false,
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             catalog_selection: Default::default(),
             machine: None,
@@ -7716,6 +7720,12 @@ impl PersistentSession {
     ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
         if let Some(refusal) = &self.source_refusal {
             return Err(refusal.clone());
+        }
+        if self.source_context_active && !self.source_hook_admitted {
+            if let Some(hook) = &self.source_admission_hook {
+                hook()?;
+                self.source_hook_admitted = true;
+            }
         }
         if self.source_claim.is_some() {
             return Ok(None);

@@ -3515,11 +3515,33 @@ where
         let previous_refusal = std::mem::replace(&mut self.state.source_refusal, refusal);
         let previous_claim = self.state.source_claim.take();
         let previous_active = std::mem::replace(&mut self.state.source_context_active, true);
+        let previous_hook = self.state.source_admission_hook.take();
+        let previous_hook_admitted = std::mem::replace(&mut self.state.source_hook_admitted, false);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
         self.state.source_claim = previous_claim;
         self.state.source_refusal = previous_refusal;
         self.state.source_admission = previous_admission;
         self.state.source_context_active = previous_active;
+        self.state.source_admission_hook = previous_hook;
+        self.state.source_hook_admitted = previous_hook_admitted;
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Install an additional source issuer for one actual compiler action.
+    /// Pure continuations never call it; nested actions restore their issuer.
+    pub fn with_source_admission_hook<R>(
+        &mut self,
+        hook: super::SourceAdmissionHook,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.state.source_admission_hook.replace(hook);
+        let previous_admitted = std::mem::replace(&mut self.state.source_hook_admitted, false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
+        self.state.source_admission_hook = previous;
+        self.state.source_hook_admitted = previous_admitted;
         match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),

@@ -8343,9 +8343,10 @@ mod tests {
             .unwrap()
             .contains(&inherited_exports[0]));
         let view = resident.compile_view_in(execution.private_scope()).unwrap();
-        let facade =
-            tidepool_testing::with_settlement(|settlement| selected.materialize(&view, settlement))
-                .unwrap();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            resident.materialize_facade(&selected, &view, settlement)
+        })
+        .unwrap();
         assert!(facade.source_artifact().is_none());
         let projection = facade.projection().unwrap();
         assert!(projection

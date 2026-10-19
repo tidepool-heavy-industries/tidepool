@@ -35,6 +35,10 @@ pub enum SourceAdmissionError {
     Unconfirmed { scope: ScopeId, count: usize },
 }
 
+/// An additional issuer-owned admission check for the current compiler action.
+/// The issuer retains any earned custody through its actual native END owner.
+pub type SourceAdmissionHook = Arc<dyn Fn() -> Result<(), SourceAdmissionError> + Send + Sync>;
+
 struct AdmissionState {
     next_attempt: u64,
     phase: SourceAdmissionPhase,

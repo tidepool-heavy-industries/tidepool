@@ -1144,9 +1144,10 @@ mod source_authority_tests {
             .exact_exports_in(ScopeId::ROOT, &["Selected"])
             .unwrap();
         let view = session.compile_view_in(ScopeId::ROOT).unwrap();
-        let facade =
-            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
-                .unwrap();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            session.materialize_facade(&surface, &view, settlement)
+        })
+        .unwrap();
         let projection = Arc::downgrade(facade.projection().unwrap());
         let imports = ActorSourceImports::from_exact_facades([&facade]);
         let retained = imports.clone();

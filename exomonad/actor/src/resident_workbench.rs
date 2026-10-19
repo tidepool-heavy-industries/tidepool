@@ -5810,27 +5810,6 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    fn run_source_transaction<T>(
-        session: &mut ResidentSession<H, O>,
-        ticket: crate::termination::CompilerWorkTicket,
-        action: impl FnOnce(
-            &mut ResidentSession<H, O>,
-            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-        ) -> T,
-    ) -> T {
-        let claims = ticket.runtime_source_claims();
-        ticket.run(|settlement| {
-            session.with_source_claim_transfer(
-                |claim| {
-                    if let Some(claim) = claim {
-                        claims.lock().push(claim);
-                    }
-                },
-                |session| action(session, settlement),
-            )
-        })
-    }
-
     async fn with_machine<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
@@ -5866,9 +5845,12 @@ where
         let owner = crate::capabilities::CompilerOwnerScope::current()?
             .with_source_dependency(context.source_dependency());
         self.with_machine(context, move |session, context, source| {
-            Self::run_source_transaction(session, owner.admit_work()?, |session, settlement| {
-                operation(session, context, source, settlement)
-            })
+            crate::termination::CompilerWorkTicket::run_source_transaction(
+                session,
+                owner.admit_work()?,
+                context.source_dependency(),
+                |session, settlement| operation(session, context, source, settlement),
+            )
         })
         .await
     }
@@ -5890,9 +5872,10 @@ where
     {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine(context, move |session, context, source| {
-            Self::run_source_transaction(
+            crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
                 owner.admit_continuation()?,
+                context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
             )
         })
@@ -5917,9 +5900,10 @@ where
     {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine_wait(context, admission, move |session, context, source| {
-            Self::run_source_transaction(
+            crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
                 owner.admit_continuation()?,
+                context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
             )
         })
@@ -5945,9 +5929,12 @@ where
         let owner = crate::capabilities::CompilerOwnerScope::current()?
             .with_source_dependency(context.source_dependency());
         self.with_machine_wait(context, admission, move |session, context, source| {
-            Self::run_source_transaction(session, owner.admit_work()?, |session, settlement| {
-                operation(session, context, source, settlement)
-            })
+            crate::termination::CompilerWorkTicket::run_source_transaction(
+                session,
+                owner.admit_work()?,
+                context.source_dependency(),
+                |session, settlement| operation(session, context, source, settlement),
+            )
         })
         .await
     }
@@ -22502,6 +22489,244 @@ pub(crate) mod request_tests {
             )
             .unwrap(),
         )
+    }
+
+    fn lazy_binding_install(
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    ) -> tidepool_runtime::session::ReadyPreparedInstall {
+        let generation = tidepool_repr::Generation(871);
+        let binder = BoundBinder {
+            name: "lazySourceBinding".into(),
+            var_id: 871,
+            module: tidepool_repr::SessionModule::val(generation).module_name(),
+            tier: tidepool_runtime::session::ValueTier::ForceData,
+            type_display: "()".into(),
+            root_head: None,
+        };
+        session
+            .snapshot_run_prepared(
+                Arc::try_unwrap(child_bootstrap_fixture())
+                    .unwrap()
+                    .into_code(),
+                PendingPreparedMode::Binding {
+                    binder,
+                    generation,
+                    observation: None,
+                },
+                None,
+            )
+            .unwrap()
+            .compile_off_checkout()
+            .unwrap()
+    }
+
+    fn suspended_source_binding(
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        session_id: tidepool_repr::SessionId,
+        root: &std::path::Path,
+    ) -> ResidentHole {
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+            tidepool_mcp::sleep_decl(),
+        ])
+        .unwrap();
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
+        let include = effects
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let turn = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: Some(session_id),
+                    turn_text: "lazySourceBinding <- (sleep (minutes 0) >> pure ())",
+                    templates: &templates,
+                    include: &include,
+                    session_root: root,
+                    inject_modules: &[],
+                    gen: 872,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = turn
+        else {
+            panic!("fixture must be a legacy binding");
+        };
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            session.run_bind_with_sites(
+                "lazy_source_binding",
+                compiled.code(),
+                &bound[0],
+                tidepool_repr::Generation(872),
+                settlement,
+            )
+        })
+        .unwrap();
+        let ResidentOutcome::Suspended { hole, .. } = outcome else {
+            panic!("fixture must suspend before binding publication");
+        };
+        hole
+    }
+
+    #[test]
+    fn joined_continuation_binding_keeps_all_source_worlds_uncertain_at_end() {
+        use super::generation_admission::{
+            BootstrapWorld, GenerationAdmissionError, GenerationDependency, SourceDependency,
+        };
+        for kind in 0..3 {
+            let (mut session, root) = bare_session_at(tidepool_repr::SessionId(870 + kind));
+            let parent_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+            let parent = GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(870)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &parent_scope,
+                None,
+            );
+            let scope = session
+                .mint_notebook_scope_with_lease(
+                    (kind == 2).then(|| parent.runtime_admission().clone()),
+                )
+                .unwrap();
+            let target = GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(871)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &scope,
+                (kind == 2).then(|| parent.clone()),
+            );
+            let dependency = match kind {
+                0 => SourceDependency::Generation(target.clone()),
+                1 => SourceDependency::World(BootstrapWorld::new(None)),
+                _ => SourceDependency::World(BootstrapWorld::new(Some(parent))),
+            };
+            session
+                .set_run_context(tidepool_runtime::session::SessionRunContext {
+                    lexical_scope: scope.scope(),
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                })
+                .unwrap();
+            session
+                .set_actor_execution(
+                    session.run_context(),
+                    tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                    tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
+                .unwrap();
+            let hole = suspended_source_binding(
+                &mut session,
+                tidepool_repr::SessionId(870 + kind),
+                root.path(),
+            );
+            assert!(!session
+                .binding_names_in(scope.scope())
+                .iter()
+                .any(|name| name == "lazySourceBinding"));
+            let services = crate::capabilities::WorkbenchServices::new();
+            let owner = services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(
+                crate::RetainedActorExit::new(),
+            ));
+            // The real wrapper installs a lazy hook, but a pure continuation
+            // earns neither an own-world nor lower runtime source claim.
+            session.with_source_admission(dependency.runtime_admission(), |session| {
+                crate::termination::CompilerWorkTicket::run_source_transaction(
+                    session,
+                    owner.admit_continuation().unwrap(),
+                    &dependency,
+                    |_, _| (),
+                )
+            });
+            match &dependency {
+                SourceDependency::Generation(generation) => {
+                    let fence = generation.fence().unwrap();
+                    assert_eq!(fence.pending_claims(), 0);
+                    fence.reopen().unwrap();
+                }
+                SourceDependency::World(world) => {
+                    world.begin_publication(&target).unwrap().refused()
+                }
+                _ => unreachable!(),
+            }
+            session.with_source_admission(dependency.runtime_admission(), |session| {
+                crate::termination::CompilerWorkTicket::run_source_transaction(session, owner.admit_continuation().unwrap(), &dependency, |session, settlement| {
+                    let outcome = session.resume(hole, (), settlement).unwrap();
+                    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+                    settlement(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+                        tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                            tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                            tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                        ),
+                    ));
+                })
+            });
+            assert!(session
+                .binding_names_in(scope.scope())
+                .iter()
+                .any(|name| name == "lazySourceBinding"));
+            match &dependency {
+                SourceDependency::Generation(generation) => assert!(matches!(
+                    generation.runtime_admission().admit(),
+                    Err(GenerationAdmissionError::Unconfirmed { .. })
+                )),
+                SourceDependency::World(world) => assert!(
+                    matches!(world.begin_publication(&target), Err(GenerationAdmissionError::BootstrapBusy { unconfirmed, .. }) if unconfirmed > 0)
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn joined_source_hook_refusal_precedes_binding_and_native_exports() {
+        let (mut session, _root) = bare_session_at(tidepool_repr::SessionId(878));
+        let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        session
+            .set_run_context(tidepool_runtime::session::SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            })
+            .unwrap();
+        let ready = lazy_binding_install(&mut session);
+        let before = (
+            session.code_export_count(),
+            session.scope_binding_count(scope.scope()),
+        );
+        let services = crate::capabilities::WorkbenchServices::new();
+        let owner = services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(
+            crate::RetainedActorExit::new(),
+        ));
+        let dependency = generation_admission::SourceDependency::World(
+            generation_admission::BootstrapWorld::new(None),
+        );
+        dependency.claim().unwrap().retain_unconfirmed();
+        assert!(
+            dependency.runtime_admission().unwrap().is_none(),
+            "fault must be refused by the actual lazy issuer hook"
+        );
+        let result = session.with_source_admission(Ok(None), |session| {
+            crate::termination::CompilerWorkTicket::run_source_transaction(
+                session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, settlement| session.revalidate_and_run_prepared(ready, settlement),
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            (
+                session.code_export_count(),
+                session.scope_binding_count(scope.scope())
+            ),
+            before
+        );
     }
 
     struct ChildOutputLifetime(Arc<tokio::sync::Notify>);
