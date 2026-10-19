@@ -102,7 +102,9 @@ decodeInputAcquisition = do
           (fail "original input image differs from its complete content identity")
         unique "original input image paths" (map (originalInputPath . snd) parts)
         pure (OriginalInputImage producer key imageSha parts)
-      unique "original input image owners" [key | OriginalInputImage _ key _ _ <- images]
+      -- Custody may carry several historical versions of one module. The
+      -- receiving semantic owner separately decides which version is selected.
+      unique "original input images" [(producer,key,seal) | OriginalInputImage producer key seal _ <- images]
       unless (sum [length parts | OriginalInputImage _ _ _ parts <- images] <= 65536)
         (fail "owned original input part inventory exceeds bound")
       pure (ContinueOwnedOriginals images)

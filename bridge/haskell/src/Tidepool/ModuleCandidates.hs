@@ -185,6 +185,8 @@ candidateParts candidate =
 validateCandidateImages :: String -> [ModuleCandidate] -> [(String,FilePath)] -> [ExecutionSourceRef]
   -> [OriginalInputImage] -> Either String ()
 validateCandidateImages producer candidates graphs references images = do
+  unless (Set.size (Set.fromList [key | OriginalInputImage _ key _ _ <- images]) == length images)
+    (Left "candidate owned inputs have conflicting selected owners")
   let graphPaths = Map.fromList graphs
       expected candidate = Set.fromList
         ([(kind,path,sha) | (kind,path,sha,_) <- candidateParts candidate] ++

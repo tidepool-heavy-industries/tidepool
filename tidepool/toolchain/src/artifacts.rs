@@ -1301,6 +1301,58 @@ fn checked_candidate_reservations(
 }
 
 impl ModuleCandidateOffer {
+    /// Capture one published primary selection and its separate binding rows.
+    /// The runtime's existing publication token supplies these together; this
+    /// constructor never activates historical value support as source roots.
+    pub fn compiler_world_inputs(
+        primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        visible_rows: Vec<Arc<crate::checked_cell::CheckedValueArtifact>>,
+        visibility: Arc<[u8]>,
+        sources: Arc<crate::compiler_world::CapturedCompilerSources>,
+    ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
+        let primary = checked_offer_context(primary)?;
+        let directory = Arc::new(
+            tempfile::Builder::new()
+                .prefix("tidepool-compiler-world-")
+                .tempdir()?,
+        );
+        let mut owners = BTreeSet::new();
+        let mut issuers = Vec::with_capacity(visible_rows.len());
+        for artifact in &visible_rows {
+            crate::host_work::checkpoint()?;
+            let owner = artifact.owner().module_name();
+            if !owners.insert(owner.clone()) {
+                return Err(CompileError::ExtractFailed(
+                    "duplicate visible world value row".into(),
+                ));
+            }
+            let (producer, receipt) = artifact.world_issuer();
+            issuers.push(Value::Array(vec![
+                Value::Text(owner),
+                Value::Bytes(producer.to_vec()),
+                Value::Bytes(receipt.to_vec()),
+            ]));
+        }
+        // Preserve the original compiler receipt independently of equal type
+        // bytes. It binds the row's historical proof without promoting that
+        // proof into the primary source namespace.
+        let visibility = Value::Array(vec![
+            Value::Text("TPCWVIS1".into()),
+            Value::Bytes(visibility.to_vec()),
+            Value::Array(issuers),
+        ]);
+        let mut encoded_visibility = Vec::new();
+        ciborium::ser::into_writer(&visibility, &mut encoded_visibility)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
+            primary,
+            visible_rows,
+            sources,
+            encoded_visibility.into(),
+            directory,
+        )
+    }
+
     /// Physical transport leases carry no selection or compiler authority.
     /// Execution transfers these exact files into the compiler close owner.
     pub fn input_transport_files(&self) -> Vec<Arc<std::fs::File>> {
