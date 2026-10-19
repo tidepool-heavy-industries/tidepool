@@ -16,9 +16,11 @@ flowchart TD
   END --> P6["P6 Seal contextual values and prefixes"]
   P6 --> P7["P7 Current runtime admission / installation"]
   P7 --> P8["P8 Typed activation / live payload / rendering"]
-  P7 --> P9["P9 Completed execution / publication"]
-  P9 --> P10["P10 Materialize / acquire / recover on demand"]
-  P10 --> P1
+  P7 -->|direct execution| P9["P9 Completed execution / publication"]
+  P8 -->|resumed execution| P9
+  P9 --> P1
+  P9 -. optional persistence .-> P10["P10 Materialize / acquire / recover on demand"]
+  P10 -. recovered input .-> P1
   P6 --> P1
 ```
 
@@ -95,8 +97,9 @@ tracing emission as well as uninstrumented algorithm work.
 | `products.complete_native_availability` | Projection, entries, requirements **and** dependency catalog, namespace admission, complete issuance, body validation, offer retention and normalization. |
 | Prepared item / seal / capture | P5 receipt/entry/target/source facts; P6 output/surface/template capture and retention, final support construction/merge/validation. Successful `Ok(None)` is distinct from failed capture. |
 
-The admission-tail timers split existing synchronous work with cheap existing
-counts; they add no graph census. They do not by themselves measure how many
+The admission-tail timers add clocks and phase labels around existing synchronous
+work; they add no work counters or graph census. Separate owning counters are
+needed to establish how many
 chosen inputs, unique groups, immutable facts or permission environments exist.
 
 ## Evidence and qualification boundary
@@ -104,10 +107,15 @@ chosen inputs, unique groups, immutable facts or permission environments exist.
 Historical **b108** scripted Persona13 measurements include 389 retained input
 references across 13 offers (not 389 distinct graphs), 64 native-item
 continuations (~61.283 s inclusive) and 64 value captures (~34.438 s inclusive).
-The segment-tail **18.219 s** and its **12.013 s** complete-availability component
-are historical **whole 13-cell cohort totals**, not per-cell costs or predicted
-savings. Parent/child totals overlap. Current source has the implementations
-above; those historical measurements cannot establish their benefit.
+The b108 stage table separately reports `certify_segment_original_products`
+**20.003934 s** (13 calls). The later entry-carry planning report quotes a
+segment-tail **18.219 s** and **12.013 s** issuance component, but the direct
+source-bound aggregate/trace establishing those two figures has not been
+recovered for this map. Treat them as previously reported **whole 13-cell cohort
+planning figures needing baseline confirmation**, not established b108 measured
+components, per-cell costs or predicted savings. Parent/child totals overlap.
+Current source has the implementations above; historical observations cannot
+establish their benefit.
 
 The observer baseline `20d7ccdcf6ed13a5e0db7ffa89527224a95606ec` compiled and its
 single timing control executed PASS. Exact joined `233f988d` has source review;
@@ -120,4 +128,5 @@ when their then-pending qualification status has since advanced):
 
 - [v1 workflow and invariants](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-review-final-v1/WORK-MAP.md), [invariant matrix](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-review-final-v1/INVARIANTS.md).
 - [b108 preparation mapping](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-joined-v2-preparation/WORK-MAP.md), [actual stage table](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-joined-v2-b108-actual/STAGE-TABLE.md).
+- [Entry-carry planning report (18.219/12.013 provenance limit above)](/srv/swarm/evidence/inanna/overnight-release-20261018/postcompiler-entry-carry-proposal.md).
 - [Admission-tail timer review](/srv/swarm/evidence/inanna/overnight-release-20261018/admission-tail-instrumentation-review.md), [four-parcel source review](/srv/swarm/evidence/inanna/overnight-release-20261018/boundary-contract-coverage/admission-tail-review-20261019.json).
