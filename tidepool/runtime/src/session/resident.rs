@@ -4583,6 +4583,30 @@ where
             .map(|view| view.hide_value_names(&hidden))
     }
 
+    /// Capture a logical-world observation before constructing a compile view.
+    pub fn capture_inspection_world_in(
+        &self,
+        scope: ScopeId,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<super::AdmittedInspectionWorld, SessionError> {
+        self.state
+            .capture_inspection_world_in(scope, source, original_source, |id| {
+                self.hidden_host_bindings.contains_key(&id)
+            })
+    }
+
+    /// Attach only the world returned by the runner for this unchanged base.
+    pub fn install_inspection_world_if_current(
+        &mut self,
+        completed: &super::CompletedInspectionWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        self.state
+            .install_inspection_world_if_current(completed, source, original_source)
+    }
+
     /// Capture checked value inputs while the matching resident view is owned.
     pub fn capture_inspection_inputs(
         &self,

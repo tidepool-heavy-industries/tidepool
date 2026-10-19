@@ -528,6 +528,332 @@ impl AdmittedInspectionInputs {
     }
 }
 
+/// One runtime-owned observation of a published compiler world. A cold capture
+/// retains raw checked rows separately from the published primary context.
+#[derive(Clone)]
+pub struct AdmittedInspectionWorld {
+    pub(super) base: InspectionWorldBase,
+    pub(super) inputs: InspectionWorldInputs,
+}
+
+#[derive(Clone)]
+pub(super) struct InspectionWorldBase {
+    pub(super) scope: tidepool_codegen::scope::ScopeId,
+    pub(super) key: super::persistent::CompileViewKey,
+    pub(super) owner: std::sync::Arc<super::admission::RuntimeAdmissionOwner>,
+    pub(super) epoch: u64,
+    pub(super) source: std::sync::Arc<super::GenerationArtifactReference>,
+    pub(super) original_source: std::sync::Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) target: std::sync::Arc<super::RuntimeLexicalScopeLease>,
+}
+
+#[derive(Clone)]
+pub(super) enum InspectionWorldInputs {
+    Published(std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>),
+    Cold {
+        primary:
+            Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+        rows: Vec<std::sync::Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
+        visibility: std::sync::Arc<[u8]>,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct InspectionWorldAssociation {
+    pub(super) base: InspectionWorldBase,
+    pub(super) world: std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+}
+
+/// Refusals before a service world exists remain distinct from a closed
+/// module absence issued by the compiler service.
+#[derive(Debug, thiserror::Error)]
+pub enum WorldInspectionError {
+    #[error("source owner cannot represent this compiler source domain")]
+    UnsupportedSource,
+    #[error("compiler source unavailable: {0}")]
+    SourceUnavailable(String),
+    #[error("compiler source unreadable: {0}")]
+    SourceUnreadable(String),
+    #[error(transparent)]
+    Runtime(#[from] crate::RuntimeError),
+    #[error("compiler world observation close is unconfirmed")]
+    CompilerClose {
+        primary: Option<Box<WorldInspectionError>>,
+        close: crate::CompilerTransactionClose,
+    },
+}
+
+impl From<CompileError> for WorldInspectionError {
+    fn from(error: CompileError) -> Self {
+        Self::Runtime(error.into())
+    }
+}
+
+/// Only the admitted runner constructs this pairing of a runtime base and a
+/// compiler-issued world. Callers cannot attach an unrelated service result.
+pub struct PreparedInspectionWorld {
+    pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
+    origin: crate::CompilerTransactionOrigin,
+    receipt: tidepool_toolchain::compiler_world::WorldQueryResult,
+    result: Result<InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection>,
+    provenance: ScopeProvenance,
+}
+
+/// A world answer sealed after the exact physical compiler transaction END.
+pub struct CompletedInspectionWorld {
+    pub(super) prepared: PreparedInspectionWorld,
+    pub(super) cancellation: crate::HostAdmissionCancellation,
+}
+
+impl AdmittedInspectionWorld {
+    pub fn needs_source_capture(&self) -> bool {
+        matches!(self.inputs, InspectionWorldInputs::Cold { .. })
+    }
+}
+
+impl CompletedInspectionWorld {
+    pub fn result(
+        &self,
+    ) -> Result<&InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection> {
+        self.prepared.result.as_ref().map_err(|reason| *reason)
+    }
+    pub fn resolution(&self) -> &tidepool_toolchain::compiler_world::WorldModuleResolution {
+        self.prepared.receipt.resolution()
+    }
+
+    pub fn defining_module(
+        &self,
+    ) -> Option<&tidepool_toolchain::compiler_world::WorldModuleReceipt> {
+        self.prepared.receipt.defining_module()
+    }
+
+    pub fn provenance(&self) -> &ScopeProvenance {
+        &self.prepared.provenance
+    }
+}
+
+/// Accept only the completed action from its own clean, uncancelled compiler
+/// transaction. An uncertain END cannot attach a world to the runtime base.
+pub fn finish_admitted_world_inspection(
+    settled: crate::CompilerTransactionSettled<
+        Result<PreparedInspectionWorld, WorldInspectionError>,
+    >,
+) -> Result<CompletedInspectionWorld, WorldInspectionError> {
+    let same_owner = settled
+        .action()
+        .as_ref()
+        .is_ok_and(|completed| settled.belongs_to(&completed.origin));
+    let cancellation = settled.host_admission_cancellation().cloned();
+    let outcome = settled.into_outcome();
+    if !matches!(
+        outcome.close,
+        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
+    ) {
+        return Err(WorldInspectionError::CompilerClose {
+            primary: outcome.action.err().map(Box::new),
+            close: outcome.close,
+        });
+    }
+    let prepared = outcome.action?;
+    if !same_owner {
+        return Err(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::DifferentOwner,
+        )
+        .into());
+    }
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+        crate::CompilerTransactionPublicationError::MissingOwner,
+    ))?;
+    cancellation.checkpoint().map_err(CompileError::from)?;
+    Ok(CompletedInspectionWorld {
+        prepared,
+        cancellation,
+    })
+}
+
+/// Run one public-module observation without constructing query source or
+/// combining historical checked-value compiler support into a current world.
+pub fn run_admitted_world_inspection(
+    owner: &super::RuntimeSourceCompilerTransaction,
+    admitted: AdmittedInspectionWorld,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+    query: NameQuery,
+    kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
+) -> Result<PreparedInspectionWorld, WorldInspectionError> {
+    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
+        return Err(
+            crate::RuntimeError::from(super::SourceAdmissionError::ForeignTransaction).into(),
+        );
+    }
+    owner
+        .admit(Some(admitted.base.target.clone()))
+        .map_err(crate::RuntimeError::from)?;
+    run_admitted_world_inspection_inner(admitted, capture_sources, query, kind)
+}
+
+fn run_admitted_world_inspection_inner(
+    admitted: AdmittedInspectionWorld,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+    query: NameQuery,
+    kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
+) -> Result<PreparedInspectionWorld, WorldInspectionError> {
+    use std::sync::Arc;
+    use tidepool_toolchain::compiler_world::{
+        self, PublicModuleQuestion, PublicModuleQuestionKind,
+    };
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
+    let NameScope::PublicModule(module) = &query.scope else {
+        return Err(invalid("world inspection requires a public module").into());
+    };
+    let exact = exact_name_request(&query);
+    let question = match kind {
+        PublicModuleQuestionKind::StructuredInfo => PublicModuleQuestion::structured_info(
+            module.clone(),
+            exact.namespace,
+            query.name.clone(),
+        ),
+        PublicModuleQuestionKind::StructuredType => PublicModuleQuestion::structured_type(
+            module.clone(),
+            exact.namespace,
+            query.name.clone(),
+        ),
+    };
+    let endpoint = || -> Result<_, CompileError> {
+        let command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
+        tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+            command.bind().map_err(map_spawn)?,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
+    };
+    let expected_world = match &admitted.inputs {
+        InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
+        InspectionWorldInputs::Cold { .. } => None,
+    };
+    let result = match admitted.inputs {
+        InspectionWorldInputs::Published(world) => {
+            compiler_world::query_public_module(&endpoint()?, &world, question.clone())?
+        }
+        InspectionWorldInputs::Cold {
+            primary,
+            rows,
+            visibility,
+        } => {
+            let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
+            if sources.origin() != admitted.base.source.bytes() {
+                return Err(invalid("cold sources differ from the admitted source owner").into());
+            }
+            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+                primary, rows, visibility, sources,
+            )?;
+            compiler_world::open_world(cold, &endpoint()?, question.clone())?
+        }
+    };
+    if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
+        return Err(invalid("world query returned a different logical world").into());
+    }
+    if result.question() != &question {
+        return Err(invalid("world result differs from its admitted question").into());
+    }
+    let provenance = ScopeProvenance {
+        scope: query.scope.clone(),
+        generation: admitted.base.key.generation().0,
+        fingerprint: {
+            use std::fmt::Write;
+            let mut observation = String::from("compiler-world:");
+            for byte in result.world().logical_id() {
+                write!(&mut observation, "{byte:02x}").expect("String formatting");
+            }
+            observation
+        },
+    };
+    if let compiler_world::WorldModuleResolution::Rejected(reason) = result.resolution() {
+        let reason = *reason;
+        return Ok(PreparedInspectionWorld {
+            association: Arc::new(InspectionWorldAssociation {
+                base: admitted.base,
+                world: Arc::clone(result.world()),
+            }),
+            origin,
+            result: Err(reason),
+            receipt: result,
+            provenance,
+        });
+    }
+    let mut decoded = decode_inspections(result.inspection_payload())?;
+    if decoded.len() != 1 {
+        return Err(invalid("world inspection must return exactly one result").into());
+    }
+    let mut decoded = decoded.remove(0);
+    let error = match (&mut decoded, kind) {
+        (InspectionResult::StructuredInfo(Ok(info)), PublicModuleQuestionKind::StructuredInfo) => {
+            verify_world_provenance(&info.provenance, &query)?;
+            info.provenance = provenance.clone();
+            None
+        }
+        (InspectionResult::StructuredType(Ok(info)), PublicModuleQuestionKind::StructuredType) => {
+            verify_world_provenance(&info.provenance, &query)?;
+            info.provenance = provenance.clone();
+            None
+        }
+        (
+            InspectionResult::StructuredInfo(Err(error)),
+            PublicModuleQuestionKind::StructuredInfo,
+        )
+        | (
+            InspectionResult::StructuredType(Err(error)),
+            PublicModuleQuestionKind::StructuredType,
+        ) => Some(error),
+        _ => return Err(invalid("world payload has the wrong inspection kind").into()),
+    };
+    match (result.resolution(), error) {
+        (
+            compiler_world::WorldModuleResolution::Absent(absence),
+            Some(QueryError::UnknownModule(module)),
+        ) if module == &absence.module && module == question.module() => {}
+        (compiler_world::WorldModuleResolution::Resolved(receipt), error)
+            if receipt.module == question.module()
+                && !matches!(error, Some(QueryError::UnknownModule(_))) => {}
+        _ => {
+            return Err(
+                invalid("world module resolution differs from its structured payload").into(),
+            )
+        }
+    }
+    Ok(PreparedInspectionWorld {
+        association: Arc::new(InspectionWorldAssociation {
+            base: admitted.base,
+            world: Arc::clone(result.world()),
+        }),
+        origin,
+        result: Ok(decoded),
+        receipt: result,
+        provenance,
+    })
+}
+
+fn verify_world_provenance(
+    provenance: &ScopeProvenance,
+    query: &NameQuery,
+) -> Result<(), CompileError> {
+    if provenance.scope != query.scope
+        || provenance.generation != 0
+        || !provenance.fingerprint.is_empty()
+    {
+        return Err(invalid(
+            "world payload differs from requested presentation provenance",
+        ));
+    }
+    Ok(())
+}
+
 pub struct InspectionRequest<'a> {
     /// Protected declarations and request-local annotations shared by every query in this batch.
     pub exact_context:
@@ -1192,7 +1518,6 @@ fn map_spawn(error: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(error.source))
 }
 
-#[cfg(test)]
 fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileError> {
     match decode_inspection_output(bytes)? {
         InspectionOutput::Complete(results) => Ok(results),

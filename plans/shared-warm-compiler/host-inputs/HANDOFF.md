@@ -4,7 +4,7 @@ Owner `/root/warm_compiler_campaign/host_inputs`; checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019`, branch
 `feature/shared-warm/host-inputs`, original base `5b74c2f1`.
 
-## Tested area checkpoint
+## Qualified source/catalog foundation
 
 Production source `da584c7421eefc77941ae9681d3821d1f27bbe9b` is independently
 reviewed and compiled through both coupled consumers:
@@ -32,12 +32,12 @@ host artifact SHA256 is
 Supervisor read production changes and actual reports. Process cleanup was
 confirmed; hosted/compiler cleanup and directory resource hashes remain limited.
 
-All host native clients are terminal; both six- and fourteen-GiB grants are
-released. Daemon PID 4122402 remains in build.slice with idle current
-6,247,665,664 B and observed lifetime peak 13,127,516,160 B (the peak increased
-during the host gate). Output remains its owned per-checkout XFS bind mount.
-New native work requires fresh actual phase/scope admission. Idle daemons stay
-in global usage; never subtract an old idle daemon from a future test allowance.
+Current HOST resource ownership: no native clients remain after the query
+component phase below. Host-world's retained daemon152834 and forkserver152875
+remain in build.slice scope1792412537, last terminal current4,574,601,216 B and
+lifetime peak12,053,938,176 B. HOST future allowance is zero in campaign LIVE.json.
+Idle daemons remain in global accounting. Every next build needs fresh actual
+phase/scope projection; no reservation or old idle-daemon subtraction is assumed.
 
 ## Source owners and the repaired boundary
 
@@ -91,38 +91,139 @@ service-issued logical world, ordinary cells, per-item successors, atomic paired
 publication, fork, recovery and obsolete-route deletion are required. First query
 is the delivery sequence, not an optional cache as final architecture.
 
-Reserved implementation leaf selected_root is active in
-`tidepool-shared-warm-host-world-20261019`. It preserved original dirty world WIP
-SHA256 `171c544a55e74daf9dccac48ad57b7492b419f4ca9494ddf54e5e0338213bf42`,
-then merged full area da584, reviewed reload 3dd (own merge 9dbb0d4), and real
-Warm f160 (own merge 3e26464). Warm resolved its seven shared protocol/type merge
-conflicts; the leaf did not invent protocol semantics or commit runtime WIP into
-a dependency merge. Latest Warm arity/profile fixes and reload fixture successors
-are required before the joined consumer compile; their owner terminal receipts
-control acceptance, not this handoff.
+The full reviewed query history through `c8b922273fe4d0bac83e0862fb1aa29de20d41e6`
+was merged into the area at `20c016a273d10cf104db8d9e5e03e70a0bcfb061`. Relative
+to that tested leaf, area production adds only the separately source-reviewed
+five Ensure counters; matched consumer/native evidence remains separate.
 
-The actual early actor PublicModule StructuredInfo/Type path must precede actor
-compile view, structured provenance, source.prepare, reachable-value Vec capture,
-support folds, semantic hashes and FD export. Cold issuance also omits
-checked_value_context and all retained-support merging: actual primary context
-and unmerged binding-row/visibility owners remain separate. Historical graphs
-stay custody. Runtime native/instance/prototype proofs remain exact at consumers.
+The production PublicModule StructuredInfo/Type branch precedes actor compile
+view, provenance, value Vec, support merge, source preparation and FD export.
+Cold raw primary and visible checked rows remain separate. Original source A and
+existing canonical target B are admitted before deferred source capture/client
+work. Matching origin, clean END, cancellation and direct publication-key CAS
+seal the result. Unsupported, unavailable and unreadable source observations
+remain distinct from a service-issued closed absence. Hydration advances no
+notebook publication. Current-scope mixed runtime proofs remain on their actual
+checked path until the required ordinary-cell migration replaces its compiler
+input preparation.
 
-The runtime leaf now carries original A and existing canonical target B leases
-into the source transaction owner, admits both before deferred capture or client
-hit, and seals completed results against exact origin, clean END, cancellation
-and direct publication-key CAS. This is active unqualified WIP, not an accepted
-query. Actual Rooted boot must consume the real reviewed provider/profile fix,
-not a test proof. Bounded one/two-world cold/hit/refusal component controls need
-not wait for final retention implementation; their acceptance remains limited.
-Lookup hydration never advances the logical world or notebook publication.
+Owning four-target runtime/actor production and cfg-test compilation passed at
+16ed. Resource/wrapper prebuild passed25local actions. The actor missing-source
+entry guard executed/passed1 at16ed. The runtime world-base control initially
+failed1 BEFORE its assertions at the existing prepared fixture's bare install,
+with SourceAdmission::MissingTransaction. Reload assigned the caller-only repair:
+use its already adopted original_source in the existing session source transaction
+for fixture install and bind together; require actual NotStarted/success, with
+all source/foreign-owner/same-tip/retirement checks intact. No generic prepared
+helper or capability factory changed. At c8, runtime production/cfg-test/wrapper
+compilation passed and this exact control executed/passed1. The actor guard was
+not repeated. Actual service/frontend/retention execution remains0.
 
-Host owns the generated execution group/resource consumer after actual case names
-exist; Warm owns client/protocol/Haskell; owned owns package provider and actual
-boot/retirement proof; reload owns source transaction leases. Dedicated groups
-share the existing Rust harness and owned-resident runner, with declared service
-resources selected only there. No new Cargo target, compiler mode, handwritten
-native map or authority factory is authorized. Generic finite groups remain finite.
+Exact native artifacts/reports are under campaign evidence
+`host-inputs/host-world/`: `early-query-16ed-retry`, `finite-resources-16ed`,
+`finite-actor-missing-capture-16ed`, `runtime-build-c8b`, and
+`finite-runtime-world-base-c8b`. Runtime test binary SHA256 is
+`12cde3fe27cf6814eff37c64601193ee629d087823f0fadc006aa0e566ebf063`;
+actor binary SHA256 is
+`e7d42dd66f74fc0cc0862455317f71f5bc04d0bf7d2540734386b5c0f3962291`.
+The earlier HashSet production compile failure, six fixture receiver compile
+errors and failed runtime control are retained. None was counted as passing
+world behavior. Process cleanup is confirmed; hosted/compiler cleanup was not
+observed by these pure controls, and directory resource hashing is incomplete.
+
+Independent source receipts under the host evidence root's oracle directory
+cover the complete query, dedicated resource group and each bounded repair:
+`world-route-review-e5a32b1a.txt`,
+`world-query-resource-group-review-d32ea95f.txt`,
+`world-route-repair-review-3a948490.txt`,
+`world-source-none-counter-review-bd2bb236.txt`,
+`world-adoption-receiver-review-16ed892e.txt`, and
+`world-base-fixture-owner-review-c8b92227.txt`.
+
+The generated `actor_compiler_world_queries_test` group shares the existing
+actor unit harness and owned-resident runner, selects exactly two ignored cases,
+and supplies the declared service deployment/config only there. Generic finite
+groups remain finite. Generation and its focused functional test passed1.
+The existing adapter reads a fixed sibling CF digest as DATA; actual service
+association and the independent deployment expectation own admission.
+
+The service cases now include the actual authored Info effect: prepare and begin
+one cell, capture its Introspection boundary, resume the structured query, settle
+the item, and inspect its installed binding and consumed answer. Direct helper
+queries carry explicit hot-work observations; the frontend emits settled counters
+under full tracing. These are separate measurement scopes, and no whole-frontend
+zero-work or speed claim follows from helper counts.
+
+The coherent isolated host-world candidate is
+`8642434e599259b54fb139c62bbc831b12979acf`, combining full reviewed Reload69bf and
+Warm e2cf histories, accepted key fixture source-owner repair855, frontend and
+re-export controls4fd, and generated fixture mappings864. Warm supplied only its
+three conflicting Haskell cache/boot hunks; nonconflicted changes were retained.
+Both production/cfg-test maps, the exported fixture and testing roster now include
+`fixtures/compiler-world-info.hs`, generated through the complete native graph.
+Independent source receipts `world-frontend-reexport-repair-review-4fd1a036.txt`
+and `world-fixture-roster-review-8642434e.txt` accept the owned changes.
+
+The re-export control captures home `GHC.Internal.Maybe` with distinct bodies,
+while Facade explicitly imports package base's Data.Maybe. It checks the actual
+package defining receipt and separately queries the same-spelling captured home.
+Pinned GHC9.12.2 metadata confirms Just's defining module GHC.Internal.Maybe;
+retained `pinned-base-maybe-interface.json` and `.txt` are metadata evidence only,
+not an executed service query.
+
+At exact864, runtime/actor production and cfg-test compilation passed26 local
+actions, and matched worker/test resources passed14 local actions. Both exact
+finite key controls selected/executed/passed1 each. Report
+`host-inputs/host-world/WORLD-QUERY-864-TERMINAL.json` binds commands, binary hashes
+and counts. Runtime executable SHA256 is
+`40ca1e77ec42d9e3f34677b3438254c6ba521a1bf467ef6c20f4a1972ff6d123`.
+All clients settled; HOST14GiB total/8GiB growth was released, with the idle daemon
+retained in its existing scope. The area full-history merge40741919d4 has exactly
+the tested864 production tree; its only difference is this handoff.
+
+The explicit full-history Reload ce554 publication-purpose join is
+`5752304b59fa8baf5c0c6e172dac0735d57516a9`. Independent joined review accepted it;
+its runtime/actor production and cfg-test consumers compiled17 local actions.
+Reload separately completed its four maintained notebook controls. The actual
+Rooted2 attempt at575 failed before Ready: both wrappers exited2, libtest body
+counts are null, and no answer/frontend assertions ran. The generated dedicated
+group inherited generic LD_LIBRARY_PATH; the strict Rooted service correctly
+refused it. Process exit is confirmed but compiler startup cleanup remains
+unconfirmed, with all failed artifacts retained in WORLD-QUERY-575-TERMINAL.json.
+
+Supervisor repair `eea61b3ee2fd0b7d934fec6698d2ca128a1f8558` removes loader inputs
+and their unused finite runtime-libraries resource only from the dedicated Rooted
+group through its existing generator. Finite group loader inputs and the strict
+service guard remain. Focused generator execution passed1; its stale expected
+mode roster was corrected to the existing five literal cases. Independent source
+review accepted all three changed files. Rust/Haskell source is identical575, so
+no repeated compiler gate was needed. Its actual retry executed both test bodies
+after real Rooted Ready and failed2/2 on the first cold acquisition:
+NeedsAcquisition followed by Complete AcquisitionRejected. No answer, hot-query,
+frontend continuation, re-export or world-installation assertion was reached.
+Process and compiler cleanup are confirmed for this retry; old575 cleanup stays
+unconfirmed. WORLD-QUERY-EEA-TERMINAL.json binds exact commands, complete streams,
+binary/resource hashes and remaining diagnostic limits. All clients settled and
+HOST14GiB total/8GiB growth was released.
+
+The area merge402e88dbcd has exactly the eea production tree and preserves full
+histories. The actual query/frontend milestone remains unqualified. Warm owns the
+next old-profile acquisition diagnostic repair: existing Haskell validation drops
+WorldInputsFailure detail and combines producer/profile mismatches, while normal
+Rust RAII drops the failed cold carrier before it can be examined. Retain authentic
+issued bodies/slices under existing bounded failure custody before owner release;
+do not reconstruct missing bytes or weaken a validator. Reserved oracle reviews
+that concrete patch. selected_root remains reserved to join, compile and retry the
+actual group after review and fresh admission. No active HOST job remains. The service command is:
+`swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
+No ordinary-cell/new-hash/profile API is imported into this query candidate.
+
+Five observations extend the EXISTING host_work owner, with actual Warm producers:
+WorldEnsureResidentProbe/Hit, WorldEnsureNeedsAcquisition, WorldEnsureComplete,
+WorldEnsureCompleteReady. Receipt `world-ensure-counters-review-fb588fbd.txt` is
+source acceptance only. A successful hot query requires Probe1/Hit1 with all three
+acquisition counters0; fenced source refusals require all five0. Both preserve
+old preparation zeros. Empty-world FD count0 cannot establish a hit.
 
 ## Required successors and continuation
 
@@ -134,11 +235,47 @@ world/restoration with bindings or declarations and preserve committed prefixes
 on later refusal. Share current owned nodes, without predecessor replay chains,
 per-item snapshot/native-offer folds or full-world encoding hidden at commit.
 
-Two Sol-high descendants only: selected_root active implementation,
-selection_oracle settled after exact repair review and reserved for actual query
-candidate review. No grandchildren/additional descendants. Paused old 02A is
+Two Sol-high descendants only, with no grandchildren/additional descendants.
+selected_root owns independent typed namespace implementation in real checkout
+`/srv/swarm/checkouts/tidepool-shared-warm-host-bindings-20261019`, branch
+`feature/shared-warm/host-bindings`, exact base6971cdf53ac54adf9cf44075bfaab771d5721475.
+Its full approved old-profile Warm526 merge is f7a36643e66dcf1c2c10d117aa8f505a85df2200;
+source-accepted consumer ebd3ea9cc9960d0aa3a3c87b7b5602bee3647c91 includes the bounded
+unsupported-source counter repair. No new CID/profile is imported. Its early
+runtime/actor production and cfg-test gate is admitted conditionally14GiB total/
+32GiB growth, but the immediate fresh sample projected86,706,298,880 bytes against
+85,899,345,920 pressure. Configure/Buck/native launch therefore did not start;
+HOST remains0/0 with no new daemon. Exact pending commands and sample are retained
+in host-bindings/typed-bindings-ebd3.json and typed-ebd3-admission-sample.json.
+Campaign/Warm/Reload terminal release is the next admission event; if qualified
+query45f arrives first, switch to that priority after a durable source checkpoint.
+Capture must preserve every visible
+certified occurrence's actual symbol/id/scope/row and all aliases. Generic visible
+stubs require distinct typed UnsupportedBinding before builder/service; LegacyDisk
+missing-proof stays distinct. Source-backed generic mount custody remains required
+for complete namespace coverage. This initial boundary must not become a silent
+omission or permanently unsupported migration shortcut. Query eea remains immutable.
+
+selection_oracle owns independent Warm old-profile diagnostic/producer repair
+review, then exact typed consumer review. Diagnostic8e259's initial source receipt
+was qualified after a confirmed non-UTF-8 Path serialization panic in optional
+capture. Warm repaired it with fallible conversion00e9 and restored the independent
+oversize-control premise45f. Exact45f090a4bfe6322c951b659128172337aa707f50 has
+independent source acceptance. Canonical producer repair367 admits the actual
+endpoint's canonical identity before cold root sealing, instead of raw producer
+bytes or an empty zero-producer root. Warm owns the active old-profile native gate;
+its qualified terminal event triggers the priority HOST join and genuine Rooted
+retry. The historical eea rejection branch is still unobserved. The genuine Rooted query retry
+preempts independent work once the reviewed exact dependency is ready. No active
+HOST native job exists; source-only changes still require production and cfg-test
+consumer compilation and meaningful counted controls under fresh admission. Paused old 02A is
 unchanged and not a dependency (patch SHA256
 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
+Required retention controls remain actual A/B eviction and exact restore, zero
+optional budget retaining two questions through END, and physical cleanup failure
+causing worker exit without Ready. HOST owns fixtures in the existing group; Warm
+owns the actual branch/backing observations and startup budget policy. They follow
+the first query and do not replace frontend or cell migration evidence.
 No periodic polling. Every terminal producer checks recipient state and sends
 exact source/evidence/next action to a running owner, or followup_task to a dormant
 owner. Every external command retains an observer through terminal settlement.
