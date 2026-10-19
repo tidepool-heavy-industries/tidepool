@@ -16082,6 +16082,24 @@ mod tests {
                 "equal original/interface IDs and graph cannot substitute a different birth domain"
             );
         }
+        let full_birth = full
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        let passive = full_role.recorded_fact();
+        let passive_endorsement =
+            PublishedOriginalEndorsement::new(root.clone(), passive.as_role().clone());
+        assert!(
+            matches!(
+                full_birth.publish_original(&passive_endorsement),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(&error.failure,
+                        ArtifactInventoryFailure::PublicationNativeDomainMismatch { owner }
+                            if owner == &root)
+            ),
+            "recorded publication facts must be acquired before endorsement"
+        );
         assert_ne!(
             full.context().semantic_sha256(),
             partial.context().semantic_sha256()
