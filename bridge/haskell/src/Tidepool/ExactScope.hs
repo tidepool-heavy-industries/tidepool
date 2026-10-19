@@ -39,7 +39,7 @@ module Tidepool.ExactScope
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
-  , worldInputsSourceModuleHints, worldInputsRetainedCharge
+  , worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, decodeWorldSources, readWorldStringMap
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
@@ -83,6 +83,7 @@ import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
+import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
@@ -1080,10 +1081,6 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedPlannedCell :: Maybe PlannedCellAdmission
   , checkedCellPurpose :: CheckedCellPurpose
   } deriving (Eq, Show)
-
-data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
-  | PlannedBind Word64 | PlannedExpression Word64 String
-  deriving (Eq, Show)
 
 data PlannedCellAdmission = PlannedCellAdmission
   { plannedParserDigest :: String
@@ -2228,6 +2225,7 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsBindingScope :: Word64
   , worldInputsBindings :: Map.Map String WorldBinding
   , worldInputsBindingCharge :: (Integer,Int)
+  , worldInputsPrimaryIsEmpty :: Bool
   }
 
 -- Current occurrence selection is distinct from the referenced row's owner.
@@ -2312,7 +2310,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
       (bindingScope,bindingRoot) <- decodeWorldBytes decodeWorldBindingRoot visibility
       frontier <- verifyWorldBlocks [primary,bindingRoot] blocks
-      validateWorldContext frontier primary producer
+      primaryIsEmpty <- validateWorldContext frontier primary producer
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility baseSeal visibleSeal blockSeal <-
         decodeWorldBytes decodeWorldRestoration restoration
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
@@ -2369,7 +2367,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
           complete = map bind rows
       let identity = SHA.hash restoration
       pure (WorldInputFacts (hexBytes identity) identity producer profile sources
-        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility bindingScope bindings bindingCharge)
+        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility bindingScope bindings bindingCharge primaryIsEmpty)
 
 decodeWorldBytes :: (forall s. Decoder s a) -> BS.ByteString -> IO a
 decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict bytes) of
@@ -2701,7 +2699,7 @@ worldDescriptor roots producer = do
 -- These are the exact current Materializer ContextDescriptorV5 and
 -- SelectionDescriptorV2 wire families. Fact links remain passive references;
 -- validating their storage shape does not activate Original/native inventory.
-validateWorldContext :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString -> IO ()
+validateWorldContext :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString -> IO Bool
 validateWorldContext frontier root producer = do
   context <- readDescriptor root (worldDescriptor
     ["selection","roles","lexical","offers","native_availability","input_decisions"] True)
@@ -2709,22 +2707,26 @@ validateWorldContext frontier root producer = do
   case Map.lookup "producer" context of
     Just (WorldDescriptorProducer actual) | actual == producer -> pure ()
     _ -> worldCorrupt "compiler world context producer differs"
-  forM_ ["roles","lexical","input_decisions"] $ \name -> do
+  moduleMaps <- forM ["roles","lexical","input_decisions"] $ \name -> do
     cid <- link name context
-    void (worldHamtMap frontier cid decodeWorldModuleKey encodeWorldModuleKey worldCID)
-  forM_ ["offers","native_availability"] $ \name -> do
+    Map.null <$> worldHamtMap frontier cid decodeWorldModuleKey encodeWorldModuleKey worldCID
+  artifactMaps <- forM ["offers","native_availability"] $ \name -> do
     cid <- link name context
-    void (worldHamtMap frontier cid worldArrayDigest encodeWorldArrayDigest worldCID)
+    Map.null <$> worldHamtMap frontier cid worldArrayDigest encodeWorldArrayDigest worldCID
   selection <- link "selection" context
   selected <- readDescriptor selection (worldDescriptor ["scopes","roots","namespace","custody_roots"] False)
   requireVersion 2 selected
   scopes <- link "scopes" selected
-  void (worldHamtMap frontier scopes worldArrayDigest encodeWorldArrayDigest worldCID)
+  scopesEmpty <- Map.null <$> worldHamtMap frontier scopes worldArrayDigest encodeWorldArrayDigest worldCID
   namespace <- link "namespace" selected
-  void (worldHamtMap frontier namespace worldArrayDigest encodeWorldArrayDigest decodeWorldBinding)
-  forM_ ["roots","custody_roots"] $ \name -> do
+  namespaceEmpty <- Map.null <$> worldHamtMap frontier namespace worldArrayDigest encodeWorldArrayDigest decodeWorldBinding
+  rootMaps <- forM ["roots","custody_roots"] $ \name -> do
     cid <- link name selected
-    void (worldHamtMap frontier cid decodeWorldBindingNode encodeWorldBindingNode decodeNull)
+    Map.null <$> worldHamtMap frontier cid decodeWorldBindingNode encodeWorldBindingNode decodeNull
+  -- Until the primary owner supplies its exact binding-to-row resolver, only
+  -- genuinely empty decoded primary facts can enter the first cell slice.
+  -- Custody rows alone cannot establish a selected lexical/original context.
+  evaluate (and (moduleMaps ++ artifactMaps ++ [scopesEmpty,namespaceEmpty] ++ rootMaps))
   where
     readDescriptor :: BS.ByteString -> (forall s. Decoder s (Map.Map String WorldDescriptorField))
       -> IO (Map.Map String WorldDescriptorField)

@@ -69,6 +69,33 @@ worldRequestBoundaries = do
       pure (void (scopedEnsureWorld scope resident),void (runBoundWorldQuery request))
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
+  let recipe = WorldCellRecipe "(this must not parse" "module CellCheck where" []
+      cellPlan = WorldCellPlanRequest root "foreign-worker-realization" recipe "/unavailable/cell-plan.cbor"
+      cellPrepare = WorldCellPrepareRequest root "foreign-worker-realization" recipe "untrusted-receipt" (BS.replicate 32 1)
+        [] "/unavailable/cell-operation" "/unavailable/cell-prepared.cbor"
+      decode fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just request) -> pure request
+        other -> fail ("invalid held cell fixture: " ++ show other)
+  planArgs <- decode [WorldCellPlan cellPlan]
+  prepareArgs <- decode [WorldCellPrepare cellPrepare]
+  (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
+    latePlan <- (withBoundCompilerRequest (const (pure ())) scope planArgs >=> finishCompletion) $ \request -> do
+      absent <- try (runBoundWorldCellPlan request) :: IO (Either WorldCellRefusal BS.ByteString)
+      unless (either (== WorldCellUnavailable) (const False) absent)
+        (fail "unheld plan parsed source or obtained a compiler world")
+      pure (void (runBoundWorldCellPlan request))
+    latePrepare <- (withBoundCompilerRequest (const (pure ())) scope prepareArgs >=> finishCompletion) $ \request -> do
+      absent <- validateBoundWorldCell request
+      unless (either (== WorldCellUnavailable) (const False) absent)
+        (fail "unheld prepare parsed source or allocated compiler generation state")
+      compiled <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
+        :: IO (Either WorldCellRefusal CheckedEnvironmentResult)
+      unless (either (== WorldCellUnavailable) (const False) compiled)
+        (fail "world compiler bypassed its actual hold/admission owner")
+      pure (void (validateBoundWorldCell request))
+    pure (latePlan,latePrepare)
+  try latePlan >>= requireCancellation
+  try latePrepare >>= requireCancellation
 
 -- These are raw closed-source data/I/O controls, not rooted world issuers.
 -- They enter the same materialization owner used before world publication.

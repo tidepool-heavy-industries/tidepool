@@ -66,11 +66,22 @@ cellProgramStateChecks = bracket acquire removeDirectoryRecursive $ \work -> do
     (programCaptureSignatures first == signatures1 && programCaptureSignatures middle == signatures1
       && programObservations first == observations1 && programObservations middle == observations1)
   assert "accumulation does not modify native authority"
-    (programExact final == exact && programPrologue final == prologue
+    (programInput final == exact && programPrologue final == prologue
       && null (programValues final) && null (programOriginals final)
       && programOriginal final == Nothing && Map.null (programRetained final)
       && programSourceImports final == Nothing)
-  putStrLn "cell accumulation: 8 checks passed"
+  let privateInput = ("held-world", "scope-reference")
+      heldInitial = initialProgramCellState prologue privateInput Map.empty
+      heldFinal = recordTypedSegment lastPlan typedLast observations2 signatures2 "typed-3"
+        (recordDeclarationSegment declaration "declared" "receipt-2"
+          (recordTypedSegment firstPlan typedFirst observations1 signatures1 "typed-1" heldInitial))
+  assert "the same inference spine does not require an ExactScope input basis"
+    (programInput heldFinal == privateInput && programItemOffset heldFinal == 5
+      && programPlans heldFinal == programPlans final
+      && programTypedPlans heldFinal == programTypedPlans final
+      && programObservations heldFinal == programObservations final
+      && programDeclarations heldFinal == programDeclarations final)
+  putStrLn "cell accumulation: 9 checks passed"
 
   where
     acquire = do

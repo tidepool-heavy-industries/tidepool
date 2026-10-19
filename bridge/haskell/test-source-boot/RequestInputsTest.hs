@@ -71,7 +71,7 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -487,9 +487,11 @@ semanticWorldBindingControls work scopePath contextParcel = do
   unless (worldInputsRetainedCharge original == expectedCharge)
     (fail ("world binding retention omitted encoded backing/entry charge: "
       ++ show (worldInputsRetainedCharge original,expectedCharge)))
-  _ <- readPacket "world-seal-empty-context"
+  emptyContext <- readPacket "world-seal-empty-context"
     (packetFor 2 (restorationFor 2 emptyPrimary emptyBlocks base visible)
       emptyPrimary emptyBlocks base visible acquisition)
+  unless (worldInputsPrimaryIsEmpty emptyContext && not (worldInputsPrimaryIsEmpty original))
+    (fail "passive custody replaced the actual decoded primary selection emptiness")
   let rootBody = case lookup primary blockPairs of
         Just value -> value
         Nothing -> error "validated fixture root disappeared"

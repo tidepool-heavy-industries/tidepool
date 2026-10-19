@@ -6,6 +6,8 @@ import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, (</>))
 import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
+import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Char (digitToInt, intToDigit)
 import qualified Data.ByteString.Lazy as BL
 import qualified Codec.CBOR.Decoding as CD
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -14,7 +16,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, mask, SomeException
+  ( evaluate, try, throwIO, mask, SomeException, fromException
   , IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (intercalate, nub, isPrefixOf)
@@ -25,7 +27,7 @@ import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8, IOMode(ReadMode), withBinaryFile)
 
 import GHC (moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
-import GHC.Driver.Session (DynFlags)
+import GHC.Driver.Session (DynFlags, importPaths)
 import GHC.Driver.Env (hsc_dflags)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Utils.Outputable (ppr)
@@ -66,17 +68,17 @@ import Tidepool.GhcPipeline
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
-  , scopedEnsureWorld
+  , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
-import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
+import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , PreparedProductContext
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
-  , retainStagedProgramProducts
+  , retainStagedProgramProducts, publishStagedOriginalProducts
   , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
 import Tidepool.ExecutionProjection (preparedRootIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -115,7 +117,7 @@ import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest
   ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag, admitRequestOperation
-  , WorldPublicModuleRequest(..) )
+  , WorldPublicModuleRequest(..), WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..) )
 import Tidepool.Introspection
   ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
@@ -144,7 +146,7 @@ import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , SessionModule(..), SessionModuleKind(..), Generation(..)
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , sessionHiPath, sessionModuleString )
+  , sessionHiPath, sessionModuleString, capturedSessionInterface, capturedSessionInterfaceEvidence )
 import Tidepool.FatIface
   ( readExactInterface )
 import Tidepool.SessionArtifacts
@@ -238,6 +240,11 @@ dispatch timing bound =
   let args = boundWorkerRequest bound
   in case boundRequestOperation bound of
     DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
+    WorldCellPrepareOperation question -> runWorldCellPrepareMode bound question
+    WorldCellPlanOperation question -> do
+      bytes <- runBoundWorldCellPlan bound
+      BS.writeFile (worldCellPlanOutput question) bytes
+      pure []
     WorldPublicModuleOperation question -> do
       bytes <- runBoundWorldQuery bound
       BS.writeFile (worldQueryOutput question) bytes
@@ -335,9 +342,9 @@ runActivationPreviewMode bound path = do
           <> encodeBytes (previewInputWitness admission))
       Right (artifacts, productContext) -> do
         unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
-        writePreparedSidecars InlineYieldSites outDir binds
+        void $ writePreparedSidecars InlineYieldSites outDir binds
           (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
-        writePreparedArtifacts outDir artifacts
+        void $ writePreparedArtifacts outDir artifacts
         void $ writeRequestProducts args originalInterfaces outDir prepared productContext artifacts
         outFile <- requireArg "--turn-out" (requestTurnOut args)
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
@@ -479,11 +486,11 @@ processFile bound timing path = do
     let preparedArtifacts = case output of
           NativeOutputs artifacts _ -> artifacts
           PortableOutputs artifacts -> artifacts
-    if null preparedArtifacts
+    void $ if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
 
-    timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     case output of
       NativeOutputs _ productContext -> void $ timePhase timing "module_products" $
         writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
@@ -538,30 +545,34 @@ standardAuxiliaryRoots binds =
                Rec pairs   -> map fst pairs
       ]
 
-writePreparedArtifacts :: FilePath -> [PreparedArtifact] -> IO ()
-writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
-  let output = outDir </> paTarget artifact ++ ".prepared.cbor"
+writePreparedArtifacts :: FilePath -> [PreparedArtifact] -> IO [FilePath]
+writePreparedArtifacts outDir artifacts = forM artifacts $ \artifact -> do
+  let name = paTarget artifact ++ ".prepared.cbor"
+      output = outDir </> name
   BS.writeFile output (paBytes artifact)
   hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
+  pure name
 
 data YieldSiteDelivery = SeparateYieldSites | InlineYieldSites
 
 writePreparedSidecars
   :: YieldSiteDelivery -> FilePath -> [CoreBind] -> Maybe T.Text -> [T.Text]
-  -> [PreparedArtifact] -> IO ()
+  -> [PreparedArtifact] -> IO [FilePath]
 writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
   let constructors = concatMap paConstructors artifacts
   metadata <- either (ioError . userError . show) pure (metadataForConstructors constructors)
   let hasIO = any (targetBindingHasIO binds . paTarget) artifacts
       metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes
-  case delivery of
-    InlineYieldSites -> pure () -- TurnOut carries the same typed sites.
+  auxiliary <- case delivery of
+    InlineYieldSites -> pure [] -- TurnOut carries the same typed sites.
     SeparateYieldSites -> do
       let multiple = length artifacts > 1
-      forM_ artifacts $ \artifact -> do
+      forM artifacts $ \artifact -> do
         let asksName = if multiple then paTarget artifact ++ ".asks.json" else "asks.json"
         writeFile (outDir </> asksName) (renderAsksJson (paYieldSites artifact))
+        pure asksName
+  pure ("meta.cbor":auxiliary)
 
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
@@ -851,8 +862,8 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
-    timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
-    timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    void $ timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
+    void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
       writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
@@ -934,6 +945,183 @@ runCellPlanMode parserFlags args cellPath = do
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out (toStrictByteString receipt)
   either throwIO (const (pure [])) result
+
+-- This initial slice performs actual whole-segment inference/output emission
+-- for an empty primary/binding base. Other bases receive an explicit typed
+-- refusal until their exact Context/alias resolver is available. It never
+-- constructs an ExactScope or publishes a runtime world during compilation.
+runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
+runWorldCellPrepareMode bound question = do
+  admitted <- validateBoundWorldCell bound
+  case admitted of
+    Left refusal -> writeResult (Left refusal) BS.empty
+    Right initial
+      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "")
+      | otherwise -> do
+          attempted <- trySynchronous (prepareSegment initial)
+          case attempted of
+            Right (items,observations) -> writeResult (Right items) observations
+            Left failure -> case fromException failure of
+              Just refusal -> writeResult (Left refusal) BS.empty
+              Nothing -> case fromException failure of
+                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty
+                Nothing -> throwIO failure
+  pure []
+  where
+    recipe = worldCellPrepareRecipe question
+    directory = worldCellPrepareDirectory question
+    parserFlags = boundParserFlags bound
+    text = encodeString . T.pack
+    digestText = SHA256.hash . TE.encodeUtf8 . T.pack
+    base = rawWorldID (worldCellPrepareIdentity question)
+    planDigest = SHA256.hash (worldCellPreparePlan question)
+    admission = worldCellPrepareAdmission question
+    admissionHex = concatMap (\byte -> [intToDigit (fromIntegral byte `div` 16),intToDigit (fromIntegral byte `mod` 16)])
+      (BS.unpack admission)
+    refusalTag WorldCellUnsupported = 0
+    refusalTag WorldCellUnavailable = 1
+    refusalTag WorldCellCorrupt = 2
+    writeResult outcome observations = BS.writeFile (worldCellPrepareOutput question) $
+      toStrictByteString (encodeListLen 6 <> text "TPCWPREP1" <> encodeBytes base
+        <> encodeBytes planDigest <> encodeBytes admission
+        <> (case outcome of
+          Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
+          Right items -> encodeListLen 2 <> text "prepared" <> encodeListLen (fromIntegral (length items))
+            <> foldMap (\(ordinal,generation,sha) -> encodeListLen 3 <> encodeWord64 ordinal
+              <> encodeWord64 generation <> encodeBytes sha) items)
+        <> encodeBytes observations)
+    prepareSegment initial = do
+      createDirectoryIfMissing True directory
+      preparedBatch <- newIORef Nothing
+      attempt <- newIORef (0 :: Int)
+      let template = worldCellTemplate recipe
+          checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
+          slots = [(fromIntegral ordinal,generation,observation) | (ordinal,slot) <- worldCellPrepareSlots question
+            , (generation,observation) <- case slot of
+                PlannedBind value -> [(value,Nothing)]
+                PlannedExpression value name -> [(value,Just name)]
+                _ -> []]
+          compile plan = do
+            index <- readIORef attempt
+            modifyIORef' attempt (+1)
+            writeIORef preparedBatch Nothing
+            let stagingRoot = directory </> "typed-session-" ++ show index
+            source <- either fail pure (prepareTypedSegmentSource checkingTemplate plan admissionHex slots)
+            let owner = generatedScaffoldModuleName ["held-world-cell-v1",worldCellPrepareIdentity question
+                  ,shaHex (worldCellPreparePlan question),shaHex admission,preparedTypedSegmentSource source]
+            effective <- templateParserFlags parserFlags (preparedTypedSegmentSource source) >>= either throwCellSplitError pure
+            named <- either fail pure (renameScaffoldModuleHeader effective owner checkingTemplate)
+            authored <- either fail pure (prepareTypedSegmentSource named plan admissionHex slots)
+            unless (preparedTypedSegmentPlan source == preparedTypedSegmentPlan authored)
+              (throwIO WorldCellCorrupt)
+            let protected = preparedTypedSegmentTemplate authored
+                rendered = preparedTypedSegmentSource authored
+                typedPlan = preparedTypedSegmentPlan authored
+                path = directory </> owner ++ ".hs"
+            imports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags protected)
+            mapped <- either fail pure (renderProtectedTemplateImports (preparedTypedSegmentLineOffset authored) imports)
+            writeFile path rendered
+            scaffold <- generatedTypedSegmentRecipeWithProtectedImports (preparedTypedSegmentOperations authored) parserFlags
+              (CheckedTemplateImports [] []) mapped protected rendered path owner >>= either fail pure
+            let prepare environment admissions typed = do
+                  batch <- prepareTypedSegmentSessionBindings environment admissions typed stagingRoot
+                  writeIORef preparedBatch (Just batch)
+                  pure (typedSegmentSessionEnvironment batch,typedSegmentSessionGlobals batch,typedSegmentSessionInterfaces batch)
+                purpose = withSourceImportIntents (cellPlanPrologue plan) $
+                  GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+                    (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] Nothing [])))
+            completed <- compilePreparedSegmentRequest bound
+              (WithTypedSegmentPreparation prepare (PreparedSegmentProducts typedPlan Nothing)) Set.empty purpose Nothing path
+            pure (authored,completed)
+      (finalized,(authored,(completion,typed))) <- checkCellInstances compile initial
+      batch <- readIORef preparedBatch >>= maybe (fail "world cell has no actual typed batch") pure
+      let prepared = preparedCompilationResult completion
+          result = pprPipelineResult prepared
+          typedPlan = preparedTypedSegmentPlan authored
+          rendered = preparedTypedSegmentSource authored
+          items = typedSegmentItems typed
+          targets = map (plannedItemEntry . typedItemPlan) items
+          binds = prBinds result
+          targetOwner = tcg_mod (prTargetTcGblEnv result)
+      actualTarget <- case [value | value <- pprModules prepared,pmModule value == targetOwner] of
+        [value] -> pure value
+        _ -> fail "world cell completion has no unique actual target"
+      captures <- either throwIO pure (typedSegmentSessionBinders (pmIdentityResolver actualTarget) batch)
+      signaturesByItem <- forM items $ \item -> do
+        signatures <- forM (typedItemCaptures item) $ \capture ->
+          captureCheckedSignature (prHscEnv result)
+            (plannedItemEntry (typedItemPlan item) ++ ":"
+              ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
+        pure (plannedItemOrdinal (typedItemPlan item),signatures)
+      originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
+      let generations = Map.fromList [(preparedRootIdentity global,generation)
+            | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
+      (artifacts,context) <- prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
+        generations (typedSegmentSessionBindingRepresentations batch)
+      unless (length artifacts == length items && length items == length (cellPlanItems finalized))
+        (fail "world cell output lost a parsed item")
+      products <- maybe (fail "world cell has no actual original inventory") pure context
+      staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces directory prepared products
+      descriptions <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
+        let itemPlan = typedItemPlan item
+            ordinal = plannedItemOrdinal itemPlan
+            generation = plannedItemGeneration itemPlan
+            child = directory </> "item-" ++ show ordinal
+            selected = maybe (error "world typed batch lost its actual item") id (lookup ordinal captures)
+            output = artifact {paTarget=preparedScaffoldTargetName}
+            turn = TBind (map (T.pack . bbName) selected) 0 selected (paYieldSites output) (T.pack rendered)
+        createDirectoryIfMissing True child
+        sidecarFiles <- writePreparedSidecars InlineYieldSites child binds Nothing (map T.pack (prWarnings result)) [output]
+        programFiles <- writePreparedArtifacts child [output]
+        productFile <- writeCertifiedSegmentItemProducts prepared staged child (paProgram output)
+        let turnFile = "turn.cbor"
+        BS.writeFile (child </> turnFile) (encodeTurnOut turn)
+        valueFiles <- case selected of
+          [] -> pure []
+          binder:_ -> case [value | value <- typedSegmentSessionInterfaces batch
+              , let (owner,_) = capturedSessionInterface value
+              , moduleNameString (moduleName owner) == bbModule binder] of
+            [value] -> case capturedSessionInterfaceEvidence value of
+              Just (packages,requirements,_) -> do
+                let (_,interface) = capturedSessionInterface value
+                forM_ [("value.hi",interface),("value.hi.packages",packages),("value.hi.requirements",requirements)] $ \(name,bytes) ->
+                  BS.writeFile (child </> name) bytes
+                pure ["value.hi","value.hi.packages","value.hi.requirements"]
+              Nothing -> fail "world value output lacks its actual package/requirement capture"
+            _ -> fail "world value output lacks one exact issued thin interface"
+        nativeOrdinal <- stagedOriginalEntryOrdinal staged (preparedRootIdentity (typedItemRoot item))
+        files <- forM (programFiles ++ sidecarFiles ++ [turnFile,productFile] ++ valueFiles) $ \name -> do
+          bytes <- BS.readFile (child </> name)
+          pure (name,SHA256.hash bytes)
+        let description = toStrictByteString (encodeListLen 13 <> text "TPCWITEM1"
+              <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
+              <> encodeWord64 (fromIntegral ordinal) <> encodeWord64 generation
+              <> text (typedSegmentPlanDigest typedPlan) <> encodeBytes (digestText (cellAnalysisSource sourceItem))
+              <> text (plannedItemEntry itemPlan) <> encodeSymbol (preparedRootIdentity (typedItemRoot item))
+              <> encodeWord64 (fromIntegral nativeOrdinal)
+              <> encodeListLen 2
+              <> encodeListLen (fromIntegral (length selected)) <> foldMap encodeBoundBinder selected
+              <> (let signatures = maybe (error "world typed item lost its capture witnesses") id (lookup ordinal signaturesByItem)
+                  in encodeListLen (fromIntegral (length signatures)) <> foldMap encodeCheckedSignature signatures)
+              <> encodeListLen (fromIntegral (length files))
+              <> foldMap (\(name,sha) -> encodeListLen 2 <> text name <> encodeBytes sha) files)
+        BS.writeFile (child </> "world-item.cbor") description
+        pure (fromIntegral ordinal,generation,SHA256.hash description)
+      -- Actual certification completes before exposing any private item table.
+      -- Nothing here adopts a runtime value or updates an actor-current world.
+      _ <- publishStagedOriginalProducts prepared staged
+      validateDependencyEvidence (preparedFreshDependencies prepared)
+      let observations = [CellExpressionPlan (plannedItemEntry (typedItemPlan item))
+            (case typedObservationLift observation of PureObservation -> ExpressionPure; EffectfulObservation -> ExpressionEffectful)
+            (showSDoc (hsc_dflags (prHscEnv result)) (ppr (typedObservationValueType observation)))
+            (nominalHeadsOfType (typedObservationValueType observation))
+            | item <- items,Just observation <- [typedItemObservation item]]
+          prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
+            (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
+      pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix)))
+    rawWorldID [] = BS.empty
+    rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
+    rawWorldID _ = error "world identity left its admitted shape"
 
 runCellMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runCellMode bound cellPath = do
@@ -1100,7 +1288,7 @@ runCellProgramMode bound cellPath exact planned = do
       let offset = programItemOffset state
           prefix = selectedProgramValues (programValues state)
           withPrefix = installProgramImports prefix (programOriginals state) segment
-          scope = programExact state
+          scope = programInput state
           segmentRequest = cellSegmentRequest bound state
           localArgs = boundWorkerRequest segmentRequest
           directory = outDir </> "segment-" ++ show segmentIndex
@@ -1130,7 +1318,7 @@ runCellProgramMode bound cellPath exact planned = do
                 , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value, name `notElem` declared]
                 , not (null kept)]
           pure $ recordDeclarationSegment finalized (plannedSourceFromDirectory finalized) (shaHex receipt)
-            $ state { programExact = extended, programOriginal = original
+            $ state { programInput = extended, programOriginal = original
               , programSourceImports = retainedImports
               , programValues = remainingValues
               , programOriginals = programOriginals state ++ maybe [] pure original }
@@ -1258,10 +1446,10 @@ runCellProgramMode bound cellPath exact planned = do
                   prefix (scopeValues scope) (checkedTemplateImports admission)
             createDirectoryIfMissing True itemDirectory
             writeFile (itemDirectory </> sourceOwner ++ ".hs") rendered
-            writePreparedSidecars InlineYieldSites itemDirectory binds
+            void $ writePreparedSidecars InlineYieldSites itemDirectory binds
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
-            writePreparedArtifacts itemDirectory [outputArtifact]
-            writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
+            void $ writePreparedArtifacts itemDirectory [outputArtifact]
+            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
             ordinal <- stagedOriginalEntryOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
@@ -1273,7 +1461,7 @@ runCellProgramMode bound cellPath exact planned = do
           retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
             (stagedFinalizedArtifacts sharedProducts) extended
           let completedState = recordTypedSegment finalized typedPlan expressionObservations captureSignatures rendered
-                state {programExact=extended,programSourceImports=retainedImports}
+                state {programInput=extended,programSourceImports=retainedImports}
           next <- foldM (\current (generation,captures) ->
             addProgramValue stagingRoot generation captures current) completedState emitted
           modifyIORef' batches (++ [batch])
@@ -1331,7 +1519,7 @@ installProgramImports values original plan = plan { cellPlanPrologue = prologue
       ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
         ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") RetainedGeneratedImport [mkModuleName (completedValueModule value)] | value <- values]
 
-addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState -> IO ProgramCellState
+addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState ExactScope -> IO (ProgramCellState ExactScope)
 addProgramValue _ _ [] state = pure state
 addProgramValue root generation binders@(firstBinder:_) state = do
   owner <- maybe (fail "compiled Val owner is not canonical") pure
@@ -1351,7 +1539,7 @@ addProgramValue root generation binders@(firstBinder:_) state = do
     _ -> fail "value type interface dependencies are invalid"
   let digest = shaHex bytes
       artifact = ExactIfaceArtifact "main" (bbModule firstBinder) path digest requirements
-      exact = programExact state
+      exact = programInput state
       selection = CompletedValueImport "main" (bbModule firstBinder) path digest
         [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
   lexicalRequirements <- programLexicalRequirements exact [] requirements
@@ -1360,7 +1548,7 @@ addProgramValue root generation binders@(firstBinder:_) state = do
   let retained = foldr (\binder -> Map.insert
           (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
         (programRetained state) binders
-  pure state { programExact = extended, programValues = programValues state ++ [selection]
+  pure state { programInput = extended, programValues = programValues state ++ [selection]
     , programRetained = retained }
 
 -- Refine generated instances in the original declaration's typed environment.
@@ -1402,9 +1590,9 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
   originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces directory completion
     ["__result"] [] (requestRetainedGenerations args) []
-  writePreparedSidecars SeparateYieldSites directory binds
+  void $ writePreparedSidecars SeparateYieldSites directory binds
     Nothing (map T.pack (prWarnings result)) artifacts
-  writePreparedArtifacts directory artifacts
+  void $ writePreparedArtifacts directory artifacts
   certified <- writeRequestProducts args originalInterfaces directory prepared productContext artifacts
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts directory prepared certified reserved exact

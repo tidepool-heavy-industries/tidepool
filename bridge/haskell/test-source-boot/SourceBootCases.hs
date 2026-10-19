@@ -3756,7 +3756,7 @@ originalProjectionProducts = withScratch $ \work -> do
     let itemDirectory = segmentDirectory </> ("item-" ++ show ordinal)
         target = if even ordinal then currentProgram else safeProgram
     createDirectory itemDirectory
-    writeCertifiedSegmentItemProducts paired sharedCertificate itemDirectory target
+    void $ writeCertifiedSegmentItemProducts paired sharedCertificate itemDirectory target
     itemFacts <- readSegmentItemCodecFacts work (itemDirectory </> "certified-products.cbor")
     unless (null (codecCertificateModules itemFacts)
         && length (codecCertificateOwners itemFacts) == length (programGlobals target)
