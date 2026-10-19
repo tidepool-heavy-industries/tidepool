@@ -22620,10 +22620,15 @@ mod tests {
             )
             .unwrap();
         type_baseline.normalize().unwrap();
-        assert!(!type_baseline
+        assert!(type_baseline
+            .compiler_input_projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(type_baseline
             .artifact_view()
-            .artifact_ids()
-            .contains(&original_id));
+            .selected_native_groups()
+            .is_empty());
         let private_request = ExactCompileContext::new(context.clone())
             .with_generated_planned_imports(Some(&certificate), [source.as_str()])
             .unwrap()
