@@ -311,11 +311,11 @@ impl ConfiguredSource {
             return Err(invalid("unsupported immutable service profile version"));
         }
         let facts = profile_decoder.frame()?;
-        if !facts.starts_with(b"TPGHC001") {
+        if !facts.starts_with(b"TPGHC002") {
             return Err(invalid("unsupported GHC profile facts version"));
         }
         let mut profile_identity = Sha256::new();
-        profile_identity.update(b"Tidepool GHC supported package profile v1\0");
+        profile_identity.update(b"Tidepool GHC supported package profile v2\0");
         profile_identity.update(facts);
         if <[u8; 32]>::from(profile_identity.finalize()) != self.profile {
             return Err(invalid("immutable profile identity differs"));
@@ -465,7 +465,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authenticated_provider_executes_sealed_captured_bytes() {
+    fn authenticated_provider_retains_sealed_captured_bytes() {
         let mut original = tempfile::tempfile().unwrap();
         original.write_all(b"print('captured')\n").unwrap();
         original.rewind().unwrap();

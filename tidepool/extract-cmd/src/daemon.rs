@@ -2359,7 +2359,7 @@ fn grant_worker_argv(
 struct QuarantinedSlot {
     worker: Worker,
     retirement: WorkerAbortRetirement,
-    _resource_permit: ResourcePermit,
+    _resource_permit: Option<ResourcePermit>,
     _admission_permit: Option<AdmissionPermit>,
     prior: Option<Box<FrontendError>>,
 }
@@ -2698,7 +2698,7 @@ fn serve_workers(
                             resident.quarantine();
                             drop(job_rx);
                             return Ok(Some(QuarantinedSlot {
-                                worker, retirement, _resource_permit: resource_permit,
+                                worker, retirement, _resource_permit: Some(resource_permit),
                                 _admission_permit: _permit, prior: None,
                             }));
                         }
@@ -2718,7 +2718,7 @@ fn serve_workers(
                                 resident.quarantine();
                                 drop(job_rx);
                                 return Ok(Some(QuarantinedSlot {
-                                    worker, retirement, _resource_permit: resource_permit,
+                                    worker, retirement, _resource_permit: Some(resource_permit),
                                     _admission_permit: _permit, prior: Some(Box::new(error)),
                                 }));
                             }
@@ -3718,6 +3718,7 @@ pub(crate) struct Worker {
     stdout: ChildStdout,
     build_products_namespace: BuildProductsNamespace,
     package_boot: Option<crate::package_source::WorkerPackageBootReceipt>,
+    _package_source: Option<std::sync::Arc<crate::package_source::ServicePackageSource>>,
 }
 
 impl Worker {
@@ -3801,27 +3802,41 @@ impl Worker {
             .stdout
             .take()
             .ok_or_else(|| FrontendError::Daemon("worker stdout was not piped".to_owned()))?;
-        let package_boot = if let Some(source) = &prepared.service_source {
-            match read_package_boot(&mut stdout)
-                .and_then(|bytes| source.check_boot(&bytes, &worker_instance))
-            {
-                Ok(receipt) => Some(receipt),
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(FrontendError::Io(error));
-                }
-            }
-        } else {
-            None
-        };
-        Ok(Self {
+        let mut worker = Self {
             child,
             stdin: Some(stdin),
             stdout,
             build_products_namespace,
-            package_boot,
-        })
+            package_boot: None,
+            _package_source: prepared.service_source.clone(),
+        };
+        if let Some(source) = &prepared.service_source {
+            match read_package_boot(&mut worker.stdout)
+                .and_then(|bytes| source.check_boot(&bytes, &worker_instance))
+            {
+                Ok(receipt) => worker.package_boot = Some(receipt),
+                Err(error) => {
+                    let retirement = worker.abort();
+                    if matches!(
+                        &retirement.worker,
+                        crate::CompilerWorkerRetirement::WaitUnconfirmed(_)
+                    ) {
+                        return Err(FrontendError::UnconfirmedWorkers {
+                            retained: RetainedDaemonWorkers(vec![QuarantinedSlot {
+                                worker,
+                                retirement,
+                                _resource_permit: None,
+                                _admission_permit: None,
+                                prior: Some(Box::new(FrontendError::Io(error))),
+                            }]),
+                            prior: None,
+                        });
+                    }
+                    return Err(FrontendError::Io(error));
+                }
+            }
+        }
+        Ok(worker)
     }
 
     /// A slot may retain its warm disk products only after its former child
@@ -7008,6 +7023,7 @@ tidepool-reuse-error: witness failed\n";
             stdout,
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
             package_boot: None,
+            _package_source: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -7056,6 +7072,7 @@ tidepool-reuse-error: witness failed\n";
                     child,
                     build_products_namespace: BuildProductsNamespace::direct().unwrap(),
                     package_boot: None,
+                    _package_source: None,
                 };
                 let (connection, client) = UnixStream::pair().unwrap();
                 let action_client = client.try_clone().unwrap();
@@ -7131,6 +7148,7 @@ tidepool-reuse-error: witness failed\n";
             child,
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
             package_boot: None,
+            _package_source: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result =
