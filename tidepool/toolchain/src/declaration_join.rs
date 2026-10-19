@@ -464,7 +464,7 @@ impl CertifiedAuthoredDeclaration {
         let implementations = self
             .compiler_support
             .artifacts()
-            .source_implementation_roles();
+            .retained_source_implementations();
         let mut inherited_by_owner = std::collections::BTreeMap::new();
         for node in inherited.iter().chain(&self.source_lexical_imports) {
             if inherited_by_owner

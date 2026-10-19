@@ -711,7 +711,7 @@ fn original_source_lexical(
         &roots,
         &imports,
         &[],
-        &artifacts.source_implementation_roles(),
+        &artifacts.retained_source_implementations(),
     )?
     .lexical)
 }

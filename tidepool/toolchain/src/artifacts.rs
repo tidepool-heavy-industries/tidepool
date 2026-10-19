@@ -6604,7 +6604,7 @@ mod typed_site_tests {
                 ),
             ]
         );
-        assert!(support.source_implementation_roles().is_empty());
+        assert!(support.retained_source_implementations().is_empty());
     }
 
     #[test]
@@ -9239,7 +9239,7 @@ mod module_product_tests {
                     std::slice::from_ref(&quoted_owner),
                     &admission.home_imports().unwrap(),
                     &[],
-                    &compiled.artifact_view.source_implementation_roles(),
+                    &compiled.artifact_view.retained_source_implementations(),
                 )
                 .unwrap();
                 let owners = surface

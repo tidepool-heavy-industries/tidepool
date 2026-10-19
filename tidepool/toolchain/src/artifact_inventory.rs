@@ -6303,11 +6303,11 @@ impl ArtifactView {
             .collect()
     }
 
-    /// Canonical interfaces authorize types alongside their implementations;
-    /// they cannot replace or grant a selected source implementation role.
-    /// Classify retained implementations for lexical traversal. Exact variants
-    /// share their kind; this census never selects a compiler original offer.
-    pub(crate) fn source_implementation_roles(
+    /// Census retained noncanonical implementations for lexical traversal.
+    /// Exact retained variants of an owner share their artifact kind. This is
+    /// neither the selected compiler role map nor native execution permission;
+    /// canonical interfaces do not add retained source implementations.
+    pub(crate) fn retained_source_implementations(
         &self,
     ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
         self.descriptors()
@@ -14184,7 +14184,7 @@ mod tests {
             std::slice::from_ref(&helper.descriptor.owner),
             &source_imports,
             &[],
-            &available.source_implementation_roles(),
+            &available.retained_source_implementations(),
         )
         .expect("recapture source graph must retain certified import evidence")
         .lexical;
@@ -17377,9 +17377,9 @@ mod tests {
         let execution_cap = inventory.admit(&type_cap, vec![native]).unwrap();
         assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);
         assert!(type_cap.entries().iter().all(|entry| !entry.is_native()));
-        assert!(type_cap.source_implementation_roles().is_empty());
+        assert!(type_cap.retained_source_implementations().is_empty());
         assert_eq!(
-            execution_cap.source_implementation_roles(),
+            execution_cap.retained_source_implementations(),
             BTreeMap::from([(module("Owner"), ArtifactKind::OriginalModule)])
         );
         assert!(execution_cap.artifact_ids().contains(&native_id));
@@ -17412,7 +17412,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(projected.artifact_ids(), vec![canonical_id]);
-        assert!(projected.source_implementation_roles().is_empty());
+        assert!(projected.retained_source_implementations().is_empty());
         drop(execution_cap);
         assert_eq!(inventory.node_count(), 1);
         assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);

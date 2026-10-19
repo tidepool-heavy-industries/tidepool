@@ -207,7 +207,7 @@ impl PreparedValueSourceSupport {
         .into_iter()
         .map(|node| (node.owner, node.imports))
         .collect();
-        let implementations = context.artifact_view().source_implementation_roles();
+        let implementations = context.artifact_view().retained_source_implementations();
         let selected = context.compiler_metadata_snapshot()?.entries;
         Ok(Self {
             context,
@@ -4692,7 +4692,7 @@ impl ProgramSourceSupportState {
             // their adjacency comes from the validated current-source receipt.
             .chain(selected_originals.keys().cloned())
             .collect::<Vec<_>>();
-        let implementations = context.artifact_view().source_implementation_roles();
+        let implementations = context.artifact_view().retained_source_implementations();
         let program_source_lexical = crate::declaration_join::source_lexical_surface(
             &roots,
             &imports,
@@ -5903,7 +5903,7 @@ impl<'a> ExactProductAdmission<'a> {
                     .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
                     .cloned()
                     .collect::<Vec<_>>(),
-                &artifacts.source_implementation_roles(),
+                &artifacts.retained_source_implementations(),
             )?;
         }
         let exact_roots = self
@@ -18915,7 +18915,7 @@ mod tests {
         assert!(context.lexical_graph().is_empty());
         assert!(!context
             .artifact_view()
-            .source_implementation_roles()
+            .retained_source_implementations()
             .contains_key(&owner));
         let entry = context
             .artifact_view()

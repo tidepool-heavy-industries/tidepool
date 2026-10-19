@@ -314,7 +314,7 @@ impl<'a, 'validation> ValidatedAuthoredClosure<'a, 'validation> {
             )?;
             let mut implementations = context
                 .into_iter()
-                .flat_map(|context| context.artifact_view().source_implementation_roles())
+                .flat_map(|context| context.artifact_view().retained_source_implementations())
                 .collect::<BTreeMap<_, _>>();
             for product in products {
                 let owner = ExactModuleIdentity {
@@ -1480,7 +1480,7 @@ mod tests {
         assert!(context.lexical_graph().is_empty());
         assert!(context
             .artifact_view()
-            .source_implementation_roles()
+            .retained_source_implementations()
             .is_empty());
         assert!(context
             .artifact_view()

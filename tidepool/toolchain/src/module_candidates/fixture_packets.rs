@@ -192,7 +192,7 @@ fn admit_fixture_scope(
             lexical_roots,
             &imports,
             &[],
-            &view.source_implementation_roles(),
+            &view.retained_source_implementations(),
         )
         .unwrap();
         let lexical_owners = surface
