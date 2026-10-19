@@ -9806,7 +9806,8 @@ mod authored_publication_tests {
             }));
             assert_eq!(result.is_err(), unwind);
             let fence = scope.source_admission().fence().unwrap();
-            assert_eq!(fence.pending_claims(), 0);
+            assert_eq!(fence.pending_claims(), 1);
+            assert_eq!(fence.unconfirmed_claims(), 1);
             assert!(matches!(
                 fence.reopen(),
                 Err(super::super::SourceAdmissionError::Unconfirmed { .. })
