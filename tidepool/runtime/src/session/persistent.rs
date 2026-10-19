@@ -946,6 +946,9 @@ impl PersistentSession {
         ),
         PreparedRuntimeError,
     > {
+        let plan = target
+            .source_plan()
+            .ok_or(PreparedRuntimeError::MissingSourceDomainPlan)?;
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -958,9 +961,6 @@ impl PersistentSession {
                 .iter()
                 .flat_map(|selected| selected.image().constructor_declarations()),
         )?;
-        let plan = target
-            .source_plan()
-            .ok_or(PreparedRuntimeError::MissingSourceDomainPlan)?;
         let inherited = {
             let current = self
                 .bindings
@@ -7534,6 +7534,77 @@ mod checkpoint_scope_tests {
         assert!(
             matches!(session.adopt_initial_notebook_scope(scope), Err(SessionError::DeadScope(id)) if id == scope)
         );
+    }
+
+    #[test]
+    fn certified_install_refuses_plan_less_target_before_source_work() {
+        use tidepool_repr::execution_schema::testing;
+        let registry = ImageRegistry::new();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope();
+        let target = CertifiedTargetImage::compile(
+            testing::prepare(testing::wire_program()).unwrap(),
+            &registry,
+        )
+        .unwrap();
+        let refused = session.install_certified_turn_in(
+            scope,
+            &target.fixture_constructor_metadata(),
+            target,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+            &[],
+        );
+        assert!(matches!(
+            refused,
+            Err(PreparedRuntimeError::MissingSourceDomainPlan)
+        ));
+        assert!(session.residency().is_none());
+        assert!(session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .is_empty());
+    }
+
+    #[test]
+    fn certified_install_with_plan_reaches_the_source_transaction_seam() {
+        use tidepool_repr::execution_schema::testing;
+        let registry = ImageRegistry::new();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope();
+        let plan = ResolvedSourceDomainPlan::fixture(
+            BTreeMap::new(),
+            session
+                .bindings()
+                .source_domain_selection_in(session.scope_tree(), scope)
+                .unwrap(),
+            session
+                .bindings()
+                .scope_snapshot(session.scope_tree(), scope)
+                .unwrap(),
+        );
+        let target = CertifiedTargetImage::compile_with_plan(
+            testing::prepare(testing::wire_program()).unwrap(),
+            &registry,
+            plan,
+        )
+        .unwrap();
+        let refused = session.install_certified_turn_in(
+            scope,
+            &target.fixture_constructor_metadata(),
+            target,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+            &[],
+        );
+        assert!(matches!(
+            refused,
+            Err(PreparedRuntimeError::SourceAdmission(
+                super::super::SourceAdmissionError::MissingTransaction
+            ))
+        ));
     }
 }
 

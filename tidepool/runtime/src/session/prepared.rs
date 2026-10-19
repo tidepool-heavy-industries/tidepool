@@ -8409,13 +8409,16 @@ pub(super) mod tests {
                 required_generation: None,
             });
         }
-        let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
-            .unwrap()
-            .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+        let target = CertifiedTargetImage::compile_with_plan(
+            testing::prepare(wire).unwrap(),
+            &registry,
+            super::super::persistent::ResolvedSourceDomainPlan::fixture(
                 target_sources,
                 selection,
                 snapshot,
-            ));
+            ),
+        )
+        .unwrap();
         let demanded = target.compile_scoped_demanded(selected, &registry).unwrap();
         let owners = roots
             .iter()
@@ -8448,13 +8451,25 @@ pub(super) mod tests {
         );
         assert_eq!(session.residency().unwrap().programs, 3);
         assert_eq!(session.prepared_mut().unwrap().code_export_count(), 0);
+        let dead_plan = super::super::persistent::ResolvedSourceDomainPlan::fixture(
+            BTreeMap::new(),
+            session
+                .bindings()
+                .source_domain_selection_in(session.scope_tree(), scope)
+                .unwrap(),
+            session
+                .bindings()
+                .scope_snapshot(session.scope_tree(), scope)
+                .unwrap(),
+        );
         assert!(matches!(
             session.install_certified_turn_in(
                 tidepool_codegen::scope::ScopeId(u64::MAX),
                 &DataConTable::new(),
-                CertifiedTargetImage::compile(
+                CertifiedTargetImage::compile_with_plan(
                     testing::prepare(testing::wire_program()).unwrap(),
                     &registry,
+                    dead_plan,
                 )
                 .unwrap(),
                 &[],
@@ -8701,13 +8716,16 @@ pub(super) mod tests {
                 required_evaluated: false,
                 required_generation: None,
             });
-            let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
-                .unwrap()
-                .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+            let target = CertifiedTargetImage::compile_with_plan(
+                testing::prepare(wire).unwrap(),
+                &registry,
+                super::super::persistent::ResolvedSourceDomainPlan::fixture(
                     roots,
                     selected.clone(),
                     snapshot,
-                ));
+                ),
+            )
+            .unwrap();
             let demanded = target.compile_scoped_demanded(groups, &registry).unwrap();
             (
                 target,
