@@ -37,7 +37,7 @@ module Tidepool.ExactScope
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
-  , readWorldInputsWithOwner
+  , readWorldInputsWithOwner, decodeWorldSources
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   ) where
 

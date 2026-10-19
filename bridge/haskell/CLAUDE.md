@@ -128,6 +128,11 @@ bytecode generation can compile foreign stubs even when CPP and TH are disabled.
 Authenticated source-row names without captured finder-representable paths
 produce Unavailable; passive custody can prevent an absence claim but cannot
 select an interface or authorize an ambient/package replacement.
+Unpublished world directories are released on failure or cancellation through
+the existing completion owner, retaining both the primary and cleanup failures.
+The masked final publication performs only preforced owner writes. Published
+backing files remain with their actual world/worker owner until safe release;
+dropping an index entry does not establish release of global GHC state.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization

@@ -37,6 +37,7 @@ module Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, HeldCompilerWorld
+  , materializeWorldSources
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
@@ -46,7 +47,7 @@ module Tidepool.GhcPipeline
 
 import Tidepool.RequestCompletion
   ( CleanupStage(CompilerScopeRestore), captureCompletion, withCompletionRelease
-  , attemptReleases, appendCleanupFailures, finishCompletion )
+  , attemptReleases, appendCleanupFailures, finishCompletion, completionResult, BodyOutcome(..) )
 
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr', loadIfaceByteCode, generateFreshByteCode, mkCgInteractiveGuts)
@@ -276,7 +277,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
-  , WorldInputFacts, readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
+  , WorldInputFacts, CapturedWorldSources, readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints
   , WorldInputsFailure(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -1313,31 +1314,47 @@ data WorldPreparedModules = WorldPreparedModules HomePackageTable (Map.Map Modul
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
 
-materializeWorldSources :: FilePath -> WorldInputFacts -> IO WorldMaterialization
-materializeWorldSources parent facts = do
+-- The final callback is masked: its sole production consumer prepares all
+-- publication metadata, then transfers this directory to the world/hold owner
+-- with nonblocking writes. A failed unissued extent preserves both its primary
+-- exception (including cancellation) and any cleanup failure. Failed removal
+-- remains beneath the existing worker namespace for confirmed-reap cleanup.
+materializeWorldSources :: FilePath -> CapturedWorldSources -> Set.Set String
+  -> (WorldMaterialization -> IO result) -> IO result
+materializeWorldSources parent sources hints publish = mask $ \restore -> do
   directory <- mkdtemp (parent </> "world.XXXXXX")
-  let products = directory </> "products"
-  createDirectory products
-  roots <- forM (zip [0..] (worldSourceRoots (worldInputsSources facts))) $ \(ordinal,root) -> do
-    let physicalRoot = directory </> ("root-" ++ show (ordinal :: Int))
-    createDirectory physicalRoot
-    entries <- forM (Map.toAscList (worldSourceFiles root)) $ \(relative,bytes) -> do
-      let physical = physicalRoot </> relative
-      createDirectoryIfMissing True (takeDirectory physical)
-      BS.writeFile physical bytes
-      pure (relative,WorldHomeSource ordinal relative physical (SHA256.hash bytes))
-    pure (physicalRoot,entries)
-  let sourceNames entries = Map.fromList
-        [(mkModuleName (map (\c -> if c == pathSeparator then '.' else c) (dropExtension relative)),source)
-        | (relative,source) <- reverse entries, takeExtension relative `elem` [".hs",".lhs"]]
-      names = foldr (Map.union . sourceNames . snd) Map.empty roots
-      paths = Map.fromList [(physical,source) | (_,entries) <- roots
-        , (_,source@(WorldHomeSource _ _ physical _)) <- entries]
-  -- Build refusal hints once on acquisition, never enumerate passive custody
-  -- on a resident query or turn it into a selected compiler interface set.
-  let hints = worldInputsSourceModuleHints facts
-  _ <- evaluate (Set.size hints)
-  pure (WorldMaterialization products (map fst roots) names paths hints)
+  completed <- captureCompletion $ do
+    materialized <- restore (build directory)
+    publish materialized
+  case completionResult completed of
+    BodySucceeded _ -> finishCompletion completed
+    _ -> do
+      failures <- attemptReleases [(CompilerScopeRestore,removeDirectoryRecursive directory)]
+      finishCompletion (appendCleanupFailures completed failures)
+  where
+    build directory = do
+      let products = directory </> "products"
+      createDirectory products
+      roots <- forM (zip [0..] (worldSourceRoots sources)) $ \(ordinal,root) -> do
+        let physicalRoot = directory </> ("root-" ++ show (ordinal :: Int))
+        createDirectory physicalRoot
+        entries <- forM (Map.toAscList (worldSourceFiles root)) $ \(relative,bytes) -> do
+          let physical = physicalRoot </> relative
+          createDirectoryIfMissing True (takeDirectory physical)
+          BS.writeFile physical bytes
+          sha <- evaluate (SHA256.hash bytes)
+          pure (relative,WorldHomeSource ordinal relative physical sha)
+        pure (physicalRoot,entries)
+      let sourceNames entries = Map.fromList
+            [(mkModuleName (map (\c -> if c == pathSeparator then '.' else c) (dropExtension relative)),source)
+            | (relative,source) <- reverse entries, takeExtension relative `elem` [".hs",".lhs"]]
+          names = foldr (Map.union . sourceNames . snd) Map.empty roots
+          paths = Map.fromList [(physical,source) | (_,entries) <- roots
+            , (_,source@(WorldHomeSource _ _ physical _)) <- entries]
+      -- Complete cold indexes before publication, never enumerate passive
+      -- custody on a resident query or select an interface from these hints.
+      _ <- evaluate (Set.size hints + Map.size names + Map.size paths + length roots)
+      evaluate (WorldMaterialization products (map fst roots) names paths hints)
 
 -- This path starts from captured source selection, never the universe's most
 -- recent HPT or a raw-custody module inventory. The universe supplies only its
@@ -5339,12 +5356,20 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 Nothing -> do
                                     unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
                                     directory <- maybe (throwIO WorldQueryUnavailable) pure (universeWorldDirectory selected)
-                                    materialized <- materializeWorldSources directory facts
-                                    table <- newIORef (WorldPreparedModules emptyHomePackageTable Map.empty)
-                                    let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
-                                        world = HeldCompilerWorld facts reference materialized table
-                                    modifyIORef' universe (\state -> state {universeWorlds=Map.insert root world (universeWorlds state)})
-                                    install world
+                                    materializeWorldSources directory (worldInputsSources facts)
+                                      (worldInputsSourceModuleHints facts) $ \materialized -> do
+                                        table <- newIORef (WorldPreparedModules emptyHomePackageTable Map.empty)
+                                        let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
+                                            world = HeldCompilerWorld facts reference materialized table
+                                        _ <- evaluate (length reference)
+                                        nextWorlds <- evaluate (Map.insert root world (universeWorlds selected))
+                                        next <- evaluate (selected {universeWorlds=nextWorlds})
+                                        held <- evaluate (Just world)
+                                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
+                                        -- No fallible or interruptible work follows publication.
+                                        writeIORef universe next
+                                        writeIORef heldWorld held
+                                        pure ready
                 queryWorld expected grant executor question = runGuarded $ do
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
