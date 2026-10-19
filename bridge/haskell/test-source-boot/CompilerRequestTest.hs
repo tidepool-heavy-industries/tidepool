@@ -14,7 +14,10 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
-import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName)
+import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName, getSessionDynFlags)
+import GHC.Driver.Backend (backendGeneratesCode)
+import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynamicFilePragma)
+import GHC.Types.SrcLoc (noLoc)
 import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
@@ -177,6 +180,15 @@ worldMaterializationBoundaries = do
 checkedPublicModuleHistories :: IO ()
 checkedPublicModuleHistories = do
   withRequestFixture $ \_ request work -> do
+    runBoundGhc request $ do
+      baseline <- getSessionDynFlags
+      (effective,leftover,_) <- parseDynamicFilePragma baseline [noLoc "-fbyte-code"]
+      liftIO $ unless (null leftover
+          && not (backendGeneratesCode (backend baseline))
+          && not (gopt Opt_ByteCode baseline)
+          && not (backendGeneratesCode (backend effective))
+          && gopt Opt_ByteCode effective)
+        (fail "pinned GHC bytecode pragma no longer separates its generation flag from the checking backend")
     writeTarget work
     checked <- compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing
       (work </> "BoundPreparedA.hs")

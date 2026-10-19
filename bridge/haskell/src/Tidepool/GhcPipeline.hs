@@ -6181,10 +6181,11 @@ requireWorldModuleFlags :: FilePath -> DynFlags -> IO ()
 requireWorldModuleFlags path flags = do
   when (hasUntrackedCompileTimeExecution flags)
     (throwIO (WorldModulePolicyFailure path WorldUntrackedOptions))
-  -- A module-local -fbyte-code also generates foreign stubs through GHC's
-  -- interpreter backend. Keep every demanded source in the checking backend
-  -- before make can invoke a compiler or read uncaptured foreign headers.
-  when (backendGeneratesCode (backend flags))
+  -- GHC also records bytecode generation independently of the current backend.
+  -- Keep every demanded source in the checking policy before make can invoke
+  -- a compiler or read uncaptured foreign headers.
+  when (backendGeneratesCode (backend flags)
+      || any (`gopt` flags) [Opt_ByteCode,Opt_ByteCodeAndObjectCode])
     (throwIO (WorldModulePolicyFailure path WorldCodeGeneration))
   when (any (`gopt` flags) [Opt_WriteHie,Opt_DumpToFile,Opt_Hpc])
     (throwIO (WorldModulePolicyFailure path WorldSideOutputs))
