@@ -1690,6 +1690,23 @@ impl<'de> Deserialize<'de> for PublicationNativeFacts {
             .map_err(|_| serde::de::Error::custom("decoded publication facts unexpectedly shared"))
     }
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeFactWork {
+    pub(crate) changed_entries: u64,
+    pub(crate) serialized_bytes: u64,
+    pub(crate) offered_bytes: u64,
+    pub(crate) cid_validation_bytes: u64,
+    pub(crate) link_visits: u64,
+    pub(crate) unlink_visits: u64,
+}
+#[cfg(test)]
+thread_local! { static NATIVE_FACT_WORK:Cell<NativeFactWork>=Cell::new(NativeFactWork::default()); }
+#[cfg(test)]
+pub(crate) fn take_native_fact_work() -> NativeFactWork {
+    NATIVE_FACT_WORK.with(|work| work.replace(NativeFactWork::default()))
+}
+
 impl PublicationNativeFacts {
     pub(crate) fn commitment(&self) -> Cid {
         self.receipt.root
@@ -1745,6 +1762,20 @@ impl PublicationNativeFacts {
         })?;
         let staged = writer.finish()?;
         let frontier = frontier.replace_roots(&staged, vec![root])?;
+        let metrics = staged.metrics();
+        let work = frontier.work();
+        tracing::debug!(target:"exomonad_harness::timing", changed_entries=metrics.changed_entries,serialized_bytes=metrics.serialized_bytes,offered_bytes=metrics.offered_bytes,cid_validation_bytes=metrics.cid_validation_bytes,link_visits=work.link_visits,unlink_visits=work.unlink_visits,"native fact root maintained");
+        #[cfg(test)]
+        NATIVE_FACT_WORK.with(|counter| {
+            let mut total = counter.get();
+            total.changed_entries += metrics.changed_entries;
+            total.serialized_bytes += metrics.serialized_bytes;
+            total.offered_bytes += metrics.offered_bytes;
+            total.cid_validation_bytes += metrics.cid_validation_bytes;
+            total.link_visits += work.link_visits;
+            total.unlink_visits += work.unlink_visits;
+            counter.set(total);
+        });
         Ok(Arc::new(Self {
             maps,
             receipt: NativeFactReceipt {

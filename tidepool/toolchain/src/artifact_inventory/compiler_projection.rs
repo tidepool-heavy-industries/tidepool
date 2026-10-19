@@ -3723,6 +3723,92 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_native_fact_successors_encode_only_changed_facts() {
+        use crate::exact_context::{take_native_fact_work, NativeFactWork};
+        for unrelated in [0, 16, 128] {
+            let inventory = ArtifactInventory::default();
+            let mut entries = decision_affinity_entries();
+            entries.extend((0..unrelated).map(|index| {
+                Arc::new(ArtifactEntry::canonical(
+                    crate::certified_products::fixture_module_interface(
+                        [2; 32],
+                        "unrelated",
+                        &format!("Prior{index}"),
+                        BTreeMap::new(),
+                    ),
+                ))
+            }));
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            take_native_fact_work();
+            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let cold = take_native_fact_work();
+            assert!(
+                cold.changed_entries > 0
+                    && cold.serialized_bytes > 0
+                    && cold.cid_validation_bytes > 0
+            );
+            assert!(!source.input_decisions.facts.is_empty());
+            let before = Arc::clone(source.native_fact_owner());
+            for _ in 0..4 {
+                let request = source.close_request(None, &Default::default()).unwrap();
+                assert_eq!(request.input_decisions, source.input_decisions);
+                assert!(Arc::ptr_eq(request.native_fact_owner(), &before));
+                let captured = PublicationNativeAuthority::capture(&request).unwrap();
+                assert!(Arc::ptr_eq(captured.facts(), &before));
+                assert_eq!(take_native_fact_work(), NativeFactWork::default());
+            }
+            // Independent actual new interface ingress, created outside measurement.
+            let addition = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "changed",
+                    "OnlyNew",
+                    BTreeMap::new(),
+                ),
+            ));
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[Arc::clone(&addition)]).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), vec![addition])
+                .unwrap();
+            let incoming =
+                CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap();
+            take_native_fact_work();
+            let changed = source.merge(&incoming).unwrap();
+            let delta = take_native_fact_work();
+            assert_eq!(
+                delta.changed_entries, 1,
+                "only one new typed role: {delta:?}"
+            );
+            assert!(delta.serialized_bytes > 0 && delta.serialized_bytes < cold.serialized_bytes);
+            assert!(delta.link_visits > 0 && delta.unlink_visits > 0);
+            assert_eq!(
+                changed.native_fact_owner().offers,
+                source.native_fact_owner().offers
+            );
+            assert_eq!(
+                changed.native_fact_owner().native_availability,
+                source.native_fact_owner().native_availability
+            );
+            assert_eq!(
+                changed.native_fact_owner().input_decisions,
+                source.native_fact_owner().input_decisions
+            );
+            assert_ne!(
+                changed.native_fact_owner().commitment(),
+                before.commitment()
+            );
+            assert_eq!(changed.input_decisions, source.input_decisions);
+            eprintln!(
+                "native-fact-successor unrelated={unrelated} cold={cold:?} changed={delta:?}"
+            );
+        }
+    }
+
+    #[test]
     fn complete_support_new_and_merge_do_not_materialize_unused_metadata() {
         for demand in [
             NativeArtifactDemand::AllGroups,
