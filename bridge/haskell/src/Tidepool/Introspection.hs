@@ -913,7 +913,8 @@ visibleInspectionName :: Name -> Bool
 visibleInspectionName = not . isPrefixOf "__tidepool_" . occNameString . nameOccName
 
 -- | Apply an extraction inspection budget. `Nothing` means the caller asked for
--- the complete enumeration.
+-- the complete enumeration. The budget counts names, and browsing renders one
+-- entry per surviving name, so it also bounds the encoded entry list.
 boundedNames :: Maybe Int -> [a] -> [a]
 boundedNames Nothing = id
 boundedNames (Just budget) = take budget
