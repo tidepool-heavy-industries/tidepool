@@ -470,6 +470,16 @@ impl std::ops::Index<&ExactModuleIdentity> for AdmittedCompilerRoles {
     }
 }
 
+/// The acquired pairs chosen by one issued primary role. Equal image bytes
+/// do not replace these exact binding selection witnesses.
+pub(crate) struct WorldPrimaryTypeRow<'a> {
+    pub(crate) owner: &'a ExactModuleIdentity,
+    pub(crate) interface_binding: &'a ArtifactBinding,
+    pub(crate) original_binding: Option<&'a ArtifactBinding>,
+    pub(crate) transport_binding: &'a ArtifactBinding,
+    pub(crate) entry: &'a Arc<ArtifactEntry>,
+}
+
 /// Borrowed selected interface observations and the same issuing view that
 /// resolves their scoped bindings. Historical custody cannot choose a row.
 pub(crate) struct SelectedCompilerInterfaces<'a> {
@@ -790,6 +800,21 @@ impl CompilerSourceSupport {
         .map(|mut support| {
             support.input_decisions = input_decisions;
             support
+        })
+    }
+
+    /// Borrow successful role admission's actual acquired binding pairs. This
+    /// is a cold export/delta issuer view, not an inventory namespace search.
+    pub(crate) fn world_primary_type_rows(&self) -> impl Iterator<Item = WorldPrimaryTypeRow<'_>> {
+        self.selected.iter().map(|(owner, row)| {
+            let transport = row.original.as_ref().unwrap_or(&row.interface);
+            WorldPrimaryTypeRow {
+                owner,
+                interface_binding: &row.interface.0,
+                original_binding: row.original.as_ref().map(|(binding, _)| binding),
+                transport_binding: &transport.0,
+                entry: &transport.1,
+            }
         })
     }
 
@@ -1155,23 +1180,20 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn from_original_output(
-        request: &crate::declaration_context::ExactRequestInputs,
+        compiler: &crate::declaration_context::RequestCompilerInputs,
+        parent: &Self,
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
-        let projection = request
-            .compiler()
+        let projection = compiler
             .projection()
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
-        request
-            .compiler()
+        compiler
             .compiler_source_support()
             .rebuild(
                 projection,
                 output.issued_artifacts().clone(),
-                request
-                    .context()
-                    .compiler_source_support()
+                parent
                     .native_offers()
                     .iter()
                     .chain(output.issued_offers())

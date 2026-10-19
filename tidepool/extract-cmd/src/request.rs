@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v23";
-const MAGIC: &[u8; 8] = b"TPREQ023";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
+const MAGIC: &[u8; 8] = b"TPREQ024";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -128,6 +129,208 @@ impl WorldPublicModuleRequest {
             && valid_reference(&self.realization)
             && self.output.to_str().is_some_and(valid_reference)
             && matches!(&self.query.scope, InspectionScope::PublicModule(module) if valid_reference(module))
+    }
+}
+
+/// Source recipe DATA. The existing runtime admission and held-world owner
+/// supply authority; these fields never select a second compiler inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldCellRecipe {
+    pub source: String,
+    pub template: String,
+    pub turn_templates: Vec<(String, String)>,
+}
+
+impl WorldCellRecipe {
+    fn encoded_len(&self) -> usize {
+        4 + self.source.len()
+            + 4
+            + self.template.len()
+            + 4
+            + self
+                .turn_templates
+                .iter()
+                .map(|(kind, body)| 8 + kind.len() + body.len())
+                .sum::<usize>()
+    }
+
+    fn valid(&self) -> bool {
+        self.source.len() <= 2 << 20
+            && self.template.len() <= 2 << 20
+            && self.turn_templates.len() <= 256
+            && self.turn_templates.iter().all(|(kind, source)| {
+                valid_reference(kind) && kind.len() <= 65536 && source.len() <= 2 << 20
+            })
+            && self
+                .turn_templates
+                .iter()
+                .map(|(kind, _)| kind)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.turn_templates.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldCellPlanRequest {
+    pub world: String,
+    pub realization: String,
+    pub recipe: Arc<WorldCellRecipe>,
+    pub output: PathBuf,
+}
+
+fn valid_cell_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|value| valid_reference(value) && value.len() <= 65536)
+}
+
+impl WorldCellPlanRequest {
+    fn valid(&self) -> bool {
+        self.validate_transport().is_ok()
+    }
+
+    /// Check the existing encoded frame budget without copying source bodies.
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
+        if !valid_world_identity(&self.world)
+            || !valid_reference(&self.realization)
+            || !self.recipe.valid()
+            || !valid_cell_path(&self.output)
+        {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        check_world_cell_bytes(
+            21 + 1
+                + 4
+                + self.world.len()
+                + 4
+                + self.realization.len()
+                + self.recipe.encoded_len()
+                + 4
+                + self.output.as_os_str().len(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlannedCellSlot {
+    Prologue(u64),
+    Declaration(u64),
+    Bind(u64),
+    Expression {
+        generation: u64,
+        observation: String,
+    },
+}
+
+impl PlannedCellSlot {
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Prologue(generation)
+            | Self::Declaration(generation)
+            | Self::Bind(generation)
+            | Self::Expression { generation, .. } => *generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldCellPrepareRequest {
+    pub world: String,
+    pub realization: String,
+    pub recipe: Arc<WorldCellRecipe>,
+    pub plan: Vec<u8>,
+    pub admission: [u8; 32],
+    pub slots: Vec<(u64, PlannedCellSlot)>,
+    pub directory: PathBuf,
+    pub output: PathBuf,
+}
+
+impl WorldCellPrepareRequest {
+    fn valid_fields(&self) -> bool {
+        valid_world_identity(&self.world)
+            && valid_reference(&self.realization)
+            && self.recipe.valid()
+            && !self.plan.is_empty()
+            && self.plan.len() <= 8 << 20
+            && self.slots.len() <= 10000
+            && self
+                .slots
+                .iter()
+                .enumerate()
+                .all(|(index, (ordinal, slot))| {
+                    *ordinal == index as u64
+                        && slot.generation() > 0
+                        && match slot {
+                            PlannedCellSlot::Expression { observation, .. } => {
+                                valid_reference(observation) && observation.len() <= 65536
+                            }
+                            _ => true,
+                        }
+                })
+            && self
+                .slots
+                .iter()
+                .map(|(_, slot)| slot.generation())
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.slots.len()
+            && valid_cell_path(&self.directory)
+            && valid_cell_path(&self.output)
+    }
+    fn valid(&self) -> bool {
+        self.validate_transport().is_ok()
+    }
+
+    /// Check the existing encoded frame budget without copying source bodies.
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
+        if !self.valid_fields() {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        let slots = self
+            .slots
+            .iter()
+            .map(|(_, slot)| {
+                17 + match slot {
+                    PlannedCellSlot::Expression { observation, .. } => 4 + observation.len(),
+                    _ => 0,
+                }
+            })
+            .sum::<usize>();
+        check_world_cell_bytes(
+            21 + 1
+                + 4
+                + self.world.len()
+                + 4
+                + self.realization.len()
+                + self.recipe.encoded_len()
+                + 4
+                + self.plan.len()
+                + 32
+                + 4
+                + slots
+                + 4
+                + self.directory.as_os_str().len()
+                + 4
+                + self.output.as_os_str().len(),
+        )
+    }
+}
+
+// read_request charges the cwd and argv PAYLOAD bytes, including this flag
+// and the typed request's hex expansion. The actual cwd is known only by the
+// physical transport; this borrowed preflight reserves the known argv part
+// before cloning/encoding/appending bulk source fields. It does not raise or
+// independently copy the daemon's operational receive limit.
+fn check_world_cell_bytes(binary_bytes: usize) -> Result<(), ProtocolError> {
+    let declared = (binary_bytes as u64)
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(WORKER_REQUEST_FLAG.len() as u64))
+        .unwrap_or(u64::MAX);
+    let limit = crate::daemon::MAX_REQUEST_FRAME_BYTES;
+    if declared > u64::from(limit) {
+        Err(ProtocolError::RequestBudgetExceeded { declared, limit })
+    } else {
+        Ok(())
     }
 }
 
@@ -381,6 +584,8 @@ enum Field {
     PortableOutput,
     EnsureExactInputs(ExactInputsRequest),
     WorldPublicModule(WorldPublicModuleRequest),
+    WorldCellPlan(WorldCellPlanRequest),
+    WorldCellPrepare(WorldCellPrepareRequest),
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -400,6 +605,8 @@ pub(crate) enum RequestMode {
     Invalid,
     EnsureExactInputs,
     WorldPublicModule,
+    WorldCellPlan,
+    WorldCellPrepare,
     ActivationPreview,
     DeclarationInterface,
     CellPlan,
@@ -417,6 +624,8 @@ impl std::fmt::Display for RequestMode {
             Self::Invalid => "invalid",
             Self::EnsureExactInputs => "ensure_exact_inputs",
             Self::WorldPublicModule => "world_public_module",
+            Self::WorldCellPlan => "world_cell_plan",
+            Self::WorldCellPrepare => "world_cell_prepare",
             Self::ActivationPreview => "activation_preview",
             Self::DeclarationInterface => "declaration_interface",
             Self::CellPlan => "cell_plan",
@@ -505,6 +714,23 @@ impl ExtractRequest {
                 }
                 _ => Err(CliError::new(
                     "world public module query must be source-free, public and exclusive",
+                )),
+            };
+        }
+        if self
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::WorldCellPlan(_) | Field::WorldCellPrepare(_)))
+        {
+            return match self.fields.as_slice() {
+                [Field::WorldCellPlan(request)] if request.valid() => {
+                    Ok(RequestMode::WorldCellPlan)
+                }
+                [Field::WorldCellPrepare(request)] if request.valid() => {
+                    Ok(RequestMode::WorldCellPrepare)
+                }
+                _ => Err(CliError::new(
+                    "held world cell request must be bounded and exclusive",
                 )),
             };
         }
@@ -914,6 +1140,60 @@ impl ExtractRequest {
                         output,
                     })
                 }
+                59 => {
+                    check_world_cell_bytes(bytes.len())?;
+                    let world = decoder.cell_string(64)?;
+                    let realization = decoder.string()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
+                    let output = PathBuf::from(decoder.cell_string(65536)?);
+                    Field::WorldCellPlan(WorldCellPlanRequest {
+                        world,
+                        realization,
+                        recipe,
+                        output,
+                    })
+                }
+                60 => {
+                    check_world_cell_bytes(bytes.len())?;
+                    let world = decoder.cell_string(64)?;
+                    let realization = decoder.string()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
+                    let plan = decoder.cell_frame(8 << 20)?.to_vec();
+                    let admission = decoder.fixed()?;
+                    let count = decoder.count(17)?;
+                    if count > 10000 {
+                        return Err(ProtocolError::InvalidWorldCell);
+                    }
+                    let mut slots = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let ordinal = decoder.u64()?;
+                        let tag = decoder.byte()?;
+                        let generation = decoder.u64()?;
+                        let slot = match tag {
+                            0 => PlannedCellSlot::Prologue(generation),
+                            1 => PlannedCellSlot::Declaration(generation),
+                            2 => PlannedCellSlot::Bind(generation),
+                            3 => PlannedCellSlot::Expression {
+                                generation,
+                                observation: decoder.cell_string(65536)?,
+                            },
+                            _ => return Err(ProtocolError::InvalidWorldCell),
+                        };
+                        slots.push((ordinal, slot));
+                    }
+                    let directory = PathBuf::from(decoder.cell_string(65536)?);
+                    let output = PathBuf::from(decoder.cell_string(65536)?);
+                    Field::WorldCellPrepare(WorldCellPrepareRequest {
+                        world,
+                        realization,
+                        recipe,
+                        plan,
+                        admission,
+                        slots,
+                        directory,
+                        output,
+                    })
+                }
                 45 => return Err(ProtocolError::RetiredFieldTag(45)),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
@@ -942,6 +1222,15 @@ impl ExtractRequest {
             request
                 .admitted_mode()
                 .map_err(|_| ProtocolError::InvalidWorldPublicModule)?;
+        }
+        if request
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::WorldCellPlan(_) | Field::WorldCellPrepare(_)))
+        {
+            request
+                .admitted_mode()
+                .map_err(|_| ProtocolError::InvalidWorldCell)?;
         }
         if request.hosted_lookup_batch().is_some() {
             request
@@ -1261,6 +1550,30 @@ impl ExtractRequest {
         self
     }
 
+    pub fn world_cell_plan(
+        &mut self,
+        request: WorldCellPlanRequest,
+    ) -> Result<&mut Self, ProtocolError> {
+        if !self.fields.is_empty() {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        request.validate_transport()?;
+        self.fields.push(Field::WorldCellPlan(request));
+        Ok(self)
+    }
+
+    pub fn world_cell_prepare(
+        &mut self,
+        request: WorldCellPrepareRequest,
+    ) -> Result<&mut Self, ProtocolError> {
+        if !self.fields.is_empty() {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        request.validate_transport()?;
+        self.fields.push(Field::WorldCellPrepare(request));
+        Ok(self)
+    }
+
     pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
         self.fields.push(Field::WorldPublicModule(request));
         self
@@ -1402,6 +1715,14 @@ impl ExtractRequest {
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
                 Field::PortableOutput => flags.push("--portable-output".into()),
+                Field::WorldCellPlan(request) => {
+                    flag(&mut flags, "<world-cell-plan>", OsStr::new(&request.world))
+                }
+                Field::WorldCellPrepare(request) => flag(
+                    &mut flags,
+                    "<world-cell-prepare>",
+                    OsStr::new(&request.world),
+                ),
                 Field::WorldPublicModule(request) => flag(
                     &mut flags,
                     "<world-public-module>",
@@ -1502,6 +1823,38 @@ impl<'a> Decoder<'a> {
 
     fn string(&mut self) -> Result<String, ProtocolError> {
         self.text().map(str::to_owned)
+    }
+
+    fn cell_frame(&mut self, limit: usize) -> Result<&'a [u8], ProtocolError> {
+        let bytes = self.frame()?;
+        if bytes.len() > limit {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        Ok(bytes)
+    }
+
+    fn cell_string(&mut self, limit: usize) -> Result<String, ProtocolError> {
+        std::str::from_utf8(self.cell_frame(limit)?)
+            .map(str::to_owned)
+            .map_err(|_| ProtocolError::NonUtf8Text)
+    }
+
+    fn world_cell_recipe(&mut self) -> Result<WorldCellRecipe, ProtocolError> {
+        let source = self.cell_string(2 << 20)?;
+        let template = self.cell_string(2 << 20)?;
+        let count = self.count(8)?;
+        if count > 256 {
+            return Err(ProtocolError::InvalidWorldCell);
+        }
+        let mut turn_templates = Vec::with_capacity(count);
+        for _ in 0..count {
+            turn_templates.push((self.cell_string(65536)?, self.cell_string(2 << 20)?));
+        }
+        Ok(WorldCellRecipe {
+            source,
+            template,
+            turn_templates,
+        })
     }
 
     fn os_string(&mut self) -> Result<OsString, ProtocolError> {
@@ -1671,6 +2024,8 @@ pub enum ProtocolError {
     InvalidHostedLookup,
     InvalidExactInputs,
     InvalidWorldPublicModule,
+    InvalidWorldCell,
+    RequestBudgetExceeded { declared: u64, limit: u32 },
     UnknownInspectionNamespace(u8),
     UnknownOptionalTextTag(u8),
 }
@@ -1693,6 +2048,8 @@ impl std::fmt::Display for ProtocolError {
             Self::InvalidWorldPublicModule => {
                 f.write_str("invalid source-free world public module query")
             }
+            Self::InvalidWorldCell => f.write_str("invalid held world cell request"),
+            Self::RequestBudgetExceeded { declared, limit } => write!(f, "compiler request needs {declared} known argv payload bytes; limit is {limit} before the actual cwd"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
             Self::Truncated => f.write_str("truncated worker request"),
             Self::NonUtf8Text => f.write_str("worker request text is not UTF-8"),
@@ -1890,6 +2247,38 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::ActivationPreview => out.push(41),
         Field::InspectionStrict => out.push(42),
         Field::PortableOutput => out.push(53),
+        Field::WorldCellPlan(request) => {
+            out.push(59);
+            push_frame(out, OsStr::new(&request.world));
+            push_frame(out, OsStr::new(&request.realization));
+            encode_world_cell_recipe(out, &request.recipe);
+            push_frame(out, request.output.as_os_str());
+        }
+        Field::WorldCellPrepare(request) => {
+            out.push(60);
+            push_frame(out, OsStr::new(&request.world));
+            push_frame(out, OsStr::new(&request.realization));
+            encode_world_cell_recipe(out, &request.recipe);
+            push_u32(out, request.plan.len());
+            out.extend_from_slice(&request.plan);
+            out.extend_from_slice(&request.admission);
+            push_u32(out, request.slots.len());
+            for (ordinal, slot) in &request.slots {
+                out.extend_from_slice(&ordinal.to_le_bytes());
+                out.push(match slot {
+                    PlannedCellSlot::Prologue(_) => 0,
+                    PlannedCellSlot::Declaration(_) => 1,
+                    PlannedCellSlot::Bind(_) => 2,
+                    PlannedCellSlot::Expression { .. } => 3,
+                });
+                out.extend_from_slice(&slot.generation().to_le_bytes());
+                if let PlannedCellSlot::Expression { observation, .. } = slot {
+                    push_frame(out, OsStr::new(observation));
+                }
+            }
+            push_frame(out, request.directory.as_os_str());
+            push_frame(out, request.output.as_os_str());
+        }
         Field::WorldPublicModule(request) => {
             out.push(58);
             push_frame(out, OsStr::new(&request.world));
@@ -1922,6 +2311,16 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 }
             }
         }
+    }
+}
+
+fn encode_world_cell_recipe(out: &mut Vec<u8>, recipe: &WorldCellRecipe) {
+    push_frame(out, OsStr::new(&recipe.source));
+    push_frame(out, OsStr::new(&recipe.template));
+    push_u32(out, recipe.turn_templates.len());
+    for (kind, source) in &recipe.turn_templates {
+        push_frame(out, OsStr::new(kind));
+        push_frame(out, OsStr::new(source));
     }
 }
 
@@ -2144,7 +2543,7 @@ mod tests {
     fn hosted_lookup_matches_shared_independent_wire_fixture() {
         let (request, batch) = hosted_fixture();
         // Fixed independently encoded bytes also consumed by the Haskell codec test.
-        let bytes = unhex("545052455130323300010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72").unwrap();
+        let bytes = unhex("545052455130323400010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72").unwrap();
         assert_eq!(request.encode(), bytes);
         let decoded = ExtractRequest::decode(&bytes).unwrap();
         assert_eq!(decoded.hosted_lookup_batch(), Some(&batch));
@@ -2672,6 +3071,7 @@ mod tests {
             b"TPREQ020",
             b"TPREQ021",
             b"TPREQ022",
+            b"TPREQ023",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
@@ -2970,7 +3370,7 @@ mod tests {
         };
         let mut request = ExtractRequest::default();
         request.world_public_module(query.clone());
-        let bytes = unhex("5450524551303233000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        let bytes = unhex("5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
         assert_eq!(request.encode(), bytes);
         for mode in [WorldQueryMode::Info, WorldQueryMode::Type] {
             let mut request = ExtractRequest::default();
@@ -3050,6 +3450,178 @@ mod tests {
     }
 
     #[test]
+    fn world_cell_wire_is_exclusive_bounded_and_matches_haskell() {
+        let recipe = Arc::new(WorldCellRecipe {
+            source: "x <- pure 1".into(),
+            template: "{{CELL_IMPORTS}}\n{{CELL_BODY}}".into(),
+            turn_templates: vec![("bind".into(), "module Bind where".into())],
+        });
+        let plan = WorldCellPlanRequest {
+            world: "a".repeat(64),
+            realization: "held".into(),
+            recipe: recipe.clone(),
+            output: "plan.cbor".into(),
+        };
+        let prepare = WorldCellPrepareRequest {
+            world: plan.world.clone(),
+            realization: plan.realization.clone(),
+            recipe,
+            plan: b"plan-receipt".to_vec(),
+            admission: [b'b'; 32],
+            slots: vec![
+                (0, PlannedCellSlot::Bind(7)),
+                (
+                    1,
+                    PlannedCellSlot::Expression {
+                        generation: 8,
+                        observation: "it".into(),
+                    },
+                ),
+            ],
+            directory: "operation".into(),
+            output: "prepared.cbor".into(),
+        };
+        assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
+        assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
+        let plan_bytes = unhex("5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
+        let prepare_bytes = unhex("5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
+        let mut plan_request = ExtractRequest::default();
+        plan_request.world_cell_plan(plan.clone()).unwrap();
+        let mut prepare_request = ExtractRequest::default();
+        prepare_request.world_cell_prepare(prepare.clone()).unwrap();
+        for (request, bytes, mode) in [
+            (plan_request, plan_bytes, RequestMode::WorldCellPlan),
+            (
+                prepare_request,
+                prepare_bytes,
+                RequestMode::WorldCellPrepare,
+            ),
+        ] {
+            assert_eq!(request.encode(), bytes);
+            assert_eq!(ExtractRequest::decode(&bytes).unwrap().encode(), bytes);
+            assert_eq!(request.admitted_mode().unwrap(), mode);
+            for end in 0..bytes.len() {
+                assert!(ExtractRequest::decode(&bytes[..end]).is_err());
+            }
+            for extra in [
+                Field::Input("ambient.hs".into()),
+                Field::Include("ambient".into()),
+                Field::WorldCellPlan(plan.clone()),
+                Field::WorldCellPrepare(prepare.clone()),
+            ] {
+                for first in [false, true] {
+                    let mut mixed = request.clone();
+                    if first {
+                        mixed.fields.insert(0, extra.clone());
+                    } else {
+                        mixed.fields.push(extra.clone());
+                    }
+                    assert_eq!(
+                        ExtractRequest::decode(&mixed.encode()).unwrap_err(),
+                        ProtocolError::InvalidWorldCell
+                    );
+                }
+            }
+        }
+        let mut bad_recipes = Vec::new();
+        let mut value = plan.clone();
+        Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
+        bad_recipes.push(value);
+        let mut value = plan.clone();
+        let duplicate = value.recipe.turn_templates[0].clone();
+        Arc::make_mut(&mut value.recipe)
+            .turn_templates
+            .push(duplicate);
+        bad_recipes.push(value);
+        let mut value = plan.clone();
+        value.output = "x".repeat(65537).into();
+        bad_recipes.push(value);
+        for value in bad_recipes {
+            let mut request = ExtractRequest::default();
+            assert!(request.world_cell_plan(value.clone()).is_err());
+            assert!(request.fields.is_empty());
+            request.fields.push(Field::WorldCellPlan(value));
+            assert!(ExtractRequest::decode(&request.encode()).is_err());
+        }
+        let mut wrong_slots = Vec::new();
+        let mut value = prepare.clone();
+        value.slots[1].0 = 0;
+        wrong_slots.push(value);
+        let mut value = prepare.clone();
+        value.slots.reverse();
+        wrong_slots.push(value);
+        let mut value = prepare.clone();
+        value.slots[1].1 = PlannedCellSlot::Bind(7);
+        wrong_slots.push(value);
+        for value in wrong_slots {
+            let mut request = ExtractRequest::default();
+            assert!(request.world_cell_prepare(value.clone()).is_err());
+            assert!(request.fields.is_empty());
+            request.fields.push(Field::WorldCellPrepare(value));
+            assert_eq!(
+                ExtractRequest::decode(&request.encode()).unwrap_err(),
+                ProtocolError::InvalidWorldCell
+            );
+        }
+        let mut empty = prepare;
+        empty.slots.clear();
+        let mut request = ExtractRequest::default();
+        request.world_cell_prepare(empty).unwrap();
+        assert!(ExtractRequest::decode(&request.encode()).is_ok()); // Semantic empty-plan proof is owned by the compiler.
+    }
+
+    #[test]
+    fn world_cell_builders_bound_hex_expansion_before_appending_source() {
+        // Four existing 2MiB fields already exceed the SAME daemon ceiling
+        // after typed framing and hex. No 256-field/512MiB fixture is needed.
+        let body = "x".repeat(2 << 20);
+        let recipe = Arc::new(WorldCellRecipe {
+            source: body.clone(),
+            template: body.clone(),
+            turn_templates: vec![("one".into(), body.clone()), ("two".into(), body)],
+        });
+        let mut request = ExtractRequest::default();
+        let refused = match request.world_cell_plan(WorldCellPlanRequest {
+            world: "a".repeat(64),
+            realization: "held".into(),
+            recipe,
+            output: "plan.cbor".into(),
+        }) {
+            Err(failure) => failure,
+            Ok(_) => panic!("over-budget bulk recipe was appended"),
+        };
+        assert!(
+            matches!(refused,ProtocolError::RequestBudgetExceeded {declared,limit}
+            if declared > u64::from(limit) && limit==crate::daemon::MAX_REQUEST_FRAME_BYTES)
+        );
+        assert!(request.fields.is_empty());
+        // The existing receipt field alone can fill 8MiB. Hex and the real
+        // prepare envelope must still be charged before it is appended.
+        let refused = match request.world_cell_prepare(WorldCellPrepareRequest {
+            world: "a".repeat(64),
+            realization: "held".into(),
+            recipe: Arc::new(WorldCellRecipe {
+                source: String::new(),
+                template: String::new(),
+                turn_templates: vec![],
+            }),
+            plan: vec![0; 8 << 20],
+            admission: [1; 32],
+            slots: vec![],
+            directory: "operation".into(),
+            output: "prepared.cbor".into(),
+        }) {
+            Err(failure) => failure,
+            Ok(_) => panic!("over-budget plan receipt was appended"),
+        };
+        assert!(
+            matches!(refused,ProtocolError::RequestBudgetExceeded {declared,limit}
+            if declared > u64::from(limit) && limit==crate::daemon::MAX_REQUEST_FRAME_BYTES)
+        );
+        assert!(request.fields.is_empty());
+    }
+
+    #[test]
     fn exact_inputs_requests_are_source_free_and_exclusive() {
         let resident = ExactInputsRequest {
             root: "a".repeat(64),
@@ -3061,7 +3633,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("54505245513032330001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
+        let bytes = unhex("54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),

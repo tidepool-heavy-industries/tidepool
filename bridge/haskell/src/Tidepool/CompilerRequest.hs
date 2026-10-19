@@ -9,8 +9,8 @@ module Tidepool.CompilerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
-  , runBoundWorldQuery
-  , PreparedCompilation, preparedCompilationResult, prepareCompilationOriginals
+  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell
+  , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
@@ -32,6 +32,7 @@ import GHC (Ghc)
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import GHC.Driver.Session (DynFlags)
 import Tidepool.CellProgramState
+import Tidepool.Binders (CellSourcePlan)
 import Tidepool.CheckedPrefixImports (CompletedValueImport)
 import Tidepool.CheckedAdmission (matchesInspectionAdmission)
 import Tidepool.CompilerExecution
@@ -152,6 +153,10 @@ withBoundCompilerRequest sink compilerScope parsed use = do
       basis <- case operation of
         WorldPublicModuleOperation question -> HeldWorldBasis <$>
           scopedReadHeldWorld compilerScope (worldQueryIdentity question) (worldQueryRealization question)
+        WorldCellPlanOperation question -> HeldWorldBasis <$>
+          scopedReadHeldWorld compilerScope (worldCellPlanIdentity question) (worldCellPlanRealization question)
+        WorldCellPrepareOperation question -> HeldWorldBasis <$>
+          scopedReadHeldWorld compilerScope (worldCellPrepareIdentity question) (worldCellPrepareRealization question)
         _ -> pure (ExactScopeBasis exact)
       emitPhase sink BodyStarted
       result <- use (BoundCompilerRequest compilerScope args operation basis grant executor Nothing)
@@ -163,10 +168,10 @@ withBoundCompilerRequest sink compilerScope parsed use = do
 data CellCompilationInputs = CellCompilationInputs (Maybe ProgramSourceImports)
   [((String,String),String)] [CompletedValueImport]
 
-cellSegmentRequest :: BoundCompilerRequest -> ProgramCellState -> BoundCompilerRequest
+cellSegmentRequest :: BoundCompilerRequest -> ProgramCellState ExactScope -> BoundCompilerRequest
 cellSegmentRequest (BoundCompilerRequest _ _ _ (HeldWorldBasis _) _ _ _) _ = throw CheckedPurposeMismatch
 cellSegmentRequest (BoundCompilerRequest scope args operation _ grant executor _) state =
-  let exact = programExact state
+  let exact = programInput state
       values = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell exact))
       inputs = CellCompilationInputs (programSourceImports state) (programOriginals state)
         (selectedProgramValues (programValues state))
@@ -190,13 +195,14 @@ compileBoundCompleted :: BoundCompilerRequest -> PipelineSelection result
   -> IO (CompletedCompilerResult result)
 compileBoundCompleted (BoundCompilerRequest scope args _ basis grant executor cell) selection retained purpose session path = do
   requireCompilerExecutorOpen executor
-  exact <- case basis of
-    ExactScopeBasis value -> pure value
-    HeldWorldBasis _ -> throwIO CheckedPurposeMismatch
   let effectivePurpose = maybe purpose (`cellCompilationPurpose` purpose) cell
-  scopedCompileCompleted scope (WithCompilerExecution grant executor selection) retained
-    (maybe effectivePurpose (ExactScopeCompile effectivePurpose) exact) session path
-    (requestIncludes args) (requestBuildProductsDir args)
+  case basis of
+    ExactScopeBasis exact -> scopedCompileCompleted scope (WithCompilerExecution grant executor selection) retained
+      (maybe effectivePurpose (ExactScopeCompile effectivePurpose) exact) session path
+      (requestIncludes args) (requestBuildProductsDir args)
+    HeldWorldBasis held -> case requestWorldCellPrepare args of
+      Just question -> scopedCompileWorldCell scope held grant executor question selection retained effectivePurpose path
+      Nothing -> throwIO CheckedPurposeMismatch
 
 compileBoundRequest :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO result
@@ -207,15 +213,18 @@ compileBoundRequest request selection retained purpose session path =
 -- bracket closes; projection checks operation entry, while submissions fence a
 -- concurrent close. GHC's retained mutable package cells keep their existing owner.
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist)
+  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) (Maybe WorldCellInputs)
 
 preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _) = result
+preparedCompilationResult (PreparedCompilation result _ _ _ _ _) = result
+
+preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ inputs) = inputs
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist) use = do
+withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _) use = do
   guard
   requireCompilerExecutorOpen executor
   use result recovery executor worklist
@@ -269,7 +278,8 @@ compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) se
     PortableExecutable -> do
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist)
+  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist
+    (completedCompilerWorldInputs completed))
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
@@ -279,7 +289,8 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _
   -- captured recovery context and the existing fallback path.
   completed <- compileBoundCompleted request selection retained purpose session path
   let result = completedCompilerResult completed
-  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing,
+  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing
+      (completedCompilerWorldInputs completed),
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
@@ -287,6 +298,20 @@ runBoundGhc (BoundCompilerRequest scope _ _ basis _ executor _) operation = do
   requireCompilerExecutorOpen executor
   case basis of HeldWorldBasis _ -> throwIO CheckedPurposeMismatch; ExactScopeBasis _ -> pure ()
   scopedRunGhc scope operation
+
+validateBoundWorldCell :: BoundCompilerRequest -> IO (Either WorldCellRefusal CellSourcePlan)
+validateBoundWorldCell (BoundCompilerRequest scope _ operation basis grant executor _) = do
+  requireCompilerExecutorOpen executor
+  case (operation,basis) of
+    (WorldCellPrepareOperation question,HeldWorldBasis held) -> scopedValidateWorldCell scope held grant executor question
+    _ -> throwIO CheckedPurposeMismatch
+
+runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
+runBoundWorldCellPlan (BoundCompilerRequest scope _ operation basis grant executor _) = do
+  requireCompilerExecutorOpen executor
+  case (operation,basis) of
+    (WorldCellPlanOperation question,HeldWorldBasis held) -> scopedPlanWorldCell scope held grant executor question
+    _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldQuery :: BoundCompilerRequest -> IO BS.ByteString
 runBoundWorldQuery (BoundCompilerRequest scope _ (WorldPublicModuleOperation question) (HeldWorldBasis world) grant executor _) = do

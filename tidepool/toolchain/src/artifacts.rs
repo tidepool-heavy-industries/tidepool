@@ -1309,7 +1309,7 @@ impl ModuleCandidateOffer {
         bindings: crate::compiler_world::CompilerWorldBindings,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
-        let (visible_rows, visibility) = bindings.cold_parts()?;
+        let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
         let directory = Arc::new(compiler_scratch_directory()?);
         crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
@@ -1317,7 +1317,6 @@ impl ModuleCandidateOffer {
             visible_rows,
             bindings,
             sources,
-            visibility,
             directory,
         )
     }

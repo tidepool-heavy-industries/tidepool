@@ -67,7 +67,7 @@ use crate::{CompileWorkload, ExtractRequest};
 // Accepted requests may wait for a free worker slot. This bounds a genuinely
 // wedged daemon without mistaking ordinary queueing for failure.
 const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 // Compiler artifacts are file-backed; only complete diagnostics cross this boundary.
 const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
 const UNCONFIRMED_RESPONSE: &[u8; 8] = b"TPCU0001";

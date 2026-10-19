@@ -2862,7 +2862,6 @@ impl CheckedTypedEntry {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         producer: [u8; 32],
     ) -> Result<Self, CompileError> {
-        use tidepool_repr::execution_schema::Group;
         let receipt = decode(&read(directory.join("checked-item.cbor"), 4 << 20)?)?;
         let fields = row(&receipt, 9)?;
         validate_item_receipt(
@@ -2890,6 +2889,39 @@ impl CheckedTypedEntry {
             Value::Integer(value) => u32::try_from(value).map_err(failure)?,
             _ => return Err(failure("typed native original ordinal is not integer")),
         };
+        if string(&proof[0])? != plan.digest
+            || origin.occurrence != plan.root
+            || entry.occurrence != item.entry
+        {
+            return Err(typed_entry_failure());
+        }
+        Self::from_original_entry(
+            plan.digest.clone(),
+            origin,
+            entry,
+            original_ordinal,
+            target,
+            owner,
+            products,
+            producer,
+        )
+    }
+
+    // Native membership is independent of the physical receipt format. The
+    // owning operation must authenticate its plan before reaching this check.
+    // A receipt ordinal or SymbolIdentity alone cannot issue a typed entry.
+    #[allow(clippy::too_many_arguments)]
+    fn from_original_entry(
+        plan_digest: String,
+        origin: tidepool_repr::execution_schema::SymbolIdentity,
+        entry: tidepool_repr::execution_schema::SymbolIdentity,
+        original_ordinal: u32,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        producer: [u8; 32],
+    ) -> Result<Self, CompileError> {
+        use tidepool_repr::execution_schema::Group;
         let target_entry = target
             .bindings()
             .iter()
@@ -2908,10 +2940,7 @@ impl CheckedTypedEntry {
                 )
             })
             .collect::<Vec<_>>();
-        if string(&proof[0])? != plan.digest
-            || origin.occurrence != plan.root
-            || entry.occurrence != item.entry
-            || origin.unit != owner.unit
+        if origin.unit != owner.unit
             || origin.module != owner.module
             || entry.unit != origin.unit
             || entry.module != origin.module
@@ -2921,7 +2950,7 @@ impl CheckedTypedEntry {
             return Err(typed_entry_failure());
         }
         Ok(Self {
-            plan_digest: plan.digest.clone(),
+            plan_digest,
             origin,
             entry,
             original_ordinal,

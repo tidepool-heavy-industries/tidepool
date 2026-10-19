@@ -57,8 +57,9 @@ pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExactNameInspection, ExtractRequest, HostedLookupBatch,
     HostedLookupDiscovery, HostedLookupOperation, HostedLookupQuery, InspectionNamespace,
-    InspectionScope, LookupNameInspection, LookupNameMode, ProtocolError, StructuredInspection,
-    SymbolIdentity, WorldPublicModuleRequest, WorldQueryMode,
+    InspectionScope, LookupNameInspection, LookupNameMode, PlannedCellSlot, ProtocolError,
+    StructuredInspection, SymbolIdentity, WorldCellPlanRequest, WorldCellPrepareRequest,
+    WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -873,6 +874,22 @@ impl ExtractCmd {
     }
 
     /// Query public metadata in the exact world held by the current transaction.
+    pub fn world_cell_plan(
+        &mut self,
+        request: WorldCellPlanRequest,
+    ) -> Result<&mut Self, ProtocolError> {
+        self.request.world_cell_plan(request)?;
+        Ok(self)
+    }
+
+    pub fn world_cell_prepare(
+        &mut self,
+        request: WorldCellPrepareRequest,
+    ) -> Result<&mut Self, ProtocolError> {
+        self.request.world_cell_prepare(request)?;
+        Ok(self)
+    }
+
     pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
         self.request.world_public_module(request);
         self
@@ -939,6 +956,25 @@ impl ExtractCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_cell_builder_refusal_leaves_existing_command_unchanged() {
+        let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        command.input("already-selected.hs");
+        let before = command.request_bytes();
+        let refused = command.world_cell_plan(WorldCellPlanRequest {
+            world: "a".repeat(64),
+            realization: "held".into(),
+            recipe: std::sync::Arc::new(WorldCellRecipe {
+                source: "pure ()".into(),
+                template: "template".into(),
+                turn_templates: vec![],
+            }),
+            output: "plan.cbor".into(),
+        });
+        assert!(matches!(refused, Err(ProtocolError::InvalidWorldCell)));
+        assert_eq!(command.request_bytes(), before);
+    }
 
     #[test]
     fn world_transport_builders_preserve_exclusive_domain_requests() {
