@@ -719,6 +719,23 @@ impl CompilerWorldOpenInputs {
             rows: BTreeMap::new(),
             arenas: Default::default(),
         };
+        let block_bytes =
+            self.primary_blocks
+                .blocks()
+                .iter()
+                .try_fold(0u64, |total, (cid, body)| {
+                    total
+                        .checked_add(body.len() as u64)
+                        .and_then(|n| n.checked_add(cid.to_bytes().len() as u64 + 32))
+                        .ok_or_else(source_size_failure)
+                })?;
+        let envelope_bytes = block_bytes
+            .checked_add(self.sources.encoded().len() as u64)
+            .and_then(|n| n.checked_add(self.visibility.len() as u64))
+            .ok_or_else(source_size_failure)?;
+        let mut remaining_raw = capture_allowance()?
+            .checked_sub(envelope_bytes)
+            .ok_or_else(source_size_failure)?;
         let metadata = self.primary_context.compiler_metadata_snapshot()?;
         let mut base = Vec::with_capacity(metadata.entries.len());
         for (ordinal, entry) in metadata.entries.values().enumerate() {
@@ -736,6 +753,9 @@ impl CompilerWorldOpenInputs {
                 if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
                     return Err(source_failure("world type input exceeds its format bound"));
                 }
+                remaining_raw = remaining_raw
+                    .checked_sub(bytes.len() as u64)
+                    .ok_or_else(source_size_failure)?;
                 pending.push((
                     kind,
                     builder
@@ -768,6 +788,11 @@ impl CompilerWorldOpenInputs {
         for artifact in &self.visible_rows {
             crate::host_work::checkpoint()?;
             let (entry, parts) = artifact.world_type_parts()?;
+            for part in &parts {
+                remaining_raw = remaining_raw
+                    .checked_sub(part.bytes)
+                    .ok_or_else(source_size_failure)?;
+            }
             let (row, image) = rows.row(&entry, parts)?;
             references.push(world_array(vec![
                 world_text(entry.descriptor.owner.unit.clone()),
@@ -1026,8 +1051,7 @@ fn query_world_inner(
     }
     use std::io::Read;
     let mut bytes = Vec::new();
-    file.take(allowance.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    crate::host_work::read_to_end(&mut file.take(allowance.saturating_add(1)), &mut bytes)?;
     if bytes.len() as u64 > allowance {
         return Err(world_response_error(false));
     }
