@@ -5014,7 +5014,12 @@ resident_request_roster! {
     ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
     AgentControl(crate::generated::agent_control::AgentControlReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentControl)),
     AgentInspection(crate::generated::agent_inspection::AgentInspectionReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentInspection)),
-    Introspection(crate::generated::introspection::IntrospectionReq) => None,
+    // `info`, `typeOf`, and the six compiler-query verbs are all served by
+    // the resident workbench. Claiming the family here is what puts
+    // `Introspection` in the installed row: an unclaimed family is
+    // filtered out of the actor's effective effects before installation,
+    // so every verb would be unreachable even though it decodes.
+    Introspection(crate::generated::introspection::IntrospectionReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Introspection)),
     AgentLaunch(crate::generated::agent_launch::AgentLaunchReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentLaunch)),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq) => None,
     ActorLocal(crate::generated::actor_local::ActorLocalReq) => None,
@@ -17762,6 +17767,20 @@ pub(crate) mod request_tests {
             recognized.len(),
             27,
             "schema-owned resident families: {recognized:?}"
+        );
+    }
+
+    #[test]
+    fn introspection_is_claimed_as_an_intrinsic_actor_family() {
+        // Installation keeps only granted effects the installed interpreters
+        // claim. A decoded verb whose family is unclaimed never reaches the
+        // actor's row, so this pins the claim rather than the decode.
+        let families = intrinsic_effect_families();
+        assert!(
+            families.contains(&exomonad_tool::ToolEffectKey::Actor(
+                exomonad_tool::ActorEffectKey::Introspection
+            )),
+            "Introspection verbs are served by the resident workbench: {families:?}"
         );
     }
 
