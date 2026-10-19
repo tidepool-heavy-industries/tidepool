@@ -39,6 +39,7 @@ rust_filegroup(
         "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
@@ -278,6 +279,7 @@ rust_filegroup(
         "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
@@ -1000,6 +1002,7 @@ filegroup(
         "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs": "src/fixtures/captured-replacement-installers-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
+        "exomonad/actor/src/fixtures/compiler-world-info.hs": "src/fixtures/compiler-world-info.hs",
         "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
@@ -1261,6 +1264,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f63617074757265642d737065632d696e7374616c6c65722e6873",
     src = "src/fixtures/captured-spec-installer.hs",
     out = "captured-spec-installer.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f636f6d70696c65722d776f726c642d696e666f2e6873",
+    src = "src/fixtures/compiler-world-info.hs",
+    out = "compiler-world-info.hs",
     visibility = ["PUBLIC"],
 )
 
