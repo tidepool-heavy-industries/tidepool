@@ -102,7 +102,8 @@ async fn hosted_lookup_binding_keeps_a_pure_second_cell_compilable() {
                         &store,
                         dispatch_haskell_script(
                             policy.as_ref(),
-                            "import qualified Tidepool.Lookup as LookupApi\n\
+                            "import qualified Tidepool.Effects.Authored as Files\n\
+                             import qualified Tidepool.Lookup as LookupApi\n\
                              import qualified Tidepool.Lookup.Tools as LookupTools\n\
                              topics <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"doc workbench\"])\n\
                              display (LookupTools.renderBatch topics)",
