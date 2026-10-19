@@ -2857,10 +2857,10 @@ impl CertifiedSourceSelection {
             .chain(self.private_native.issued())
     }
 
-    pub(crate) fn complete_native_products(
+    pub(crate) fn complete_native_entries(
         &self,
         artifacts: &crate::artifact_inventory::ArtifactView,
-    ) -> CertResult<Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>> {
+    ) -> CertResult<Vec<Arc<crate::artifact_inventory::ArtifactEntry>>> {
         let metadata = artifacts.metadata_snapshot();
         self.native_selections()
             .filter(|native| {
@@ -2870,20 +2870,20 @@ impl CertifiedSourceSelection {
                 )
             })
             .map(|native| {
-                let products = metadata
+                let entries = metadata
                     .artifacts
                     .values()
                     .filter_map(|entry| match &entry.payload {
                         crate::artifact_inventory::ArtifactPayload::Original(product)
                             if product.owner() == &native.owner =>
                         {
-                            Some(product.clone())
+                            Some(Arc::clone(entry))
                         }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                match products.as_slice() {
-                    [product] => Ok(product.clone()),
+                match entries.as_slice() {
+                    [entry] => Ok(Arc::clone(entry)),
                     _ => Err(CertificationError::Mismatch(
                         "complete native selection payload",
                     )),
@@ -12503,8 +12503,8 @@ pub(crate) mod tests {
                 usize::from(namespace_original)
             );
             assert_eq!(
-                selection.complete_native_products(&view).unwrap(),
-                vec![original.clone()]
+                selection.complete_native_entries(&view).unwrap(),
+                vec![native.clone()]
             );
             assert!(selection.permits_native_group(native.descriptor.id, original.owner(), 9));
             let projected = selection.compiler_projection(&view).unwrap();

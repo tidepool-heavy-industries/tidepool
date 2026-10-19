@@ -3109,7 +3109,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .any(|proof| proof.original == entry.descriptor.id));
     assert!(cloned.receipt_native_body_owners().next().is_none());
     assert!(cloned
-        .complete_native_products(&inputs.artifacts())
+        .complete_native_entries(&inputs.artifacts())
         .unwrap()
         .is_empty());
     assert!(!cloned.permits_native_group(ArtifactId([255; 32]), native.owner(), 9001));
@@ -9636,7 +9636,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         )
         .map_err(compiler_evidence_failure)?;
         assert!(selection
-            .complete_native_products(request.artifacts())
+            .complete_native_entries(request.artifacts())
             .map_err(compiler_evidence_failure)?
             .is_empty());
         let continued = OriginalCompilerInputs::from_selection(&selection, request.artifacts())?;

@@ -823,7 +823,10 @@ impl OriginalCompilerInputs {
         timing.advance("select_complete_products");
         let complete = continuation.complete_products(&artifacts)?;
         timing.advance("issue_complete_products");
-        let artifacts = if let Some(product) = complete.products.first() {
+        let artifacts = if let Some(entry) = complete.entries.first() {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("complete native selection lacks original payload"));
+            };
             let producer = product
                 .module_interface()
                 .ok_or_else(|| failure("complete native product has no canonical owner"))?
@@ -894,16 +897,26 @@ impl OriginalCompilerInputs {
             "products.complete_native_availability",
             "projection",
         );
-        let products = match &source {
-            CompleteAvailabilitySource::Candidate { products, .. } => *products,
-            CompleteAvailabilitySource::Request(completed) => completed.products.as_slice(),
+        let count = match &source {
+            CompleteAvailabilitySource::Candidate { products, .. } => products.len(),
+            CompleteAvailabilitySource::Request(completed) => completed.entries.len(),
         };
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
         timing.advance("entries");
         let mut entries = Vec::new();
-        for product in products {
+        for index in 0..count {
+            let (product, completed_entry) = match &source {
+                CompleteAvailabilitySource::Candidate { products, .. } => (&products[index], None),
+                CompleteAvailabilitySource::Request(completed) => {
+                    let entry = &completed.entries[index];
+                    let ArtifactPayload::Original(product) = &entry.payload else {
+                        return Err(failure("complete native selection lacks original payload"));
+                    };
+                    (product, Some(entry))
+                }
+            };
             let _ = crate::certified_products::original_available_groups(product)
                 .map_err(compiler_evidence_failure)?;
             let owner = identity(&product.owner().unit, &product.owner().module);
@@ -933,11 +946,24 @@ impl OriginalCompilerInputs {
                     "private native availability has ambiguous retained originals",
                 ));
             }
-            entries.push(Arc::new(ArtifactEntry::original_with_validation(
-                producer_sha256,
-                product.clone(),
-                &mut validation,
-            )?));
+            entries.push(match completed_entry {
+                Some(entry) => {
+                    // The completed selection carries its already admitted facts and
+                    // acquisition owner; native permission still comes from the solver.
+                    let canonical = product.module_interface().ok_or_else(|| {
+                        failure("native product lacks its canonical finalized module")
+                    })?;
+                    if canonical.producer_sha256() != producer_sha256 {
+                        return Err(failure("native product has another canonical producer"));
+                    }
+                    Arc::clone(entry)
+                }
+                None => Arc::new(ArtifactEntry::original_with_validation(
+                    producer_sha256,
+                    product.clone(),
+                    &mut validation,
+                )?),
+            });
         }
         timing.advance("requirements_and_dependency_catalog");
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
@@ -1182,13 +1208,13 @@ impl<'a> ContinuationNativeInputs<'a> {
         &self,
         artifacts: &ArtifactView,
     ) -> Result<CompletedRequestNativeProducts<'_>, CompileError> {
-        let products = self
+        let entries = self
             .selection
-            .complete_native_products(artifacts)
+            .complete_native_entries(artifacts)
             .map_err(compiler_evidence_failure)?;
         Ok(CompletedRequestNativeProducts {
             continuation: self,
-            products,
+            entries,
         })
     }
 
@@ -1208,7 +1234,7 @@ impl<'a> ContinuationNativeInputs<'a> {
 /// Only its NewProduct rows can authorize issuing complete native availability.
 struct CompletedRequestNativeProducts<'a> {
     continuation: &'a ContinuationNativeInputs<'a>,
-    products: Vec<CertifiedRecoveryProduct>,
+    entries: Vec<Arc<ArtifactEntry>>,
 }
 
 enum CompleteAvailabilitySource<'a> {
