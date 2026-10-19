@@ -207,6 +207,7 @@ mod tests {
 
     #[derive(Default)]
     struct Host {
+        opens: AtomicUsize,
         closes: AtomicUsize,
         fail_closes: AtomicUsize,
     }
@@ -220,6 +221,7 @@ mod tests {
             _: &str,
             _: &serde_json::Value,
         ) -> Result<(), FormCause> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn attempt(&self, _: crate::ActorRef, _: &str) -> Result<Option<FormAttempt>, FormCause> {
@@ -372,6 +374,7 @@ mod tests {
             ),
             Err(FormCause::FormClosed)
         );
+        assert_eq!(host.opens.load(Ordering::SeqCst), 0);
         assert_eq!(host.closes.load(Ordering::SeqCst), 0);
     }
 

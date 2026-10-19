@@ -3574,7 +3574,6 @@ mod form_source_admission {
         fail_open: AtomicUsize,
         panic_open: AtomicUsize,
         work: Mutex<Option<std::sync::Weak<InvocationWork>>>,
-        source: Mutex<Option<SourceDependency>>,
     }
     impl FormHost for Host {
         fn changed(&self) -> BoxFuture<'static, Result<(), FormCause>> {
@@ -3592,16 +3591,15 @@ mod form_source_admission {
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade)
                 .unwrap();
+            let state = work
+                .state
+                .try_lock()
+                .expect("invocation guard must be released before host IO");
             assert!(
-                work.state
-                    .lock()
-                    .forms
-                    .iter()
-                    .any(|form| form.mount == mount),
+                state.forms.iter().any(|form| form.mount == mount),
                 "pending membership precedes the host effect"
             );
-            let source = self.source.lock().clone().unwrap();
-            source.with_open_admission(|| ()).unwrap();
+            drop(state);
             self.opens.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 self.panic_open.load(Ordering::SeqCst),
@@ -3672,7 +3670,6 @@ mod form_source_admission {
         let (_recipient, source_b) = source(None);
         let host = Arc::new(Host::default());
         *host.work.lock() = Some(Arc::downgrade(&work));
-        *host.source.lock() = Some(source_a.clone());
         let first =
             FormCleanup::new(actor, "first".into(), host.clone(), source_a.clone()).unwrap();
         work.admit_form(first.clone(), &publication, &descriptor, None)
@@ -3695,7 +3692,6 @@ mod form_source_admission {
         assert_eq!(host.closes.load(Ordering::SeqCst), 1);
         assert_eq!(fence.pending_claims(), 0);
         // B remains independently authorized; it cannot refresh A's authority.
-        *host.source.lock() = Some(source_b.clone());
         let second =
             FormCleanup::new(actor, "independent".into(), host.clone(), source_b.clone()).unwrap();
         work.admit_form(second.clone(), &publication, &descriptor, None)
