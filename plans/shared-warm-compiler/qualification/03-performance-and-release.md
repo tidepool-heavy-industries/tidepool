@@ -6,6 +6,14 @@ bundle before declaring delivery. Follow the existing
 [frozen bundle](../../../build/package/README.md) owners. This plan adds no
 latency threshold or automatic release/activation action.
 
+Run the [first complete ordinary-cell workflow](../README.md#next-complete-workflow)
+as soon as its paired producers/consumers compile. Its exact three-root input,
+declared compiler profile, real source authority and publication owner are
+prerequisites. Finishing every query/force/recovery case is not. Produce an early
+partial ledger through the existing runner; final frozen timing remains a
+separate acceptance. Query success and initial empty-world Prepare success do
+not establish ordinary-cell reuse.
+
 ## Matched baseline and workloads
 
 Freeze baseline and candidate with the same selected profile, workload roster,
@@ -119,13 +127,17 @@ input must affect its owning counter/phase. The frozen owner's named workload
 roster, not the events that happened to survive, determines required coverage.
 Behavioral completion and valid timing are independent assessments.
 
-## Frontend experiment go/no-go
+## Core dependency reuse and deeper frontend decision
 
 Join [the worker owner's experiment](../warm-workers/03-import-context-experiment.md):
 current warm generated imports; persistent exact HPT with unchanged normal-module
 entry; complete checked import-context or maintained scope-interface alternative.
 Use the same actual ordinary-module path and fresh target identities. Full
-`TcGblEnv`/AST retention per actor is not the default solution.
+`TcGblEnv`/AST retention per actor is not the default solution. Exact selected
+dependency reuse (B) is core G3 delivery and measured during its first nonempty
+cell join. Deeper checked import-context reuse (C) is conditional. Failure to
+show meaningful B reuse triggers a design review; it is not a successful no-go
+for the ordinary-cell performance objective.
 
 Acceptance requires parity against the declared normal GHC/module baseline:
 values/types and nominal identity; aliases/qualification/hiding/shadowing;

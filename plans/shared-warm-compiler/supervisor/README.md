@@ -57,10 +57,11 @@ Start the five tracks as their dependencies and actual grants allow:
 `host-inputs`, `warm-workers`, `owned-inputs`, `reload`, `qualification`.
 Qualification begins with baselines and discriminating observers, not just a
 final gate. Follow the campaign gates in SUPERVISION: G0 fresh baseline/common
-contract; G1 exact roots, owned rows and frontdoor controls; G2 deltas,
-admission/publication and generation retirement; G3 worker realizations and
-optional measured affinity; G4 frontend experiment go/no-go and whole joined
-acceptance. Name the exact prerequisite slices of each area wave and pipeline
+contract; G1 exact roots and owned inputs; G2 real demand-based queries;
+G3 nonempty ordinary-cell dependency reuse and atomic publication with early
+measurement; G4 lifecycle/removal completion, conditional deeper import-context
+decision and whole joined acceptance. Name the exact prerequisite slices of
+each area wave and pipeline
 ready work; these gates do not impose an artificial stop on every other area.
 The conceptual contract roles name obligations, not mandatory new public types.
 

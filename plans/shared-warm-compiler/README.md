@@ -45,12 +45,13 @@ The campaign has two deliverables:
 
 1. A reviewed, integrated production compiler service: immutable selected worlds,
    demand-specific queries, shared owned input rows, incremental notebook
-   publication, bounded worker residency, and changed-reload retirement.
-2. A measured frontend experiment that determines whether ordinary-module import
-   processing can also reuse a checked environment safely. Promote that change
-   only if its semantic and performance gates pass. Otherwise preserve its
-   findings and deliver the first candidate without claiming the frontend cost
-   has disappeared.
+   publication, reuse of eligible checked dependencies for ordinary cells,
+   bounded worker residency, and changed-reload retirement.
+2. A measured, conditional deeper frontend experiment: determine whether the
+   remaining ordinary-module import/reader processing can reuse a checked import
+   environment safely. This is arm C in the worker plan. Arm B's exact selected
+   home/dependency reuse belongs to the first deliverable, not a late optional
+   experiment. Neither an HPT hit nor a smaller request establishes that reuse.
 
 Tenfold improvement is the search target. It is not an acceptance result or an
 estimate. Success requires measured structural work removal and a useful joined
@@ -142,13 +143,66 @@ authority.
 | G0: agree and observe | Current source baseline; shared contracts; selection regression oracle; current phase/counter coverage | All area first waves, with coordinated shared-file edits | Compile any shared scaffolding and exercise a small production history immediately |
 | G1: establish service ownership | Runtime facts versus compiler-derived state inventory; exact world/restoration contract; owned rows and package-source decision | First actual inspection/check service path; independent reload work | Independent selection, source lifetime and production consumer review |
 | G2: prove demand-based operation | Held compiler world; actual lookup/check caller; no host export before hit; cold restore | Cell and publication migration; bounded retention | Exact module/visibility semantics, no hidden full preparation or worker rebuilding |
-| G3: migrate cells and publication | Whole-cell checking/executable demand; paired successor publication; fork/reload/recovery; old route deletion | Frontend experiment and qualified affinity comparison | No missed mutation route; END/cancellation, stale writer and divergent-world controls |
-| G4: decide and qualify | Import-context decision; joined source; updated engine map; matched baseline/candidate evidence | Release owner integration and subsequent exploratory runs | Frozen bundle and all claimed workloads qualify at the exact delivered commit |
+| G3: ordinary cells reuse dependencies | Real nonempty bind then later use; retained eligible compiler answers; exact per-item successors and atomic publication; early work/timing comparison | Remaining mutation/lifecycle coverage, deletion and conditional arm C | Actual values and world transitions; no hidden whole-world rebuild; fresh authority and strict dependency refusals |
+| G4: complete and qualify | Fork/reload/recovery and removal coverage; scoped retirement; deeper import-context decision; exact packaged histories and paired measurements | Release owner integration and subsequent exploratory runs | Frozen bundle and all claimed workloads qualify at the exact delivered commit |
 
 These are dependency gates, not global barriers. For example, input-row work and
 reload ownership work can proceed while host delta work is reviewed. An area
 must name the exact prerequisite commit it consumes. A supervisor does not fill
 an idle slot with unrelated speculative work while a known critical defect waits.
+
+### Next complete workflow
+
+First join a production actor that captures its actual source/spec/effects,
+uses a real imported module, publishes a binding, and uses that binding in the
+next distinct cell. Observe W0 -> W1 -> W2, actual returned values, fresh target
+checking, reused unchanged dependencies, and actual publication cost. Start
+with the small `x <- pure (7 :: Int)` / `y <- pure (x + 1)` binding control, then
+the same path with a declared home dependency and the real scaffold. The simple
+integer control alone does not measure the expensive import workload.
+
+The required producer/consumer join has four concrete owners:
+
+| Work | Owner | Needed before this workflow passes |
+| --- | --- | --- |
+| Matched nonempty world receiver and binding activation | Warm protocol owner | Context, acquired primary associations and occurrence bindings agree; current compiler/profile boots with the actual declared dependencies |
+| Prepare and output certification | Warm, with existing certifier review | Actual outputs and demanded input evidence, not reconstruction of a whole ExactCompilationRequest or a second certificate issuer |
+| Private successor finalization and runtime publication | Host | Exact successful item facts and actual runtime changes; atomic bindings/world association through the existing owner |
+| Reusable compiler dependencies | Warm | World-owned selected HPT and eligible completed answers with their exact validity and backing; fresh per-operation mutable checking state |
+
+Capture successful target evidence before the reusable module cache removes the
+target. A successor may share unchanged facts and backing, but must not retain a
+predecessor world chain or borrow scratch that predecessor eviction will delete.
+The two-root bootstrap branch cannot substitute for the accepted three-root
+nonempty actor input contract. The matched codec/profile work is a real
+prerequisite; additional general codec or cache machinery is not.
+
+For the first join, adoption requires the exact published world base. Existing
+semantic rebasing must not merge unrelated concurrent bindings while installing
+a successor that omits them. Refuse a stale semantic base, retain the current
+world and any prior committed prefix, and report completed effects without
+replay. Storage-only restaging may retain the same semantic base. Service-backed
+merge/recertification is a named subsequent concurrency obligation, not a
+reason to accept mismatched bindings/worlds or rebuild the entire universe.
+
+Do not wait for all query retention/eviction cases or every unrelated fixture
+repair to start this join. Known defects in the facts, authority or publication
+it actually consumes remain blockers. Retain independent work on those repairs.
+Use an existing idle worker for a bounded missing contract/review before adding
+headcount; the current bottleneck is joined implementation and feedback.
+
+Measure this workflow before completing the full matrix or undertaking arm C.
+Vary unrelated retained history separately from visible import scope, then one
+changed dependency. Include an instance-only change and an equal-interface,
+different-original refusal. Use the existing production constructor and counted
+runner; do not hand-assemble a privileged world or an approximate effects row.
+
+An intermediate usable candidate may explicitly refuse `force: true` while
+scoped forced retirement is unfinished. It must still fence stale source work,
+keep a visible-but-unacknowledged generation nonoperational, preserve exact birth
+provenance, and safely refuse blocked default reload. This is partial delivery,
+not full campaign completion. Full force/drain and the remaining lifecycle
+matrix stay authorized and tracked; optional arm C may conclude with a no-go.
 
 ## Scope decisions
 
