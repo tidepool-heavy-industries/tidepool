@@ -204,11 +204,17 @@ observed global available bytes were 107,887,243,264, above the 100 GiB floor.
 Scratch peak and shared-cache attribution were not instrumented. Buck daemon
 PID 3835600 is retained idle in `/build.slice/inanna-build-1792398682-3835490.scope`;
 its enclosing observed MemoryPeak was 836,239,360 bytes. No commands are running.
-The serial native lane was released. Root owns new storage cleanup. Its first
-settled retirement reports 105.80 GiB real free; warm-workers owns the next
-serial lane. This is not admission for a larger reload graph. The R1 leaf owns
-the next source-candidate event; campaign/root owns the subsequent native-lane
-admission event. No reload command is running or awaiting terminal collection.
+Campaign admitted the early runtime/actor production and unit compilation gate
+after exact-review disposition, area fold and source generation. Its allowance
+is 12 GiB memory and 32 GiB prospective growth, with fresh global accounting
+below 80 GiB and at least 100 GiB unreserved disk. Observed build.slice current
+29,587,906,560 bytes plus conservative remaining 24+8+8+12 GiB was 79.56 GiB;
+no current-lane subtraction was needed. RAM available was 98,148,052,992 bytes,
+disk available 471,212,376,064 bytes. Refresh before launch. The receipt is
+`early-native-gate-preflight.json` in the area evidence directory. Exact review
+is the remaining launch dependency, produced by authority_review. No reload
+command is running or awaiting terminal collection. Host/browser and broader
+R2/R3 remain separate subsequent gates.
 
 After the coherent R1 candidate is joined and source maps are regenerated, the
 smallest first compilation stage is the runtime and actor production libraries
