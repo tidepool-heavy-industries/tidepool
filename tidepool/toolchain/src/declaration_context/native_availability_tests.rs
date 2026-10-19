@@ -5371,7 +5371,8 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
 }
 
 #[test]
-fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
+fn native_availability_preserves_ambiguity_and_explicit_selection_refuses_conflicts() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let first = product("AmbiguousNative", 23);
     let second = product("AmbiguousNative", 24);
     assert_eq!(first.module_interface(), second.module_interface());
@@ -5394,73 +5395,95 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         view,
     );
     changed = changed.rebuild(|facts| facts.compiler_support = support);
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &changed,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        std::slice::from_ref(&first),
-    )
-    .is_err());
+    let candidates = crate::module_candidates::CandidateSet {
+        manifest_path: PathBuf::from("ambiguous-availability-only"),
+        by_owner: BTreeMap::new(),
+        contextual_native_availability: vec![first.clone()],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    let owner = identity(first.owner().unit.as_str(), first.owner().module.as_str());
+    assert!(
+        matches!(OriginalCompilerInputs::from_candidates(&changed, producer, &candidates),
+        Err(CompileError::ArtifactInventory(error))
+            if matches!(&error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual } if actual == &owner))
+    );
     let entries = [&first, &second]
         .into_iter()
         .map(|product| {
-            Arc::new(
-                ArtifactEntry::original_with_validation(
-                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
-                    product.clone(),
-                    &mut PackageInterfaceValidation::default(),
-                )
-                .unwrap(),
-            )
+            Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
         })
         .collect::<Vec<_>>();
     let mut ambiguous = context.as_ref().clone();
-    {
-        let updated = ambiguous
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .inventory()
-            .admit_shared(
-                &ambiguous.owner.facts.compiler_support.artifacts(),
-                entries.clone(),
-            )
-            .unwrap();
-        let support = recover_fixture_compiler_support(
-            ambiguous.compiler_input_projection().clone(),
-            updated,
-            ambiguous
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
+    let inventory = ambiguous.artifact_view().inventory().clone();
+    let custody = inventory
+        .admit_shared_with_demand(
+            ambiguous.artifact_view(),
+            entries.clone(),
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-        ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    }
+    let support = fixture_compiler_support(ambiguous.compiler_input_projection().clone(), custody);
+    ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
     assert!(ambiguous
-        .owner
-        .facts
-        .compiler_support
-        .artifacts()
+        .artifact_view()
         .metadata_snapshot()
         .ambiguous_native_owners
-        .contains(&identity("fixture", "AmbiguousNative"),));
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &ambiguous,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        std::slice::from_ref(&first),
-    )
-    .is_err());
-    // An issued winner remains explicit even when other versions stay in custody.
-    let projection = CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
-    let selected = projection
-        .admit_interfaces_under_unissued_policy(
-            ambiguous.artifact_view(),
-            vec![entries[0].clone()],
-            &[],
+        .contains(&owner));
+    assert!(ambiguous
+        .artifact_view()
+        .selected_native_groups()
+        .is_empty());
+    let received = OriginalCompilerInputs::from_candidates(&ambiguous, producer, &candidates)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        received.role_projection(),
+        ambiguous.compiler_input_projection()
+    );
+    assert_eq!(
+        received.native_availability(),
+        ambiguous.compiler_source_support().native_availability()
+    );
+    assert_eq!(
+        received.issued_offers(),
+        ambiguous.compiler_source_support().native_offers()
+    );
+    assert!(received
+        .role_projection()
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(ambiguous.clone()))
+        .prepare_compilation_with_private_input(
+            &root.path().join("available"),
+            PRODUCER,
+            None,
+            Some(received),
         )
-        .expect("the inventory issuer selects the explicit original and canonical pair");
+        .unwrap();
+    for entry in &entries {
+        if let Some(row) = request
+            .compiler_inputs()
+            .native_availability(entry.descriptor.id)
+        {
+            assert!(row.issued_ordinals().is_empty());
+            assert_ne!(row.mode, NativeTransportMode::Full);
+        }
+    }
+    assert!(request
+        .compiler_inputs()
+        .artifacts()
+        .selected_native_groups()
+        .is_empty());
+
+    // An independently issued A selection remains exact while B is custody.
+    let selected = inventory
+        .admit_shared(&inventory.empty_view(), vec![entries[0].clone()])
+        .unwrap()
+        .retain_custody(ambiguous.artifact_view())
+        .unwrap();
     let first_id = entries[0].descriptor.id;
     let second_id = entries[1].descriptor.id;
     assert_ne!(first_id, second_id);
@@ -5470,59 +5493,54 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
             .iter()
             .map(|group| group.artifact)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([first_id, second_id]),
-        "the broad fixture selected both complete native censuses"
+        BTreeSet::from([first_id])
     );
-    let selected = selected.select_roots(vec![first_id]).unwrap();
-    assert_eq!(
-        selected
-            .selected_native_groups()
-            .iter()
-            .map(|group| group.artifact)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([first_id]),
-        "the explicit winner alone supplies executable demand"
-    );
-    let retained_originals = selected
-        .entries()
-        .into_iter()
-        .filter(|entry| {
-            matches!(
-                &entry.payload,
-                crate::artifact_inventory::ArtifactPayload::Original(_)
-            )
-        })
-        .map(|entry| entry.descriptor.id)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(retained_originals, BTreeSet::from([first_id, second_id]));
-    assert!(selected
-        .metadata_snapshot()
-        .ambiguous_native_owners
-        .contains(&identity("fixture", "AmbiguousNative")));
-    let support = recover_fixture_compiler_support(
-        projection.clone(),
-        selected,
-        ambiguous
-            .compiler_source_support()
-            .native_offers()
-            .iter()
-            .cloned(),
-    )
-    .unwrap();
+    assert!(selected.artifact_ids().contains(&second_id));
+    let projection = CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
+    let support = fixture_compiler_support(projection.clone(), selected);
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    assert_eq!(ambiguous.compiler_input_projection(), &projection);
-    OriginalCompilerInputs::issue_candidate_from_context(
-        &ambiguous,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        std::slice::from_ref(&first),
-    )
-    .expect("explicit issued original remains usable beside historical custody");
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &ambiguous,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        std::slice::from_ref(&second),
-    )
-    .is_err());
+    let explicit_a =
+        OriginalCompilerInputs::from_issued_support(ambiguous.compiler_source_support());
+    let accepted = ExactCompileContext::new(Arc::new(ambiguous.clone()))
+        .prepare_compilation_with_private_input(
+            &root.path().join("selected-a"),
+            PRODUCER,
+            None,
+            Some(explicit_a),
+        )
+        .unwrap();
+    assert_eq!(accepted.compiler_inputs().projection(), &projection);
+    assert!(accepted
+        .compiler_inputs()
+        .native_availability(first_id)
+        .unwrap()
+        .permits(7));
+    assert!(accepted
+        .compiler_inputs()
+        .native_availability(second_id)
+        .is_none());
+    let output_inventory = ArtifactInventory::default();
+    let physical = output_inventory
+        .admit_shared_with_demand(
+            &output_inventory.empty_view(),
+            vec![entries[1].clone()],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let projection_b = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
+    let selection_b =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection_b,
+            &physical.metadata_snapshot(),
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+    let explicit_b = OriginalCompilerInputs::from_selection(&selection_b, &physical).unwrap();
+    assert!(matches!(ExactCompileContext::new(Arc::new(ambiguous))
+        .prepare_compilation_with_private_input(&root.path().join("selected-b"), PRODUCER, None, Some(explicit_b)),
+        Err(CompileError::ArtifactInventory(error))
+            if matches!(&error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { owner: actual, existing, incoming }
+                if actual == &owner && *existing == first_id && *incoming == second_id)));
 }
 
 #[test]
