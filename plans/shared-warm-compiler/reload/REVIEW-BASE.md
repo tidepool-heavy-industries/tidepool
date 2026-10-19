@@ -1,16 +1,26 @@
 # Reload authority review at the campaign base
 
 Reviewer: `/root/warm_compiler_campaign/reload/authority_review`.
-Source: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`, branch
-`feature/shared-warm/reload`, checkout
-`/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`.
-This is source evidence and an independent oracle proposal. No compilation,
-test execution, cleanup experiment or release qualification occurred.
 
-The baseline intentionally permits late work from retained A selections. The
-paths below are required migration coverage and counterexamples to incomplete
-gating implementations, not claims that this baseline violates its old contract.
-Shared semantic decisions remain with the campaign coordinator.
+Current cumulative source review: campaign base
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact repair candidate
+`9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`, read from committed objects in
+`/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`.
+Disposition: BLOCKED on bootstrap continuation/native-END custody remaining
+outside CompilerWorkTicket, specified in the final checkpoint below. The fe3
+runtime generation-claim loss, ownership enum and fixture lease findings have
+source repairs in this candidate. No source acceptance or integration readiness
+is issued. Compile/test execution remains 0: root's shared native lane is held
+elsewhere. Cumulative whitespace check passes. No build, cleanup experiment,
+product source edit or release qualification occurred.
+
+Required R1 WatchRoute/forms/reply-tool/display registration successors remain
+explicitly HELD until initial runtime and actor production/unit compilation.
+Their absent gates are known incomplete R1 coverage, not an accepted exception.
+R2 force-drain/publication composition and R3 remain held. The following base
+map supplies the issuance relationships and historical counterexamples; its
+baseline line numbers are not current candidate locations. Current candidate
+findings and accepted strategy are recorded at the end.
 
 ## Authority issuance and use
 
@@ -730,3 +740,195 @@ including generalized BootstrapWorld and private initial-uncertainty custody;
 parent supplies joined source/evidence when root admits native verification.
 Next action is cumulative exact-candidate review of these production aliases
 and parent/own claims. Yield without periodic polling.
+
+
+### Exact cumulative checkpoint fe3ef791f967: blocked source verdict
+
+Reviewed committed base..fe3 production delta, including the prior directory
+repair, BootstrapWorld issuance/claims, publisher retained facts, compiler
+scopes/tickets, callback captures and the runtime lexical-scope gate. The
+admission checkout HEAD had advanced to 47f9442bf9917a9b135a21e5574425ae6ba6b50b
+while reviewing, so source observations above used git show/diff of fe3 rather
+than worktree contents. No WIP or product source was edited.
+
+Blocking findings:
+
+1. **Uncertain hidden compiler work loses its runtime claim.**
+   `resident_workbench.rs::with_continuation_machine` and its wait variant
+   deliberately issue `admit_continuation()` tickets with no source claim.
+   A completed Binding/Projected continuation can still call
+   `resident.rs::complete_prepared` -> `bind_prepared` ->
+   `persistent.rs::bind_replacing_decls_in` -> `retract_value_heads_in` ->
+   `SessionLib::prepare_retraction_in`, which can perform actual compiler work.
+   Its lazy source claim is stored in PersistentSession.source_claim by
+   `admit_source_work_in`. At checkout exit,
+   `ResidentSession::with_source_admission` (3519 in fe3) unconditionally assigns
+   previous_claim, dropping the just-earned claim. It never observes compiler
+   END or unwind. `CompilerWorkTicket::consume_close` preserves unconfirmed
+   source work only through ticket.source_claim, which is None for this path.
+   Counterexample: resume a binding that retracts an existing declaration while
+   A is open, let its actual compiler close become unconfirmed, then fence A.
+   The generation can report zero claims and reopen/retire despite unconfirmed
+   native work. Connect lazily earned runtime claims to the actual owning
+   compiler close, including panic/abandonment, without adding a source claim
+   to a pure continuation. Both owner and leaf received exact paths. Required
+   control pairs clean/uncertain/abandoned hidden binding compilation with a
+   pure continuation that earns no source claim.
+
+2. **Nonexistent ownership enum variant prevents actor compilation.**
+   `local_actor.rs::SpawnOwnership` declares Independent and Supervised, while
+   is_independent (213 in fe3) matches Self::World. The SourceDependency rename
+   accidentally changed an unrelated enum consumer. Restore its actual
+   Independent variant. This is source evidence, not an observed compiler run.
+
+3. **New admission-history fixture drops actual lexical custody.**
+   `generation_admission.rs::tests::generation` drops its local runtime lexical
+   scope lease when returning only GenerationDependency. The next generation
+   helper invocation calls mint_notebook_scope_with_lease, which reaps queued
+   lease retirement and closes that earlier gate. In
+   first_visible_world_closes_old_alias_after_replacement, creating next thus
+   retires first before first.fence().unwrap; typed-parent controls similarly
+   retire parents they expect open. Keep the actual leases in an explicit test
+   history owner. The leaf acknowledged and is repairing the fixture; do not
+   weaken production retirement or make metadata dependency own lexical custody.
+
+Adjacent source results:
+
+- Actual typed capture now mints BootstrapWorld external Some(parentA), root
+  and independently captured/forked LLM worlds use None, and already admitted
+  World descriptors survive root handoffs. Preparation selects only external
+  prerequisites; C -> D does not accidentally depend on C. Bootstrap claims,
+  checkout and registration guards retain parent runtime claims, including
+  propagation of uncertainty. SourceCallback and from_context retain the
+  issuing dependency, independently of generation() returning None.
+- Initial publication is not self-blocked by its own checkout claim in the
+  inspected production path: prepare_actor_generation holds bootstrap claims
+  only in its synchronous checkout, dropping them before returning prepared
+  custody. ActorGenerationPublisher uses with_machine_wait_mode(false), while
+  WorldPublication separately retains external A through commit settlement.
+  Initialization's compiler-owner scope captures a capability rather than
+  automatically admitting a ticket. This is source reachability, not execution.
+- No concrete World/runtime reverse-lock cycle found in the actual synchronous
+  callbacks: directory generation_enqueue only sends its message; startup
+  source admission pushes into the owned source vector; activation admission
+  checks no action; compiler preparation admission touches lifecycle metadata.
+  These do not acquire World.state from inside an already held runtime gate.
+  Runtime chain checks lock ancestors before descendants. Retain an actual
+  production race control once native verification is admitted.
+- Parent's preleased initial-scope concern remains a latent API hazard without
+  a proven production route here. retain_lexical_scope ALWAYS mints a separate
+  detached scope before leasing it, so installation/checkpoint capture does not
+  lease the child's actual target notebook scope. Child-session provisioning
+  uses raw mint_isolated_scope, checkpoint remint produces an unleased target,
+  and the actual target's first lease comes from initial notebook adoption.
+  Replacing an existing leased gate would strand lower aliases; do not change
+  canonical ownership based on this unproven counterexample. A direct public
+  runtime API can prelease a scope, but no actor production consumer inspected
+  makes the child share A's canonical gate that way.
+- InitialPublicationUnconfirmed retains private candidate facts and unbound
+  public owner; actual visibility creates ActorGeneration with real readiness.
+  Unknown first publication closes old world aliases permanently. Recovery is
+  explicit enclosing host/run reopen into a NEW recovered context; no same-run
+  fence reset, live reconciliation or prospective bound owner is authorized.
+- Directory base..804 repair remains intact: typed starter failure distinguishes
+  proven NotStarted and StartUnconfirmed, preserves uncertain identity/pending
+  custody, and actual reservation supplies worker preparation provenance.
+  fe3 still routes source-dependent RunOwned creation through supervised worker
+  reservation; the leaf's announced 47f9442 delta corrects this using existing
+  reserve_generation_actor. That later delta is not accepted by this fe3 verdict.
+
+Verification: cumulative git diff --check base..fe3 exits 0. Native production,
+unit, host and focused integration compilation/execution are all unqualified;
+0 commands executed as tests. Required held registration successors and the
+three findings above prevent any complete-R1 acceptance. No R2/R3 changes are
+accepted by this review.
+
+Awaited producer/event: admission leaf supplies an exact repaired candidate
+covering hidden-END claim custody, ownership enum and fixture leases, including
+its final RunOwned/callback/ticket controls; reload supervisor supplies the
+joined revision and admitted native evidence. Next action is exact cumulative
+repair review and those production histories. No periodic polling.
+
+
+### Exact repair checkpoint 9bb4c1eb4bf5: bootstrap END custody still blocked
+
+Reviewed committed fe3..9bb and cumulative base..9bb with the earlier fe3
+production map. Repair sequence includes 47f9442bf9917a9b135a21e5574425ae6ba6b50b,
+f2ab98b069b46495711a0199b9856fdd9fac8916 and
+9bb4c1eb4bf5a0775dae68beb119446bb34d06b9. The checkout was clean at exact 9bb.
+Only this authorized review report was edited.
+
+Source repairs verified:
+
+- All four fresh/continuation(+wait) machine helpers call run_source_transaction.
+  It obtains the actual CompilerWorkTicket's lazy claim collection and invokes
+  ResidentSession::with_source_claim_transfer INSIDE the ticket action.
+  Transfer runs after the operation returns or unwinds and before rethrow.
+  extract-cmd endpoint's owning TransactionScopeGuard performs finish/abandon
+  only after that action, so a lazy RuntimeSourceClaim reaches the ticket before
+  actual END. Unknown close and abandoned ticket drain those claims through
+  retain_unconfirmed. Clean/NotStarted releases them after END; the shared Arc
+  holder survives until the synchronous helper returns. Previous runtime source
+  claim restoration occurs before transfer/rethrow. Nested compiler transaction
+  scopes are explicitly prohibited by the existing owning runtime; nested
+  lexical transfer scopes restore the previous claim rather than replacing its
+  owner. No new generation-path claim-loss defect found in this ordering.
+- The enum repair restores SpawnOwnership::Independent. The History test owner
+  retains every actual lexical scope Arc; subsequent mints no longer reap gates
+  those histories expect open. Neither repair weakens production semantics.
+- Source-dependent RunOwned uses reserve_generation_actor and ActorOwned uses
+  reserve_generation_worker, preserving source membership separately from
+  lifetime. The existing real reservation/RootWorker provenance chain remains.
+- New actual compiler-ticket unknown-END and SourceCallback/from_context alias
+  controls inspect the correct owners. Callback transfer's generation() None
+  does not erase its source dependency. These tests remain unexecuted.
+
+Remaining confirmed source counterexample: **bootstrap continuation custody is
+not transferred to native END.** BootstrapWorld::checkout_admission returns an
+own BootstrapClaim alongside an optional external runtime gate. The root/LLM
+bootstrap case returns None; the typed bootstrap case returns parent A's gate.
+ResidentMachineAccess::with_machine_wait_mode keeps that own claim in local
+_bootstrap_claim, outside run_source_transaction/CompilerWorkTicket. Continuation
+admission intentionally has no eager source claim. For a root bootstrap,
+admit_source_work_in sees source_context_active + source_admission None and
+earns no RuntimeSourceClaim at all, so the new lazy transfer collects None.
+After hidden compiler END is uncertain, the outer BootstrapClaim drops normally
+and the world remains open. In the typed bootstrap case external A's runtime
+claim becomes uncertain but the child's own bootstrap obligation still drops
+cleanly; own-world accounting is incomplete.
+
+This is production reachable, not a forged context: host
+`exomonad/host/src/actor_host.rs` (2320 in 9bb) provisions the OperatorService's
+actor with forest.new_workbench. ResidentBoot::Workbench initialization installs
+a Bootstrap lease and returns without generation binding. Its real
+begin_ready_bind_in_checkout uses run_bind_with_sites/run_projected_bind_with_sites
+(8848/8855 in 9bb). An effectful Binding/Projected run can suspend and later
+complete through the continuation wrapper, then bind_prepared/retract_heads_in
+can perform hidden compiler work. An unknown END on that work has no retained
+own-world obligation after checkout. The repair needs the actual bootstrap
+source claim tied to the same native END, or an equivalent existing-owner
+handoff, while preserving pure continuation behavior. No metadata-only
+precheck or compiler lifecycle observation can substitute for the world claim.
+Parent and leaf received exact paths before this report.
+
+Detection limitation: the new actor continuation test manually pushes a claim
+into the ticket collection, while the new runtime test independently drives
+binding plus transfer. These are useful component controls, but both would pass
+if run_source_transaction stopped wiring them together. Require the smallest
+joined production control through actual continuation helper/run_source_transaction:
+actual lazy binding earns the source claim, the real owning ticket receives an
+Unconfirmed END, and a source fence reports retained uncertainty. Include
+Generation, root Bootstrap(None) and typed Bootstrap(Some(parentA)) worlds,
+plus clean/NotStarted and unwind controls. Pair with a pure continuation which
+keeps source mutation refused after a fence and earns no RuntimeSourceClaim.
+Use existing fixtures/runner and close observation; no production test hook or
+new test framework. A joined actual hidden-retraction compiler history remains
+behavioral acceptance evidence after admitted native compilation.
+
+Verification: git diff --check base..9bb exits 0. Native compilation and test
+execution remain 0; source review is not an executed pass. Required R1
+registration successors remain HELD and complete-R1 acceptance remains blocked.
+Awaited event: reload supervisor authorizes the bounded remaining bootstrap
+END repair and leaf supplies its exact stable candidate; parent supplies
+admitted compile/focused evidence when the lane is available. Next action is
+cumulative exact repair review including joined claim/END controls. No polling.
