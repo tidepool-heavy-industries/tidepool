@@ -149,3 +149,11 @@ states, not24 maintained test executions. Exactef797 additionally passed the dec
 SOURCE boot reuse native-scope leaf1; empty-binder1 and a procedure refusal0 remain
 separate. No component count grants frontend, performance, release or deployment
 acceptance. Private exact receipts are linked from the owning handoff.
+
+The separable availability foundation at exact `d334ef5af9b40578c86f9e93e37571e5d1a2cee2`
+compiled production/cfg(test) and passed the final three owning Request controls
+(3 selected/executed/passed). Its obsolete Candidate issuer/API/enum paths are
+deleted; source-specific earlier GHC/pairing/retained/scoped/physical controls
+remain bound to their receipts. Full-history review and joined campaign compilation
+are receiving gates. Later publication birth-offer contamination remains an open
+product failure; foundation integration cannot qualify it or the frozen workflow.

@@ -194,7 +194,7 @@ fixture migrations use actual closed outputs and preserve refusal, physical owne
 retained-history and source-policy checks. NativeBinding closure is authenticated,
 not assumed from broad custody.
 
-Latest executed source `6d93cc5fac1474c3f4c1a4620b1299bbd67964e6` compiled
+Prior executed source `6d93cc5fac1474c3f4c1a4620b1299bbd67964e6` compiled
 production and cfg(test), then selected/executed/passed two maintained tests:
 the generated publication/recovery property and the repeated retained-core history.
 Receipt `retry-6d93/TERMINAL.json` SHA-256
@@ -296,3 +296,28 @@ bounded top-down scratch analysis by checkout/output owner, active versus idle
 users, required independent products/evidence and exact possible reclaim
 boundaries. Analysis only: no deletion, GC, unmount or stopping others.
 Deployment and live Persona changes remain outside qualification authorization.
+
+## Separable availability foundation checkpoint
+
+Exact `d334ef5af9b40578c86f9e93e37571e5d1a2cee2` includes the reviewed
+`91d6ba6ceb733794c63da1d07d18efc7ec2087e1` retirement stack. Production and
+all owning cfg(test) callers compile. The three changed owning controls selected,
+executed and passed 3/3: carried dependency proof through the actual private Request,
+completed entry acquisition/lifetime, and empty producer-pin Request preparation.
+The first contains three internal preference histories; these are one libtest.
+`retry-d334/TERMINAL.json` SHA-256
+`90eabdf2806384752a03b6ad9e6eb3bcbd222d22dbb0cf3cf97dffe2610c97c2` binds
+commands, reports and binary
+`3b5e7c26532419f8bdb2e9e84e4d60cdaabc970fd179af043104901529a35fd5`.
+Process cleanup is confirmed, compiler cleanup not observed, diagnostics complete.
+All commands settled; qualification foreground allowance is zero.
+
+The obsolete Candidate authority factory, wrappers, enum and alternative validator
+are removed. Actual Request completion retains its admitted entries, canonical and
+producer checks, independent row permissions and strict selected-input validation.
+Retired histories have source-specific actual Request replacements above; unrelated
+primitive malformed-offer, narrowing, restoration and ambiguity controls remain.
+The upward checkpoint needs independent full-history campaign review and joined
+compilation. It does not include the later publication-native-authority repair,
+whose actual strict context-equality failure remains open. Frozen Persona, ordinary
+cell/service migration and matched performance remain unqualified.
