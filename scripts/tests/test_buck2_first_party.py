@@ -779,6 +779,29 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         recovered = self.generate("--package", "exomonad-host", "--check")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
 
+    def test_skill_directory_file_outside_the_projection_fails_generation(self):
+        tree = ast.parse(GENERATOR.read_text())
+        definition = next(
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "RUNTIME_SOURCE_PROJECTIONS"
+                    for target in node.targets)
+        )
+        environment = {}
+        exec(compile(ast.Module(body=[definition], type_ignores=[]), str(GENERATOR), "exec"), environment)
+        projection = environment["RUNTIME_SOURCE_PROJECTIONS"][
+            ("exomonad-host", "exomonad_host_unit_tests")]
+        for relative in projection:
+            self.write(relative, "skill\n")
+        control = self.generate("--package", "exomonad-host")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.write(".exomonad/workspace/skills/exomonad-command/references/unprojected.md",
+                   "silently dropped\n")
+        refused = self.generate("--package", "exomonad-host")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("undeclared=", refused.stderr)
+        self.assertIn("references/unprojected.md", refused.stderr)
+
     def test_binary_sources_preserve_module_layouts_and_their_includes(self):
         metadata = json.loads(self.metadata.read_text())
         facade = next(package for package in metadata["packages"] if package["name"] == "exomonad-host")
