@@ -136,8 +136,12 @@ the complete occurrence inventory. `TPCWBIND4` keeps runtime variable IDs,
 defining scope and the checked row's explicit compiler generation separate.
 Exact exported GHC Names/types supply native alias identity; ordinary renaming
 preserves authored local shadowing. Captured thin interfaces and package facts
-remain explicit operation inputs. `TPCWPREP3` reports actual normalized typed-segment plans, correlated input refs and
-the existing emitters' output manifest; it grants no runtime value permission.
+remain explicit operation inputs. `TPCWPREP3` reports actual normalized
+typed-segment plans, correlated input refs and the existing emitters' output
+manifest; it grants no runtime value permission. The private
+`TPCWSOURCE2` receipt carries the completion's ordered materialized root aliases
+as transport DATA. Their positions map back to the captured source domain;
+they neither identify logical worlds nor authorize later filesystem reads.
 The matched `TPCWORLD` version 3 carrier retains exactly the frontier of three
 roots in Context, primary-association, occurrence order. Its fixed `TPCWREST`
 version 3 product binds those roots, the captured source seal, canonical producer,
