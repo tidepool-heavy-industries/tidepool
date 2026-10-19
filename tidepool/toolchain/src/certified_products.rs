@@ -14091,7 +14091,13 @@ pub(crate) mod tests {
             let row = availability
                 .rows()
                 .find(|row| row.original_owner() == product.owner())
-                .unwrap();
+                .unwrap_or_else(|| {
+                    let observed = availability.rows().map(|row| (
+                        row.target_original(row.original_owner()).unwrap().descriptor.id,
+                        row.original_owner().clone(), row.permits(7), row.permits(9001),
+                    )).collect::<Vec<_>>();
+                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, closed.projection().snapshot_roles());
+                });
             assert_eq!(row.permits(7), expected_two.is_some(), "{label}");
             assert_eq!(row.permits(9001), expected_one.is_some(), "{label}");
             let mut graph = view.capture_graph_selection();
@@ -14395,12 +14401,38 @@ pub(crate) mod tests {
                     .unwrap();
                 let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
                 if !expected {
+                    let outcome = match &completed {
+                        Ok(completed) => {
+                            let rows = completed
+                                .native_availability()
+                                .rows()
+                                .map(|row| {
+                                    (
+                                        row.target_original(row.original_owner())
+                                            .unwrap()
+                                            .descriptor
+                                            .id,
+                                        row.original_owner().clone(),
+                                        row.permits(required_ordinal),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            format!(
+                                "success roles={:?} rows={rows:?} offers={} selected_groups={}",
+                                completed.role_projection().snapshot_roles(),
+                                completed.native_offers().len(),
+                                completed.issued_artifacts().selected_native_groups().len()
+                            )
+                        }
+                        Err(error) => format!("typed_error={error:?}"),
+                    };
                     assert!(
                         matches!(completed, Err(CompileError::ArtifactInventory(error))
                         if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
                             artifact: support_entry.descriptor.id, original_ordinal: required_ordinal,
                         }),
-                        "actual NEW C must consult the receiving Request's absent A permission"
+                        "actual NEW C must consult the receiving Request's absent A permission; label={label} inputA={:?} newC={:?} required_ordinal={required_ordinal} required_edges={required_edges:?} outcome={outcome}",
+                        support_entry.descriptor.id, output_entry.descriptor.id,
                     );
                 } else {
                     let completed = completed.unwrap();

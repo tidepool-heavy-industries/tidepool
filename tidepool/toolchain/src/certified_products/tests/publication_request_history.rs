@@ -469,8 +469,11 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .admit_shared_with_demand(request.compiler_inputs().artifacts(), vec![output.clone()],
                             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces).unwrap();
                     let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
-                    prop_assert!(matches!(completed.role_projection().snapshot_roles()[&output.descriptor.owner],
-                        CompilerInputRole::InterfaceOnly { interface } if interface == canonical.descriptor.id), "completed retained-core output keeps its actual interface-only role");
+                    let actual_role = &completed.role_projection().snapshot_roles()[&output.descriptor.owner];
+                    prop_assert!(matches!(actual_role,
+                        CompilerInputRole::InterfaceOnly { interface } if *interface == canonical.descriptor.id),
+                        "completed output role: step={} ordinal={} owner={:?} origin={:?} input_role={:?} actual={:?} expected_canonical={:?}",
+                        step, ordinal, output.descriptor.owner, origin, existing, actual_role, canonical.descriptor.id);
                     let output_permission = completed.native_availability().rows()
                         .find(|row| row.original_owner() == product.owner()).unwrap();
                     prop_assert!(output_permission.permits(0));
