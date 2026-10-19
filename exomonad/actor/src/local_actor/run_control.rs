@@ -1714,7 +1714,7 @@ impl Actor for RunControl {
                         phase: PreparationPhase::Running,
                         compiler: compiler.clone(),
                         placement: None,
-                        dependency,
+                        dependency: dependency.clone(),
                     },
                 );
                 let (delivery, receiver) = oneshot::channel();
@@ -1722,6 +1722,7 @@ impl Actor for RunControl {
                     .send_message(PreparationMessage::Start {
                         id,
                         expected_worker: reservation,
+                        dependency,
                         operation,
                         compiler,
                         reply: delivery,

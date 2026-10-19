@@ -363,6 +363,7 @@ pub(super) enum PreparationMessage {
     Start {
         id: u64,
         expected_worker: Option<ActorRef>,
+        dependency: Option<GenerationDependency>,
         operation: RootOperation,
         compiler: RetainedActorExit,
         reply: oneshot::Sender<RootDelivery>,
@@ -510,10 +511,16 @@ impl Actor for PreparationSupervisor {
                     Err(error) => { let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: identity, lifecycle: Err(ReservationStartFailure::NotStarted(error.to_string())) }); }
                 }
             }
-            PreparationMessage::Start { id, expected_worker, operation, compiler, reply } => {
+            PreparationMessage::Start { id, expected_worker, dependency, operation, compiler, reply } => {
                 let compiler_scope = state.compiler_services.with_compiler_owner(
                     crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(compiler.clone()),
                 );
+                let compiler_scope = match dependency {
+                    Some(dependency) => compiler_scope.with_source_dependency(
+                        &crate::resident_workbench::generation_admission::SourceDependency::Generation(dependency),
+                    ),
+                    None => compiler_scope.for_preparation(),
+                };
                 let arguments = RootWorkerArguments { id, expected_worker, operation: Some(operation), compiler: compiler.clone(), compiler_scope, reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, RootWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
