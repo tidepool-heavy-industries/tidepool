@@ -79,25 +79,28 @@ Useful progress is an accepted decision, implemented consumer, discriminating
 test, repaired failure, reviewed fold or measured result. A growing number of
 agents or documents is not progress by itself.
 
-## Active supervision and continuation
+## Event-driven supervision and continuation
 
-While approved work, running children/builds, reviews, or dependency-ready
-successor waves remain, campaign and area supervisors stay in their active turn.
-Process completion notifications, review and repair concrete candidates, fold
-accepted history, and launch approved successors. When only events can advance
-work, use `collaboration.wait_agent(timeout_ms=60000)` and reconcile notifications;
-this interruptible mailbox wait does not schedule another turn after a final.
-Avoid empty busy polling and blocking waits longer than 60 seconds.
+Do all dependency-ready implementation, review, repair and integration useful
+in an activation. Do not run periodic timed polling or status-only wake loops.
+If no local action remains, record the exact awaited event, dependency, producer
+or process observer, recipient and next continuation in the area handoff, then
+yield. A short mailbox wait is useful only for a concrete completion expected
+soon; it is not a recurring scheduler. Preserve reserved grant ownership and the
+whole-tree ceiling when resuming; avoid duplicate tasks.
 
-Leaves return exact base/candidate evidence and pending checks to their parent,
-and notify consequential cross-area owners. Completion automatically notifies the
-parent; `send_message` alone does not reactivate a completed parent. If a needed
-parent has ended its turn, inspect actual status/capacity and use `followup_task`
-with the concrete result and next action, within its existing reserved grant.
-Avoid duplicate work. Area supervisors end only when their approved frontier is
-drained or explicitly stood down; campaign ends only at the agreed completion,
-hard-gap or external-blocker handoff with no independently runnable approved work.
+Every child sends a terminal handoff for success, refusal, failure, blocked,
+cancelled or stood-down work: exact task/base/candidate, evidence, status and
+next action to its owning supervisor and consequential dependent owners. Check
+recipient status: `send_message` when running; `followup_task` with the actionable
+packet when a non-root parent or peer is dormant/completed. Automatic completion
+notification supports delivery but does not guarantee another turn. Only the
+responsible parent integrates its branch and reconciles review/fold disposition.
 
+Running command owners remain responsible for observing terminal outcomes and
+emitting the same event; do not yield with no observer able to collect a job.
+A final response does not schedule future execution. Campaign stand-down still
+requires the finite approved frontier and morning-handoff rule below.
 
 ## Hard strategy questions: drain, then terminate
 

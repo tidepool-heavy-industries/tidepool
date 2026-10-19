@@ -112,16 +112,21 @@ or test execution. Observed free bytes108974096384 leave about1.49GiB above rese
 no defensible cold compile growth bound exists yet. Exact pending compile:
 `swarm-build just check exomonad-host tidepool-toolchain`.
 
-## Active supervision
+## Event-driven supervision
 
-Explicit user directive propagated to all five supervisors: stay active through
-approved implementation, running children/builds, reviews, repairs, folds and
-ready successor waves. Wait on interruptible mailbox events for at most60s when
-only events can advance work. Final does not schedule continuation. If a required
-parent has ended, inspect status/capacity and use followup_task with concrete next
-action under its existing grant. Current host/warm ACKs received; remaining ACKs
-being reconciled. Host oracle reviewer has temporarily settled after exact leaf
-source review; its grant remains reserved for repaired/cumulative review.
+The user superseded periodic60s polling. All five supervisors acknowledged:
+maximize useful work per activation; if no local action remains, retain exact
+awaited event/dependency/producer-or-observer/recipient/continuation and yield.
+No timed periodic/status-only wake loops. Terminal handoff is mandatory for all
+success/refusal/failure/blocked/cancelled/stand-down outcomes with exact source,
+evidence and next action. Producer checks running recipient→send_message,
+dormant non-root recipient→followup_task, under reserved grants/no duplication.
+Auto-completion is supporting delivery, not a resumption guarantee. Process
+owners observe terminal results; only branch owner reconciles review and fold.
+
+Host/owned supervisors may yield while their exact leaves finish current work;
+reserved grants remain held and producers own status-aware reactivation. No
+source result or build is accepted merely because a worker reports done.
 
 Qualification source-only baseline executed89 unittest cases and failed19
 subtests:16 new observer-sensitivity failures and3 fixture/procedure defects
@@ -134,3 +139,16 @@ source-reviewed full5b74..candidate by campaign; redundant explicit HscEnv field
 removed with identical sole HPT fallback and missing-HMI behavior. No native compile
 or memory-release claim, no qualified fold. Package default cold fallback held
 pending actual source-owner option review and regression controls.
+
+Qualification candidates cec2a3361cf6b46d3de6026a0e0b9ace416d4cd8 (roster)
+and ac3bf6e0379559b68396b7854868c3d819cd6467 (capture) independently reviewed
+full5b74..tip by campaign Sol-high; source accepted, joined area fold and script
+checks requested before campaign integration. Capture89 report cases+436 bundle
+script cases passed at its source; roster434 script cases passed at its source.
+These are script behavior, not hosted/native execution. Exact joined evidence
+and artifact identity remain pending.
+Reload source-admission owner extends existing lower RuntimeLexicalScopeLease,
+separately from custody/resource liveness, at actual compile/install/mutation.
+Force cannot stop an independent LLM child as collateral of dependent parent's
+lifetime cleanup: exact owner closure fences or typed refusal must precede stop.
+No automatic reparent/promotion is authorized. Concrete controls under development.
