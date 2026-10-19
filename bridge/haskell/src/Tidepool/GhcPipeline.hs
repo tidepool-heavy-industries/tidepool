@@ -7079,7 +7079,7 @@ captureHeldWorldSourceSelection facts values graph = do
         , worldHasSelectedPrimary facts (ownerKey (ms_mod summary))
         , not (worldHasSelectedSource facts (ownerKey (ms_mod summary)))]
   unless (null unsupported) (liftIO (throwIO WorldCellUnsupported))
-  if Set.null demanded then pure (Nothing,[]) else do
+  if Set.null demanded then pure (Nothing,snd (sourceEvidenceGraphFor Map.empty graph)) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs initial facts (Set.toAscList demanded))
     (proofs,interfaces,packages) <- case captured of

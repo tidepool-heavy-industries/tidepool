@@ -774,6 +774,11 @@ extendCheckedValueScope scope row@(artifact,_,_) requirements = case scopePurpos
     extendExactScopeGeneration extended [(row,CheckedValueEvidence)] [] [(rowOwner row,requirements)]
   _ -> pure (Left "completed value extension requires a checked cell scope and canonical value owner")
 
+canonicalRequirementsSelected :: Map.Map (String,String) String -> ExactIfaceArtifact -> CanonicalInterfaceProof -> Bool
+canonicalRequirementsSelected seals artifact proof =
+  Map.keysSet (canonicalRequirements proof) == Set.fromList (exactRequirements artifact)
+    && all (\(key,sha) -> Map.lookup key seals == Just sha) (Map.toAscList (canonicalRequirements proof))
+
 validateInputClosure :: String -> AdmittedScopeInputs -> [ExactProduct] -> IO ()
 validateInputClosure producer inputs products = do
   let rows = inputRows inputs
@@ -791,8 +796,7 @@ validateInputClosure producer inputs products = do
             && certificateInterface facts == exactSha256 iface && certificatePackages facts == packagesSha
             && certificateCore facts == (canonicalCoreSha256 <$> canonicalCoreArtifact proof))
           (fail "canonical module certificate differs from exact owner or payload")
-        unless (Map.keysSet (canonicalRequirements proof) == Set.fromList (exactRequirements iface)
-            && matching (canonicalRequirements proof))
+        unless (canonicalRequirementsSelected seals iface proof)
           (fail "canonical module requirements differ from selected exact interfaces")
       LocalNativeDeclarationEvidence native -> do
         let proof = localNativeProof native
@@ -2322,7 +2326,7 @@ worldHasSelectedSource facts key = case Map.lookup key (worldPrimarySelected (wo
 readWorldSourceInputs :: HscEnv -> WorldInputFacts -> [(String,String)]
   -> IO (Either String (Map.Map (String,String) CanonicalInterfaceProof
       ,[(ExactIfaceArtifact,ModIface)],Map.Map (String,String) PackageImportEvidence))
-readWorldSourceInputs env facts roots = case walk Map.empty roots of
+readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate of
   Left reason -> pure (Left reason)
   Right rows -> do
     let custody = worldInputsCustody facts
@@ -2361,6 +2365,13 @@ readWorldSourceInputs env facts roots = case walk Map.empty roots of
                       packages = Map.fromList [(key,value) | (key,(_,value)) <- pairs]
                   Right (proofs,interfaces,packages)
   where
+    validate rows = do
+      let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
+      forM_ (Map.elems rows) $ \(ScopeInterfaceInput (artifact,_,_) evidence) -> case evidence of
+        ModuleInterfaceEvidence proof -> unless (canonicalRequirementsSelected seals artifact proof)
+          (Left "world canonical requirements differ from selected exact interfaces")
+        _ -> Left "world canonical type closure lacks its admitted source proof"
+      pure rows
     walk selected [] = Right selected
     walk selected (key:rest) | Map.member key selected = walk selected rest
     walk selected (key:rest) = do
