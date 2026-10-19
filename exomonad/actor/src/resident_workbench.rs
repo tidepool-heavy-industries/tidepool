@@ -1904,7 +1904,7 @@ pub(crate) enum ActorPublicationOwner {
     Preparation(crate::CompilerPreparationClient),
 }
 impl ActorPublicationOwner {
-    fn matches_actor(&self, actor: ActorRef) -> bool {
+    fn matches_actor(&self, actor: crate::ActorRef) -> bool {
         match self {
             Self::Actor(lifecycle) => lifecycle.identity() == actor,
             #[cfg(test)]
