@@ -19737,7 +19737,34 @@ None,
             )
             .is_err());
             context = context
-                .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
+                .extend_issued_compiler_support(&{
+                    let inputs = request.compiler_inputs();
+                    let entry = Arc::new(
+                        crate::artifact_inventory::ArtifactEntry::original(
+                            canonical_producer,
+                            current.clone(),
+                        )
+                        .unwrap(),
+                    );
+                    let physical = inputs
+                        .artifacts()
+                        .inventory()
+                        .admit_certified_with_demand(
+                            inputs.artifacts(),
+                            vec![entry],
+                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                            &issued.source_selection,
+                        )
+                        .unwrap();
+                    let output =
+                        crate::declaration_context::OriginalCompilerInputs::from_selection(
+                            &issued.source_selection,
+                            &physical,
+                        )
+                        .unwrap();
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                        .unwrap()
+                })
                 .unwrap();
             prior = context.recovery_products();
         }
@@ -20332,10 +20359,38 @@ None,
             .unwrap();
             let marker_context = ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products(
-                    canonical_producer,
-                    &marker_certified.recovery_products,
-                )
+                .extend_issued_compiler_support(&{
+                    let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                    let entries = marker_certified
+                        .recovery_products
+                        .iter()
+                        .cloned()
+                        .map(|product| {
+                            crate::artifact_inventory::ArtifactEntry::original(
+                                canonical_producer,
+                                product,
+                            )
+                            .map(Arc::new)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    let physical = inventory
+                        .admit_certified_with_demand(
+                            &inventory.empty_view(),
+                            entries,
+                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                            &marker_certified.source_selection,
+                        )
+                        .unwrap();
+                    let output =
+                        crate::declaration_context::OriginalCompilerInputs::from_selection(
+                            &marker_certified.source_selection,
+                            &physical,
+                        )
+                        .unwrap();
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                        .unwrap()
+                })
                 .unwrap();
             let public_context = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
