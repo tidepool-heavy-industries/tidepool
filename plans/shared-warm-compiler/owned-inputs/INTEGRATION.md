@@ -1,8 +1,8 @@
 # Owned row checkpoint integration packet
 
 Status: implementation/source review and component checks accepted; baseline
-reproduced the stale fresh-worker assertion. Product fold remains held until the
-reviewed test-only correction compiles and its complete case executes. No
+reproduced both inherited fresh-worker oracle failures. Product fold remains held
+until the approved second test-only correction is reviewed and its full case executes. No
 product source is merged into the area yet.
 
 Base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
@@ -83,8 +83,17 @@ SHA-256 `4fff5a9e049235a69dff22cb6bad587f853ad7d9b79e472d66ebac940039b124`.
 Candidate a178 changes only this test's lexical-root oracle to the actual
 `library_import_module()`, with explicit reserved-versus-actual distinction.
 Supervisor and independent source review verified all later controls unchanged;
-no production runtime code changed. Compilation/full corrected execution are
-row-owned and pending. Failing original cache:
+no production runtime code changed. The a178 runtime production/cfgtest build passed; its full case failed at the
+next unchanged native-selection assertion (turn.rs8717), before target demand.
+A controlled no-row baseline actual7c5c5d4c reproduced that same second failure
+with only the lexical test patch over the6d3 native sources. Report SHA256
+942f76b616f48fe0d94dfd15655bec8c42df2e79f0e66a21181b679c174fe4e3 and
+exact input delta are in private native-oracle-baseline/TERMINAL.json. Campaign
+approved a test-only pretarget-demand correction, preserving every downstream
+actual target/native/refusal check and requiring both existing opaque-custody
+owner controls plus the full corrected case. Rows owns that successor; independent
+review and exact native gates remain pending. No graph census replaces opaque
+offer authority. Failing original cache:
 `/tmp/tidepool-libtest-cache-jv8erlca`. The area has not folded that test repair.
 
 ## Resource and continuation ownership
@@ -100,8 +109,8 @@ shared service was deleted/restarted. Daemon/output next use is the owned
 test-only oracle repair and its exact checked-bind rerun after qualification's
 baseline result. Keep them warm until that gate settles; retirement is separate.
 
-Rows is active for the corrected runtime case; source_lifetime completed its
-exact test-only source review. Both use the existing two reserved grants.
+Rows is active for the second corrected runtime case. Source_lifetime is active
+for the root-authorized consumed-package-source proposal and then exact successor review. Both use the existing two reserved grants.
 Use status-aware `followup_task` for their next concrete assignment. The area
 supervisor owns the eventual full-candidate fold and campaign handoff. Campaign
 owns the receiving branch and joined integration gate. Qualification owns the
