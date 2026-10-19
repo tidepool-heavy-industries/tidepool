@@ -1310,6 +1310,7 @@ impl ModuleCandidateOffer {
         visibility: Arc<[u8]>,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
+        crate::compiler_world::check_world_visibility_size(visibility.len(), visible_rows.len())?;
         let primary = checked_offer_context(primary)?;
         let directory = Arc::new(
             tempfile::Builder::new()
@@ -1320,6 +1321,10 @@ impl ModuleCandidateOffer {
         let mut issuers = Vec::with_capacity(visible_rows.len());
         for artifact in &visible_rows {
             crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
+                1,
+            );
             let owner = artifact.owner().module_name();
             if !owners.insert(owner.clone()) {
                 return Err(CompileError::ExtractFailed(
@@ -1341,9 +1346,7 @@ impl ModuleCandidateOffer {
             Value::Bytes(visibility.to_vec()),
             Value::Array(issuers),
         ]);
-        let mut encoded_visibility = Vec::new();
-        ciborium::ser::into_writer(&visibility, &mut encoded_visibility)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let encoded_visibility = crate::compiler_world::world_bytes(&visibility)?;
         crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
             primary,
             visible_rows,
