@@ -19832,7 +19832,11 @@ None,
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
                     .unwrap()
             };
-            promoted_support.insert(owner.clone(), completed_support.clone());
+            let emitted_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                canonical_producer,
+                current,
+            );
+            promoted_support.insert(emitted_id, completed_support.clone());
             context = context
                 .extend_issued_compiler_support(&completed_support)
                 .unwrap();
@@ -19864,7 +19868,6 @@ None,
         };
         let mut selected_contexts = Vec::new();
         for product in [child, current] {
-            let emitted = &promoted_support[product.owner()];
             let entry = Arc::new(
                 crate::artifact_inventory::ArtifactEntry::original(
                     canonical_producer,
@@ -19872,6 +19875,7 @@ None,
                 )
                 .unwrap(),
             );
+            let emitted = &promoted_support[&entry.descriptor.id];
             assert_eq!(
                 emitted.native_availability().snapshot_facts().unwrap()[&entry.descriptor.id].mode,
                 crate::declaration_context::NativeTransportMode::Full
