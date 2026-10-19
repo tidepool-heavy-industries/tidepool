@@ -533,6 +533,19 @@ impl ConcurrentResident {
         markers: &[&str],
         layers: Option<exomonad_actor::ActorSourceLayerResolver>,
     ) -> Self {
+        Self::new_configured(bucket, markers, layers, false).await
+    }
+
+    async fn new_for_display(bucket: u32) -> Self {
+        Self::new_configured(bucket, &[], None, true).await
+    }
+
+    async fn new_configured(
+        bucket: u32,
+        markers: &[&str],
+        layers: Option<exomonad_actor::ActorSourceLayerResolver>,
+        with_console: bool,
+    ) -> Self {
         if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -541,7 +554,7 @@ impl ConcurrentResident {
                 .expect("one test tracing subscriber");
         }
         eval_harness::require_extract();
-        let declarations = [
+        let mut declarations = vec![
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::context_read_write_decl(),
             tidepool_mcp::agent_session_decl(),
@@ -552,6 +565,17 @@ impl ConcurrentResident {
             tidepool_mcp::fs_read_decl(),
             tidepool_mcp::sleep_decl(),
         ];
+        let mut actor_effects = vec![
+            exomonad_actor::ActorEffectKey::Commands,
+            exomonad_actor::ActorEffectKey::Watches,
+        ];
+        let console_row = if with_console {
+            declarations.push(tidepool_mcp::console_decl());
+            actor_effects.push(exomonad_actor::ActorEffectKey::Console);
+            ", Console"
+        } else {
+            ""
+        };
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
@@ -563,7 +587,7 @@ impl ConcurrentResident {
             insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
         let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
         let preamble = format!(
-            "{preamble}\ntype ActorEffects = '[AgentSession, ActorLocal Maybe, Commands, Watch.Watches]\n"
+            "{preamble}\ntype ActorEffects = '[AgentSession, ActorLocal Maybe, Commands, Watch.Watches{console_row}]\n"
         );
         let session = support::process_unique_session(bucket);
         let root = tempfile::tempdir().expect("concurrent actor session root");
@@ -576,11 +600,14 @@ impl ConcurrentResident {
         let (mut forest, mut deployments) = ResidentForest::new(
             ActorWorkbenchSource::new(preamble, include)
                 .with_spec("Tidepool.Agent.Contract.defaultWorkbenchSpec")
-                .with_installed_effect_support([
-                    exomonad_tool::ToolEffectKey::ContextReadWrite,
-                    exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Commands),
-                    exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Watches),
-                ]),
+                .with_installed_effect_support(
+                    std::iter::once(exomonad_tool::ToolEffectKey::ContextReadWrite).chain(
+                        actor_effects
+                            .iter()
+                            .copied()
+                            .map(exomonad_tool::ToolEffectKey::Actor),
+                    ),
+                ),
             session,
             machine,
             None,
@@ -603,10 +630,7 @@ impl ConcurrentResident {
         let prepared = preparation
             .scope(forest.new_program_root(
                 "concurrent-publication".into(),
-                exomonad_actor::ActorCapabilities::default().with_effect_keys(vec![
-                    exomonad_actor::ActorEffectKey::Commands,
-                    exomonad_actor::ActorEffectKey::Watches,
-                ]),
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(actor_effects),
                 std::sync::Arc::new(compiled),
             ))
             .await;
@@ -847,7 +871,7 @@ fn committed_execution(reply: &serde_json::Value) -> String {
 
 #[tokio::test]
 async fn resident_either_text_display_expands_the_retained_value() {
-    let fixture = ConcurrentResident::new(189, &[]).await;
+    let fixture = ConcurrentResident::new_for_display(189).await;
     fixture
         .read(
             "display-imports",
