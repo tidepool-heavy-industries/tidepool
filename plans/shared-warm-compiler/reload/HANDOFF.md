@@ -46,6 +46,18 @@ The directory/R1 consumers have no passing compilation or test evidence; the
 std-only generator and snapshot check do not establish those claims. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
 
+The cumulative `fe3ef791` review is in progress and has required repair before
+fold: a continuation-only compiler ticket has no eager source claim, while
+hidden binding completion can compile and obtain a lazy runtime claim. Checkout
+restoration currently drops that claim even when compiler END is uncertain.
+The leaf must connect the lazy obligation to its actual compiler-close owner;
+pure continuation must stay usable without fresh source permission. Separately,
+the new generation-history fixture drops its lexical lease before subsequent
+minting, causing real lease reaping to close gates prematurely. Repair that
+fixture's custody, not production lifetime rules. A pre-initial retained lexical
+lease potentially reusing an inherited parent gate at own-world adoption is
+under exact production-reachability review, not yet a confirmed product finding.
+
 ## Owners and exact continuation
 
 Both granted descendants use `gpt-6.1-sol`, high, fresh context, started
