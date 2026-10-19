@@ -596,14 +596,16 @@ async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() 
         assert!(memory.starts_with("Right ") && memory.contains("persona.md")
             && memory.contains("human.md") && memory.contains("curiosities.md"), "{memory}");
 
-        let trivial_operation = after_reads.operation("persona-later-trivial");
-        after_reads.sync_call_named("persona-later-trivial", "haskell", "display (1 + 1 :: Int)");
-        let after_trivial = host.while_operation_succeeds(
-            &trivial_operation,
+        let reuse_operation = after_reads.operation("persona-later-reuse");
+        after_reads.sync_call_named("persona-later-reuse", "haskell",
+            "display listing\ndisplay mem\ndisplay (1 + 1 :: Int)");
+        let after_reuse = host.while_operation_succeeds(
+            &reuse_operation,
             next_hosted_script_round(&mut requests, &mut pending, &root),
         ).await.unwrap();
-        assert_eq!(retained_committed_display_text(
-            &host.runtime.store(), &origin, &after_trivial.settled_output("persona-later-trivial")), "2");
+        assert_eq!(super::test_campaign::retained_committed_display_texts(
+            &host.runtime.store(), &origin, &after_reuse.settled_output("persona-later-reuse")),
+            vec![notes, memory, "2".to_owned()]);
 
         let installation = host.context.observer.installation(host.context.actor.identity()).await;
         let lookup = super::test_campaign::dispatch_lookup(
@@ -613,7 +615,7 @@ async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() 
         let found = lookup["items"][0]["output"].as_str().unwrap();
         assert!(found.contains("getRuntimeInfo") && found.contains("[available]")
             && !found.contains("no match:"), "{found}");
-        after_trivial.finish();
+        after_reuse.finish();
     })).await;
 }
 
