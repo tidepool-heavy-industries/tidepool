@@ -5783,7 +5783,7 @@ scopedValidateWorldCell = ownedScopedValidateWorldCell
 scopedCompileWorldCell :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
   -> WorldCellPrepareRequest -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
   -> IO (CompletedCompilerResult result)
-scopedCompileWorldCell = ownedScopedCompileWorldCell
+scopedCompileWorldCell scope = ownedScopedCompileWorldCell scope
 
 scopedCommitWorldDependencies :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutor
   -> WorldCellPrepareRequest -> PendingWorldDependencies -> IO ()

@@ -196,7 +196,7 @@ impl EntryDependencySelection {
             }
         }
         candidates.by_owner.retain(|key, _| selected.contains(key));
-        candidates.native_availability.retain(|product| {
+        candidates.contextual_native_availability.retain(|product| {
             self.linked
                 .iter()
                 .any(|original| LinkedOriginal::from_owner(product.owner()) == *original)

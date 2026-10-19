@@ -12,6 +12,7 @@ import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
+import System.IO (stderr)
 import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
@@ -122,6 +123,15 @@ worldAcquisitionDiagnostics = do
   (_,ordinary) <- captureDiagnostics (emitWorldAcquisitionRejection reason manifest detail)
   unless (all (`isInfixOf` ordinary) [reason,manifest,detail])
     (fail "world acquisition diagnostic lost its typed read cause/path/detail")
+  -- A valid UTF-8 stream may cross the existing capture byte boundary.
+  -- Decode its complete prefix, without treating a split final code point as
+  -- malformed data or replacing it with a different character.
+  let captureLimit = 4 * 1024 * 1024
+      truncatedMarker = "\n[compiler diagnostics truncated at 4 MiB]\n"
+  (_,truncated) <- captureDiagnostics $ BS.hPut stderr
+    (BS.replicate (captureLimit - 1) 97 <> TextEncoding.encodeUtf8 (Text.pack "\x03bb"))
+  unless (truncated == replicate (captureLimit - 1) 'a' ++ truncatedMarker)
+    (fail "bounded compiler diagnostics rejected or changed a valid UTF-8 prefix")
   limited <- timeout 5000000 $ captureDiagnostics $
     emitWorldAcquisitionRejection reason (repeat '\x1f30a') (repeat '\n')
   case limited of

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
 const MAGIC: &[u8; 8] = b"TPREQ024";
@@ -174,7 +175,7 @@ impl WorldCellRecipe {
 pub struct WorldCellPlanRequest {
     pub world: String,
     pub realization: String,
-    pub recipe: WorldCellRecipe,
+    pub recipe: Arc<WorldCellRecipe>,
     pub output: PathBuf,
 }
 
@@ -185,10 +186,11 @@ fn valid_cell_path(path: &Path) -> bool {
 
 impl WorldCellPlanRequest {
     fn valid(&self) -> bool {
-        self.check_transport().is_ok()
+        self.validate_transport().is_ok()
     }
 
-    fn check_transport(&self) -> Result<(), ProtocolError> {
+    /// Check the existing encoded frame budget without copying source bodies.
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
         if !valid_world_identity(&self.world)
             || !valid_reference(&self.realization)
             || !self.recipe.valid()
@@ -235,80 +237,127 @@ impl PlannedCellSlot {
 pub struct WorldCellPrepareRequest {
     pub world: String,
     pub realization: String,
-    pub recipe: WorldCellRecipe,
-    pub plan: Vec<u8>,
+    pub recipe: Arc<WorldCellRecipe>,
+    pub plan: Arc<[u8]>,
     pub admission: [u8; 32],
     pub slots: Vec<(u64, PlannedCellSlot)>,
     pub directory: PathBuf,
     pub output: PathBuf,
 }
 
-impl WorldCellPrepareRequest {
-    fn valid_fields(&self) -> bool {
-        valid_world_identity(&self.world)
-            && valid_reference(&self.realization)
-            && self.recipe.valid()
-            && !self.plan.is_empty()
-            && self.plan.len() <= 8 << 20
-            && self.slots.len() <= 10000
-            && self
-                .slots
-                .iter()
-                .enumerate()
-                .all(|(index, (ordinal, slot))| {
-                    *ordinal == index as u64
-                        && slot.generation() > 0
-                        && match slot {
-                            PlannedCellSlot::Expression { observation, .. } => {
-                                valid_reference(observation) && observation.len() <= 65536
-                            }
-                            _ => true,
-                        }
-                })
-            && self
-                .slots
-                .iter()
-                .map(|(_, slot)| slot.generation())
-                .collect::<BTreeSet<_>>()
-                .len()
-                == self.slots.len()
-            && valid_cell_path(&self.directory)
-            && valid_cell_path(&self.output)
+/// Borrowed reservation fields used before an operation copies observation names.
+#[derive(Clone, Copy)]
+pub enum PlannedCellSlotRef<'a> {
+    Prologue(u64),
+    Declaration(u64),
+    Bind(u64),
+    Expression {
+        generation: u64,
+        observation: &'a str,
+    },
+}
+
+impl PlannedCellSlot {
+    fn borrowed(&self) -> PlannedCellSlotRef<'_> {
+        match self {
+            Self::Prologue(generation) => PlannedCellSlotRef::Prologue(*generation),
+            Self::Declaration(generation) => PlannedCellSlotRef::Declaration(*generation),
+            Self::Bind(generation) => PlannedCellSlotRef::Bind(*generation),
+            Self::Expression {
+                generation,
+                observation,
+            } => PlannedCellSlotRef::Expression {
+                generation: *generation,
+                observation,
+            },
+        }
     }
+}
+
+impl WorldCellPrepareRequest {
     fn valid(&self) -> bool {
-        self.check_transport().is_ok()
+        self.validate_transport().is_ok()
     }
 
-    fn check_transport(&self) -> Result<(), ProtocolError> {
-        if !self.valid_fields() {
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
+        Self::validate_borrowed(
+            &self.world,
+            &self.realization,
+            &self.recipe,
+            &self.plan,
+            self.slots
+                .iter()
+                .map(|(ordinal, slot)| (*ordinal, slot.borrowed())),
+            &self.directory,
+            &self.output,
+        )
+    }
+
+    /// Bound the complete existing frame before copying caller-owned names.
+    /// Only the bounded generation sets allocate; source and receipt are borrowed.
+    pub fn validate_borrowed<'a>(
+        world: &str,
+        realization: &str,
+        recipe: &WorldCellRecipe,
+        plan: &[u8],
+        slots: impl IntoIterator<Item = (u64, PlannedCellSlotRef<'a>)>,
+        directory: &Path,
+        output: &Path,
+    ) -> Result<(), ProtocolError> {
+        if !valid_world_identity(world)
+            || !valid_reference(realization)
+            || !recipe.valid()
+            || plan.is_empty()
+            || plan.len() > 8 << 20
+            || !valid_cell_path(directory)
+            || !valid_cell_path(output)
+        {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        let slots = self
-            .slots
-            .iter()
-            .map(|(_, slot)| {
-                17 + match slot {
-                    PlannedCellSlot::Expression { observation, .. } => 4 + observation.len(),
-                    _ => 0,
+        let mut declarations = BTreeSet::new();
+        let mut values = BTreeSet::new();
+        let mut slot_bytes = 0usize;
+        for (index, (ordinal, slot)) in slots.into_iter().enumerate() {
+            if index >= 10000 || ordinal != index as u64 {
+                return Err(ProtocolError::InvalidWorldCell);
+            }
+            let (generation, unique, extra) = match slot {
+                PlannedCellSlotRef::Prologue(generation)
+                | PlannedCellSlotRef::Declaration(generation) => {
+                    (generation, declarations.insert(generation), 0)
                 }
-            })
-            .sum::<usize>();
+                PlannedCellSlotRef::Bind(generation) => (generation, values.insert(generation), 0),
+                PlannedCellSlotRef::Expression {
+                    generation,
+                    observation,
+                } => {
+                    if !valid_reference(observation) || observation.len() > 65536 {
+                        return Err(ProtocolError::InvalidWorldCell);
+                    }
+                    (generation, values.insert(generation), 4 + observation.len())
+                }
+            };
+            if generation == 0 || !unique {
+                return Err(ProtocolError::InvalidWorldCell);
+            }
+            slot_bytes += 17 + extra;
+        }
         check_world_cell_bytes(
             21 + 1
                 + 4
-                + self.world.len()
+                + world.len()
                 + 4
-                + self.realization.len()
-                + self.recipe.encoded_len()
+                + realization.len()
+                + recipe.encoded_len()
                 + 4
-                + self.plan.len()
+                + plan.len()
                 + 32
                 + 4
-                + slots
+                + slot_bytes
                 + 4
-                + self.directory.as_os_str().len()
+                + directory.as_os_str().len()
                 + 4
-                + self.output.as_os_str().len(),
+                + output.as_os_str().len(),
         )
     }
 }
@@ -1141,7 +1190,7 @@ impl ExtractRequest {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
-                    let recipe = decoder.world_cell_recipe()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let output = PathBuf::from(decoder.cell_string(65536)?);
                     Field::WorldCellPlan(WorldCellPlanRequest {
                         world,
@@ -1154,7 +1203,7 @@ impl ExtractRequest {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
-                    let recipe = decoder.world_cell_recipe()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let plan = decoder.cell_frame(8 << 20)?.to_vec();
                     let admission = decoder.fixed()?;
                     let count = decoder.count(17)?;
@@ -1184,7 +1233,7 @@ impl ExtractRequest {
                         world,
                         realization,
                         recipe,
-                        plan,
+                        plan: plan.into(),
                         admission,
                         slots,
                         directory,
@@ -1554,7 +1603,7 @@ impl ExtractRequest {
         if !self.fields.is_empty() {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        request.check_transport()?;
+        request.validate_transport()?;
         self.fields.push(Field::WorldCellPlan(request));
         Ok(self)
     }
@@ -1566,7 +1615,7 @@ impl ExtractRequest {
         if !self.fields.is_empty() {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        request.check_transport()?;
+        request.validate_transport()?;
         self.fields.push(Field::WorldCellPrepare(request));
         Ok(self)
     }
@@ -3448,11 +3497,11 @@ mod tests {
 
     #[test]
     fn world_cell_wire_is_exclusive_bounded_and_matches_haskell() {
-        let recipe = WorldCellRecipe {
+        let recipe = Arc::new(WorldCellRecipe {
             source: "x <- pure 1".into(),
             template: "{{CELL_IMPORTS}}\n{{CELL_BODY}}".into(),
             turn_templates: vec![("bind".into(), "module Bind where".into())],
-        };
+        });
         let plan = WorldCellPlanRequest {
             world: "a".repeat(64),
             realization: "held".into(),
@@ -3463,7 +3512,7 @@ mod tests {
             world: plan.world.clone(),
             realization: plan.realization.clone(),
             recipe,
-            plan: b"plan-receipt".to_vec(),
+            plan: Arc::from(&b"plan-receipt"[..]),
             admission: [b'b'; 32],
             slots: vec![
                 (0, PlannedCellSlot::Bind(7)),
@@ -3478,6 +3527,8 @@ mod tests {
             directory: "operation".into(),
             output: "prepared.cbor".into(),
         };
+        assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
+        assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
         let plan_bytes = unhex("5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
         let prepare_bytes = unhex("5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
@@ -3520,13 +3571,13 @@ mod tests {
         }
         let mut bad_recipes = Vec::new();
         let mut value = plan.clone();
-        value.recipe.source = "λ".repeat((1 << 20) + 1);
+        Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
         bad_recipes.push(value);
         let mut value = plan.clone();
-        value
-            .recipe
+        let duplicate = value.recipe.turn_templates[0].clone();
+        Arc::make_mut(&mut value.recipe)
             .turn_templates
-            .push(value.recipe.turn_templates[0].clone());
+            .push(duplicate);
         bad_recipes.push(value);
         let mut value = plan.clone();
         value.output = "x".repeat(65537).into();
@@ -3558,6 +3609,32 @@ mod tests {
                 ProtocolError::InvalidWorldCell
             );
         }
+        let mut overlapping = prepare.clone();
+        overlapping.slots = vec![
+            (0, PlannedCellSlot::Declaration(1)),
+            (1, PlannedCellSlot::Bind(1)),
+        ];
+        let mut request = ExtractRequest::default();
+        request.world_cell_prepare(overlapping.clone()).unwrap();
+        assert_eq!(
+            ExtractRequest::decode(&request.encode()).unwrap().encode(),
+            request.encode()
+        );
+        overlapping.slots[1].1 = PlannedCellSlot::Prologue(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+        overlapping.slots[0].1 = PlannedCellSlot::Expression {
+            generation: 1,
+            observation: "it".into(),
+        };
+        overlapping.slots[1].1 = PlannedCellSlot::Bind(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+
         let mut empty = prepare;
         empty.slots.clear();
         let mut request = ExtractRequest::default();
@@ -3566,15 +3643,66 @@ mod tests {
     }
 
     #[test]
+    fn world_prepare_bounds_borrowed_names_before_owned_slot_copies() {
+        let recipe = WorldCellRecipe {
+            source: "pure ()".into(),
+            template: "{{CELL_BODY}}".into(),
+            turn_templates: vec![],
+        };
+        let world = "a".repeat(64);
+        let oversized = "x".repeat(65537);
+        assert_eq!(
+            WorldCellPrepareRequest::validate_borrowed(
+                &world,
+                "held",
+                &recipe,
+                b"plan",
+                [(
+                    0,
+                    PlannedCellSlotRef::Expression {
+                        generation: 1,
+                        observation: &oversized
+                    }
+                )],
+                Path::new("operation"),
+                Path::new("prepared.cbor"),
+            ),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+        let within_field_limit = "x".repeat(65536);
+        let aggregate = (0..200).map(|index| {
+            (
+                index,
+                PlannedCellSlotRef::Expression {
+                    generation: index + 1,
+                    observation: within_field_limit.as_str(),
+                },
+            )
+        });
+        assert!(matches!(
+            WorldCellPrepareRequest::validate_borrowed(
+                &world,
+                "held",
+                &recipe,
+                b"plan",
+                aggregate,
+                Path::new("operation"),
+                Path::new("prepared.cbor"),
+            ),
+            Err(ProtocolError::RequestBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
     fn world_cell_builders_bound_hex_expansion_before_appending_source() {
         // Four existing 2MiB fields already exceed the SAME daemon ceiling
         // after typed framing and hex. No 256-field/512MiB fixture is needed.
         let body = "x".repeat(2 << 20);
-        let recipe = WorldCellRecipe {
+        let recipe = Arc::new(WorldCellRecipe {
             source: body.clone(),
             template: body.clone(),
             turn_templates: vec![("one".into(), body.clone()), ("two".into(), body)],
-        };
+        });
         let mut request = ExtractRequest::default();
         let refused = match request.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
@@ -3595,12 +3723,12 @@ mod tests {
         let refused = match request.world_cell_prepare(WorldCellPrepareRequest {
             world: "a".repeat(64),
             realization: "held".into(),
-            recipe: WorldCellRecipe {
+            recipe: Arc::new(WorldCellRecipe {
                 source: String::new(),
                 template: String::new(),
                 turn_templates: vec![],
-            },
-            plan: vec![0; 8 << 20],
+            }),
+            plan: vec![0; 8 << 20].into(),
             admission: [1; 32],
             slots: vec![],
             directory: "operation".into(),

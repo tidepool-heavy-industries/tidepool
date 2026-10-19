@@ -58,7 +58,7 @@ impl IssuedOriginal {
         self
     }
 
-    fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
+    pub(super) fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
         self.completed_output
             .as_ref()
             .expect("this fixture completed the physical issuer")
@@ -397,10 +397,12 @@ pub(super) fn issue_planned_original_with_source_value(
     admitted.modules[0].module = module_name.clone();
     let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
     let context = Arc::new(
-        ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products(canonical_producer, &[])
-            .unwrap(),
+        ExactDeclarationContext::from_authenticated_interfaces(
+            canonical_producer,
+            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            crate::artifact_inventory::CompilerInputProjection::default(),
+        )
+        .unwrap(),
     );
     let request = context
         .prepare_compilation(&root.join(format!("inputs-{source_tag}")), producer)
