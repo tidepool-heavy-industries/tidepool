@@ -399,6 +399,8 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       live <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
       let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
           decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      unless (length interfaces == 2 && Set.size (Set.fromList (map exactSha256 interfaces)) == 2)
+        (fail "zero-budget decoder control needs two genuine distinct interface owners")
       _ <- decode
       (_,decodedAgain) <- captureDiagnostics decode
       unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decodedAgain | iface <- interfaces]
@@ -437,6 +439,8 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
       let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
           decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      unless (length interfaces == 2 && Set.size (Set.fromList (map exactSha256 interfaces)) == 2)
+        (fail "positive-budget decoder control needs two genuine distinct interface owners")
       _ <- decode
       (_,decodedAgain) <- captureDiagnostics decode
       unless (sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decodedAgain | iface <- interfaces] > 0
