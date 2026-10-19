@@ -9866,6 +9866,12 @@ mod authored_publication_tests {
         assert_eq!(session.state.session_table(), &before_table);
         assert_eq!(session.binding_names(), before_bindings);
         assert_eq!(session.parked_count(), before_parked);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
         let outcome = session
             .with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
                 tidepool_testing::with_settlement(|settlement| {
