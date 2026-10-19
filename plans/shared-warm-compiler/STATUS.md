@@ -77,7 +77,7 @@ direct children per area; reserved grants persist through event-bound yields.
 | --- | ---: | --- |
 | host_inputs | 2 | Reviewed key70120 and producer counters8424 are area-folded9f and campaign-foldede1cfc49. Area production/cfgtest and four exact controls passed. Campaign joined toolchain/runtime compilation is observed in session49150; actual source capture0aa and actor world consumer remain pending real shared factory/compile. Old02A patch preserved. |
 | owned_inputs | 2 | Prior f330 rows integrated and joined verified. New83ad early14-label compile failed E0061 at two production_entry archive consumers, tests0; terminal and source retained. Approved successor separates finite archive provenance from live service authority, repairs root-route/provider trust and explicitly refuses old authority formats. Same rows/reviewer grants implement/review; native retry requires fresh accounting. |
-| warm_workers | 1 | Prior protocol9/9 integrated. Shared association8acf production/unitbinary compile passed, tests0. Real profile boot24b worker-only GHC build is observed in session43382 under6GiB/2GiB allowance. Revised cold carrier keeps current selection separate from unmerged historical binding-row custody; real query/Ready is unqualified. |
+| warm_workers | 1 | Prior protocol9/9 integrated. Shared association8acf production/unitbinary compile passed, tests0. Real profile boot24b worker-only GHC compilation passed8actions/0tests; actual declared profile capture passed1 invocation (81,938B). That6GiB lane is terminal/released. Revised cold carrier keeps current selection separate from unmerged historical binding-row custody; real query/Ready is unqualified. |
 | reload | 2 | Prior345 four-target compilation and corrected Sleep d9 execution passed; three unchanged6d3 actor prerequisites independently fail. Canonical owner core519/a82 is in complete independent review before earlycompile. Review found missing target-B custody on uncertain A→B and a metadata hold cycle; these require bounded lifecycle repair, no C6 acceptance yet. Force=true refuses; remaining R1/R2/R3 pending. |
 | qualification | 1 | Immutable6d3 AABA/Persona13 passed; e6 fixture2/2/freeze passed but stronger Persona fails real exact native conflict. All3 baseline actor discriminators executed/failed before target controls, no assertion waiver. Authentic frozen constructor fixture unavailable; reserved leaf implements bounded opt-in production stage tracing, independent review before12GiB/32GiB native lane and separate frozen rerun. |
 
@@ -95,10 +95,11 @@ selection/dependency/query preparation must not reconstruct a second world per
 request. Controlling DEMAND-SERVICE.md is accepted after host, worker and independent
 HLS review. Existing supervisors resumed with exact ebb98b3f25; paired concrete
 API/resolver/source-owner packets received independent and campaign review and
-were accepted. Implementation is active under SERVICE-API.md. Routine signatures require no further root approval.
+were accepted. Implementation is active under SERVICE-API.md and the controlling
+RUST-CLIENT-MIGRATION.md, integrated at2a67faf29c (root24ec0b506a). Routine signatures require no further root approval.
 Ordinary cell preparation, publication and recovery must migrate to the persistent
-logical compiler-world client; this is a required campaign outcome. Root is
-preparing the controlling migration addendum. The actual runtime
+logical compiler-world client; this is a required campaign outcome.
+RUST-CLIENT-MIGRATION.md now controls the complete implementation frontier. The actual runtime
 capture_value_interfaces Vec and checked_value_context support fold remain
 unfinished critical-path deletion work. Cold world issuance must also avoid
 checked_value_context: current primary published selection remains separate from
@@ -184,9 +185,10 @@ Installed swarm-build remains the older launcher; staged reservation switches ar
 unsupported. Use the established pinned local-only workflow, verified bind mounts,
 fresh disk/RAM/cgroup observations and prospective growth; preserve100GiB free.
 Current native lanes: campaign joined fact-key/counter toolchain/runtime10GiB
-memory/32GiB growth, session49150 observed by campaign; warm production worker6/2,
-session43382 observed by warm. Reload14/32 is authorized after exact source review;
-qualification new bounded toolchain12/32 after trace review. Owned83ad8, hostkey14,
+memory/32GiB growth, session49150 observed by campaign; host source capture14/32
+configure session39619 observed by host. Reload14/32 is authorized after exact
+source review; qualification bounded toolchain12/32 after trace review can now fit
+with warm6 fully terminal/released. Owned83ad8, hostkey14,
 hostcounter6 and qualification baseline actor14 are terminal/released; idle daemon
 usage remains in global current. No owned retry is currently running. Fresh sample
 before campaign launch: build.slice36,067,119,104B, MemAvailable98,861,940,736B,
@@ -210,7 +212,7 @@ e6 fixture repair is now merged at466d715ae9; campaign joined host cfgtest compi
 is pending the first service slice/resource admission. Area e6 compile2/2 does
 not qualify the later joined production tree. All campaign-owned commands settled.
 
-Campaign next actions: collect joined key/counter compile and exact four controls; review revised raw world constructors; join the first actual PublicModule question under fresh
+Campaign next actions: collect joined key/counter compile and exact four controls; review paired inspect/prepareCell contracts and revised raw world constructors; join the first actual PublicModule question under fresh
 source authority; derive/repair exact frozen native conflict without weakening
 issued edges; integrate repaired reload owner and production consumers; run
 joined histories and frozen candidate qualification. No hard strategy stop is
@@ -223,7 +225,13 @@ reviews/native receipts under SERVICE-API.md; campaign reviews and folds. Campai
 capture/actor integration successors; qualification owns the native issuer trace
 and exact frozen counterexample; reload owns canonical core review, first compile
 and lifecycle repairs. Owned rows owns repaired source/provider/archive migration
-and exact re-review. No terminal lane remains assigned as running. Every producer status-checks campaign
+and exact re-review. Host/warm pair both inspect and prepareCell now; after the
+query milestone, their same reserved trees own ordinary-cell preparation, exact
+private successor/publication, fork/recovery and deletion of superseded host
+reconstruction. Owned covers shared restore backing; qualification owns real
+lookup→bind→later-use→fork→evict histories and callsite deletion audit. These are
+required approved successor waves, not optional later scope. No terminal lane
+remains assigned as running. Every producer status-checks campaign
 and uses followup_task if dormant. No root routine approval is awaited; no
 campaign process lacks an observer and no periodic wake is set.
 
