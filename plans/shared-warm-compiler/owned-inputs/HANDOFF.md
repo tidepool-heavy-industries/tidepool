@@ -85,21 +85,22 @@ choices were reported to parent; both existing grants are retained.
 
 | Identity | Model / effort | Current assignment |
 | --- | --- | --- |
-| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Active WaveA independent boot/retirement/source-domain review; rows checkout remains clean5113 |
-| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Active WaveA exact package-source constructor/provider/launch/retirement proposal |
+| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Implementing qualifier/packageBUCK/toolchain admission in feature/shared-warm/service-source at923fd554a08ae208833e6bdd9b88a11d54e227ca; old5113 branch retained |
+| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Exact cumulative implementation reviewer; initial seams reviewed, awaits concrete WIP/candidate |
 
 Root architecture2486ea4b94 is accepted in campaign
 ebb98b3f254940dcac99a743107356b6dfa74d5f; DEMAND-SERVICE.md Package source
-decision controls. The broad API pause is lifted. Paired constructor signatures
-still require campaign acceptance before dependent implementation. No source/API
-implementation or new native lane has started for WaveA.
+decision controls. The broad API pause is lifted. Campaign approved the final paired packet SHA256
+a18cf40809765dbdbbfb3d01eab2e02d5ec03940c7c3dc30723588f9495a0688
+and independent challenge. Scoped implementation is active; no native lane
+has started for WaveA. Routine root approval is not a dependency.
 No current admitted deployment object owns package-source lifetime. Reviewer
 must propose borrowing a real provider interval or extending the existing
 offline qualification pin provider with independently registered execution-owned
 pins BEFORE fresh worker boot. A path/manifest/hash witness cannot bless old EPS
 or lazy state. Actual DB/interface/native path coverage and worker/iserv lifetime
 are required; mutable/uncovered inputs retain existing observation checks. Source
-or API implementation follows the exact paired contract; supervisor owns the
+and API implementation now follow the accepted exact paired contract; supervisor owns the
 bounded owner/provider/launch successor coordinated with host/warm owners.
 Revised private PACKAGE-SOURCE-SERVICE-OPTION.md supersedes per-host durable-pin
 proposal: transfer an actual deployment/service retention obligation, or register
@@ -138,11 +139,13 @@ settled and row lane released (daemon current2,653,343,744bytes). Supervisor
 folded the complete accepted ancestry. Campaign accepted/integrated area f3309fed5252b5afad30d57c1dea08dcabc22c18
 and delivered its joined terminal success. Evidence is private campaign/
 CORE-JOINED-TERMINAL.json, core-joined-native-build.json and core-joined-tests.json.
-The stable row frontier needs no repair or repeat test lane. Current WaveA
-producers are source_lifetime (exact source/boot/provider/retirement packet)
-and rows (independent concrete consumer/counterexample review), resumed under
-the same grants at09:50–09:51UTC. Campaign accepts the paired contract, then
-supervisor implements/reviews/folds the approved bounded owner+launch slice.
+The stable row frontier needs no repair or repeat test lane. Current WaveA producer is rows (qualifier provider/declared native resource/
+schema2 toolchain admission implementation), with source_lifetime independent
+exact code review under the same grants. New branch starts at923fd554a08ae208833e6bdd9b88a11d54e227ca,
+production identical to ebb/f088. Supervisor directly reviews/repairs/folds the
+bounded owner+launch slice after exact source/native gates. Warm is the sole
+extract-cmd/Haskell editor. First joined PublicModule plus actual service boot/
+lifetime controls is completion; a provider-only parcel is not a completed slice.
 No unobserved native job is live. No periodic status polling. Producers check
 recipient status and use send_message for running recipients, followup_task for
 dormant ones. Every outcome requires a terminal event. No periodic polling or
@@ -177,3 +180,44 @@ unimported module namespace or absence. Reuse those source owners; no second
 source snapshot engine. Controls include absent-then-created and sourceA-replaced-
 byB while worldA remains retained/restored, rootset/byte counts and exact normal/
 uncertain source retirement, fixed loader absolute paths/no ambient overrides.
+
+
+## Approved WaveA execution scope
+
+Rows owns build/package/qualification.py, build/package/BUCK, bounded README/
+Python tests, toolchain.rs schema2 plus exact necessary literal/caller migrations
+in module_candidates/deployment and runtime turn.rs. Warm solely owns all
+extract-cmd/Haskell codecs, launch, boot acknowledgment and retirement consumers.
+Host solely owns two exomonad.rs preflight caller migrations at1567/1984:
+admit_service_preflight(&CompilerIdentity) shares private verification with
+admit(&CompilerEndpoint); service association is not actual worker boot proof.
+No caller binds/spawns merely to fabricate that proof.
+
+Declared provider actions reuse the same qualification.py and pinned runtime
+tools. Immutable profile uses nix-store --add/post-add verification and the
+profile root in the same service pinset. Child publishes its exact receipt before
+rooted readiness; parent complete retirement releases before control-directory
+cleanup, preserving pins/receipt on unknown or release failure. Unsupported rooted
+manual startup refuses before acquisition. Source/profile identities exclude
+epoch/receipt and remain distinct from raw file seal. Partial acquisition must
+persist its plan before any registration side effect.
+
+Native allowance is provisional8GiB memory/16GiB growth, not an active grant:
+refresh actual build.slice plus remaining concurrent increments below80GiB and
+100GiB unreserved disk before any command. Qualification24/reload14 are occupied,
+not free reusable allowances. Compile changed production/cfgtest early with the
+smallest pinned targets; new compiler_service_deployment is a required actual
+production resource. No whole-bundle gate for the first service test.
+
+Read-only positive baseline evidence FIXED-WORKER-LOADER-NIX-ONLY.json confirms
+87 startup mappings identical with bundle LD_LIBRARY_PATH omitted and ambient
+PRELOAD/AUDIT unset; all mapped roots are in the retained closure. It supports
+recapturing the matched new worker's fixed Nix-only startup profile, not later
+arbitrary native-load proof. Header finding precision: old source identity
+filters.h; no cold-restore mismatch was established. Host owns header-only A→B
+dedupe/selection and complete namespace sealing or explicit unsupported profile.
+
+Awaited concrete events: rows early API/provider candidate and native observer
+terminal; warm exact codec/profile capture dependency; reviewer exact source
+acceptance/findings. Producers check recipient status and reactivate dormant
+recipients. No empty polling, orphan commands or new descendant grants.
