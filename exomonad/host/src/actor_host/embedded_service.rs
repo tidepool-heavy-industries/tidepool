@@ -870,7 +870,8 @@ where
                 session_id: session_identity,
                 agent: actor.clone(),
             },
-            NonZeroU64::new(settings.context_capacity_tokens).ok_or("zero context capacity")?,
+            NonZeroU64::new(settings.compaction_input_tokens)
+                .ok_or("zero compaction input threshold")?,
         )
         .map_err(|error| error.to_string())?;
     let engine = match runtime.output_observer() {
@@ -1428,7 +1429,7 @@ mod shutdown_tests {
                 Vec::new()
             }
         }
-        let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
+        let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncompaction_input_tokens = 2_048\n";
         let mut settings: EmbeddedLaunchConfig = toml::from_str(source).unwrap();
         let credentials = tempfile::tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;

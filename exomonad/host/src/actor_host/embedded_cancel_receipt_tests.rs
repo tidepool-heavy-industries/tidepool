@@ -641,7 +641,7 @@ async fn provider_diagnostic_and_block_write_refusal_retain_native_cleanup_cause
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret, session_secret_file: Some(secret),
             provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(), credential_file: auth,
-            context_capacity_tokens: 200_000, concurrent_jobs: 2,
+            compaction_input_tokens: 100_000, concurrent_jobs: 2,
         };
         let mut service = campaign.prepare_engine_component_service(&settings).await.unwrap();
         let embedded = super::super::embedded_service::attach_actor(

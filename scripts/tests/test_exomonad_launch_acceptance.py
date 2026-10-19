@@ -18,7 +18,7 @@ provider = "chatgpt_plan"
 listen = "127.0.0.1:0"
 session_secret_file = "/private/session-secret"
 credential_file = "/private/provider-credentials"
-context_capacity_tokens = 32768
+compaction_input_tokens = 16_384
 '''
 
 

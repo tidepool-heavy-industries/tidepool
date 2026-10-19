@@ -933,7 +933,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth_file,
-        context_capacity_tokens: 200_000,
+        compaction_input_tokens: 100_000,
         concurrent_jobs: 3,
     };
     let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
@@ -2343,7 +2343,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth_file,
-        context_capacity_tokens: 200_000,
+        compaction_input_tokens: 100_000,
         concurrent_jobs: 3,
     };
     let slot = Arc::new(Mutex::new(None));

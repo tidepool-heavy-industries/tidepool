@@ -288,7 +288,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth_file,
-        context_capacity_tokens: 2_000_000,
+        compaction_input_tokens: 1_000_000,
         concurrent_jobs: ACTORS + 1,
     };
     let provider: Arc<dyn ResponsesTransport> = transport.clone();

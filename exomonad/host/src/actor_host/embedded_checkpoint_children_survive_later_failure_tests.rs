@@ -244,7 +244,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth_file,
-        context_capacity_tokens: 200_000,
+        compaction_input_tokens: 100_000,
         concurrent_jobs: 3,
     };
     let parent = ParentTransport {

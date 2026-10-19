@@ -517,7 +517,8 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) credential_file: PathBuf,
     #[serde(default)]
     pub(crate) inference_limits: inference_selection::InferenceLimitOverrides,
-    pub(crate) context_capacity_tokens: u64,
+    #[serde(default = "default_embedded_compaction_input_tokens")]
+    pub(crate) compaction_input_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
 }
@@ -529,7 +530,7 @@ impl std::fmt::Debug for EmbeddedLaunchConfig {
             .field("provider", &self.provider)
             .field("credential_reference", &"[redacted]")
             .field("inference_limits", &self.inference_limits)
-            .field("context_capacity_tokens", &self.context_capacity_tokens)
+            .field("compaction_input_tokens", &self.compaction_input_tokens)
             .field("concurrent_jobs", &self.concurrent_jobs)
             .finish_non_exhaustive()
     }
@@ -615,6 +616,10 @@ fn default_embedded_asset_root() -> PathBuf {
         .unwrap_or_default()
 }
 
+fn default_embedded_compaction_input_tokens() -> u64 {
+    500_000
+}
+
 fn default_embedded_concurrent_jobs() -> usize {
     4
 }
@@ -647,9 +652,9 @@ impl EmbeddedLaunchConfig {
                 "embedded browser listener must use loopback or an address assigned to tailscale0",
             ));
         }
-        if self.context_capacity_tokens == 0 || self.concurrent_jobs == 0 {
+        if self.compaction_input_tokens == 0 || self.concurrent_jobs == 0 {
             return Err(runtime_error(
-                "embedded context capacity and concurrent jobs must be positive",
+                "embedded compaction input tokens and concurrent jobs must be positive",
             ));
         }
         if self.asset_root.as_os_str().is_empty() {
@@ -3051,10 +3056,8 @@ mod tests {
         std::fs::write(&credential, "{}").unwrap();
         let authored = files.path().join(".exomonad");
         write_fixture_project_config(&authored, "test-model", |project| {
-            let mut embedded: EmbeddedLaunchConfig = toml::from_str(
-                "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096",
-            )
-            .unwrap();
+            let mut embedded: EmbeddedLaunchConfig =
+                toml::from_str("listen='127.0.0.1:0'\ncompaction_input_tokens=2_048").unwrap();
             embedded.credential_file = credential.clone();
             project.launch.embedded = Some(embedded);
         });
@@ -3276,8 +3279,31 @@ mod tests {
     }
 
     #[test]
+    fn embedded_compaction_uses_explicit_input_tokens_and_defaults_to_500000() {
+        let fields = "provider='deepseek'\nlisten='127.0.0.1:0'\n";
+        let default: EmbeddedLaunchConfig = toml::from_str(fields).unwrap();
+        assert_eq!(default.compaction_input_tokens, 500_000);
+        let low: EmbeddedLaunchConfig =
+            toml::from_str(&format!("{fields}compaction_input_tokens=17\n")).unwrap();
+        assert_eq!(low.compaction_input_tokens, 17);
+        let zero: EmbeddedLaunchConfig =
+            toml::from_str(&format!("{fields}compaction_input_tokens=0\n")).unwrap();
+        assert!(zero
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("compaction input tokens"));
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{fields}context_capacity_tokens=131072\n"
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("context_capacity_tokens"));
+    }
+
+    #[test]
     fn embedded_provider_defaults_public_and_refuses_legacy_config() {
-        let fields = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
+        let fields = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/exomonad-auth'\ncompaction_input_tokens = 2_048\n";
         let public: EmbeddedLaunchConfig =
             toml::from_str(&format!("provider = 'chatgpt_plan'\n{fields}")).unwrap();
         assert_eq!(public.provider, Backend::OpenAIPlan);
@@ -3307,10 +3333,10 @@ mod tests {
         let packaged = "/nix/store/web-assets/share/exomonad/web";
         std::env::set_var(ASSET_ROOT, packaged);
         let omitted: Result<EmbeddedLaunchConfig, _> = toml::from_str(
-            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncompaction_input_tokens = 2_048\n",
         );
         let explicit: Result<EmbeddedLaunchConfig, _> = toml::from_str(
-            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/override'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/override'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncompaction_input_tokens = 2_048\n",
         );
         match previous {
             Some(value) => std::env::set_var(ASSET_ROOT, value),
@@ -3348,7 +3374,7 @@ mod tests {
     #[test]
     fn embedded_tailscale_auth_rejects_loopback_listener_before_files() {
         let config: EmbeddedLaunchConfig = toml::from_str(
-            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncompaction_input_tokens = 2_048\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
         ).unwrap();
         assert!(config.session_secret_file.is_none());
         assert!(config
@@ -3360,7 +3386,7 @@ mod tests {
 
     #[test]
     fn embedded_origin_scheme_preserves_https_and_accepts_explicit_http() {
-        let config = "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
+        let config = "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncompaction_input_tokens = 2_048\n";
         let existing: EmbeddedLaunchConfig = toml::from_str(config).unwrap();
         assert!(matches!(existing.browser_auth, EmbeddedBrowserAuth::Secret));
         assert_eq!(
@@ -3384,7 +3410,7 @@ mod tests {
     fn embedded_listener_rejects_wildcard_and_unassigned_addresses() {
         for listen in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
             let config: EmbeddedLaunchConfig = toml::from_str(&format!(
-                "provider = 'chatgpt_plan'\nlisten = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
+                "provider = 'chatgpt_plan'\nlisten = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncompaction_input_tokens = 2_048\n"
             ))
             .unwrap();
             assert!(config
@@ -3537,7 +3563,7 @@ mod tests {
                 toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
             assert_eq!(round_trip.defaults, config.defaults);
         }
-        for source in ["", "[launch.embedded]\nprovider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\ncontext_capacity_tokens = 4096\n"] {
+        for source in ["", "[launch.embedded]\nprovider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\ncompaction_input_tokens = 2_048\n"] {
             let error = toml::from_str::<ExomonadConfig>(source).unwrap_err();
             assert!(error.to_string().contains("declare [defaults]"), "{error}");
         }

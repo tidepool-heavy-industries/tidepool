@@ -364,7 +364,7 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                     provider: exomonad_actor::Backend::OpenAIPlan,
                     inference_limits: Default::default(),
                     credential_file,
-                    context_capacity_tokens: 200_000,
+                    compaction_input_tokens: 100_000,
                     concurrent_jobs: 2,
                 };
                 let mut service = campaign
@@ -622,7 +622,7 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                     provider: exomonad_actor::Backend::OpenAIPlan,
                     inference_limits: Default::default(),
                     credential_file,
-                    context_capacity_tokens: 200_000,
+                    compaction_input_tokens: 100_000,
                     concurrent_jobs: 2,
                 };
                 let mut service = campaign
@@ -746,7 +746,7 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth,
-        context_capacity_tokens: 200_000,
+        compaction_input_tokens: 100_000,
         concurrent_jobs: 1,
     };
     let transport = InterruptibleRoundTransport {

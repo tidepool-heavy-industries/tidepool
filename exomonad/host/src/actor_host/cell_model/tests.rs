@@ -1205,9 +1205,10 @@ async fn catalog_selected_model_calls_use_distinct_provider_http_and_refuse_ungr
     config.model = Model::DeepSeekFlash;
     config.reasoning = catalog.models["executor"].reasoning;
     config.workspace_inputs.as_mut().unwrap().model_catalog = Some(catalog.clone());
-    let settings =
-        toml::from_str("provider='deepseek'\nlisten='127.0.0.1:0'\ncontext_capacity_tokens=4096\n")
-            .unwrap();
+    let settings = toml::from_str(
+        "provider='deepseek'\nlisten='127.0.0.1:0'\ncompaction_input_tokens=2_048\n",
+    )
+    .unwrap();
     let factory = admitted_runtime_factory(&runtime, &settings, &config);
     let permissions = ModelPermissions::new(
         catalog

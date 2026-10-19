@@ -239,7 +239,7 @@ reasoning = { backend = "deepseek", effort = "high" }
 [launch.embedded]
 provider = "deepseek"
 listen = "127.0.0.1:8080"
-context_capacity_tokens = 131072
+compaction_input_tokens = 500000
 ```
 
 DeepSeek reads `DEEPSEEK_API_KEY` at dispatch, or an absolute protected
@@ -286,9 +286,10 @@ existing Codex credentials do not grant this flow's ChatGPT plan permission.
 Async declarations are preserved on the public route; account-specific live
 async behavior still needs an authenticated trial.
 
-Configure `[launch.embedded]` with `listen`, `credential_file`, and the model's
-`context_capacity_tokens`. The listener must
-use loopback or a local Tailscale address. File paths must be absolute;
+Configure `[launch.embedded]` with `listen`, `credential_file`, and optional
+`compaction_input_tokens` (default 500000). This is the reported input-token
+threshold for plain-text compaction, not a provider context-capacity limit.
+The listener must use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the verified browser bundle, or be supplied by the
 frozen bundle entrypoint through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The host checks
 source, schema, and asset identities before listening. Provider authentication is

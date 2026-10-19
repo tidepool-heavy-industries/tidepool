@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn injected_contract_refuses_backend_and_limits_before_startup_work() {
         let mut settings: crate::exomonad::EmbeddedLaunchConfig = toml::from_str(
-            "provider='deepseek'\nlisten='127.0.0.1:0'\nasset_root='/unused'\ncontext_capacity_tokens=4096\n",
+            "provider='deepseek'\nlisten='127.0.0.1:0'\nasset_root='/unused'\ncompaction_input_tokens=2_048\n",
         ).unwrap();
         let auth = RunAuth::DeepSeek(
             DeepSeekAuth::from_reference(

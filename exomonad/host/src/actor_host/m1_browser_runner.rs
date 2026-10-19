@@ -898,7 +898,7 @@ pub(super) async fn production_browser_journey() {
         provider: exomonad_actor::Backend::OpenAIPlan,
         inference_limits: Default::default(),
         credential_file: auth_file,
-        context_capacity_tokens: 2_000_000,
+        compaction_input_tokens: 1_000_000,
         concurrent_jobs: 1,
     };
     let (barriers, barrier_rx) = mpsc::unbounded_channel();

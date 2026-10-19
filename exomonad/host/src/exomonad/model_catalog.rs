@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn legacy_registered_custom_alias_preserves_distinct_catalog_keys() {
         let embedded: EmbeddedLaunchConfig = toml::from_str(
-            "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
+            "listen='127.0.0.1:0'\ncompaction_input_tokens=2_048\nprovider='deepseek'",
         )
         .unwrap();
         let defaults = AgentInferenceDefaults::deepseek_default();
@@ -851,7 +851,7 @@ mod tests {
         let mut config = persona_argon_fixture_config();
         config.launch.embedded = Some(
             toml::from_str(
-                "listen='127.0.0.1:0'\ncontext_capacity_tokens=4096\nprovider='deepseek'",
+                "listen='127.0.0.1:0'\ncompaction_input_tokens=2_048\nprovider='deepseek'",
             )
             .unwrap(),
         );
