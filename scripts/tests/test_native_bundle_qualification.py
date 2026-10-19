@@ -4237,6 +4237,24 @@ class CompilerServicePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'exact retained root'):
                 qualification.release_compiler_service_source(release)
 
+    def test_release_progress_preserves_the_sealed_acquisition_plan(self):
+        for change in ('omit-package', 'replace-guard'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+                acquire = provider.acquire_args()
+                qualification.acquire_compiler_service_source(acquire)
+                release = self.retirement_args(acquire)
+                receipt = json.loads(release.receipt.read_text())
+                progress = json.loads(release.receipt.read_text())
+                progress.update(status='releasing', complete_retirement_sha256=qualification.sha256(release.complete_retirement))
+                if change == 'omit-package':
+                    progress['roots'] = [item for item in progress['roots'] if item['store_path'] == progress['provider_guard_store_path']]
+                else:
+                    progress['provider_guard_store_path'] = next(item['store_path'] for item in progress['roots'] if item['store_path'] != progress['provider_guard_store_path'])
+                qualification.write_private_json(release.receipt.parent / 'release.json', progress)
+                with self.assertRaisesRegex(ValueError, 'sealed acquisition plan'):
+                    qualification.release_compiler_service_source(release)
+                self.assertTrue(all(Path(item['path']).is_symlink() for item in receipt['roots']))
+
     def test_guard_cannot_reuse_package_root_recovery_states(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()
