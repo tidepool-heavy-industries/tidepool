@@ -22,6 +22,30 @@ pub(crate) enum RootStartupState {
     Activated,
 }
 
+/// A committed native owner remains retained when canonical source setup fails.
+#[derive(Clone, thiserror::Error)]
+pub(crate) enum PublicOwnerPublicationFailure {
+    #[error("{0}")]
+    OperationFailed(String),
+    #[error("native public owner committed, but source setup is unavailable: {cause}")]
+    CommittedSourceUnavailable {
+        readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        cause: String,
+    },
+}
+
+impl std::fmt::Debug for PublicOwnerPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl From<String> for PublicOwnerPublicationFailure {
+    fn from(value: String) -> Self {
+        Self::OperationFailed(value)
+    }
+}
+
 /// Only the named public-surface operations cross into resident machine work.
 /// This service contains the runner, never the Forest or directory.
 pub(crate) trait PublicOwnerPublisher: Send + Sync {
@@ -29,14 +53,14 @@ pub(crate) trait PublicOwnerPublisher: Send + Sync {
         &self,
         context: ActorSessionContext,
         owner: RecoveryPublicOwner,
-    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, String>>;
+    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, PublicOwnerPublicationFailure>>;
     fn transfer(
         &self,
         context: ActorSessionContext,
         predecessor: RecoveryPublicOwner,
         owner: RecoveryPublicOwner,
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
-    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, String>>;
+    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, PublicOwnerPublicationFailure>>;
 }
 
 #[derive(Clone)]
@@ -180,6 +204,10 @@ pub(super) fn snapshot(state: &ResidentState) -> ResidentSnapshot {
 pub(crate) enum ResidentSettlement {
     Confirmed,
     NeedsAttention(String),
+    CommittedSourceUnavailable {
+        readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        cause: String,
+    },
 }
 impl ResidentSettlement {
     pub(crate) fn is_confirmed(&self) -> bool {
@@ -189,7 +217,8 @@ impl ResidentSettlement {
 pub(super) fn settlement_refusal(state: &ResidentState) -> Option<&str> {
     match &state.current.settlement {
         ResidentSettlement::Confirmed => None,
-        ResidentSettlement::NeedsAttention(detail) => Some(detail),
+        ResidentSettlement::NeedsAttention(detail)
+        | ResidentSettlement::CommittedSourceUnavailable { cause: detail, .. } => Some(detail),
     }
 }
 
@@ -351,7 +380,7 @@ pub(super) enum Completion {
     OwnerObservation(Result<(), String>),
     Initial(Result<InitialTransition, String>),
     InitialRefused(String),
-    Owner(Result<DurablePublicOwnerPublication, String>),
+    Owner(Result<DurablePublicOwnerPublication, PublicOwnerPublicationFailure>),
     Release(Result<(), String>),
     Retirement(Result<(), String>),
 }
@@ -985,8 +1014,8 @@ fn owner_observation_refusal(state: &LifecycleState) -> Option<ActorPublicOwnerR
             "resident lifecycle is not configured".into(),
         ));
     };
-    if let ResidentSettlement::NeedsAttention(detail) = &resident.current.settlement {
-        return Some(ActorPublicOwnerRefusal::Unsettled(detail.clone()));
+    if let Some(detail) = settlement_refusal(resident) {
+        return Some(ActorPublicOwnerRefusal::Unsettled(detail.to_owned()));
     }
     state.is_closed().then_some(ActorPublicOwnerRefusal::Closed)
 }
@@ -1168,29 +1197,58 @@ fn complete(
         }
         (Pending::Owner(reply), Completion::Owner(result)) => {
             if let Err(error) = &result {
-                resident.current.settlement = ResidentSettlement::NeedsAttention(error.clone());
+                resident.current.settlement = match error {
+                    PublicOwnerPublicationFailure::OperationFailed(cause) => {
+                        ResidentSettlement::NeedsAttention(cause.clone())
+                    }
+                    PublicOwnerPublicationFailure::CommittedSourceUnavailable {
+                        readiness,
+                        cause,
+                    } => ResidentSettlement::CommittedSourceUnavailable {
+                        readiness: Arc::clone(readiness),
+                        cause: cause.clone(),
+                    },
+                };
             }
-            let result = result.and_then(|publication| match publication {
-                DurablePublicOwnerPublication::Committed(readiness) => {
-                    let owner = WorkbenchPublicOwner::issue(
-                        &resident.current.context,
-                        &resident.current.descriptor,
-                        Some(readiness),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
-                    Ok(PublicManifestCommit::Durable)
-                }
-                DurablePublicOwnerPublication::CommittedContinuing { .. } => {
-                    Err("incarnation transfer received a continuing publication result".into())
-                }
-                DurablePublicOwnerPublication::Refused { error } => {
-                    Ok(PublicManifestCommit::Refused { error })
-                }
-                DurablePublicOwnerPublication::RecoveryRequired { error } => {
-                    Ok(PublicManifestCommit::RecoveryRequired { error })
-                }
-            });
+            let result = result
+                .map_err(|error| error.to_string())
+                .and_then(|publication| match publication {
+                    DurablePublicOwnerPublication::Committed(readiness) => {
+                        let owner = WorkbenchPublicOwner::issue(
+                            &resident.current.context,
+                            &resident.current.descriptor,
+                            Some(Arc::clone(&readiness)),
+                        )
+                        .map_err(|error| {
+                            let cause = error.to_string();
+                            resident.current.settlement =
+                                ResidentSettlement::CommittedSourceUnavailable {
+                                    readiness,
+                                    cause: cause.clone(),
+                                };
+                            cause
+                        })?;
+                        resident.current.public_owner =
+                            ActorPublicOwnerPlane::DurableCommitted(owner);
+                        Ok(PublicManifestCommit::Durable)
+                    }
+                    DurablePublicOwnerPublication::CommittedContinuing { readiness, .. } => {
+                        let cause = "incarnation transfer received a continuing publication result"
+                            .to_owned();
+                        resident.current.settlement =
+                            ResidentSettlement::CommittedSourceUnavailable {
+                                readiness,
+                                cause: cause.clone(),
+                            };
+                        Err(cause)
+                    }
+                    DurablePublicOwnerPublication::Refused { error } => {
+                        Ok(PublicManifestCommit::Refused { error })
+                    }
+                    DurablePublicOwnerPublication::RecoveryRequired { error } => {
+                        Ok(PublicManifestCommit::RecoveryRequired { error })
+                    }
+                });
             state.publish();
             let _ = reply.send(result);
         }
@@ -1687,7 +1745,7 @@ fn spawn(
                         }
                         WorkerKind::OwnerObservation => Completion::OwnerObservation(Err(error)),
                         WorkerKind::Initial => Completion::Initial(Err(error)),
-                        WorkerKind::Owner => Completion::Owner(Err(error)),
+                        WorkerKind::Owner => Completion::Owner(Err(error.into())),
                         WorkerKind::Release => Completion::Release(Err(error)),
                         WorkerKind::Retirement => Completion::Retirement(Err(error)),
                     }
@@ -1709,14 +1767,10 @@ where
         &self,
         context: ActorSessionContext,
         owner: RecoveryPublicOwner,
-    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, String>> {
+    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, PublicOwnerPublicationFailure>>
+    {
         let runner = self.clone();
-        Box::pin(async move {
-            runner
-                .initialize_durable_public_owner(context, owner)
-                .await
-                .map_err(|error| error.to_string())
-        })
+        Box::pin(async move { runner.initialize_durable_public_owner(context, owner).await })
     }
     fn transfer(
         &self,
@@ -1724,13 +1778,13 @@ where
         predecessor: RecoveryPublicOwner,
         owner: RecoveryPublicOwner,
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
-    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, String>> {
+    ) -> BoxFuture<'static, Result<DurablePublicOwnerPublication, PublicOwnerPublicationFailure>>
+    {
         let runner = self.clone();
         Box::pin(async move {
             runner
                 .transfer_recovered_root_public_owner(context, &predecessor, owner, authority)
                 .await
-                .map_err(|error| error.to_string())
         })
     }
 }
