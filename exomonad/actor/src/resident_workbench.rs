@@ -16842,6 +16842,7 @@ pub(crate) mod request_tests {
     }
 
     struct WorldQueryTestSource {
+        issuer: crate::SourceLayerIssuer,
         evidence: crate::SourceGenerationEvidence,
         roots: Vec<tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot>,
         owners: Vec<Arc<tempfile::TempDir>>,
@@ -16850,6 +16851,40 @@ pub(crate) mod request_tests {
         captured: Mutex<Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>>,
         captures: std::sync::atomic::AtomicUsize,
         unsupported: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::SourceInspection for WorldQueryTestSource {}
+
+    impl crate::ActorSourceLayers for WorldQueryTestSource {
+        fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
+            crate::SourceInspectionServices::new(self)
+        }
+
+        fn validate_source_authority(
+            &self,
+            source: &crate::CheckpointSourceLayer,
+        ) -> Result<(), String> {
+            (self.issuer.owns(source)
+                && source.include_paths() == self.paths
+                && source.identities() == self.identities
+                && source.generation_evidence().is_some_and(|evidence| {
+                    std::ptr::eq(evidence, &self.evidence)
+                        && evidence.reference == self.evidence.reference
+                }))
+            .then_some(())
+            .ok_or_else(|| "source is not this retained fixture selection".into())
+        }
+
+        fn stage_reload(
+            self: Arc<Self>,
+            _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
+            _: &[String],
+        ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            Err(crate::SourceLayerReload::Unavailable(
+                "this retained source fixture does not publish reloads".into(),
+            ))
+        }
     }
 
     impl crate::RetainedSourceLayer for WorldQueryTestSource {
@@ -16911,13 +16946,30 @@ pub(crate) mod request_tests {
     fn world_query_test_source_files(
         files_by_root: &[Vec<(&str, &str)>],
     ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {
-        use tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot;
+        world_query_test_source_files_with_support(files_by_root, &[])
+    }
+
+    fn world_query_test_source_files_with_support(
+        files_by_root: &[Vec<(&str, &str)>],
+        support: &[PathBuf],
+    ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {
+        use std::io::Read;
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
         let mut roots = Vec::new();
         let mut owners = Vec::new();
         for root_files in files_by_root {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("fixture root count fits capture allowance");
             let owner = Arc::new(tempfile::tempdir().unwrap());
             let mut files = std::collections::BTreeMap::new();
             for (path, body) in root_files {
+                remaining = remaining
+                    .checked_sub(8 + path.len() as u64 + body.len() as u64)
+                    .expect("authored fixture fits capture allowance before retention");
                 let target = owner.path().join(path);
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(target, body.as_bytes()).unwrap();
@@ -16935,27 +16987,82 @@ pub(crate) mod request_tests {
             });
             owners.push(owner);
         }
+        for source in support {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("support root fits capture allowance");
+            let manifest_files = tidepool_toolchain::cache::source_root_manifest(source).unwrap();
+            let owner = Arc::new(tempfile::tempdir().unwrap());
+            let mut files = std::collections::BTreeMap::new();
+            for (path, digest) in &manifest_files {
+                remaining = remaining
+                    .checked_sub(8 + path.as_os_str().len() as u64)
+                    .expect("support path fits capture allowance before retention");
+                let mut input = std::fs::File::open(source.join(path)).unwrap();
+                let mut body = Vec::new();
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    let allowed = remaining.min(chunk.len() as u64) as usize;
+                    assert!(allowed > 0, "support bytes exhaust capture allowance");
+                    let read = input.read(&mut chunk[..allowed]).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    remaining -= read as u64;
+                    body.try_reserve_exact(read)
+                        .expect("bounded support body allocation");
+                    body.extend_from_slice(&chunk[..read]);
+                }
+                assert_eq!(
+                    blake3::hash(&body).to_hex().as_str(),
+                    digest,
+                    "declared support changed during capture: {}",
+                    path.display()
+                );
+                let target = owner.path().join(path);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, &body).unwrap();
+                files.insert(path.clone(), Arc::<[u8]>::from(body));
+            }
+            let manifest =
+                tidepool_toolchain::cache::SourceRootManifest::from_file_digests(manifest_files)
+                    .unwrap();
+            roots.push(CapturedCompilerSourceRoot {
+                manifest,
+                bodies: files,
+            });
+            owners.push(owner);
+        }
+        let manifests = roots
+            .iter()
+            .map(|root| root.manifest.clone())
+            .collect::<Vec<_>>();
+        let revision = tidepool_toolchain::cache::source_manifests_identity(
+            b"compiler-world-query-test-source-v1",
+            &manifests,
+        );
         let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
-            serde_json::to_vec(&owners.iter().map(|owner| owner.path()).collect::<Vec<_>>())
-                .unwrap(),
+            serde_json::to_vec(&(
+                owners.iter().map(|owner| owner.path()).collect::<Vec<_>>(),
+                &revision,
+            ))
+            .unwrap(),
         );
         let owner = Arc::new(WorldQueryTestSource {
+            issuer: crate::SourceLayerIssuer::default(),
             evidence: crate::SourceGenerationEvidence {
                 reference,
                 configuration_digest: [0; 32],
             },
             paths: owners.iter().map(|owner| owner.path().to_owned()).collect(),
-            identities: vec!["retained test source bytes".into()],
+            identities: vec![revision],
             roots,
             owners,
             captured: Mutex::new(None),
             captures: std::sync::atomic::AtomicUsize::new(0),
             unsupported: std::sync::atomic::AtomicBool::new(false),
         });
-        (
-            crate::SourceLayerIssuer::default().issue(owner.clone()),
-            owner,
-        )
+        (owner.issuer.issue(owner.clone()), owner)
     }
 
     async fn installed_world_query(
@@ -17046,6 +17153,79 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn world_capture_keeps_each_checked_binding_from_one_value_row() {
+        with_test_compiler_owner(|preparation_client| async move {
+            use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+            let (machines, context, source, _root) = actor_registry_fixture();
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                source.bind_preparation(preparation_client),
+                None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+            workbench
+                .publish_cell_for_test(
+                    context.clone(),
+                    "let (worldA, worldB) = ((7 :: Int), (8 :: Int))",
+                )
+                .await
+                .unwrap();
+            workbench
+                .access
+                .with_machine(context, |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let first = session.current_binding_in(scope, "worldA").unwrap();
+                    let second = session.current_binding_in(scope, "worldB").unwrap();
+                    assert_ne!(first.0, second.0);
+                    assert_eq!(
+                        first.1, second.1,
+                        "one checked item owns both visible names"
+                    );
+                    let symbols = session
+                        .prepared_retained()
+                        .into_iter()
+                        .filter(|(_, generation)| *generation == first.1.gen().0)
+                        .map(|(symbol, _)| symbol)
+                        .collect::<Vec<_>>();
+                    assert_eq!(symbols.len(), 2);
+                    assert_ne!(symbols[0], symbols[1]);
+                    assert!(symbols.iter().all(|symbol| !symbol.unit.is_empty()
+                        && !symbol.module.is_empty()
+                        && !symbol.namespace.is_empty()
+                        && !symbol.occurrence.is_empty()));
+                    let source = tidepool_runtime::session::GenerationArtifactReference::capture(
+                        b"checked binding capture".to_vec(),
+                    );
+                    let original = context.source_dependency().source_lease()?;
+                    let observation = HostWorkObservation::new();
+                    let admitted = observation
+                        .scope(|| session.capture_inspection_world_in(scope, &source, &original))
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    assert!(admitted.needs_source_capture());
+                    let work = observation.snapshot();
+                    assert_eq!(work.get(HostWorkCounter::ValueInterfaceCapture), 1);
+                    assert_eq!(
+                        work.get(HostWorkCounter::ReachableValueVisit),
+                        2,
+                        "bindings sharing a checked row retain independent occurrences"
+                    );
+                    assert_eq!(work.get(HostWorkCounter::RetainedValueSupportMerge), 0);
+                    assert_eq!(work.get(HostWorkCounter::CompilerMetadataSnapshot), 0);
+                    assert_eq!(work.get(HostWorkCounter::ScopeEncodedByte), 0);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn public_module_world_hot_queries_skip_retained_history_preparation() {
         with_test_compiler_owner(|preparation_client| async move {
@@ -17055,7 +17235,10 @@ pub(crate) mod request_tests {
             );
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let (captured, owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
+            let (captured, owner) = world_query_test_source_files_with_support(
+                &[vec![("WorldQuestion.hs", "module WorldQuestion where\nknown :: Int\nknown = 7\n")]],
+                &source.base_include,
+            );
             context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
             workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
@@ -17066,10 +17249,62 @@ pub(crate) mod request_tests {
             assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
             let fingerprint = first.provenance().fingerprint.clone();
 
+            {
+                let layers: crate::ActorSourceLayerResolver = owner.clone();
+                let foreign = crate::SourceLayerIssuer::default().issue(owner.clone());
+                assert!(std::ptr::eq(foreign.generation_evidence().unwrap(), &owner.evidence));
+                assert!(matches!(crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    context.clone(), foreign, None, Some(&layers),
+                ), Err(crate::KernelInvocationFailure::Rejected { .. })));
+                let (_, other_owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
+                let wrong_reference = owner.issuer.issue(other_owner);
+                assert!(owner.issuer.owns(&wrong_reference));
+                assert_ne!(wrong_reference.generation_evidence().unwrap().reference, owner.evidence.reference);
+                assert!(matches!(crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    context.clone(), wrong_reference, None, Some(&layers),
+                ), Err(crate::KernelInvocationFailure::Rejected { .. })));
+                let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+                let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None).unwrap();
+                let private = Arc::new(workbench_runner_for_test(&workbench).begin_private_execution(
+                    context.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(),
+                ).await.unwrap());
+                let mut private_context = context.clone();
+                private_context.placement.lexical_scope = private.private_scope;
+                let (frontend_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    private_context, captured.clone(), None, Some(&layers),
+                ).unwrap_or_else(|error| panic!("actual source owner must admit its retained selection: {error:?}"));
+                let frontend = workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
+                let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
+                let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
+                let PreparedCell { mut items, dependencies } = prepared;
+                assert_eq!(checked.items.len(), 1);
+                assert_eq!(items.len(), 1);
+                let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
+                    ordinal: 1, total: 1, source: cell,
+                }, items.remove(0)).await.unwrap();
+                let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
+                let boundary = workbench_runner_for_test(&frontend).capture_boundary(
+                    frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
+                ).await.unwrap();
+                let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
+                assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
+                assert!(matches!(kind, StructuredInspectionKind::Info));
+                let outcome = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await.unwrap();
+                let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
+                let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
+                assert_eq!(installed_bindings, ["frontendAnswer"]);
+                assert!(output.contains("known") && output.contains("compiler-world:"), "{output}");
+                assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
+                    "the real frontend must borrow the retained captured source domain");
+                drop(dependencies);
+            }
+
             let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
                 let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
-                Ok(crate::ActorDescriptor::new("unrelated history", placement)
-                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2))))
+                let mut history = crate::ActorDescriptor::new("unrelated history", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2)));
+                history.haskell_effects_alias = context.haskell_effects_alias.clone();
+                Ok(history)
             }).await.unwrap();
             workbench_runner_for_test(&workbench).adopt_final_source_scope(history_context.clone()).await.unwrap();
             for retained in 0..=3 {
@@ -17128,31 +17363,6 @@ pub(crate) mod request_tests {
             assert!(checked.snapshot().get(HostWorkCounter::CompileViewBuild) > 0);
             assert!(checked.snapshot().get(HostWorkCounter::InjectedValueVisit) > 0);
             assert!(checked.snapshot().get(HostWorkCounter::ReachableValueVisit) > 0);
-
-            let (frontend, frontend_context) = workbench.admit_private_cell_for_test(context).await.unwrap();
-            let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
-            let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
-            let PreparedCell { mut items, dependencies } = prepared;
-            assert_eq!(checked.items.len(), 1);
-            assert_eq!(items.len(), 1);
-            let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
-                ordinal: 1, total: 1, source: cell,
-            }, items.remove(0)).await.unwrap();
-            let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
-            let boundary = workbench_runner_for_test(&frontend).capture_boundary(
-                frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
-            ).await.unwrap();
-            let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
-            assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
-            assert!(matches!(kind, StructuredInspectionKind::Info));
-            let outcome = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await.unwrap();
-            let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
-            let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
-            assert_eq!(installed_bindings, ["frontendAnswer"]);
-            assert!(output.contains("known") && output.contains("compiler-world:"), "{output}");
-            assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
-                "the real frontend must borrow the retained captured source domain");
-            drop(dependencies);
         }).await;
     }
 
@@ -17240,8 +17450,8 @@ pub(crate) mod request_tests {
                 HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
             }
-            assert!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte) > 0,
-                "cold runtime namespace was captured before the source-domain refusal");
+            assert_eq!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte), 0,
+                "unsupported source refuses before typed bindings are encoded by the cold builder");
             let facade_body = "{-# LANGUAGE PackageImports #-}\nmodule Facade (module M) where\nimport \"base\" Data.Maybe as M\n";
             let home_body = "module GHC.Internal.Maybe (HomeMaybe(..)) where\ndata HomeMaybe = Just Bool\n";
             let (reexports, _reexport_owner) = world_query_test_source_files(&[vec![("Facade.hs", facade_body), ("GHC/Internal/Maybe.hs", home_body)]]);

@@ -426,6 +426,14 @@ pub enum SessionError {
     MissingDeclarationLibrary,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
     MissingRetainedValueInterface(SessionModule),
+    #[error("compiler world cannot capture generic source binding {id:?} in {module:?} (scope={scope:?})")]
+    UnsupportedCompilerWorldBinding {
+        binding: tidepool_repr::BindingName,
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        id: tidepool_repr::SessionVarId,
+        scope: ScopeId,
+        module: SessionModule,
+    },
     #[error("staged public manifest belongs to a different session, actor, or manifest")]
     WrongPublicManifestTicket,
     #[error("durable public admission owner={owner:?}, scope={scope:?}: {reason}")]

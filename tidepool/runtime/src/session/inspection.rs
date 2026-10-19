@@ -529,8 +529,8 @@ impl AdmittedInspectionInputs {
 }
 
 /// One runtime-owned observation of a published compiler world. A cold capture
-/// retains raw checked rows separately from the published primary context.
-#[derive(Clone)]
+/// couples current binding identities to checked rows, separately from the
+/// published primary context.
 pub struct AdmittedInspectionWorld {
     pub(super) base: InspectionWorldBase,
     pub(super) inputs: InspectionWorldInputs,
@@ -547,14 +547,12 @@ pub(super) struct InspectionWorldBase {
     pub(super) target: std::sync::Arc<super::RuntimeLexicalScopeLease>,
 }
 
-#[derive(Clone)]
 pub(super) enum InspectionWorldInputs {
     Published(std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>),
     Cold {
         primary:
             Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-        rows: Vec<std::sync::Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
-        visibility: std::sync::Arc<[u8]>,
+        bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings,
     },
 }
 
@@ -741,17 +739,13 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => {
             compiler_world::query_public_module(&endpoint()?, &world, question.clone())?
         }
-        InspectionWorldInputs::Cold {
-            primary,
-            rows,
-            visibility,
-        } => {
+        InspectionWorldInputs::Cold { primary, bindings } => {
             let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
             if sources.origin() != admitted.base.source.bytes() {
                 return Err(invalid("cold sources differ from the admitted source owner").into());
             }
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
-                primary, rows, visibility, sources,
+                primary, bindings, sources,
             )?;
             compiler_world::open_world(cold, &endpoint()?, question.clone())?
         }

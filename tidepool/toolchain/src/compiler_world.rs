@@ -328,9 +328,180 @@ impl PublicModuleQuestion {
 
 /// Primary declaration/source facts and visible value rows remain separate.
 /// Historical compiler/native support in a row is custody, not selected roots.
+pub struct CompilerWorldBinding<'a> {
+    occurrence: &'a str,
+    symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: tidepool_repr::SessionVarId,
+    defining_scope: u64,
+    row: Arc<CheckedValueArtifact>,
+}
+
+impl<'a> CompilerWorldBinding<'a> {
+    /// Borrow data from the runtime's one publication capture. This does not
+    /// issue a runtime client, world, source lease or operation admission.
+    pub fn from_checked_value(
+        occurrence: &'a str,
+        symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        row: Arc<CheckedValueArtifact>,
+    ) -> Self {
+        Self {
+            occurrence,
+            symbol,
+            session_var,
+            defining_scope,
+            row,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorldBindingFact {
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: tidepool_repr::SessionVarId,
+    defining_scope: u64,
+    row: Arc<CheckedValueArtifact>,
+}
+
+/// The current occurrence table, coupled to genuine checked rows by its
+/// publication owner. Aliases keep independent names and share their row.
+pub struct CompilerWorldBindings {
+    query_scope: u64,
+    entries: imbl::OrdMap<String, WorldBindingFact>,
+}
+
+impl CompilerWorldBindings {
+    /// Charge borrowed metadata before cloning it. Callers can feed the actual
+    /// BindingTable iterator directly; no intermediate all-binding Vec is needed.
+    pub fn from_published_bindings<'a>(
+        query_scope: u64,
+        bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
+    ) -> Result<Self, CompileError> {
+        let allowance = capture_allowance()?;
+        let mut remaining = allowance.checked_sub(64).ok_or_else(source_size_failure)?;
+        let mut entries = imbl::OrdMap::new();
+        for input in bindings {
+            crate::host_work::checkpoint()?;
+            let symbol = input.symbol;
+            let fields = [
+                input.occurrence,
+                symbol.unit.as_str(),
+                symbol.module.as_str(),
+                symbol.namespace.as_str(),
+                symbol.occurrence.as_str(),
+            ];
+            if fields
+                .iter()
+                .any(|field| field.is_empty() || field.contains('\0'))
+                || symbol
+                    .record_parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.contains('\0'))
+            {
+                return Err(source_failure("invalid current compiler binding identity"));
+            }
+            let bytes = binding_metadata_bound(
+                fields.map(str::len),
+                symbol.record_parent.as_ref().map_or(0, |p| p.len()),
+            )?;
+            remaining = remaining.checked_sub(bytes).ok_or_else(|| {
+                source_failure(format!(
+                    "compiler binding metadata exceeds capture allowance {allowance} bytes"
+                ))
+            })?;
+            if entries.contains_key(input.occurrence) {
+                return Err(source_failure("duplicate visible compiler occurrence"));
+            }
+            entries.insert(
+                input.occurrence.to_owned(),
+                WorldBindingFact {
+                    symbol: symbol.clone(),
+                    session_var: input.session_var,
+                    defining_scope: input.defining_scope,
+                    row: input.row,
+                },
+            );
+        }
+        Ok(Self {
+            query_scope,
+            entries,
+        })
+    }
+
+    pub(crate) fn cold_parts(
+        &self,
+    ) -> Result<(Vec<Arc<CheckedValueArtifact>>, Arc<[u8]>), CompileError> {
+        use ciborium::value::Value;
+        let mut rows = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
+        for entry in self.entries.values() {
+            crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
+                1,
+            );
+            let owner = entry.row.owner().module_name();
+            if let Some(previous) = rows.get(&owner) {
+                if !previous.same_world_type_row(&entry.row) {
+                    return Err(source_failure(
+                        "competing checked rows for one current compiler owner",
+                    ));
+                }
+            } else {
+                rows.insert(owner, Arc::clone(&entry.row));
+            }
+        }
+        let mut ordinals = BTreeMap::new();
+        let mut issuers = Vec::with_capacity(rows.len());
+        for (ordinal, (owner, row)) in rows.iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).map_err(|_| source_size_failure())?;
+            ordinals.insert(owner.as_str(), ordinal);
+            let (producer, receipt) = row.world_issuer();
+            issuers.push(world_array(vec![
+                world_text(owner.clone()),
+                world_blob(row.certified_interface().artifact_id().0),
+                world_blob(producer),
+                world_blob(receipt),
+            ]));
+        }
+        let entries = self
+            .entries
+            .iter()
+            .map(|(occurrence, entry)| {
+                let symbol = &entry.symbol;
+                let owner = entry.row.owner().module_name();
+                world_array(vec![
+                    world_text(occurrence.clone()),
+                    world_array(vec![
+                        world_text(symbol.unit.clone()),
+                        world_text(symbol.module.clone()),
+                        world_text(symbol.namespace.clone()),
+                        world_text(symbol.occurrence.clone()),
+                        symbol
+                            .record_parent
+                            .as_ref()
+                            .map_or(Value::Null, |parent| world_text(parent.clone())),
+                    ]),
+                    entry.session_var.raw().into(),
+                    entry.defining_scope.into(),
+                    u64::from(ordinals[owner.as_str()]).into(),
+                ])
+            })
+            .collect();
+        let encoded = world_bytes(&world_array(vec![
+            world_text("TPCWBIND2"),
+            self.query_scope.into(),
+            world_array(entries),
+            world_array(issuers),
+        ]))?;
+        Ok((rows.into_values().collect(), encoded.into()))
+    }
+}
+
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
     visible_rows: Vec<Arc<CheckedValueArtifact>>,
+    _bindings: CompilerWorldBindings,
     sources: Arc<CapturedCompilerSources>,
     visibility: Arc<[u8]>,
     directory: Arc<tempfile::TempDir>,
@@ -340,6 +511,7 @@ impl CompilerWorldOpenInputs {
     pub(crate) fn from_primary_selection(
         primary_context: Arc<ExactDeclarationContext>,
         visible_rows: Vec<Arc<CheckedValueArtifact>>,
+        bindings: CompilerWorldBindings,
         sources: Arc<CapturedCompilerSources>,
         visibility: Arc<[u8]>,
         directory: Arc<tempfile::TempDir>,
@@ -347,6 +519,7 @@ impl CompilerWorldOpenInputs {
         Ok(Self {
             primary_context,
             visible_rows,
+            _bindings: bindings,
             sources,
             visibility,
             directory,
@@ -684,29 +857,22 @@ fn world_path(path: &Path) -> Result<ciborium::value::Value, CompileError> {
         .ok_or_else(|| source_failure("world input path must be absolute UTF-8"))
 }
 
-/// Check the cold visibility envelope before cloning incoming bytes or row owners.
-/// SessionModule names have a bounded u64 generation; nine bytes bounds every
-/// CBOR head, including the outer arrays. The bounded writer enforces the final
-/// encoding too. This is the existing portable capture budget, not retention.
-pub(crate) fn check_world_visibility_size(
-    visibility_bytes: usize,
-    rows: usize,
-) -> Result<(), CompileError> {
+// Nine bytes bounds every CBOR head and integer. Each occurrence is charged
+// for its own issuer row even when aliases will share that row. SessionModule's
+// generated name has a bounded u64 generation, independently of SymbolIdentity.
+fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64, CompileError> {
     let max_owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(u64::MAX))
         .module_name()
         .len() as u64;
-    let row_bound = 9 + 9 + max_owner + 2 * (9 + 32);
-    let bound = (rows as u64)
-        .checked_mul(row_bound)
-        .and_then(|n| n.checked_add(9 + 9 + 8 + 9 + 9))
-        .and_then(|n| n.checked_add(visibility_bytes as u64))
-        .ok_or_else(source_size_failure)?;
-    let allowance = capture_allowance()?;
-    if bound > allowance {
-        return Err(source_failure(format!(
-            "compiler world visibility requires at most {bound} bytes; capture allowance is {allowance} bytes")));
-    }
-    Ok(())
+    let entry_heads = 11 * 9;
+    let issuer_row = 9 + 9 + max_owner + 3 * (9 + 32);
+    fields
+        .into_iter()
+        .chain([parent_bytes])
+        .try_fold(entry_heads + issuer_row, |size, field| {
+            size.checked_add(field as u64)
+                .ok_or_else(source_size_failure)
+        })
 }
 
 struct WorldColdRows {
@@ -1852,8 +2018,7 @@ mod answer_tests {
         let sources = Arc::new(sources(b"module Module where\n", b"module Module where\n"));
         let cold = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             None,
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
         )
         .unwrap();
@@ -1871,8 +2036,7 @@ mod answer_tests {
         assert_eq!(restored.snapshot().producer_sha256(), canonical);
         let issued = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(bound),
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
         )
         .unwrap();
@@ -1881,8 +2045,7 @@ mod answer_tests {
             Some(Arc::new(
                 (*cold.primary_context).clone().admit_producer(raw).unwrap(),
             )),
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             sources,
         )
         .unwrap();
@@ -1891,8 +2054,32 @@ mod answer_tests {
 
     #[test]
     fn cold_visibility_rejects_oversize_before_clone_or_allocation() {
-        assert!(check_world_visibility_size(usize::MAX, 0).is_err());
-        assert!(check_world_visibility_size(0, usize::MAX).is_err());
+        assert!(binding_metadata_bound([usize::MAX; 5], 0).is_err());
+        assert!(binding_metadata_bound([0; 5], usize::MAX).is_err());
+        let symbol = ["alias", "base", "Actual.Defining", "Value", "definition"];
+        let encoded_entry = world_array(vec![
+            world_text(symbol[0]),
+            world_array(
+                symbol[1..]
+                    .iter()
+                    .map(|s| world_text(*s))
+                    .chain([ciborium::value::Value::Null])
+                    .collect(),
+            ),
+            u64::MAX.into(),
+            u64::MAX.into(),
+            u64::MAX.into(),
+        ]);
+        let owner =
+            tidepool_repr::SessionModule::val(tidepool_repr::Generation(u64::MAX)).module_name();
+        let issuer = world_array(vec![
+            world_text(owner),
+            world_blob([0; 32]),
+            world_blob([1; 32]),
+            world_blob([2; 32]),
+        ]);
+        let encoded = world_bytes(&world_array(vec![encoded_entry, issuer])).unwrap();
+        assert!(binding_metadata_bound(symbol.map(str::len), 0).unwrap() >= encoded.len() as u64);
     }
     #[test]
     fn world_identifier_namespace_is_checked_beyond_question_echo() {
