@@ -4,115 +4,74 @@ Owner `/root/warm_compiler_campaign/host_inputs`; area checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019`, branch
 `feature/shared-warm/host-inputs`, original base `5b74c2f1`.
 
-## Current source and actual query result
+## Qualified actual query and receiving continuation
 
-Actual tested production is exact `345827c749e0ec04f40da0f9401b839fdab824e1`: full reviewed
-HOST query history plus qualified old-profile Warm `d7cd1bbb`. No typed-binding,
-new-CID or new-profile API is mixed into this query candidate. The full-history
-merge was clean; all eight incoming Warm blobs and seven critical HOST blobs
-were verified. Independent receipt: `oracle/query-owner-joined-review-345827c7.txt`.
+Actual tested production is `f82e4321cc05e3b10888e78003fae83f6e4b3a1f`.
+Full history is folded at area75be05a43c3148413f9d73643945549bb28869b1:
+HOST source-owner/resolver support capture, qualified old-profile Warm397 wire
+ordering, strict answer oracle and its actual wrong-guard sensitivity. No typed
+binding or new-profile API is mixed into this query candidate. Exact independent
+source receipts are `oracle/query-sort-supplier-join-review-b4e4b796.txt`,
+`frontend-strict-oracle-review-8614d096.txt` and its closed repair
+`frontend-strict-oracle-repair-review-f82e4321.txt`.
 
-Owning runtime/actor production and cfg-test compilation passed at exact345:
-1811 local actions, exit0, 743.16s. Actual declared Rooted group then selected and
-executed two cases, passing one and failing one, exit1, 97.18s including sixteen
-matched resource actions. Evidence root is
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/host-inputs/host-world/`;
-`WORLD-QUERY-345-TERMINAL.json` binds commands, reports, sources, streams,
-compiler/resources and cleanup observations. Actor harness SHA256 is
-`e75a6eb24b934b57bd457695583b1458538d9a7d4701508ccb3ef10503dcf966`;
-worker SHA256 is
-`af10bf7eed4244802176b8d9122f266bbaf9743d2c5887698546ee1915181efb`.
+At b4 four runtime/actor production/cfg-test targets passed21 local actions.
+The final f82 actor cfg-test compile passed exit0/one local action/85.35s.
+The SAME declared Rooted group then selected/executed2, PASS2/FAIL0, exit0/76.69s.
+`host-world/WORLD-QUERY-F82E-TERMINAL.json`, SHA256
+`e7e7edb5ff9c5c4500795edb53ed6580dd5131124f07dc8772672b36c5467c29`,
+binds actual commands, matched resources, reports and cleanup. Actor binary is
+`ef71b8ac3da974708266abb456f5424bcc1e6e40e795d8e92e8c40807a4981f4`.
+HOST directly checked22 report/diagnostic hashes. Independent native review checked
+30 unique files/375888995 bytes, both reports and binary, compile/count records,
+cleanup owners and current worker absence:
+`oracle/world-query-native-evidence-verification-f82e4321.txt`.
 
-The source-domain case passed its entire actual service path: ordered A/B sources
-with different bodies, reversed root selection and attested root/path/hash,
-retained live edits and captured absence, stale publication CAS, and requested
-home versus defining package reexport identity. The hot-history case accepted its
-first cold Info and retained0 hot Info/Type; those hot observations required
-EnsureProbe1/Hit1 and zero old preparation/acquisition work. It failed at its FIRST
-unrelated-history publication, before growing-history, transfer, source fences or
-actual Introspection continuation. The generated scaffold references Replies and
-Watches because the new history ActorDescriptor uses default capabilities, while
-the fixture preamble declares only Introspection. The exact scaffold and GHC
-NotInScope diagnostics are retained. This is a bounded fixture-context lead;
-no validator, worker guard or publication policy has been changed.
+The genuine frontend now reaches private/source authority admission, preparation,
+Introspection suspension and resume, checks Right/name known/compiler-world
+provenance BEFORE selecting pure, then commits frontendAnswer with the exact
+binding receipt. A second actual query changes only the expected-name guard,
+requires the specific typed authored error and no installed binding. It cannot
+pass on query refusal, undefined or missing inputs. Genuine unrelated history
+publication3, resident hot Info/Type helper zero-old-preparation counters, original
+A/target B fences and positive legacy-work calibration all pass. The source-domain
+case passes differing ordered A/B bodies, root/path/hash attestation, live edits,
+captured absence, stale CAS, unsupported/mismatch refusal and requested-home versus
+defining-package reexport. Hydration leaves the logical public world unchanged.
 
-Both case process and compiler cleanup are confirmed; actual complete-retirement
-receipts are true and recorded package pin paths no longer exist. Diagnostic
-summary completeness is false because retained timing records truncate at172;
-request-count and aggregate completeness are true, and full compiler logs remain.
-Do not turn that summary limit into missing raw evidence or complete diagnostics.
+Both cases confirm process/compiler cleanup and actual complete retirement;
+observed worker/owned daemon PIDs are absent. Hosted cleanup is not observed,
+directory resource hashes remain UNKNOWN and both diagnostic summaries are
+incomplete from bounded timing truncation; raw logs and complete36/22 request
+counts remain. The frontend caller lacks a DEBUG subscriber, so actual frontend
+host-work zero remains UNMEASURED; helper/client hot counters are not whole
+frontend preparation evidence. No ordinary cell, typed service, successor, fork,
+recovery, eviction or performance milestone is inferred from this query pass.
 
-The preceding actual345 clients are terminal. At that terminal, query checkout
-retained Buck407847/forkserver407888 in
-`/build.slice/inanna-build-1792421479-407771.scope`, last idle3,313,496,064 bytes,
-phase peak11,383,582,720 bytes. Typed checkout's separate idle daemon remains in
-global accounting. Campaign LIVE.json is the current phase authority; fresh actual
-scope/headroom accounting is required before any next native lane.
+All HOST clients are terminal; LIVE host grant0/sessionnull. Query Buck407847 and
+forkserver407888 retain scope1792421479-407771, last idle3499806720 bytes,
+cumulative peak11383582720 bytes; typed daemon509870 also stays globally counted.
+Campaign owns receiving integration after its frozen f88 gate settles, then exact
+joined actor cfg-test/Rooted2. No duplicate area query job is scheduled.
 
-## Active repair and exact continuation
+Earlier failures stay in their original terminal receipts. b4 exposed the lazy
+presentation oracle and does not prove answer fields consumed.945 exposed PathBuf
+versus UTF8 wire ordering; discovery still performs fixed-fixture full-file reads,
+so no bounded full-constructor claim.345/db1 fixture composition failures remain
+separate. Original eea rejection cause stays unknown and575 startup cleanup stays
+unconfirmed. Later passing cleanup does not rewrite earlier observations.
 
-Two reserved Sol-high descendants only, no grandchildren or additional agents.
-selected_root owns query implementation and terminal command observation. Exact
-345→db1b26f4 cumulative source review accepted the mounted-alias repair and
-unchanged frontend-block reorder before history. The area fold7a759353 preserves
-full histories; production matches db1, independently reviewed but not yet tested.
-Receipt: `oracle/query-frontend-reorder-joined-review-db1b26f4.txt`.
-selection_oracle checkpointed the zero-budget lifecycle source fixture in isolated
-checkout `tidepool-shared-warm-retention-fixture-20261019`, branch
-`feature/shared-warm/retention-fixture`, exact base db1. Four-file dirty patch
-SHA256 `2f6098291512a833c7505b12d8656f1a15dc043d63a5b5f3aa2125b0f0a5aa53`
-is retained under `host-inputs/retention-fixture/`. B expansion is PAUSED by root/
-campaign priority; no metadata, generation, formatting or native execution ran.
-This reserved reviewer now prioritizes actual ordinary-cell consuming API review
-and per-item publication/second-cell reuse. No additional agent or native grant
-was allocated. Preserve independent-world original/target leases, genuine
-unrelated-history production publication, all aliases and every existing oracle.
-A context repair must use the fixture's actual effect contract, not rewrite GHC
-errors or bypass source admission. The independent frontend block now precedes
-history growth so its result is not hidden by a later fixture failure. All
-assertions remain; direct-client counters stay distinct from frontend work.
+## Reserved work and continuation
 
-Actor cfg-test-only incremental compile PASSED at db1, exit0/one local action/
-91.45s. Actual Rooted retry executed2, passed1 and failed1, exit1/15.83s. Moving
-the frontend earlier exposed its source-admission fixture mismatch before prepare:
-`WorkbenchCompilationAuthority::for_test` always admits an empty default source,
-but this context carries Complete captured source. The guard correctly refused;
-no frontend effect, growing-history, transfer or fences were reached. Source-domain
-case passed again unchanged. Both process/compiler cleanup and complete retirement
-are confirmed. First diagnostic summary is complete; second retains the172-record
-summary limit. `WORLD-QUERY-DB1-TERMINAL.json` records all exact outcomes.
-
-The source-owner repair is exact945d58c2323561f0f4679aa9b3f67ef90aef4c6e, folded
-with full history at area e676c7d83522fc516d60ed0510048f799f7b465b. It retains the
-SAME actual SourceLayerIssuer and validates exact borrowed generation evidence,
-reference, ordered paths and identities through the real resolver. The caller
-uses production public-owner/private-scope/WorkbenchCompilationAuthority::admit,
-with no change to the generic empty-source helper or guard. The first case copies
-its already-declared effects/core/orchestration/prelude/actor support into the same
-strict owner before capsule issuance/open. Existing manifest discovery performs
-full-file reads: this is an explicit fixed-declared-fixture limitation, not a
-bounded full-constructor claim. Subsequent retained-byte reads share the existing
-allowance, and final factory framing remains checked. Source-domain root4/10
-selection and bytes are unchanged. Foreign issuer and different selection negatives
-exercise actual admission; the latter is not an isolated reference-only mutant.
-
-Independent receipt `oracle/query-source-owner-admission-review-945d58c2.txt`
-accepted exact diff SHA7870853ab5bd52f30323a4e8ef2615f7b9362ee6cc6678f7fa32f9516a5da90e.
-Root and campaign direct review also accepted. Minimal actor cfg-test compilation
-is ACTIVE64153, observed by selected_root (launcher498721), followed serially by
-the same actualRooted2 only after compilation passes. Source945 is frozen, and
-HOST14GiB TOTAL/8GiB growth is active. Fresh projection52,057,079,808 bytes includes
-current global22,765,387,776 bytes, actual own-scope remaining allowance, Warm8 ADD
-and known qualification8 ADD. Campaign and Reload were explicitly settled0;
-their idle daemons remain global. No source/profile/API extension or baseline reset
-is authorized inside this gate. No native pass for945 has been claimed.
-The unchanged service command is:
-`swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
-Campaign's separate exact6f9 joined12699 also completed: ten labels compiled,
-154 workflow and four component controls passed; actualRooted2 reproduced the
-prior345 Replies/Watches failure. Its14GiB grant is released; idle daemon stays
-global. Emit each consequential new source/count/hash/resource result to campaign
-and the affected Warm owner.
+Two reserved descendants only: selected_root owns implementation/native observation;
+selection_oracle owns exact independent review. No descendants or polling loops.
+Optional retention-stress source WIP is paused in real checkout
+`tidepool-shared-warm-retention-fixture-20261019`, branch
+`feature/shared-warm/retention-fixture`, based on db1. Four-file dirty patch SHA256
+`2f6098291512a833c7505b12d8656f1a15dc043d63a5b5f3aa2125b0f0a5aa53`
+is retained under `host-inputs/retention-fixture/`; no native evidence is claimed.
+Ordinary-cell Plan/Prepare, actual private successor finalization, atomic binding/world
+publication and second-cell use take priority over query or retention expansion.
 
 ## Qualified foundations and boundary
 
@@ -170,17 +129,35 @@ ordinary-cell coverage, not permanently unsupported by convenience.
 Independent cumulative source receipt is
 `oracle/typed-binding-consumer-repair-review-ebd3ea9c.txt`. Four runtime/actor
 production and cfg-test targets passed at ebd3, 1811 local actions/737.15s;
-matched worker/wrappers passed25 actions/124.69s. The TWO new focused controls are
-still UNRUN, explicitly pending because genuine query qualification took priority:
+matched worker/wrappers passed25 actions/124.69s. The TWO required focused controls now each selected/executed/passed1, total2/2:
 `session::persistent::checkpoint_scope_tests::world_binding_capture_refuses_visible_stubs_before_missing_rows`
 and
 `resident_workbench::request_tests::world_capture_keeps_each_checked_binding_from_one_value_row`.
-`host-bindings/TYPED-EBD3-TERMINAL.json` binds exact artifacts and limits. The stub
+`host-bindings/TYPED-EBD3-TERMINAL.json` binds compilation;
+`TYPED-EBD3-FOCUSED-TERMINAL.json` binds actual counted execution and matching
+runtime/actor binaries. Runners implicitly rebuilt861/409 local actions; no
+redundant explicit build. Process cleanup is confirmed, compiler cleanup is not
+observed and actor trace is absent; no physical retirement/zero-work claim. The stub
 control is representation/capture coverage, not physical generic-mount ownership.
 The two-name checked capture is not service serialization. Do not fold typed API
 changes into the frozen four-argument query source. Later owner-guided composition
 uses Warm's old-profile typed supplier f1621e9a, independently source accepted but
 not yet compiled as a join.
+
+Controlling six-document amendment2428b82d962a9a98f072c978580b8b22d778fe13
+makes compatible world-owned dependency, validity and recovery reuse CORE to the
+first nonempty three-root/import milestone. This is worker arm B, distinct from
+our paused optional retention-stress fixture. Warm's world_dependencies owner
+must retain eligible checked dependency answers and exact selected HPT/backing
+across compatible successors, with fresh target/request/diagnostic/hooks/executor
+and cancellation. HPT seeding alone is not meaningful reuse if unchanged
+dependencies still compile; empty-world bootstrap is not arm B acceptance.
+HOST finalization preserves those returned owned references without predecessor
+chains or whole-world reconstruction. Same-world and successor reuse are separate
+controls. First scalar bind/use then genuine imported-home/scaffold bind/use must
+observe actual W0→W1→W2, values, matched three-root/profile and work counters.
+Changed dependencies, instance-only changes and equal-interface/different-original
+refusal remain required; optional deeper arm C can conclude with a no-go.
 
 RUST-CLIENT-MIGRATION.md requires ordinary plan/prepareCell, private per-item
 successors, paired atomic binding/declaration publication, fork, recovery and old
@@ -191,7 +168,28 @@ committed prefixes on later refusal. Share current changed nodes/restoration
 frontier, with no predecessor replay chain, per-item snapshot/native-offer fold,
 full-world encoding hidden at commit or legacy ExactCompilationRequest rebuild.
 Runtime Original, instance, prototype and executable dependency proofs remain.
-Warm's actual paired plan/prepare successor API is not caller-ready yet.
+HOST is the SINGLE runtime finalization/adoption owner; Warm owns Prepare/output
+certification/private successor issuance, with OWN read-only review. Concrete
+packet `host-inputs/cell-world/RUNTIME-SUCCESSOR-ADOPTION-945.md` binds actual
+CheckedTurnCompletion/AcceptedJoin settlement and persistent.rs atomic promotion.
+First adoption must typed-refuse semantic world/base changes rather than reuse
+privateW1 after a legacy rebase with publicz; storage-only restage may retain it.
+Service-backed semantic rebase remains required later. The critical ordinary
+bind/use path needs genuine nonempty primary/import closure and all three roots
+under the matched new profile, then actual x=7 and y=x+1=8. No empty-root proof.
+
+Real source checkout `tidepool-shared-warm-host-cells-20261019`, branch
+`feature/shared-warm/host-cells`, starts at0a1c789733 and joins typedebd3 full
+history. 3141d6133d repairs shared canonical/typed composition under Warm's
+exact hunk guidance, preserving canonical-before-root and ReachableBlocks owner.
+Its canonical regression callers use truthful empty typed binding DATA. Independent joined source review accepted3141d613; no configuration, formatting
+or native lane has run in this new checkout. Mount is provisioned. Warm owner-guided full Plan/reservation e608 merge is now
+b4e36b655ed5395dcd58d33fcfb9e968f89d6224, source-only. Supervisor is editing
+PrivateExecutionAdmission finite/world capture and reserved selected_root owns the
+disjoint RuntimeCellAdmission finite/world basis in branch world-cell-admission
+of the existing typed checkout. No native grant or Prepare claim. Actual reservation
+DATA000572 exists; coherent Prepare/output certifier/product-update API is not yet caller-ready. Do not invent
+placeholder capability or silently reconstruct ExactCompilationRequest to proceed.
 
 Required retention histories follow first-query acceptance: actual A/B eviction
 and exact restore, zero optional budget holding TWO questions through real END,
