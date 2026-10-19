@@ -776,8 +776,9 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         candidates: &crate::module_candidates::CandidateSet,
     ) -> Result<Option<Self>, CompileError> {
+        let carried = Self::reuse_selected_authored(context)?;
         if candidates.contextual_native_availability.is_empty() {
-            return Self::reuse_selected_authored(context);
+            return Ok(carried);
         }
         let source = context.compiler_source_support();
         let mut validation = PackageInterfaceValidation::default();
@@ -802,6 +803,10 @@ impl OriginalCompilerInputs {
             &[],
             &dependencies,
         )?;
+        if let Some(mut carried) = carried {
+            carried.artifacts = carried.artifacts.retain_custody(&custody)?;
+            return Ok(Some(carried));
+        }
         let retained = source.retain_custody(&custody)?;
         Ok(Some(Self::from_issued_support(&retained)))
     }
@@ -13499,11 +13504,28 @@ mod tests {
             .first()
             .and_then(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
-        let output = OriginalCompilerInputs::issue_candidate_from_support(
-            &crate::artifact_inventory::CompilerSourceSupport::empty(),
-            producer,
-            products,
-        )
+        let output = (|| -> Result<OriginalCompilerInputs, CompileError> {
+            let fixture_products: &[CertifiedRecoveryProduct] = products;
+            let entries = fixture_products
+                .iter()
+                .map(|product| ArtifactEntry::original(producer, product.clone()).map(Arc::new))
+                .collect::<Result<Vec<_>, _>>()?;
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory.admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )?;
+            let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .map_err(compiler_evidence_failure)?;
+            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        })()
         .unwrap();
         let support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
@@ -18743,18 +18765,31 @@ mod tests {
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap()
         };
-        let support = if sparse {
-            issue_fixture_compiler_support(projection, artifacts).unwrap()
-        } else {
-            let output = OriginalCompilerInputs::issue_candidate_from_support(
-                &crate::artifact_inventory::CompilerSourceSupport::empty(),
-                [7; 32],
-                &products,
-            )
+        let support =
+            if sparse {
+                issue_fixture_compiler_support(projection, artifacts).unwrap()
+            } else {
+                let output = (|| -> Result<OriginalCompilerInputs, CompileError> {
+    let fixture_products: &[CertifiedRecoveryProduct] = &products;
+    let entries = fixture_products.iter().map(|product| {
+        ArtifactEntry::original([7; 32], product.clone()).map(Arc::new)
+    }).collect::<Result<Vec<_>, _>>()?;
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory.admit_shared_with_demand(
+        &inventory.empty_view(), entries.clone(),
+        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+    )?;
+    let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        &projection, &artifacts.metadata_snapshot(),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    ).map_err(compiler_evidence_failure)?;
+    OriginalCompilerInputs::from_selection(&selection, &artifacts)
+})()
             .unwrap();
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                .unwrap()
-        };
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            };
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             compiler_support: support,
             producer: [7; 32],
@@ -21471,11 +21506,28 @@ mod tests {
             .unwrap()
             .descriptor
             .id;
-        let hidden_output = OriginalCompilerInputs::issue_candidate_from_support(
-            &crate::artifact_inventory::CompilerSourceSupport::empty(),
-            [2; 32],
-            &[hidden],
-        )
+        let hidden_output = (|| -> Result<OriginalCompilerInputs, CompileError> {
+            let fixture_products: &[CertifiedRecoveryProduct] = &[hidden];
+            let entries = fixture_products
+                .iter()
+                .map(|product| ArtifactEntry::original([2; 32], product.clone()).map(Arc::new))
+                .collect::<Result<Vec<_>, _>>()?;
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory.admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )?;
+            let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .map_err(compiler_evidence_failure)?;
+            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        })()
         .unwrap();
         let support = context
             .compiler_source_support()
@@ -21912,11 +21964,28 @@ mod tests {
             1
         );
 
-        let empty_private = OriginalCompilerInputs::issue_candidate_from_support(
-            &crate::artifact_inventory::CompilerSourceSupport::empty(),
-            [2; 32],
-            &[],
-        )
+        let empty_private = (|| -> Result<OriginalCompilerInputs, CompileError> {
+            let fixture_products: &[CertifiedRecoveryProduct] = &[];
+            let entries = fixture_products
+                .iter()
+                .map(|product| ArtifactEntry::original([2; 32], product.clone()).map(Arc::new))
+                .collect::<Result<Vec<_>, _>>()?;
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory.admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )?;
+            let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .map_err(compiler_evidence_failure)?;
+            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        })()
         .unwrap();
         let private = baseline
             .in_program_context_with_private_input(context.clone(), &empty_private)
@@ -23362,13 +23431,9 @@ mod tests {
             &configured_support,
         )
         .unwrap();
-        let selected_private = OriginalCompilerInputs::from_selected_authored_declarations(
-            &dependent_context,
-            producer,
-            &[],
-        )
-        .unwrap()
-        .expect("complete selected authored original can reuse exact selected support");
+        let selected_private = OriginalCompilerInputs::reuse_selected_authored(&dependent_context)
+            .unwrap()
+            .expect("complete selected authored original can reuse exact selected support");
         let selected_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
             .prepare_compilation_with_private_input(
                 &root.join("selected-authored-scope"),
