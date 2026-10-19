@@ -2,9 +2,9 @@
 
 Implementation and qualification are active. Reviewed host sharing, immutable
 input custody and worker transport/retention are integrated at f088e3e783. Joined
-production/test compilation and thirty-six counted controls passed. The user-directed C2/C5 architecture
-amendment pauses NEW shared host/worker/package APIs while existing source owners
-map a demand-based Haskell compiler service. Real warm hits, selective force
+production/test compilation and thirty-six counted controls passed. The user-directed C2/C5 demand-service amendment is accepted and integrated at
+ebb98b3f25 (root2486ea4b94). Existing host/worker/package owners are active on
+paired concrete contracts and the first complete public-module inspection slice. Real warm hits, selective force
 reload and a measured speedup remain unfinished.
 
 Owner `/root/warm_compiler_campaign`, gpt-6.1-sol high. Checkout
@@ -73,10 +73,10 @@ direct children per area; reserved grants persist through event-bound yields.
 
 | Area | Leaves | Current exact state and next owner action |
 | --- | ---: | --- |
-| host_inputs | 2 | Reviewed b5 successor integrated; area compile+17/17 pass. Supervisor and reserved oracle map actual runtime paired owner and compiler-only derivation for C2/C5 amendment. Selected-root02A source/API WIP explicitly paused at b5; four files +415/-100 preserved in private paused-wip.patch, uncompiled/unqualified, not integrated. |
-| owned_inputs | 2 | Complete reviewed f330 row history integrated at f088. Exact5113 compile0 +three counted cases pass; every later paired native/refusal assertion reached. Both children settled; package source proposal held pending service-owner contract decision, no new APIs. Joined campaign36/36 passed; service contract decision is the next owned dependency. |
-| warm_workers | 1 | Reviewed0bd integrated; area9/9 pass, no jobs. Supervisor reactivated for actual production compile/query service-owned-world map, cold recovery and private publication only. New APIs held; protocol framing still Unsupported for real Ready. |
-| reload | 2 | Foundation and routine owner-module/fixture repairs remain area-local. First two native attempts failed E0616 private field then missing host_authority test initializer; both repaired, exact f147 retry03 four-target production/cfgtest compilation passed. Foundation counted controls next. Public lower-facade END claim retention needs one canonical runtime transaction owner; signature/actual bootstrap issuer timing under bounded review. R2/R3 force/drain not wired; force=true now fails closed before preparation. |
+| host_inputs | 2 | Reviewed b5 successor integrated; area compile+17/17 pass. Supervisor and existing leaves now propose exact paired runtime world-reference/source-domain issuers and pre-capture public inspection branch against accepted DEMAND-SERVICE.md. Selected-root02A source/API WIP explicitly paused at b5; four files +415/-100 preserved in private paused-wip.patch, uncompiled/unqualified, not integrated. |
+| owned_inputs | 2 | Complete reviewed f330 row history integrated at f088. Exact5113 compile0 +three counted cases pass; every later paired native/refusal assertion reached. Existing source_lifetime and rows grants resumed for exact service-epoch source-root/boot/retirement/schema2 contract, default option B. Joined campaign36/36 passed; implementation follows paired constructor review. |
+| warm_workers | 1 | Reviewed0bd integrated; area9/9 pass, no jobs. Supervisor and protocol grant resumed for exact cross-language open/restore +held-world module question/resolver contract with host/owned. Prior source maps completed. New code follows campaign signature review; protocol framing still Unsupported for real Ready. |
+| reload | 2 | Foundation and routine owner-module/fixture repairs remain area-local. First two native attempts failed E0616 private field then missing host_authority test initializer; both repaired, exact f147 retry03 four-target production/cfgtest compilation passed. Foundation runtime5 executed:4pass,1 Ready-install refusal assertion failed; actual consumer repair and analogue search active. Actor11 counted controls active. Public owner contract now selects confirmed preparation/runtime phase separation. Public lower-facade END claim retention needs one canonical runtime transaction owner; signature/actual bootstrap issuer timing under bounded review. R2/R3 force/drain not wired; force=true now fails closed before preparation. |
 | qualification | 1 | Exact frozen6d3 bundle build/freeze/verify passed. AABA and all13 Persona phases passed1/1 each with confirmed process/host/compiler cleanup. Persona13 diagnostics incomplete. Full-profile AABA attribution complete; stronger Persona failed writable-lock fixture setup before compiler requests. Narrow fixture repair38c53 independently source accepted; area compile/count/refreeze successor next. No matched candidate performance yet. |
 
 All leaves use isolated real checkouts. Only the responsible area parent folds
@@ -90,8 +90,10 @@ The user requests a demand-based Haskell compiler service owning long-lived
 compiler worlds. Rust retains exact source/artifact/native dependency provenance,
 fresh lifecycle authority and atomic world/bindings publication; compiler-only
 selection/dependency/query preparation must not reconstruct a second world per
-request. Root is revising C2/C5. New host/worker/package APIs are PAUSED pending
-that bounded review; isolated validated fixes, reviews, folds and tests continue.
+request. Controlling DEMAND-SERVICE.md is accepted after host, worker and independent
+HLS review. Existing supervisors resumed with exact ebb98b3f25; paired concrete
+API/resolver/source-owner proposals receive campaign review before dependent
+implementation. Routine signatures require no further root approval.
 The actual runtime capture_value_interfaces Vec and checked_value_context support
 fold remain unfinished critical-path work. Persistent maps alone do not establish
 borrowed complete-root capture. The first revised vertical slice must traverse an
@@ -171,11 +173,12 @@ stop is declared. A real unresolved strategy gap closes only its cone after boun
 review; drain all other approved independent successors, reviews, repairs, merges
 and running tests before MORNING handoff.
 
-Awaited events and continuation: root owns the exact committed C2/C5 decision;
+Awaited events and continuation: host, warm and owned own concrete paired
+contracts against accepted ebb98b3f25; campaign owns their exact review/activation;
 qualification owns the reviewed fixture successor native terminal and receiving
 OID; reload owns counted foundation controls and the canonical transaction-owner
-issuer decision packet. Warm/host source maps and owned source-lifetime options
-are delivered. Each producer checks campaign status and uses followup_task if it
+issuer decision packet. Warm/host source maps and owned source-lifetime options are delivered; their
+reserved supervisors/leaves are reactivated for concrete constructors. Each producer checks campaign status and uses followup_task if it
 is dormant; campaign then reviews/repairs/folds or activates the approved next
 source wave. No campaign process lacks an observer and no periodic wake is set.
 
