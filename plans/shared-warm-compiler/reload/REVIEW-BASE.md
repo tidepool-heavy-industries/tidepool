@@ -2,21 +2,19 @@
 
 Reviewer: `/root/warm_compiler_campaign/reload/authority_review`.
 
-Current cumulative source review: campaign base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact frozen candidate
-`fc92605eb78c52284f90249f6e5dd1200ba060de`, read from committed objects in
-`/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`.
-Disposition: actor same-ticket composition source review is complete; the
-subsequent root audit confirmed a public-runtime facade/native-END custody gap
-without the actor wrapper. The runtime-only counterexample and approved bounded
-owner repair are recorded in the final section. Previous actor generation,
-bootstrap and facade claim gaps are source-repaired, but the lower public
-boundary remains blocked pending an exact owner repair. This is NOT complete-R1
-acceptance, compilation evidence, behavioral acceptance or integration readiness. Native production/unit compilation and native test
-execution by this reviewer remain 0; parent now owns an admitted native gate, whose terminal receipt is not established by this source report. Cumulative whitespace check passes; the leaf's pinned
-formatting and generated source-mapping receipts are recorded separately.
-No product source edit, build, cleanup experiment or release qualification was
-performed by this reviewer.
+Current exact review: original campaign base
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`, previously reviewed owned history,
+then core base `345194431d9f8407a7b7e7c4c273eafbce90bfc0` through committed
+core candidate `51900a30df171a3920584eeaa12be0180d6c7bb4`, plus exact
+fixture-only followup `a82c900783e13ee5bf8c107df7ab00ab737437ea`.
+Disposition: CHANGES REQUESTED for the C6 core. Confirmed original/target lease
+custody and Pending-to-Ready provenance gaps, plus the actual metadata-cycle
+terminal-owner limitation, are recorded in the final section. Candidate owning
+compilation and test execution remain 0; earlier foundation results do not
+qualify this candidate. Parent explicitly authorizes integration for EARLY
+COMPILER FEEDBACK with review-blocked status, not an acceptance fold or feature
+acceptance. Source is frozen pending that compile receipt before further repair
+growth. No reviewer native command or product edit was performed.
 
 Required R1 WatchRoute/forms/reply-tool/display registration successors remain
 explicitly HELD until initial runtime and actor production/unit compilation.
@@ -1877,3 +1875,252 @@ END/abandon. Do not fabricate GHC uncertainty for a synchronous Cranelift-only
 control. Confirmed findings, protected actor exceptions, pure observations and
 untested/native boundaries above remain separate. Await exact candidate plus
 early owning compile; no further category search or source change this activation.
+
+
+### Exact C6 core owned-history review: 51900a30df plus a82c900783
+
+Task/base/candidate: authority_review; originalbase
+5b74c2f1fe010c5c343e0c6f331d54328fbd5090; corebase
+345194431d9f8407a7b7e7c4c273eafbce90bfc0; committed core
+51900a30df171a3920584eeaa12be0180d6c7bb4; fixture followup
+a82c900783e13ee5bf8c107df7ab00ab737437ea. Read exact committed delta (14 files),
+actual direct runtime/actor/host consumers, prior cumulative source review, C6
+923 decision, and leaf evidence
+`/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/c6-runtime-owner-core/HANDOFF.md`.
+The leaf receipt explicitly marks incremental core, native compile/test 0/0 and
+unaccepted successors. No WIP was reviewed as candidate; no source edit/build/test
+was performed here. Cumulative originalbase..a82 git diff --check passed.
+
+Verdict: CHANGES REQUESTED; safe to obtain EARLY COMPILER FEEDBACK under parent's
+explicit admission, with this parcel review-blocked. Not a full C6/R1 acceptance,
+not a lifecycle acceptance, and not an acceptance fold. Stop source growth for
+first coherent production/cfg(test) compile, then repair the exact blockers.
+The trusted build is not deployment. Earlier345/f147 foundation counts are not
+candidate519/a82 evidence.
+
+#### Confirmed core blockers
+
+1. Pending-to-Ready loses ORIGINAL source authority.
+
+PendingPreparedInstall now owns the exact source Arc A, and its off-checkout
+compiler entry gates A. However compile_off_checkout (`resident.rs:2728`) returns
+ReadyPreparedInstall containing only ReadyPreparedSource plus metadata, without
+retaining A. Final revalidate_and_run_prepared checks the CURRENT transaction
+source and the capsule target scope, not the source that issued its pending
+compile. Supported public history: session B snapshots a real turn under source
+A's actual transaction, compiles while A is open, then fences A. It can enter a
+new unrelated valid B source transaction and install that same Ready capsule into
+its original target B. The final checks see B/B, so they no longer consult A.
+The actual actor begin_ready_block_split preserves its original context and
+therefore protects that actor route; the public owning runtime boundary cannot
+require callers to remember the erased original source. This is a surviving
+core issuer-to-consumer gap, not a detached-validation successor.
+
+Required repair/control: carry the exact original strong A lease through Ready,
+validate its issuing epoch/identity and earn its gate at the actual final install
+alongside every applicable target. Use one shared exact-lease admission owner.
+Two-real-source public control: snapshot/compile under A, fence A, attempt final
+install under open B, require typed A refusal before metadata/native installation.
+Keep an open positive and source-neutral already-installed continuation.
+
+2. Earned target gates do not retain target lexical custody through uncertainty.
+
+RuntimeSourceCompilerTransaction::admit stores `(RuntimeSourceAdmission,
+RuntimeSourceClaim)` for original A and optional target B. settle on unknown
+retains the strong lease of source A only (`source_admission.rs:535–545`), then
+moves every gate claim to unconfirmed. It has no strong target B lease to retain.
+Concrete lower PUBLIC owning path: create actual sessions/scopes A and B with a
+real mutable native binding in B; enter B.with_source_compiler_transaction(A),
+mutate canonical target B and observe Unknown. Drop the caller's final B lease.
+RuntimeLexicalScopeLease::drop queues B, and B's next reap_admission_leases
+(`admission.rs:2299`) retires B/removes its record/binding/native roots while B's
+gate retains only a numeric unconfirmed count. Thus the new supported original-A/
+recipient-B boundary does not own all of its admitted physical scope custody.
+No forged capability or parent-enclosure inference is needed for this public
+counterexample.
+
+Actual transferred callback code supplies the same mixed original-A/recipient-B
+context: replacement.rs:520 preserves original dependency; delivery uses it in
+map_source/run_receiver. A current actor generation may additionally retain B
+in some actor histories. This review does NOT claim last-lease drop is already
+proven in that particular actor lifecycle; the public runtime contract cannot
+rely on an unrequired enclosing actor owner.
+
+Required repair/control: the single transaction owner admits and retains exact
+opaque leases, including the target's real canonical lease when different, not
+only gate Arcs. Preserve each through actual END/abandon and transfer uncertain
+holds to its actual owning lexical record/terminal owner. Two-real-session public
+binding control with Unknown, last B lease drop and next reap must show B remains
+owned/pending until explicit terminal cleanup. Do not mint a new gate, infer it
+from scope names, or add a broader registry.
+
+3. Gate-only static compositional admission omits the supplied admission's
+original lease validation.
+
+Public turn::prepare_cell_program_admitted and compile_activation_renderer pass
+`admission.source_lease().source_admission()` to owner.admit. owner.admit validates
+ONLY its own source lease's epoch/identity, not the supplied admission lease A.
+Therefore a valid unrelated source B token can test gate A without validating
+A's original issuer. The convenience cell compiler uses A as its source and
+validates it, so this omission is specific to the explicit compositional fronts.
+Runtime public-owner transfer advances RuntimeAdmissionOwner epoch
+(`persistent.rs:3075–3087`; `admission.rs:1748`) and does not retire/fence every
+old gate. The source-backed static mismatch is: source B remains valid, A lease
+is stale by owner epoch while gate A is still Open; B.admit(gateA) has no A-lease
+check, and cell preparation then writes scratch/starts GHC after its purpose/
+parser checks. Renderer has the analogous producer ordering.
+
+Certainty limit: missing validation is confirmed directly in the new API; epoch
+transfer's invalidation semantics are directly evidenced. This review did NOT
+execute a complete retained RuntimeCellAdmission-A plus actual durable-transfer
+history, nor prove every recovery precondition of that combined history. Treat
+the full stale-epoch compiler counterexample as SOURCE-BACKED / UNEXECUTED, with
+that production setup still requiring its real transfer control. Do not label it
+an executed GHC bypass or waive the exact original epoch check. The same shared
+exact-lease admission/retention repair as blocker2 closes this boundary without
+an extra authority factory. Positive same-owner and A-to-B tests plus actual
+owner-transfer refusal before scratch/worker submission discriminate it.
+
+4. The new unknown-custody metadata cycle has no ordinary drop terminal owner.
+
+The candidate intentionally inserts an Arc<RuntimeLexicalScopeLease> into
+RuntimeAdmissionOwner.lexical_leases[scope].unconfirmed_source_custody. Lease
+contains an Arc back to RuntimeAdmissionOwner. This is a real self-cycle.
+Confirmed explicit breaker: PersistentSession::retire_scope calls
+retire_source_admission (`admission.rs:2105`), removing the actual record, which
+drops the retained Arc and eventually queues ordinary lease retirement. A new
+recovered context does not clear the old record. There is NO candidate
+PersistentSession/RuntimeAdmissionOwner Drop that removes the records. Dropping
+the enclosing session/host's ordinary Arc therefore CANNOT destroy that cycle.
+The original handoff's enclosing-teardown release implication was withdrawn by
+leaf after this finding.
+
+Also distinguish metadata from native machine lifetime: RuntimeAdmissionOwner
+contains UUID/epoch, retired scope IDs and lexical records, not the Session,
+PreparedEngine, bindings or machine registry. Its self-cycle alone does not
+retain the physical machine after session destruction. It does prevent automatic
+last-lease drop retirement while the session remains live, then can leak the
+metadata owner/scopes/gates indefinitely after ordinary session drop. Unknown
+truth must remain honest, but this is not proof of confirmed resource retention
+or a real host cleanup release owner.
+
+Required resolution/control: wire the actual existing terminal owner/confirmed
+scope retirement to remove every held record and show its resulting lifetime,
+or explicitly accept the bounded limitation at campaign ownership while keeping
+lifecycle acceptance withheld. Ordinary Arc drop is not a release mechanism.
+A Weak owner/scope witness after actual session teardown distinguishes the
+cycle leak from a deliberately retained live session. Never clear an uncertain
+hold merely because a waiter/PID disappeared. Parent permits early compilation
+with this lifecycle piece unaccepted, not final acceptance.
+
+#### Source findings repaired / unproven questions kept separate
+
+The source test runtime_source_owner_keeps_binding_claim_through_close_and_unwind
+at519 incorrectly expected pending_claims()==0 after Unknown/panic, while
+pending_claims counts active+unconfirmed. Exact fixture-only a82 changes expected
+total to1 and separately asserts unconfirmed1. Read the exact a82 delta: no
+product retention was weakened, no native result claimed. This source fixture
+finding is repaired.
+
+Bootstrap claim/registration helpers in generation_admission.rs still distinguish
+World state/external prerequisite from a canonical own C gate: registration_dependency
+and with_open_admission under Bootstrap do not themselves consult exposed C.
+This review did not finish a new actual production reservation-after-own-C-only
+closure history; do not promote that observation to an executed registration
+bypass. Required later same-C controls must cover direct public C uncertainty
+as well as actor hook state. Broad R1 registrations/R2 remain held.
+
+Runner recovery transfer now calls adopt_final_scope after an Ok
+DurablePublicOwnerPublication enum without matching its committed/refused/
+recovery-required disposition. The host checks the returned disposition and
+refuses startup on noncommitted outcomes, so no resulting authored-progress
+bypass was proved here. Preserve this concrete ordering question for the repair
+review: approved contract permits adoption after actual successful owner epoch
+transfer, not merely Result::Ok. Do not infer a successful transfer from an enum
+containing refusal/uncertainty. Source freeze stops further analogue expansion.
+
+#### Positive core structure and scope of review
+
+One PRIVATE runtime runner calls the existing actual
+settle_compiler_transaction_cancellable_for_workload. The public capability has
+private fields/no constructor/Clone; public off-checkout action gets only a
+borrowed reference. Native-origin and closed checks prevent normal use under a
+foreign scope or after END. The session entries install a private Arc context,
+catch unwind, restore the prior context BEFORE rethrowing, and the outer runner
+retains its independent Arc until physical settle. There is no observed public
+Arc token escape; original-lease access can only start a NEW checked transaction.
+Nested owning entry rejects before action with ForeignTransaction; borrowed
+inner producer NotStarted does not settle the outer collector. Owner.validate
+checks the ORIGINAL issuer, independently of recipient session. Existing
+public None/setter/hook-transfer stack was removed rather than maintained as a
+compatibility authority route. Supplemental hook grants no missing lease.
+These are substantial correct boundary changes, but do not excuse blockers1–4.
+
+The runner holds claims until its actual close callback; on abnormal unwind it
+uses returned=false even if no GHC request was started, retaining uncertainty
+conservatively. Actor delegates once rather than nesting ticket.run, and its
+same-ticket supplemental world hook accounts bootstrap separately. Pure entry
+validates custody without eagerly requiring an Open gate; actual mutation and
+immutable facade producers earn lazy claims. Empty/unchanged facade paths remain
+claim-free; private fixture callbacks were replaced by the public owner. Ready
+actual-scope gate, public mount before compile/stub write, shared checked-declaration
+commit hook, and checked-item actor admission before reservation are present.
+The latter fixes the confirmed actor mutation bypass by routing reservation and
+adoption through actual runtime phases. No second policy registry was added.
+
+Final issuers: explicit child adoption occurs after final remint/fallback/new-machine
+resolution and before mailbox transfer; generic observation checkout does not
+adopt provisional ROOT. Program-root mint/adopt precedes one authored execution
+and returns the same dependency into its descriptor. Factory setup uses actual
+run_with_close, checks resources_retired before final adoption/bootstrap/registry
+publication, and does not replay. Recovery has a post-transfer insertion point
+subject to disposition question above. World/GenerationDependency now strongly
+retain the exact lease without ActorGeneration back-reference. First publication
+fences the same C before IO and holds its fence through visibility/ack without
+claiming C itself. Replacement uses external parent A, not old own C. The remaining
+same-C direct-public uncertainty and failed-start cleanup histories need execution.
+
+Pending Cranelift now owns a separate synchronous source compiler phase; its old
+snapshot checkout's close no longer masquerades as settlement of deferred work.
+It currently gates even cached-image reuse before calling snapshot compile;
+no claim is made that a cache-only metadata branch is source-neutral. Final
+installation is always fresh authority, and must retain original A as blocker1.
+Cranelift-only operation completion is not a physical GHC END fault. GHC cell,
+renderer and facade producers instead require actual outer physical END custody.
+
+Test coverage remains partial/unexecuted: public facade positive/narrowed/retired/
+pure producers enter the actual runner; mutable binding test observes an actual
+earned claim and injects aggregate Unknown or panic. Joined hidden Generation/
+root/typed-bootstrap controls use the actor wrapper with actual canonical lease
+attachment, but synthetic aggregate Unknown remains distinct from real GHC END
+loss. Missing real factory-unknown→no-advance, A-to-B last-target-drop, actual stale
+epoch and actual physical compiler fault controls are NOT supplied by a source
+claim or naming. Component/integration fixtures still lacking an owner are
+explicit unaccepted migration successors, not evidence that MissingTransaction
+should be loosened. Detached DeclarationCandidateRender validation still lacks
+its full original-source owner and remains a declared unaccepted successor.
+
+Terminal disposition/next action: findings delivered directly to leaf and parent.
+Core519+a82 is review-blocked but suitable for parent's explicitly authorized
+first owning compile feedback before further source growth. Parent will integrate
+for compile-only, retain the observer/terminal receipt, then authorize bounded
+repairs of this exact blocker set and remaining declared successors. No acceptance
+fold, feature acceptance, inherited foundation counts or deployment is authorized
+by this source receipt. Next independent review event is an exact repaired frozen
+candidate plus the actual early compile receipt. Only authorized REVIEW-BASE.md
+changed. Yield without polling or new category expansion.
+
+
+Architecture steering received before terminal: read
+`/srv/swarm/checkouts/tidepool-compiler-world-plan-20261019/plans/shared-warm-compiler/RUST-CLIENT-MIGRATION.md`
+from observed plan checkout HEAD24ec0b506a8bc80d9d06851e197ab8be493162dc (the named
+file had no dirty status at read). The required common published-session
+compiler client covers queries, ordinary cells, successors, fork/reload/recovery;
+every actual operation and warm hit remains under the SAME fresh source owner,
+END/cancellation and stale-publication checks. No machine checkout while waiting
+and no actor-current reconstruction registry. C6 exact-lease capability must
+compose off-checkout with that common client; query-only/legacy adapter routes
+cannot become acceptance. This does not expand the frozen519+a82 review or delay
+its explicitly permitted early compile. Alpha permits removing confused public
+APIs/serialized compatibility with explicit version refusal; old authority is
+never upgraded. Baseline quoted/nativegroup failures remain independent.

@@ -3,12 +3,15 @@
 Original contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
 `feature/shared-warm/reload`; supervisor `/root/warm_compiler_campaign/reload`.
-Current implementation checkpoint: `d9efb188fb1ee27f06901440eca8ccf20c7a72c4`, joining campaign contract
+Current implementation checkpoint: `cea014da70cccbcfd18ca23619ebd6c00677034c`
+(area-only compile feedback, NOT acceptance), joining the frozen canonical core
+`a82c900783e13ee5bf8c107df7ab00ab737437ea` and campaign contract
 `923fd554a0` through `aebe74eac5` and reviewed Ready repair
 `4e790ab850f4df886fc185e15a7b28139f6bf530` through `3fcbbb4bfc`.
-The joined `345194431d` production/test configurations compiled. Its bounded
-Ready control passed; full feature acceptance remains withheld. Campaign owns
-shared contracts and qualification; this file owns the area continuation.
+The prior joined `345194431d` production/test configurations compiled and its
+Ready control passed. The current canonical-owner core is review-blocked and its
+early four-target compilation failed. Full feature acceptance remains withheld.
+Campaign owns shared contracts and qualification; this file owns continuation.
 
 ## Current disposition
 
@@ -40,6 +43,57 @@ its producer. The minimal Sleep fixture now imports the real `minutes` helper
 through the canonical template builder imports argument (`d9efb188fb`); an earlier
 appended import failed the protected insertion-marker contract and remains
 retained failure evidence. No assertion was relaxed.
+
+## Current canonical-core gate and active repair
+
+Exact frozen core `51900a30df171a3920584eeaa12be0180d6c7bb4`, fixture correction
+`a82c900783e13ee5bf8c107df7ab00ab737437ea`, area-only integration `cea014da70`.
+Independent full owned-history review is CHANGES REQUESTED. This source has one
+private actual runtime runner and borrowed capability, strong original leases,
+explicit final issuers and real preparation END separation. It removes the old
+None/setter stack. These improvements do not qualify the remaining gaps:
+
+1. Pending owns original A, but Ready drops A before final installation; unrelated
+   open B cannot be permitted to refresh A after A's fence.
+2. The transaction collector admits target B's gate but retains only source A's
+   strong lease. Unknown then final B-lease drop/reap can retire B's actual roots.
+3. Static cell/renderer producers pass supplied admission A's gate without checking
+   its actual original lease/epoch under an unrelated B capability. Missing check
+   is confirmed; combined stale-transfer compiler history remains unexecuted.
+4. Unknown holds currently create a record→strong lease→admission-owner metadata
+   cycle. Only explicit retire_scope removes the record; session/host Arc drop
+   cannot clear it. Metadata alone does not retain the machine. Required repair
+   uses the actual existing operation/process/session cleanup custodian and a
+   proven terminal release, not a permanent cycle or a new registry.
+
+The area early four-target compile at exact `cea014da70` (production source
+identical a82; area documents differ) is TERMINAL exit 3, tests executed 0.
+Runtime production compiled; actor production and unit target fail the same
+SessionError conversion at generation_admission.rs:320. Runtime unit fails the
+new facade fixture's Option<ScopedCompilerContext> equality/debug requirements at
+facade.rs:451. Do not add production derives just to appease the fixture; compare
+its actual exact-context observation. Full stderr and receipt:
+`c6-core-early-four-target-build.log`, `c6-core-early-four-target-receipt.json`.
+Native lane released; no area external command remains running.
+
+Both reserved leaves are ACTIVE on independent approved work in isolated source:
+generation_admission implements the exact lease-chain/lifecycle repairs and sends
+small compiler fixes first, then a coherent source checkpoint/controls;
+authority_review traces the actual existing cleanup custodian read-only while
+that repair advances, then reviews the exact repaired full history. Frozen area
+build inputs were not changed by leaf work. No additional agents or approval
+roundtrip is needed for these routine fixes.
+
+Required architecture amendment `2a67faf29ccbe288161117ae4027a08d957e4c95`
+(root `24ec0b506a`) was read from the actual RUST-CLIENT-MIGRATION.md. Published
+session client ownership is mandatory for queries AND ordinary cells, successors,
+fork/reload/recovery. Every actual operation/warm hit uses the same fresh original
+source admission and cancellation/END bracket without waiting on a compiler while
+holding the machine checkout. No mutable actor-current registry, manual world
+parts or compatibility authority stack. Query is only the first milestone.
+Host/warm own the common client; this area applies canonical admission/END and
+successor/recovery composition. Alpha allows removing confused routes and explicit
+serialized refusal, never upgrading historical custody to authority.
 
 ## Executed evidence and independent blockers
 
@@ -107,9 +161,16 @@ does not establish causal equivalence of these different failing construction
 steps or waive exact native selection. Report:
 `/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-6d3/reload-discriminators/capture/db2efc93ae350fd810806b1a4c1337a10f8488abd70e4524084d75835517cafd.json`.
 Baseline process cleanup is confirmed, compiler cleanup not_observed and
-diagnostics incomplete. No baseline edits. Qualification observer 26850 owns the
-two quoted-source baseline cases; await both terminal reports before selecting
-a repair. Canonical owner implementation proceeds independently.
+diagnostics incomplete. No baseline edits. Qualification baseline is now TERMINAL: all 3 selected/executed cases failed.
+Both quoted-source cases fail the same early semantic-context equality before
+durability at baseline resident_workbench.rs:19882. Terminal receipt SHA-256
+`d751526e3065d7ccb8c92260beca41d23782c1899fbde761f98b93f7ad5c9259` is verified.
+Classifier report `quoted-baseline-owner-trace.md` and normalized comparison
+`baseline-prerequisite-comparison.json` in area evidence preserve both identities.
+The test and installer issue S1/S2 separately; diagnose S1 versus S2, empty merge
+M and enumeration R before assigning a changed-field cause. The owning identity
+roundtrip oracle stays strict; native ordinal8 remains separate. No baseline
+source edit or assertion waiver. Canonical owner repair proceeds independently.
 
 The std-only protocol generator, generated mirror refresh and snapshot check
 passed earlier (tests executed: 0); receipt `protocol-generator-receipt.json`.
@@ -222,15 +283,18 @@ Two retained descendants, both `gpt-6.1-sol`, high, fork none; original starts
 2026-10-19 07:52 UTC, no descendant capacity:
 
 - `generation_admission`: isolated admission checkout, source terminal
-  `4e790ab850f4df886fc185e15a7b28139f6bf530`, now ACTIVE implementing approved
-  C6 on joined `345194431d`, with the area Sleep fix `d9efb188fb` supplied. It
-  sends a coherent frozen core/direct-caller checkpoint before native admission.
+  frozen core `a82c900783e13ee5bf8c107df7ab00ab737437ea`, now ACTIVE repairing
+  the reviewed exact lease-chain/lifecycle blockers and actual compiler failures
+  in its isolated checkout. Next: smallest compiler fix first, then coherent
+  exact owner repair with real controls. Area owns native admission/observer.
 - `authority_review`: report-only `REVIEW-BASE.md` owner, completed independent
   cumulative foundation, bounded Ready and exact `345194431d` C6 analogue review.
-  Dormant after terminal category report, reserved for exact new owner candidate
-  full-history review, including issuer timing and actual control entry points.
+  completed exact519+a82 CHANGES REQUESTED review and prerequisite classifier.
+  ACTIVE read-only existing cleanup-custodian trace for the same lifecycle blocker;
+  exact repaired full-history review follows. No additional analogue expansion.
 
-Area collected terminal Ready/Sleep results and released its active native lane.
+Area collected terminal Ready/Sleep and failed canonical-core compile results,
+released its active native lane, and assigned isolated repair immediately.
 Qualification/campaign
 own baseline discrimination for preserved context/native-original failures.
 Host_inputs owns optimized PublicModule query consumer and receives the final
@@ -266,8 +330,9 @@ configure --tests --browser before host. No full qualification claim.
 Event-driven continuation: terminal producer includes exact task/base/candidate,
 evidence/status and next action to area plus affected dependents. send_message to
 running recipient; followup_task to dormant recipient. No periodic polling.
-Awaited implementation event: generation_admission exact coherent owner candidate
-with prod/cfg(test) evidence or concrete escalation; area reviews critical code,
-reactivates authority_review, repairs/folds then runs joined focused controls.
-Awaited discriminator event: qualification/campaign exact controlled baseline
-results; preserve current failing inputs until that event.
+Awaited implementation event: generation_admission smallest exact compiler repair,
+then coherent lease-chain/lifecycle checkpoint; area directly reviews and admits
+early production/cfg(test) retry, independent exact review and bounded repair.
+Awaited support event: authority_review exact existing cleanup custodian/options.
+Baseline discriminator is terminal; owning S1/S2/M/R diagnostic remains a separate
+campaign assignment, with strict inputs/oracles retained. No periodic polling.
