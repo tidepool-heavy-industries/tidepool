@@ -139,7 +139,14 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
             context
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(context.owner.facts.producer, &[recovered])
+                .extend_issued_compiler_support(&match support_offer(&[recovered]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed zero-group output")
+                    }
+                })
                 .unwrap(),
         );
         assert_eq!(parent.semantic_sha256(), parent_digest);
@@ -578,7 +585,14 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         context
             .as_ref()
             .clone()
-            .extend_checked_original_products([7; 32], &[recovered])
+            .extend_issued_compiler_support(&match support_offer(&[recovered]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed zero-group output")
+                }
+            })
             .unwrap(),
     );
     let unrelated = materialize(&context);
@@ -716,7 +730,14 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             context
                 .as_ref()
                 .clone()
-                .extend_checked_original_products([7; 32], &[recovered])
+                .extend_issued_compiler_support(&match support_offer(&[recovered]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed zero-group output")
+                    }
+                })
                 .unwrap(),
         )
     };

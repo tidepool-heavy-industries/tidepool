@@ -4731,7 +4731,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
 }
 
 #[test]
-fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
+fn candidate_availability_keeps_partial_same_owner_input_permissions() {
     let unused = product("UnusedNative", 50);
     let required = product("RequiredNative", 51);
     let baseline = dependent_product(
@@ -4753,42 +4753,59 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
     let context = partial_context(&baseline, &get("RequiredNative"), &unused, None);
     let before = context.as_ref().clone();
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &context,
-        producer,
-        std::slice::from_ref(&baseline),
-    )
-    .is_err());
-    let input = OriginalCompilerInputs::issue_candidate_from_context(
-        &context,
-        producer,
-        &[baseline, unused],
-    )
-    .unwrap();
     let root = tempfile::tempdir().unwrap();
-    let request = ExactCompileContext::new(context.clone())
-        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
-        .unwrap();
-    let rows = wire_groups(&request);
-    assert_eq!(rows["BaselineNative"], vec![7]);
-    assert!(rows["UnusedNative"].is_empty());
-    assert_eq!(wire_mode(&request, "BaselineNative"), full_mode());
-    assert_eq!(wire_mode(&request, "UnusedNative"), full_mode());
-    assert_eq!(context.as_ref(), &before);
-    assert_eq!(
-        request
-            .compiler_inputs()
-            .metadata
-            .retained
-            .selected_native_groups,
-        before
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .metadata_snapshot()
-            .selected_native_groups
-    );
+    for (index, availability) in [
+        vec![baseline.clone()],
+        vec![baseline.clone(), unused.clone()],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("partial-input-availability"),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: availability,
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let input = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .unwrap()
+            .unwrap();
+        assert_eq!(input.role_projection(), context.compiler_input_projection());
+        assert_eq!(
+            input.native_availability(),
+            context.compiler_source_support().native_availability()
+        );
+        assert_eq!(
+            input.issued_offers(),
+            context.compiler_source_support().native_offers()
+        );
+        let request = ExactCompileContext::new(context.clone())
+            .prepare_compilation_with_private_input(
+                &root.path().join(index.to_string()),
+                PRODUCER,
+                None,
+                Some(input),
+            )
+            .unwrap();
+        let rows = wire_groups(&request);
+        assert_eq!(rows["BaselineNative"], vec![7]);
+        assert_eq!(wire_mode(&request, "BaselineNative"), issued_mode(&[7]));
+        assert!(!rows.contains_key("UnusedNative"));
+        assert_eq!(context.as_ref(), &before);
+        assert_eq!(
+            request
+                .compiler_inputs()
+                .metadata
+                .retained
+                .selected_native_groups,
+            before
+                .compiler_source_support()
+                .artifacts()
+                .metadata_snapshot()
+                .selected_native_groups
+        );
+    }
 }
 
 #[test]
@@ -6199,12 +6216,59 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
     )
     .unwrap();
     let context = type_context(&[wrong.clone(), required.clone()]);
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &context,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        &[wrong, required],
-    )
-    .is_err());
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let valid = dependent_product(
+        "DependentNative",
+        32,
+        vec![(7, vec![source_import(&required, 7)])],
+    );
+    let valid = recovered_witness_fixtures(&[valid, required.clone()])
+        .into_iter()
+        .find(|row| row.product.owner().module == "DependentNative")
+        .unwrap()
+        .product;
+    for (index, output, wrong_ordinal) in [(0, valid, false), (1, wrong, true)] {
+        let entries = [output, required.clone()]
+            .into_iter()
+            .map(|product| Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap()))
+            .collect::<Vec<_>>();
+        let required_id = entries[1].descriptor.id;
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let selected = OriginalCompilerInputs::from_selection(&selection, &physical);
+        if wrong_ordinal {
+            assert!(matches!(selected,
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 999 }
+                        if artifact == required_id)));
+        } else {
+            let root = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(context.clone())
+                .prepare_compilation_with_private_input(
+                    &root.path().join(index.to_string()),
+                    PRODUCER,
+                    None,
+                    Some(selected.unwrap()),
+                )
+                .unwrap();
+            assert_eq!(wire_mode(&request, "DependentNative"), full_mode());
+            assert_eq!(wire_mode(&request, "RequiredNative"), full_mode());
+        }
+    }
 }
 
 // The existing native-origin fixture supplies genuine certificates for narrowed
@@ -7087,12 +7151,17 @@ fn replay_native_transport_history(
             .as_ref()
             .clone()
             .rebuild(|facts| facts.compiler_support = support);
-        OriginalCompilerInputs::issue_candidate_from_context(
-            &context,
-            producer,
-            std::slice::from_ref(&products[index + 1]),
-        )
-        .unwrap()
+        let input = OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
+        assert_eq!(input.role_projection(), context.compiler_input_projection());
+        assert_eq!(
+            input.native_availability(),
+            context.compiler_source_support().native_availability()
+        );
+        assert_eq!(
+            input.issued_offers(),
+            context.compiler_source_support().native_offers()
+        );
+        input
     });
     let base_context = context(&base);
     let first = usize::from(reverse);

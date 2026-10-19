@@ -289,10 +289,12 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     let private = OriginalCompilerInputs::from_selection(&issued.source_selection, &view).unwrap();
     let public = Arc::new(
-        ExactDeclarationContext::new(&[], &[], Vec::new())
-            .unwrap()
-            .extend_checked_original_products(producer, &[])
-            .unwrap(),
+        ExactDeclarationContext::from_authenticated_interfaces(
+            producer,
+            crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            crate::artifact_inventory::CompilerInputProjection::default(),
+        )
+        .unwrap(),
     );
     let public_hash = public.semantic_sha256();
     let request = public

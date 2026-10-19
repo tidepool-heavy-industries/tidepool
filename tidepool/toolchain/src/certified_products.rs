@@ -13092,7 +13092,10 @@ pub(crate) mod tests {
                     &operation,
                 )
                 .unwrap();
-            let physical = inventory
+            let physical = request
+                .compiler_inputs()
+                .artifacts()
+                .inventory()
                 .admit_shared_with_demand(
                     request.compiler_inputs().artifacts(),
                     vec![output.clone()],
@@ -19458,13 +19461,51 @@ pub(crate) mod tests {
         let mut historical_child = None;
         let mut current_child = None;
         for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
-            context =
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                    context.toolchain_identity_sha256(),
-                    context.artifact_view(),
-                    context.compiler_input_projection().clone(),
-                )
+            let canonical_only = ExactDeclarationContext::from_authenticated_interfaces(
+                context.toolchain_identity_sha256(),
+                context.artifact_view(),
+                context.compiler_input_projection().clone(),
+            )
+            .unwrap();
+            let projection = canonical_only.compiler_input_projection().clone();
+            let decisions = canonical_only
+                .compiler_source_support()
+                .input_decisions()
+                .clone();
+            // This history retains prior native bytes independently of the
+            // canonical-only compiler selection used for each promotion.
+            let retained = canonical_only
+                .compiler_source_support()
+                .retain_custody(context.artifact_view())
                 .unwrap();
+            context = canonical_only
+                .extend_issued_compiler_support(&retained)
+                .unwrap();
+            assert_eq!(context.compiler_input_projection(), &projection);
+            assert!(context
+                .compiler_input_roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(context.compiler_source_support().native_offers().is_empty());
+            assert!(context
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .next()
+                .is_none());
+            assert_eq!(
+                context.compiler_source_support().input_decisions(),
+                &decisions
+            );
+            assert!(context.artifact_view().selected_native_groups().is_empty());
+            assert_eq!(
+                context
+                    .recovery_products()
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_owners
+            );
             let directory = root.path().join(format!("promotion-{index}"));
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
