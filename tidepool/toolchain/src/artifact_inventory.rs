@@ -13819,6 +13819,13 @@ mod tests {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) {
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
+        let crate::certified_products::PendingImportOwner::Source {
+            original_ordinal: helper_ordinal,
+            ..
+        } = &helper_import
+        else {
+            panic!("recapture helper import must be a source group");
+        };
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let inventory = ArtifactInventory::default();
         let originals = ["RecaptureLeft", "RecaptureRight"].map(|name| {
@@ -13869,6 +13876,34 @@ mod tests {
                 )
                 .map(|admitted| admitted.artifacts)
                 .unwrap()
+        });
+        let selected_requirements: [NativeOriginalRequirement; 2] = std::array::from_fn(|index| {
+            let original = originals[index].descriptor.id;
+            let issuer = &issuers[index];
+            let requirement = NativeOriginalRequirement::from_selected_view(original, issuer)
+                .unwrap()
+                .unwrap();
+            let (_, demanded_groups) = issuer
+                .native_requirements_with_group_bindings_from_roots(&[
+                    NativeRequirementRoot::Group {
+                        artifact: original,
+                        original_ordinal: 7,
+                    },
+                ])
+                .unwrap();
+            let carriers = requirement.issued_group_carriers(issuer).unwrap();
+            assert_eq!(
+                carriers.keys().copied().collect::<BTreeSet<_>>(),
+                demanded_groups
+            );
+            for (group, carrier) in carriers {
+                assert!(issuer.binding_dependencies().contains(&(
+                    ArtifactBindingNode::Group(group),
+                    ArtifactBindingNode::Artifact(carrier),
+                    ArtifactDependency::Interface,
+                )));
+            }
+            requirement
         });
         let expected = ExactNativeClosureModel {
             groups: issuers
@@ -13984,14 +14019,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         for publication in &publications {
-            let imports = [issued_source(&helper, 7)];
+            let imports = [helper_import.clone()];
             let groups = publication
                 .context()
                 .artifact_view()
                 .native_requirements_with_group_bindings_from_roots(&[
                     NativeRequirementRoot::Group {
                         artifact: helper.descriptor.id,
-                        original_ordinal: 7,
+                        original_ordinal: *helper_ordinal,
                     },
                 ])
                 .map(|(_, groups)| groups)
@@ -14161,7 +14196,7 @@ mod tests {
                         )
                         .unwrap();
                 let facts = &request.compiler_inputs().native_original_requirements();
-                assert!(!facts
+                assert!(facts
                     .iter()
                     .any(|fact| fact.original == helper.descriptor.id));
                 for original in &originals {
@@ -14169,13 +14204,32 @@ mod tests {
                         .iter()
                         .any(|fact| fact.original == original.descriptor.id));
                 }
+                let request_group_roots = request
+                    .compiler_inputs()
+                    .artifacts()
+                    .roots()
+                    .iter()
+                    .filter(|root| matches!(root, InventoryNodeKey::Group(_)))
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let issued_group_roots = view
+                    .roots()
+                    .iter()
+                    .filter(|root| matches!(root, InventoryNodeKey::Group(_)))
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(request_group_roots, issued_group_roots);
+                assert!(!request_group_roots.iter().any(|root| matches!(
+                    root,
+                    InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id
+                )));
                 let admitted = view
                     .inventory()
                     .admit_projected_with_native_requirements(
                         view,
                         originals.to_vec(),
                         &projection,
-                        facts,
+                        &selected_requirements,
                     )
                     .unwrap();
                 expected.check(&admitted).unwrap();
