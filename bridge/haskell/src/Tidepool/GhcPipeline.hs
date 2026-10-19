@@ -38,10 +38,11 @@ module Tidepool.GhcPipeline
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, HeldWorldQueryBinding
   , WorldCellRefusal(..)
-  , materializeWorldSources, worldMaterializationCharge
-  , emitWorldAcquisitionRejection
+  , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
+  , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , completedCompilerWorldInputs, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
+  , PendingWorldDependencies
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
   , withScopedExactInterfaceTransaction
@@ -1327,25 +1328,164 @@ data HeldWorldQueryBinding = HeldWorldQueryBinding !String !String
 
 data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath FilePath [FilePath]
-  (Map.Map ModuleName WorldHomeSource) (Map.Map FilePath WorldHomeSource) (Set.Set String) !Integer !Int
+  (Map.Map ModuleName WorldHomeSource) (Map.Map FilePath WorldHomeSource) (Set.Set String) !Integer !Int WorldBackingLease
 data WorldPreparedModules = WorldPreparedModules HomePackageTable (Map.Map Module WorldHomeSource)
+  (Maybe WorldCompletedDependencies)
 
--- The existing realization index also owns its FIFO order and issuance
--- charges. Bytes conservatively include raw custody plus physical copies;
--- derived GHC heap residency remains the worker RSS owner's responsibility.
+type WorldModuleVersions = Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
+
+-- This policy is issued only by the fixed world-cell route. The worker instance
+-- owns the boot flags; captured source bytes own module-local OPTIONS pragmas.
+-- Public-module metadata never issues this policy or completed dependency rows.
+data WorldDependencyPolicy = WorldDependencyPolicy BS.ByteString BS.ByteString BS.ByteString BS.ByteString
+  deriving (Eq)
+data WorldCompletedDependencies = WorldCompletedDependencies WorldDependencyPolicy WorldModuleVersions
+
+data WorldDependencyAttempt = WorldDependencyAttempt
+  String String WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
+  WorldModuleVersions ModIfaceCache (IORef GutsMemo) (IORef CompilerRecoveryCaches)
+  (IORef CompilerInterpreterState)
+
+-- No held world, mutable attempt, source tree or backing lease escapes in this
+-- pending result. The scope resolves the actual held owner again at commit.
+data PendingWorldDependencies = PendingWorldDependencies String String WorldDependencyPolicy WorldModuleVersions
+
+emptyWorldPreparedModules :: WorldPreparedModules
+emptyWorldPreparedModules = WorldPreparedModules emptyHomePackageTable Map.empty Nothing
+
+worldDependencyPolicy :: CompilerUniverse -> WorldInputFacts -> IO WorldDependencyPolicy
+worldDependencyPolicy universe facts = case universePackageAssociation universe of
+  Just association
+    | servicePackageProfile association == worldInputsProfile facts -> pure
+        (WorldDependencyPolicy (servicePackageWorkerInstance association)
+          (worldInputsProducer facts) (worldInputsProfile facts)
+          (worldSourceDomainSha256 (worldInputsSources facts)))
+  _ -> throwIO WorldCellCorrupt
+
+heldWorldCellFlags :: HscEnv -> FilePath -> [FilePath] -> DynFlags
+heldWorldCellFlags baseEnv directory roots = foldl' gopt_unset ((hsc_dflags baseEnv)
+  {backend=noBackend,ghcLink=NoLink,importPaths=roots,workingDirectory=Nothing
+  ,hiDir=Just directory,objectDir=Just directory,stubDir=Just directory})
+  [Opt_WriteInterface,Opt_WriteIfSimplifiedCore,Opt_ByteCode,Opt_ByteCodeAndObjectCode]
+
+beginHeldWorldDependencyAttempt :: CompilerUniverse -> HeldCompilerWorld -> IO WorldDependencyAttempt
+beginHeldWorldDependencyAttempt universe
+    (HeldCompilerWorld facts reference (WorldMaterialization _ _ _ _ paths _ _ _ _) preparedRef) = do
+  policy <- worldDependencyPolicy universe facts
+  WorldPreparedModules _ _ completed <- readIORef preparedRef
+  versions <- case completed of
+    Nothing -> pure Map.empty
+    Just (WorldCompletedDependencies issued selected)
+      | issued == policy -> pure selected
+      | otherwise -> throwIO WorldCellCorrupt
+  cache <- newIfaceCache
+  memo <- newIORef Map.empty
+  recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe) []
+  recoveryRef <- newIORef recovery
+  pure (WorldDependencyAttempt (worldInputsIdentity facts) reference policy paths versions cache memo recoveryRef (universeInterpreter universe))
+
+worldDependencyCycle :: WorldDependencyAttempt -> CompilerUniverse -> IORef InterpreterAttemptState -> CycleState
+worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions cache memo recoveryRef _) universe attempt =
+  TransactionCycle cache memo Nothing versions activate
+    (universeInterpreter universe) (universePackageFinder universe) attempt
+  where
+    activate selected = do
+      recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe)
+        [(owner,completedModuleRecovery node) | (owner,node) <- Map.toList selected]
+      writeIORef recoveryRef recovery
+      pure recovery
+
+worldDependencyRecovery :: WorldDependencyAttempt -> IO CompilerRecoveryCaches
+worldDependencyRecovery (WorldDependencyAttempt _ _ _ _ _ _ _ recoveryRef _) = readIORef recoveryRef
+
+stageHeldWorldDependencies :: WorldDependencyAttempt -> HscEnv -> FilePath -> IO PendingWorldDependencies
+stageHeldWorldDependencies
+    (WorldDependencyAttempt identity reference policy paths previous _ memo recoveryRef interpreter) final path = do
+  target <- targetModuleFor (hsc_mod_graph final) path
+  recovery <- readIORef recoveryRef
+  recoveryIdentity <- RequestUnique.newUnique
+  snapshot <- readIORef memo
+  epoch <- compilerInterpreterEpoch <$> readIORef interpreter
+  let sourceOwners = Map.fromList
+        [(ms_mod summary,source)
+        | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph final)
+        , ms_hsc_src summary == HsSrcFile
+        , ms_mod summary /= target
+        , not (isReservedSessionModuleName (moduleNameString (ms_mod_name summary)))
+        , Just physical <- [normalise <$> ml_hs_file (ms_location summary)]
+        , Just source <- [Map.lookup physical paths]]
+      eligible = Map.filter ((`Map.member` sourceOwners) . payloadOwner . gmePayload) snapshot
+      context = RecoveryContext recoveryIdentity recovery
+      -- The normal cycle already validated each selected source version before
+      -- entering the working memo. Only captured source owners can be added;
+      -- private value aliases and earlier checking targets have no such row.
+      additions = Map.fromListWith Map.union
+        [(owner,Map.singleton (memoSelectionKey validity)
+          (Map.singleton validity (CompletedModuleVersion entry home context epoch products)))
+        | entry <- Map.elems eligible
+        , let owner = payloadOwner (gmePayload entry)
+        , let validity = gmeValidity entry
+        , let home = lookupHpt (hsc_HPT final) (moduleName owner)
+        , let products = maybe [] pure (payloadProduct (gmePayload entry))
+        , let previousVersion = do
+                bySelection <- Map.lookup owner previous
+                byValidity <- Map.lookup (memoSelectionKey validity) bySelection
+                Map.lookup validity byValidity
+        , maybe True (\node -> gmeCycle (completedModuleEntry node) /= gmeCycle entry
+            || completedModuleEpoch node /= epoch) previousVersion]
+  evictCompilerRecovery recovery (== target)
+  _ <- evaluate (Map.size additions)
+  pure (PendingWorldDependencies identity reference policy additions)
+
+commitHeldWorldDependencies :: PendingWorldDependencies -> HeldCompilerWorld -> IO ()
+commitHeldWorldDependencies (PendingWorldDependencies identity reference policy additions)
+    (HeldCompilerWorld facts issued _ preparedRef) = do
+  unless (identity == worldInputsIdentity facts && reference == issued) (throwIO WorldCellCorrupt)
+  WorldPreparedModules table receipts previous <- readIORef preparedRef
+  versions <- case previous of
+    Nothing -> pure Map.empty
+    Just (WorldCompletedDependencies selected retained)
+      | selected == policy -> pure retained
+      | otherwise -> throwIO WorldCellCorrupt
+  let completed = WorldCompletedDependencies policy
+        (Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion)) additions versions)
+  let WorldCompletedDependencies _ retained = completed
+  _ <- evaluate (Map.size retained)
+  writeIORef preparedRef (WorldPreparedModules table receipts (Just completed))
+
+-- The same world owner accounts optional residency separately from all live
+-- physical backing, including active-only and quarantined extents.
+data WorldBackingState
+  = WorldBackingLive !Int | WorldBackingRemoving | WorldBackingRemoved
+  | WorldBackingQuarantined
+newtype WorldBackingLease = WorldBackingLease (IORef WorldBackingState)
+data WorldBackingAccounting = WorldBackingAccounting !Int !Int !Integer !Int
+-- live realized owners, optional indexed owners, physical bytes and nodes
+
 data CachedCompilerWorld = CachedCompilerWorld !Integer !Integer !Int HeldCompilerWorld
 data CompilerWorldCache = CompilerWorldCache
-  (Map.Map String CachedCompilerWorld) (Map.Map Integer String) !Integer !Integer !Int
+  { cachedCompilerWorlds :: Map.Map String CachedCompilerWorld
+  , cachedCompilerWorldOrder :: Map.Map Integer String
+  , nextCompilerWorldTicket :: !Integer
+  , compilerWorldRetainedBytes :: !Integer
+  , compilerWorldRetainedNodes :: !Int
+  , compilerWorldBackingAccounts :: Map.Map FilePath WorldBackingAccounting
+  , compilerWorldLiveBackingBytes :: !Integer
+  , compilerWorldLiveBackingNodes :: !Int
+  }
 
 emptyCompilerWorldCache :: CompilerWorldCache
-emptyCompilerWorldCache = CompilerWorldCache Map.empty Map.empty 0 0 0
+emptyCompilerWorldCache = CompilerWorldCache Map.empty Map.empty 0 0 0 Map.empty 0 0
 
 lookupCompilerWorld :: String -> CompilerWorldCache -> Maybe HeldCompilerWorld
-lookupCompilerWorld root (CompilerWorldCache worlds _ _ _ _) =
-  (\(CachedCompilerWorld _ _ _ world) -> world) <$> Map.lookup root worlds
+lookupCompilerWorld root cache =
+  (\(CachedCompilerWorld _ _ _ world) -> world) <$> Map.lookup root (cachedCompilerWorlds cache)
 
 compilerWorldCacheCharge :: CompilerWorldCache -> (Integer,Int)
-compilerWorldCacheCharge (CompilerWorldCache _ _ _ bytes count) = (bytes,count)
+compilerWorldCacheCharge cache = (compilerWorldRetainedBytes cache,compilerWorldRetainedNodes cache)
+
+compilerWorldLiveCharge :: CompilerWorldCache -> (Integer,Int)
+compilerWorldLiveCharge cache = (compilerWorldLiveBackingBytes cache,compilerWorldLiveBackingNodes cache)
 
 compilerWorldCharge :: HeldCompilerWorld -> (Integer,Int)
 compilerWorldCharge (HeldCompilerWorld facts _ materialized _) =
@@ -1354,57 +1494,195 @@ compilerWorldCharge (HeldCompilerWorld facts _ materialized _) =
   in (raw + copies,entries + nodes + 1)
 
 worldMaterializationCharge :: WorldMaterialization -> (Integer,Int)
-worldMaterializationCharge (WorldMaterialization _ _ _ _ _ _ copies nodes) = (copies,nodes)
+worldMaterializationCharge (WorldMaterialization _ _ _ _ _ _ copies nodes _) = (copies,nodes)
+
+worldMaterializationKey :: WorldMaterialization -> FilePath
+worldMaterializationKey (WorldMaterialization directory _ _ _ _ _ _ _ _) = directory
+
+registerWorldBacking :: WorldMaterialization -> CompilerWorldCache -> CompilerWorldCache
+registerWorldBacking materialized cache = case Map.lookup key (compilerWorldBackingAccounts cache) of
+  Nothing -> cache
+    {compilerWorldBackingAccounts=Map.insert key (WorldBackingAccounting 1 0 bytes nodes) (compilerWorldBackingAccounts cache)
+    ,compilerWorldLiveBackingBytes=compilerWorldLiveBackingBytes cache+bytes
+    ,compilerWorldLiveBackingNodes=compilerWorldLiveBackingNodes cache+nodes}
+  Just (WorldBackingAccounting live resident charge entries)
+    | (charge,entries) == (bytes,nodes) -> cache
+        {compilerWorldBackingAccounts=Map.insert key (WorldBackingAccounting (live+1) resident bytes nodes)
+          (compilerWorldBackingAccounts cache)}
+    | otherwise -> throw WorldQueryCorrupt
+  where
+    key = worldMaterializationKey materialized
+    (bytes,nodes) = worldMaterializationCharge materialized
+
+-- Called only after one actual lease hold has been released successfully. An
+-- index removal never calls this and cannot report physical backing released.
+releaseWorldBackingAccounting :: WorldMaterialization -> Bool -> CompilerWorldCache -> CompilerWorldCache
+releaseWorldBackingAccounting materialized removed cache =
+  case Map.lookup key (compilerWorldBackingAccounts cache) of
+    Just (WorldBackingAccounting live resident bytes nodes)
+      | live > 1 && not removed -> cache
+          {compilerWorldBackingAccounts=Map.insert key (WorldBackingAccounting (live-1) resident bytes nodes)
+            (compilerWorldBackingAccounts cache)}
+      | live == 1 && resident == 0 && removed -> cache
+          {compilerWorldBackingAccounts=Map.delete key (compilerWorldBackingAccounts cache)
+          ,compilerWorldLiveBackingBytes=compilerWorldLiveBackingBytes cache-bytes
+          ,compilerWorldLiveBackingNodes=compilerWorldLiveBackingNodes cache-nodes}
+    _ -> throw WorldQueryCorrupt
+  where key = worldMaterializationKey materialized
 
 removeCompilerWorld :: String -> CompilerWorldCache -> CompilerWorldCache
-removeCompilerWorld root cache@(CompilerWorldCache worlds order next bytes count) =
-  case Map.lookup root worlds of
-    Nothing -> cache
-    Just (CachedCompilerWorld ticket charge entries _) -> CompilerWorldCache
-      (Map.delete root worlds) (Map.delete ticket order) next (bytes-charge) (count-entries)
+removeCompilerWorld root cache = case Map.lookup root (cachedCompilerWorlds cache) of
+  Nothing -> cache
+  Just (CachedCompilerWorld ticket charge entries (HeldCompilerWorld _ _ materialized _)) ->
+    case Map.lookup key (compilerWorldBackingAccounts cache) of
+      Just (WorldBackingAccounting live resident bytes nodes) | resident > 0 -> cache
+        {cachedCompilerWorlds=Map.delete root (cachedCompilerWorlds cache)
+        ,cachedCompilerWorldOrder=Map.delete ticket (cachedCompilerWorldOrder cache)
+        ,compilerWorldRetainedBytes=compilerWorldRetainedBytes cache-charge-(if resident == 1 then bytes else 0)
+        ,compilerWorldRetainedNodes=compilerWorldRetainedNodes cache-entries-(if resident == 1 then nodes else 0)
+        ,compilerWorldBackingAccounts=Map.insert key (WorldBackingAccounting live (resident-1) bytes nodes)
+          (compilerWorldBackingAccounts cache)}
+      _ -> throw WorldQueryCorrupt
+    where key = worldMaterializationKey materialized
 
 admitCompilerWorld :: (Integer,Int) -> String -> HeldCompilerWorld -> CompilerWorldCache
   -> (CompilerWorldCache,[HeldCompilerWorld])
-admitCompilerWorld (byteLimit,countLimit) root world cache@(CompilerWorldCache worlds order next bytes count)
-  | charge > byteLimit || entries > countLimit = (cache,[])
-  | otherwise = trim [] (CompilerWorldCache
-      (Map.insert root (CachedCompilerWorld next charge entries world) worlds)
-      (Map.insert next root order) (next+1) (bytes+charge) (count+entries))
+admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ materialized _) cache
+  | charge+backingBytes > byteLimit || entries+backingNodes > countLimit = (cache,[])
+  | Map.member root (cachedCompilerWorlds cache) = throw WorldQueryCorrupt
+  | otherwise = case Map.lookup key (compilerWorldBackingAccounts cache) of
+      Just (WorldBackingAccounting live resident bytes nodes) -> trim [] cache
+        {cachedCompilerWorlds=Map.insert root (CachedCompilerWorld ticket charge entries world) (cachedCompilerWorlds cache)
+        ,cachedCompilerWorldOrder=Map.insert ticket root (cachedCompilerWorldOrder cache)
+        ,nextCompilerWorldTicket=ticket+1
+        ,compilerWorldRetainedBytes=compilerWorldRetainedBytes cache+charge+backingBytes
+        ,compilerWorldRetainedNodes=compilerWorldRetainedNodes cache+entries+backingNodes
+        ,compilerWorldBackingAccounts=Map.insert key (WorldBackingAccounting live (resident+1) bytes nodes)
+          (compilerWorldBackingAccounts cache)}
+      Nothing -> throw WorldQueryCorrupt
   where
-    (charge,entries) = compilerWorldCharge world
-    trim evicted selected@(CompilerWorldCache current fifo _ total objects)
-      | total <= byteLimit && objects <= countLimit = (selected,reverse evicted)
-      | otherwise = case Map.lookupMin fifo of
-          Just (_,oldest) -> case Map.lookup oldest current of
-            Just (CachedCompilerWorld _ _ _ retired) ->
-              trim (retired:evicted) (removeCompilerWorld oldest selected)
+    ticket = nextCompilerWorldTicket cache
+    key = worldMaterializationKey materialized
+    (raw,rawEntries) = worldInputsRetainedCharge facts
+    (charge,entries) = (raw,rawEntries+1)
+    (backingBytes,backingNodes) = case Map.lookup key (compilerWorldBackingAccounts cache) of
+      Just (WorldBackingAccounting _ resident bytes nodes) | resident == 0 -> (bytes,nodes)
+      Just _ -> (0,0)
+      Nothing -> throw WorldQueryCorrupt
+    trim evicted selected
+      | compilerWorldRetainedBytes selected <= byteLimit && compilerWorldRetainedNodes selected <= countLimit = (selected,reverse evicted)
+      | otherwise = case Map.lookupMin (cachedCompilerWorldOrder selected) of
+          Just (_,oldest) -> case Map.lookup oldest (cachedCompilerWorlds selected) of
+            Just (CachedCompilerWorld _ _ _ retired) -> trim (retired:evicted) (removeCompilerWorld oldest selected)
             Nothing -> throw WorldQueryCorrupt
           Nothing -> throw WorldQueryCorrupt
 
--- Called only after the optional index and active scope no longer hold this
--- realization, and the private query Session has been restored. World queries
--- retain in-memory home interfaces and cannot generate backing interface files.
-retireCompilerWorldBacking :: Bool -> CompilerUniverse -> HeldCompilerWorld -> IO ()
-retireCompilerWorldBacking timing universe world@(HeldCompilerWorld facts reference (WorldMaterialization directory _ _ _ _ _ _ _) prepared) = do
+retainWorldMaterialization :: WorldMaterialization -> IO ()
+retainWorldMaterialization (WorldMaterialization _ _ _ _ _ _ _ _ (WorldBackingLease lease)) = mask $ \_ -> do
+  state <- readIORef lease
+  case state of
+    WorldBackingLive count | count > 0 -> writeIORef lease (WorldBackingLive (count+1))
+    _ -> throwIO WorldCellCorrupt
+
+worldMaterializationOwners :: WorldMaterialization -> IO (Maybe Int)
+worldMaterializationOwners (WorldMaterialization _ _ _ _ _ _ _ _ (WorldBackingLease lease)) = do
+  state <- readIORef lease
+  pure $ case state of
+    WorldBackingLive count -> Just count
+    WorldBackingRemoved -> Just 0
+    _ -> Nothing
+
+releaseWorldMaterialization :: WorldMaterialization -> IO Bool
+releaseWorldMaterialization (WorldMaterialization directory _ _ _ _ _ _ _ (WorldBackingLease lease)) = mask $ \restore -> do
+  state <- readIORef lease
+  case state of
+    WorldBackingLive count | count > 1 -> writeIORef lease (WorldBackingLive (count-1)) >> pure False
+    WorldBackingLive 1 -> do
+      writeIORef lease WorldBackingRemoving
+      completed <- captureCompletion (restore (removeDirectoryRecursive directory))
+      case completionResult completed of
+        BodySucceeded () -> writeIORef lease WorldBackingRemoved >> pure True
+        _ -> do
+          writeIORef lease WorldBackingQuarantined
+          finishCompletion completed
+          throwIO WorldCellCorrupt
+    _ -> throwIO WorldCellCorrupt
+
+-- The caller is the service's authenticated successor issuer. Equal source
+-- seals can validate that exact base's inherited backing, never select a base.
+retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldInputFacts -> Set.Set String -> String
+  -> (HeldCompilerWorld -> IO result) -> IO result
+retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized preparedRef) facts hints reference publish = mask $ \_ -> do
+  unless (worldInputsProducer base == worldInputsProducer facts
+      && worldInputsProfile base == worldInputsProfile facts
+      && worldSourceDomainSha256 (worldInputsSources base) == worldSourceDomainSha256 (worldInputsSources facts))
+    (throwIO WorldCellCorrupt)
+  WorldPreparedModules table receipts dependencies <- readIORef preparedRef
+  prepared <- newIORef (WorldPreparedModules table receipts dependencies)
+  universe <- readIORef universeRef
+  unless (Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts (universeWorlds universe)))
+    (throwIO WorldCellCorrupt)
+  let WorldMaterialization directory products roots names paths _ bytes nodes lease = materialized
+      successorMaterialization = WorldMaterialization directory products roots names paths hints bytes nodes lease
+      successor = HeldCompilerWorld facts reference successorMaterialization prepared
+  charged <- evaluate (registerWorldBacking materialized (universeWorlds universe))
+  next <- evaluate (universe {universeWorlds=charged})
+  _ <- evaluate successor
+  retainWorldMaterialization materialized
+  writeIORef universeRef next
+  completed <- captureCompletion (publish successor)
+  case completionResult completed of
+    BodySucceeded _ -> finishCompletion completed
+    _ -> do
+      failures <- attemptReleases [(CompilerScopeRestore,
+        retireCompilerWorldBacking False universeRef successor)]
+      finishCompletion (appendCleanupFailures completed failures)
+
+-- Scope/session restoration precedes this release. A successful index
+-- retirement is distinct from releasing the last physical backing owner.
+releaseRegisteredWorldMaterialization :: IORef CompilerUniverse -> WorldMaterialization -> IO Bool
+releaseRegisteredWorldMaterialization universeRef materialized = mask $ \_ -> do
+  removed <- releaseWorldMaterialization materialized
+  universe <- readIORef universeRef
+  let cache = universeWorlds universe
+      next = if Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts cache)
+        then releaseWorldBackingAccounting materialized removed cache else cache
+  _ <- evaluate next
+  writeIORef universeRef universe {universeWorlds=next}
+  pure removed
+
+retireCompilerWorldBacking :: Bool -> IORef CompilerUniverse -> HeldCompilerWorld -> IO ()
+retireCompilerWorldBacking timing universeRef world@(HeldCompilerWorld facts reference materialized prepared) = do
   completed <- captureCompletion $ do
-    writeIORef prepared (WorldPreparedModules emptyHomePackageTable Map.empty)
-    removeDirectoryRecursive directory
-  let event = case completionResult completed of
-        BodySucceeded _ -> WorldBackingRemoved
-        _ -> WorldBackingRemoveFailed
-  observed <- attemptReleases [(CompilerScopeRestore,
-    observeCompilerWorld timing universe event (worldInputsIdentity facts) reference (Just world))]
-  finishCompletion (appendCleanupFailures completed observed)
+    writeIORef prepared emptyWorldPreparedModules
+    releaseRegisteredWorldMaterialization universeRef materialized
+  universe <- readIORef universeRef
+  observed <- attemptReleases $ case completionResult completed of
+    BodySucceeded False -> [(CompilerScopeRestore,do
+      emitCount timing "worlds.backing_owner_releases" 1
+      owners <- worldMaterializationOwners materialized
+      forM_ owners (emitCount timing "worlds.backing_realization_owners" . fromIntegral))]
+    result -> [(CompilerScopeRestore,
+      observeCompilerWorld timing universe
+        (case result of BodySucceeded True -> WorldBackingRemoved; _ -> WorldBackingRemoveFailed)
+        (worldInputsIdentity facts) reference (Just world))]
+  void (finishCompletion (appendCleanupFailures completed observed))
 
 observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> String -> String
   -> Maybe HeldCompilerWorld -> IO ()
 observeCompilerWorld timing universe event root reference world =
   forM_ (universePackageAssociation universe) $ \association -> do
     let backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
-        directory = (\(HeldCompilerWorld _ _ (WorldMaterialization path _ _ _ _ _ _ _) _) -> path) <$> world
+        directory = (\(HeldCompilerWorld _ _ (WorldMaterialization path _ _ _ _ _ _ _ _) _) -> path) <$> world
     emitWorldRetention timing event root (hexBytes (servicePackageWorkerInstance association)) reference
       (compilerWorldCharge <$> world) backing (compilerWorldCacheCharge (universeWorlds universe))
       (exactInputRetentionLimits (universeOriginalInputs universe)) directory
+    let (liveBytes,liveNodes) = compilerWorldLiveCharge (universeWorlds universe)
+    emitCount timing "worlds.live_backing_bytes" liveBytes
+    emitCount timing "worlds.live_backing_nodes" (fromIntegral liveNodes)
+    forM_ world $ \(HeldCompilerWorld _ _ materialized _) -> do
+      owners <- worldMaterializationOwners materialized
+      forM_ owners (emitCount timing "worlds.backing_realization_owners" . fromIntegral)
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
@@ -1416,15 +1694,23 @@ instance Exception WorldQueryFailure
 -- remains beneath the existing worker namespace for confirmed-reap cleanup.
 materializeWorldSources :: FilePath -> CapturedWorldSources -> Set.Set String
   -> (WorldMaterialization -> IO result) -> IO result
-materializeWorldSources parent sources hints publish = mask $ \restore -> do
+materializeWorldSources = materializeWorldSourcesWithRelease (void . releaseWorldMaterialization)
+
+materializeWorldSourcesWithRelease :: (WorldMaterialization -> IO ()) -> FilePath -> CapturedWorldSources -> Set.Set String
+  -> (WorldMaterialization -> IO result) -> IO result
+materializeWorldSourcesWithRelease release parent sources hints publish = mask $ \restore -> do
   directory <- mkdtemp (parent </> "world.XXXXXX")
+  built <- newIORef Nothing
   completed <- captureCompletion $ do
     materialized <- restore (build directory)
+    writeIORef built (Just materialized)
     publish materialized
   case completionResult completed of
     BodySucceeded _ -> finishCompletion completed
     _ -> do
-      failures <- attemptReleases [(CompilerScopeRestore,removeDirectoryRecursive directory)]
+      materialized <- readIORef built
+      failures <- attemptReleases [(CompilerScopeRestore,
+        maybe (removeDirectoryRecursive directory) release materialized)]
       finishCompletion (appendCleanupFailures completed failures)
   where
     build directory = do
@@ -1458,7 +1744,8 @@ materializeWorldSources parent sources hints publish = mask $ \restore -> do
           nodes = 2 + sum [sourceNodes entries | (_,entries) <- roots]
       _ <- evaluate (Set.size hints + Map.size names + Map.size paths + length roots + nodes)
       _ <- evaluate copiedBytes
-      evaluate (WorldMaterialization directory products (map fst roots) names paths hints copiedBytes nodes)
+      lease <- WorldBackingLease <$> newIORef (WorldBackingLive 1)
+      evaluate (WorldMaterialization directory products (map fst roots) names paths hints copiedBytes nodes lease)
 
 -- This path starts from captured source selection, never the universe's most
 -- recent HPT or a raw-custody module inventory. The universe supplies only its
@@ -1466,12 +1753,12 @@ materializeWorldSources parent sources hints publish = mask $ \restore -> do
 runWorldPublicModule :: Maybe CompilerProducerIdentity -> CompilerUniverse -> HscEnv -> Bool
   -> HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> Ghc BS.ByteString
 runWorldPublicModule producer universe baseEnv timing
-    (HeldCompilerWorld facts _ (WorldMaterialization _ products roots sources paths sourceHints _ _) preparedRef) grant executor question =
+    (HeldCompilerWorld facts _ (WorldMaterialization _ products roots sources paths sourceHints _ _ _) preparedRef) grant executor question =
   handleWorldQueryFailure facts question $ do
     requested <- case structuredScope (worldQueryInspection question) of
       StructuredPublicModule name | not (isReservedSessionModuleName name) -> pure name
       _ -> liftIO (throwIO WorldQueryUnsupported)
-    prepared@(WorldPreparedModules table receipts) <- liftIO (readIORef preparedRef)
+    prepared@(WorldPreparedModules table receipts dependencies) <- liftIO (readIORef preparedRef)
     borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
     let flags = (hsc_dflags baseEnv) {importPaths=[],workingDirectory=Nothing}
         fresh = (hscUpdateHPT (const table) (hscUpdateFlags (const flags) borrowed))
@@ -1517,7 +1804,7 @@ runWorldPublicModule producer universe baseEnv timing
               (liftIO (throwIO WorldQueryCorrupt))
             let combined = foldl' (\homes home -> addToHpt homes (moduleName (mi_module (hm_iface home))) home)
                   table (eltsHpt compiled)
-                completed = WorldPreparedModules combined (Map.union selected receipts)
+                completed = WorldPreparedModules combined (Map.union selected receipts) dependencies
             pure (Just (owner,completed))
       Nothing -> do
         -- A known source name without a captured finder-representable path
@@ -1532,7 +1819,7 @@ runWorldPublicModule producer universe baseEnv timing
     case resolved of
       Nothing -> pure (encodeWorldQueryResult facts question WorldAbsent Nothing
         (encodeInspectionResults [InspectionStructuredError (StructuredUnknownModule requested)]))
-      Just (owner,completed@(WorldPreparedModules selected selectedReceipts)) -> do
+      Just (owner,completed@(WorldPreparedModules selected selectedReceipts _)) -> do
         -- Restore a fresh mutable context around exactly this realization's
         -- selected immutable HPT. No expression/checking target is fabricated.
         current <- getSession
@@ -1721,7 +2008,7 @@ compileHeldWorldCell :: IO () -> Maybe CompilerProducerIdentity -> CompilerUnive
   -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
   -> Ghc (CompletedCompilerResult result)
 compileHeldWorldCell guard producer universe baseEnv timing attempt
-    (HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _) _) grant executor question selection retained purpose path = do
+    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) _) grant executor question selection retained purpose path = do
   directory <- liftIO (canonicalizePath (worldCellPrepareDirectory question))
   target <- liftIO (canonicalizePath path)
   unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO (throwIO WorldCellCorrupt))
@@ -5693,22 +5980,20 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 Nothing -> do
                                     unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
                                     directory <- maybe (throwIO WorldQueryUnavailable) pure (universeWorldDirectory selected)
-                                    (ready,world,committed) <- materializeWorldSources directory (worldInputsSources facts)
+                                    (ready,world,committed) <- materializeWorldSourcesWithRelease
+                                      (void . releaseRegisteredWorldMaterialization universe) directory (worldInputsSources facts)
                                       (worldInputsSourceModuleHints facts) $ \materialized -> do
-                                        table <- newIORef (WorldPreparedModules emptyHomePackageTable Map.empty)
+                                        table <- newIORef emptyWorldPreparedModules
                                         let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
                                             world = HeldCompilerWorld facts reference materialized table
                                         _ <- evaluate (length reference)
                                         let (nextWorlds,evicted) = admitCompilerWorld
-                                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (universeWorlds selected)
+                                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (registerWorldBacking materialized (universeWorlds selected))
                                             retiredWorlds = removeCompilerWorld root nextWorlds
-                                            (worldBytes,worldCount) = compilerWorldCacheCharge nextWorlds
                                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
-                                        next <- evaluate (selected {universeWorlds=nextWorlds})
                                         held <- evaluate (Just world)
                                         ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
-                                        result <- evaluate (ready,world,next)
                                         -- Retire old private owners before unlinking their backing.
                                         -- The shared reservation remains conservative until cleanup
                                         -- succeeds; failure retains it and retires this worker.
@@ -5717,15 +6002,23 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                           [(CompilerScopeRestore, do
                                               observeCompilerWorld timing retired WorldEvicted
                                                 (worldInputsIdentity oldFacts) oldReference (Just old)
-                                              retireCompilerWorldBacking timing retired old)
+                                              retireCompilerWorldBacking timing universe old)
                                           | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
                                         released <- captureCompletion (pure ())
                                         finishCompletion (appendCleanupFailures released failures)
+                                        settled <- readIORef universe
+                                        let (settledWorlds,unexpected) = admitCompilerWorld
+                                              (exactInputRetentionLimits (universeOriginalInputs settled)) root world (universeWorlds settled)
+                                            finalNext = settled {universeWorlds=settledWorlds}
+                                            (settledBytes,settledCount) = compilerWorldCacheCharge settledWorlds
+                                        unless (null unexpected) (throwIO WorldQueryCorrupt)
+                                        _ <- evaluate finalNext
+                                        finalResult <- evaluate (ready,world,finalNext)
                                         -- No fallible or interruptible work follows decoder commit.
-                                        commitWorldInputRetention (universeOriginalInputs selected) worldBytes worldCount $ do
-                                          writeIORef universe next
+                                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes settledCount $ do
+                                          writeIORef universe finalNext
                                           writeIORef heldWorld held
-                                        pure result
+                                        pure finalResult
                                     -- The unpublished-directory owner has transferred custody.
                                     -- Observation cannot make that owner unlink this world.
                                     let event = case lookupCompilerWorld root (universeWorlds committed) of
@@ -5850,7 +6143,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   -- scope release. A failed restore keeps backing with the
                   -- worker namespace for confirmed-reap cleanup instead.
                   backingFailures <- if null initialFailures && null endObservations then attemptReleases
-                    [(CompilerScopeRestore,retireCompilerWorldBacking timing selected world) | world <- uncached]
+                    [(CompilerScopeRestore,retireCompilerWorldBacking timing universe world) | world <- uncached]
                     else pure []
                   let failures = initialFailures ++ endObservations ++ backingFailures
                   if null failures
