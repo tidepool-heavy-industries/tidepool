@@ -382,44 +382,43 @@ impl IssuedInputNativeDecisions {
     }
 
     fn for_exact_roles(&self, projection: &CompilerInputProjection) -> Self {
-        Self {
-            facts: self
-                .facts
-                .iter()
-                .filter(|(owner, fact)| projection.snapshot_roles().get(*owner) == Some(&fact.role))
-                .map(|(owner, fact)| (owner.clone(), fact.clone()))
-                .collect(),
+        let mut facts = self.facts.clone();
+        for (owner, fact) in &self.facts {
+            if projection.snapshot_roles().get(owner) != Some(&fact.role) {
+                facts.remove(owner);
+            }
         }
+        Self { facts }
     }
-
     pub(crate) fn restricted(
         &self,
         projection: &CompilerInputProjection,
         view: &ArtifactView,
     ) -> Self {
         let roots = view.roots();
-        Self {
-            facts: self
-                .facts
-                .iter()
-                .filter(|(owner, fact)| projection.snapshot_roles().get(*owner) == Some(&fact.role))
-                .map(|(owner, fact)| {
-                    let groups = fact
-                        .groups
-                        .iter()
-                        .filter(|(_, group)| roots.contains(&InventoryNodeKey::Group(**group)))
-                        .map(|(ordinal, group)| (*ordinal, *group))
-                        .collect();
-                    (
-                        owner.clone(),
-                        RecordedInputNativeDecision {
-                            role: fact.role.clone(),
-                            groups,
-                        },
-                    )
-                })
-                .collect(),
+        let mut facts = self.facts.clone();
+        for (owner, fact) in &self.facts {
+            if projection.snapshot_roles().get(owner) != Some(&fact.role) {
+                facts.remove(owner);
+                continue;
+            }
+            let mut groups = fact.groups.clone();
+            for (ordinal, group) in &fact.groups {
+                if !roots.contains(&InventoryNodeKey::Group(*group)) {
+                    groups.remove(ordinal);
+                }
+            }
+            if fact.groups.diff(&groups).next().is_some() {
+                facts.insert(
+                    owner.clone(),
+                    RecordedInputNativeDecision {
+                        role: fact.role.clone(),
+                        groups,
+                    },
+                );
+            }
         }
+        Self { facts }
     }
 }
 
@@ -1992,12 +1991,19 @@ impl CompilerSourceSupport {
         // Keep the existing topology/custody transition. Only its already
         // authenticated role rows bypass metadata reconstruction afterward.
         let artifacts = self.artifacts.select_compiler_support(&projection)?;
+        let mut native_offer_facts = self.native_offer_facts.clone();
         let offers = self
             .native_offers
             .iter()
             .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
                 Ok(true) => Some(Ok(offer.clone())),
-                Ok(false) => None,
+                Ok(false) => match offer.snapshot_identity() {
+                    Ok(identity) => {
+                        native_offer_facts.remove(&identity);
+                        None
+                    }
+                    Err(error) => Some(Err(error)),
+                },
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2013,10 +2019,7 @@ impl CompilerSourceSupport {
             projection,
             artifacts,
             native_fact_owner: self.native_fact_owner.clone(),
-            native_offer_facts: offers
-                .iter()
-                .map(|offer| Ok((offer.snapshot_identity()?, offer.snapshot_facts())))
-                .collect::<Result<_, CompileError>>()?,
+            native_offer_facts,
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
