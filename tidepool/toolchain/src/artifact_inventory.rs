@@ -8746,9 +8746,14 @@ mod tests {
     }
 
     fn assert_hidden_group_carrier(other_carriers: usize, competing: bool) {
+        let producer = b"hidden bound carrier producer";
+        let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
         let inventory = ArtifactInventory::default();
-        let native = Arc::new(issued_native_groups(
+        let native = Arc::new(issued_native_groups_in_unit(
+            "fixture",
+            producer_sha256,
             "HiddenBoundCarrier",
+            vec![0x42],
             vec![(7, Vec::new())],
             &[],
             &BTreeMap::new(),
@@ -8779,35 +8784,99 @@ mod tests {
                 original_ordinal: 7,
             }]),
         );
-        let roles = CompilerInputProjection::from_issued_entries(&[native.clone()])
-            .unwrap()
-            .interface_only();
-        let mut chosen = left.clone();
+        let original_roles =
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+        let issue = |view: &ArtifactView| {
+            let source = crate::declaration_context::issue_fixture_compiler_support(
+                original_roles.clone(),
+                view.clone(),
+            )
+            .unwrap();
+            let output =
+                crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
+                    &source,
+                    native.descriptor.producer_sha256,
+                    std::slice::from_ref(product),
+                )
+                .unwrap();
+            let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
+            let types = complete
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(vec![native.descriptor.owner.clone()])
+                .unwrap();
+            types.retain_template_availability(&complete).unwrap()
+        };
+        let mut support = issue(&left);
+        let key = NativeGroupKey {
+            artifact: id,
+            original_ordinal: 7,
+        };
+        let groups = |support: &CompilerSourceSupport| {
+            NativeDependencyCatalog::from_source(support)
+                .unwrap()
+                .groups(key, product.owner())
+                .unwrap()
+        };
+        let left_groups = groups(&support);
+        assert_eq!(left_groups.len(), 1);
+        let mut expected = left_groups.clone();
         for index in 0..other_carriers {
-            let groups = if competing {
-                BTreeSet::from([NativeGroupKey {
-                    artifact: id,
-                    original_ordinal: 7,
-                }])
+            let selected = if competing {
+                BTreeSet::from([key])
             } else {
                 BTreeSet::new()
             };
-            let right = capture(&format!("OtherHiddenCarrier{index}"), groups);
+            let right = capture(&format!("OtherHiddenCarrier{index}"), selected);
             assert_ne!(left.namespace()[&id], right.namespace()[&id]);
-            chosen = chosen
-                .merge_compiler_inputs(&roles, &right, &roles)
-                .unwrap()
-                .0;
+            if competing {
+                let other = issue(&right);
+                let other_groups = groups(&other);
+                assert_eq!(other_groups.len(), 1);
+                assert!(other_groups.iter().all(|group| !expected.contains(group)));
+                expected.extend(other_groups);
+                support = support.merge(&other).unwrap();
+            } else {
+                let custody = crate::declaration_context::recover_fixture_compiler_support(
+                    original_roles.interface_only(),
+                    right
+                        .with_compiler_projection(&original_roles.interface_only())
+                        .unwrap()
+                        .into_owned(),
+                    [],
+                )
+                .unwrap();
+                support = support.merge(&custody).unwrap();
+            }
         }
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &roles,
-                &chosen.metadata_snapshot(),
-                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
-            )
+        assert_eq!(groups(&support), expected);
+        assert!(support
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_compilation(directory.path(), producer)
             .unwrap();
+        let inputs = request.compiler_inputs();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        let chosen = inputs.artifacts();
+        let inventory = chosen.inventory();
+        assert!(chosen.selected_native_groups().is_empty());
         let mut fixed = inventory
-            .bind_segment(&chosen, vec![native.clone()], &selection)
+            .bind_segment(chosen, vec![native.clone()], &selection)
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&id));
         let imports = [issued_source(&native, 7)];
@@ -8822,10 +8891,10 @@ mod tests {
             .map(|admitted| admitted.artifacts);
         if competing {
             assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == id)));
         } else {
             let demanded = result.expect("one issued group retains its recorded hidden carrier");
-            let group = left.capture_graph_selection().native_groups[0];
+            let group = *left_groups.first().unwrap();
             assert!(demanded.roots().contains(&InventoryNodeKey::Group(group)));
         }
     }
