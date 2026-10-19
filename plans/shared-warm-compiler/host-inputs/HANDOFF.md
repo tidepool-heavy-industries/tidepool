@@ -248,8 +248,14 @@ for complete namespace coverage. This initial boundary must not become a silent
 omission or permanently unsupported migration shortcut. Query eea remains immutable.
 
 selection_oracle owns independent Warm old-profile diagnostic/producer repair
-review, then exact typed consumer review. Diagnostic8e259 has source acceptance;
-canonical producer issuance repair is pending. The genuine Rooted query retry
+review, then exact typed consumer review. Diagnostic8e259's initial source receipt
+was qualified after a confirmed non-UTF-8 Path serialization panic in optional
+capture. Warm repaired it with fallible conversion00e9; its adjacent oversize test
+still needs to restore a valid path so the test reaches its intended budget check.
+Canonical producer repair367 admits the actual endpoint's canonical identity before
+cold root sealing, instead of raw producer bytes or an empty zero-producer root.
+Exact repaired source review, owning compilation and actual Rooted retry remain
+pending; the historical eea rejection branch is still unobserved. The genuine Rooted query retry
 preempts independent work once the reviewed exact dependency is ready. No active
 HOST native job exists; source-only changes still require production and cfg-test
 consumer compilation and meaningful counted controls under fresh admission. Paused old 02A is
