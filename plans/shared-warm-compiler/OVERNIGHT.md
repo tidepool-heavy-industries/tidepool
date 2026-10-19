@@ -79,6 +79,26 @@ Useful progress is an accepted decision, implemented consumer, discriminating
 test, repaired failure, reviewed fold or measured result. A growing number of
 agents or documents is not progress by itself.
 
+## Active supervision and continuation
+
+While approved work, running children/builds, reviews, or dependency-ready
+successor waves remain, campaign and area supervisors stay in their active turn.
+Process completion notifications, review and repair concrete candidates, fold
+accepted history, and launch approved successors. When only events can advance
+work, use `collaboration.wait_agent(timeout_ms=60000)` and reconcile notifications;
+this interruptible mailbox wait does not schedule another turn after a final.
+Avoid empty busy polling and blocking waits longer than 60 seconds.
+
+Leaves return exact base/candidate evidence and pending checks to their parent,
+and notify consequential cross-area owners. Completion automatically notifies the
+parent; `send_message` alone does not reactivate a completed parent. If a needed
+parent has ended its turn, inspect actual status/capacity and use `followup_task`
+with the concrete result and next action, within its existing reserved grant.
+Avoid duplicate work. Area supervisors end only when their approved frontier is
+drained or explicitly stood down; campaign ends only at the agreed completion,
+hard-gap or external-blocker handoff with no independently runnable approved work.
+
+
 ## Hard strategy questions: drain, then terminate
 
 The user explicitly wants this terminal rule:

@@ -111,3 +111,26 @@ tidepool-toolchain` passed (metadata only, no Buck/output growth), not compilati
 or test execution. Observed free bytes108974096384 leave about1.49GiB above reserve;
 no defensible cold compile growth bound exists yet. Exact pending compile:
 `swarm-build just check exomonad-host tidepool-toolchain`.
+
+## Active supervision
+
+Explicit user directive propagated to all five supervisors: stay active through
+approved implementation, running children/builds, reviews, repairs, folds and
+ready successor waves. Wait on interruptible mailbox events for at most60s when
+only events can advance work. Final does not schedule continuation. If a required
+parent has ended, inspect status/capacity and use followup_task with concrete next
+action under its existing grant. Current host/warm ACKs received; remaining ACKs
+being reconciled. Host oracle reviewer has temporarily settled after exact leaf
+source review; its grant remains reserved for repaired/cumulative review.
+
+Qualification source-only baseline executed89 unittest cases and failed19
+subtests:16 new observer-sensitivity failures and3 fixture/procedure defects
+separately classified. Buck exit32, evidence at
+`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/capture-sensitivity/before-repair.{json,log}`.
+This is actual failure discrimination, not passing acceptance. Buck logical output
+75,974,066B under measured100MiB lane; native checks remain disk-blocked.
+Warm structural candidate2ea510f075ccc8b7a7f5620faac884e610666b61 independently
+source-reviewed full5b74..candidate by campaign; redundant explicit HscEnv fields
+removed with identical sole HPT fallback and missing-HMI behavior. No native compile
+or memory-release claim, no qualified fold. Package default cold fallback held
+pending actual source-owner option review and regression controls.
