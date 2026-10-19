@@ -3256,7 +3256,7 @@ impl ArtifactInventory {
             if fixed
                 .groups
                 .get(key)
-                .is_some_and(|previous| *previous != BoundNativeGroup::Issued(*group))
+                .is_some_and(|previous| *previous != BoundNativeGroup::Issued(group.binding))
             {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeGroupSelectionConflict {
@@ -3297,8 +3297,7 @@ impl ArtifactInventory {
             // decide reuse. Independently issued carriers cannot substitute.
             let pending_binding = bound_inputs
                 .get(&group)
-                .copied()
-                .map(BoundNativeGroup::Issued);
+                .map(|verified| BoundNativeGroup::Issued(verified.binding));
             let resolution = match fixed.groups.get(&group).or(pending_binding.as_ref()) {
                 Some(BoundNativeGroup::Issued(binding)) => {
                     crate::certified_products::NativeGroupCandidates::IssuedAvailability(
@@ -3699,7 +3698,7 @@ impl ArtifactInventory {
         fixed.groups.extend(
             bound_inputs
                 .into_iter()
-                .map(|(key, group)| (key, BoundNativeGroup::Issued(group))),
+                .map(|(key, verified)| (key, BoundNativeGroup::Issued(verified.binding))),
         );
         let mut inherited_materializations = materialization_parents.clone();
         let mut view = ArtifactView::new(ViewDraft {
@@ -4381,7 +4380,11 @@ impl ArtifactInventory {
                 selection,
             )?;
             selected.extend(incoming);
-            prebound.extend(bindings);
+            prebound.extend(
+                bindings
+                    .into_iter()
+                    .map(|(key, verified)| (key, verified.binding)),
+            );
             demanded_offers = offers;
         }
         if let Some((roles, catalog)) = root_intent.input_constraints() {

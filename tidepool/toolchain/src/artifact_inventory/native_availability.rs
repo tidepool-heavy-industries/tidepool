@@ -139,8 +139,15 @@ impl<'a> NativeDependencyCatalog<'a> {
 /// Payload and file custody are staged until the receiving admission succeeds.
 pub(super) struct CertifiedNativeDemandAcquisition {
     pub(super) entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    pub(super) bindings: BTreeMap<NativeGroupKey, NativeGroupBinding>,
+    pub(super) bindings: BTreeMap<NativeGroupKey, VerifiedNativeBinding>,
     pub(super) offers: Vec<IssuedNativeOffer>,
+}
+
+/// The chosen binding and closure checked against its issuing snapshot and the
+/// installed scope graph. This is acquisition evidence, not an independent grant.
+pub(super) struct VerifiedNativeBinding {
+    pub(super) binding: NativeGroupBinding,
+    closure: BTreeSet<InventoryNodeKey>,
 }
 
 /// Bind demanded input bodies through their original opaque owner. Carrier-only
@@ -416,7 +423,7 @@ fn bind_input_demand(
         }
         // Retain just this demanded immutable closure. The offer remains the
         // authority for membership; no sibling proof roots enter selection.
-        for node in owned {
+        for node in &owned {
             if let InventoryNodeKey::Artifact(binding) = node {
                 let payload = payloads
                     .get(&binding.artifact)
@@ -433,7 +440,13 @@ fn bind_input_demand(
                 incoming.insert(binding.artifact, retained);
             }
         }
-        prebound.insert(*key, group);
+        prebound.insert(
+            *key,
+            VerifiedNativeBinding {
+                binding: group,
+                closure: owned,
+            },
+        );
         if let Some(offer) = retained_offer {
             retained_offers.push(offer.clone());
         }
@@ -501,28 +514,40 @@ pub(super) fn bind_fresh_product_dependencies(
         &wanted,
         NativeDemandSource::Catalog(dependencies),
     )?;
-    for group in acquired.bindings.values() {
-        // Historical children follow this exact acquired owner. These are
-        // dependency edges for new bodies, never executable request roots.
-        for node in admitted_closure(state, [InventoryNodeKey::Group(*group)].into_iter()) {
-            if let InventoryNodeKey::Group(group) = node {
-                let entry = acquired
-                    .entries
-                    .get(&group.binding.artifact())
-                    .or_else(|| entries.get(&group.binding.artifact()))
-                    .ok_or_else(|| failure("acquired native dependency payload missing"))?;
-                validate_consumed_native_namespace(entry, consumed_namespace)?;
-                required
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(group);
+    acquired.retain_dependency_groups(entries, consumed_namespace, required)?;
+    Ok(acquired)
+}
+
+impl CertifiedNativeDemandAcquisition {
+    fn retain_dependency_groups(
+        &self,
+        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+        required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
+    ) -> Result<(), CompileError> {
+        for binding in self.bindings.values() {
+            // Historical children follow this exact acquired owner. These are
+            // dependency edges for new bodies, never executable request roots.
+            for node in &binding.closure {
+                if let InventoryNodeKey::Group(group) = node {
+                    let entry = self
+                        .entries
+                        .get(&group.binding.artifact())
+                        .or_else(|| entries.get(&group.binding.artifact()))
+                        .ok_or_else(|| failure("acquired native dependency payload missing"))?;
+                    validate_consumed_native_namespace(entry, consumed_namespace)?;
+                    required
+                        .entry(NativeGroupKey {
+                            artifact: group.binding.artifact(),
+                            original_ordinal: group.original_ordinal,
+                        })
+                        .or_default()
+                        .insert(*group);
+                }
             }
         }
+        Ok(())
     }
-    Ok(acquired)
 }
 
 /// Consuming exact native support must respect a selected compiler role. An
