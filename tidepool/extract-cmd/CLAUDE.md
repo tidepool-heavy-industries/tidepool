@@ -37,6 +37,12 @@ captured endpoint; stale epochs refuse rather than silently rebinding an already
 prepared offer. Direct identity handshakes retain their existing child owner.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
+The private source-free exact-input exchange requires that pinned transaction.
+Its complete acquisition uses the existing exact-scope manifest and descriptor
+owners. Typed control results travel on the machine channel; captured stdout
+remains diagnostic text. Malformed accepted control responses poison the same
+transaction and retain END/input ownership without replay. Framing alone does
+not authenticate a root or issue a reusable realization.
 An ordinary one-shot response is delivered only after the worker acknowledges
 transaction cleanup, so a client closing after receiving it preserves the warm
 worker. Explicit transactions stream request responses and acknowledge cleanup

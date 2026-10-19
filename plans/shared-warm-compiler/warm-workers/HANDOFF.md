@@ -12,7 +12,7 @@ unchanged from that amendment. Only the campaign owner edits shared contracts/st
 
 | Native task | Configured model/effort | Checkout/branch | Start/settlement | Work |
 | --- | --- | --- | --- | --- |
-| `/root/warm_compiler_campaign/warm_workers/protocol` | `gpt-6.1-sol`, high, fresh context | `tidepool-shared-warm-worker-protocol-20261019`, `feature/shared-warm/worker-protocol` | Running; start before 2026-10-19T07:54:42Z; no settlement observed | Strict matched source-free request/outcome framing, early source-free dispatch and endpoint validation; owns Rust request/endpoint, Haskell ExtractRequest/CompilerRequest/Main and matched codec fixtures |
+| `/root/warm_compiler_campaign/warm_workers/protocol` | `gpt-6.1-sol`, high, fresh context | `tidepool-shared-warm-worker-protocol-20261019`, `feature/shared-warm/worker-protocol` | Running; start before 2026-10-19T07:54:42Z; no settlement observed | Protocol implementation at `992a6d0458`; now bounded review of the area's independently authored WorkerServer response route |
 
 The initial grant is one active descendant total. No other descendants were
 started. The area directly owns the existing WorkerServer typed completion path,
@@ -36,6 +36,14 @@ The campaign supervisor independently reviewed the full
 missing-HMI path, with no remaining findings. This is source review only.
 Production/test compilation and executed controls are deferred; this is not an
 accepted realization wave or qualified area fold.
+
+Private protocol candidates `1e84fd4323`, `1ca6b9697b`, `992a6d0458` are
+incorporated as `fd0cd43237`, `fcb39fd9bd`, `55a26d8d85`; area `6469ed1b85`
+owns the joined typed completion/response tests. `c402df90fe` applies the pinned
+formatter. These are source checkpoints pending cumulative independent review
+and native compilation. The source-free production dispatch currently returns
+typed UnsupportedOperation. It issues no Ready/reference and is not a completed
+realization consumer.
 
 ## Current decisions and dependencies
 
@@ -77,11 +85,16 @@ installed launcher does not support the staged storage-status/growth options;
 no admission bypass, output deletion or shared-service restart is authorized.
 
 Executed: `swarm-build just check-plan tidepool-extract-cmd`, exit 0, metadata
-selection only. `git diff --check` passed on current direct WIP. Neither is
-compilation or test execution. Exact pending commands, after admissible storage:
+selection only. `swarm-build bash scripts/buck2-configure.sh --tests` completed
+exit 0 with rooted generation `generation.dVqJhqs0`; log:
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/configure-tests.log`.
+The exact ce60 workspace submodule was initialized from the verified local
+repository with a one-command file-protocol override. `swarm-build bash
+scripts/dev-shell.sh rustfmt --edition 2021` on request/endpoint/fake-worker
+sources passed, and `git diff --check` passed. These do not establish native
+compilation or executed tests. Exact pending commands, after admissible storage:
 
 ```sh
-swarm-build bash scripts/buck2-configure.sh --tests
 swarm-build just build //bridge/haskell:tidepool_extract_bin //bridge/haskell:worker_response_child //bridge/haskell:worker_response_test_bin //bridge/haskell:cell_splitter_test_bin //bridge/haskell:source_boot_product_reuse_test_bin
 swarm-build just check tidepool-extract-cmd
 swarm-build just test-native //bridge/haskell:worker_response_test --pattern '/response bounds async unwind and next request/'
@@ -96,3 +109,14 @@ and unqualified until both matched owners and their real test consumers run.
 Qualification owns the joined packaged Persona/cell/lookup history; prior exact
 70a Persona evidence is 1 passed/1 executed, exit 0, with host cleanup confirmed,
 compiler cleanup not observed and incomplete compiler diagnostics.
+
+## Continuation
+
+The latest user direction forbids periodic wake/poll loops. Complete ready
+review/repair/fold work, then record exact dependencies and yield. A producer
+whose result unblocks this area checks native task status: use send_message for
+a running recipient and followup_task for an idle/completed recipient. Pending
+producers are host-inputs for the exact portable selected root, owned-inputs
+for admitted row/byte owner and consumed-package-source coverage, qualification
+for a measured focused compile growth bound, and the campaign supervisor for
+the cumulative independent review. There are no orphaned command observers.

@@ -166,8 +166,8 @@ renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 
 -- | Serve one typed request, or answer the role probe before compiler setup.
--- For requests, stdout contains exactly one diagnostics document; stderr is
--- the human-readable channel.
+-- Source operations return one diagnostics document; source-free controls
+-- return their typed result. Stderr remains the human-readable channel.
 main :: IO ()
 main = do
   rawWorkerRequest <- getArgs
