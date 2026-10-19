@@ -4,7 +4,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
-  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
+  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
@@ -38,7 +38,7 @@ module Tidepool.ExactScope
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
-  , worldBindingInterfaceArtifact, readWorldBindingInputs
+  , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
@@ -82,7 +82,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError, isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
@@ -1248,6 +1248,27 @@ data SourceSelectedOriginals = SourceSelectedOriginals
   , selectedOriginalEvidence :: DependencyEvidence
   }
 
+-- The same source-selection payload is used by exact and held-world receipts.
+-- Encoding preserves issuing evidence; it does not authenticate caller facts.
+encodeSourceSelectedOriginals :: Maybe SourceSelectedOriginals -> E.Encoding
+encodeSourceSelectedOriginals Nothing = E.encodeListLen 2 <> E.encodeListLen 0 <> E.encodeNull
+encodeSourceSelectedOriginals (Just selected) = E.encodeListLen 2
+  <> E.encodeListLen (fromIntegral (length (selectedOriginalRows selected)))
+  <> foldMap (\((unit,name),certificate,interfaceSha,sourceSha) -> E.encodeListLen 5
+      <> text unit <> text name <> text certificate <> text interfaceSha <> text sourceSha) (selectedOriginalRows selected)
+  <> text (renderDependencyEvidence (selectedOriginalEvidence selected))
+  where text = E.encodeString . T.pack
+
+revalidateSourceSelectedOriginals :: SourceSelectedOriginals -> IO Bool
+revalidateSourceSelectedOriginals selected = do
+  unchanged <- revalidateDependencyEvidence (selectedOriginalEvidence selected)
+  absent <- and <$> forM (dependencyResolutions (selectedOriginalEvidence selected)) (\resolution -> do
+    let candidates = case dependencyResolutionSelected resolution of
+          Nothing -> dependencyResolutionCandidates resolution
+          Just chosen -> takeWhile (/= chosen) (dependencyResolutionCandidates resolution)
+    and <$> mapM (fmap not . doesFileExist) candidates)
+  pure (unchanged && absent)
+
 instance Eq SourceSelectedOriginals where
   left == right = selectedOriginalRows left == selectedOriginalRows right
     && renderDependencyEvidence (selectedOriginalEvidence left)
@@ -2084,13 +2105,8 @@ captureExactCompilationReceipt compilation evidence = do
   unchanged <- revalidateDependencyEvidence evidence
   unless unchanged (fail "exact compile consumed source changed before receipt")
   forM_ (compilationSourceSelection compilation) $ \selected -> do
-    unchangedSelection <- revalidateDependencyEvidence (selectedOriginalEvidence selected)
-    negativeSelection <- and <$> forM (dependencyResolutions (selectedOriginalEvidence selected)) (\resolution -> do
-      let absent = case dependencyResolutionSelected resolution of
-            Nothing -> dependencyResolutionCandidates resolution
-            Just chosen -> takeWhile (/= chosen) (dependencyResolutionCandidates resolution)
-      and <$> mapM (fmap not . doesFileExist) absent)
-    unless (unchangedSelection && negativeSelection)
+    unchangedSelection <- revalidateSourceSelectedOriginals selected
+    unless unchangedSelection
       (fail "current original source selection changed before receipt")
   let parent = takeDirectory path </> ".exact-compilations"
       encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
@@ -2104,12 +2120,7 @@ captureExactCompilationReceipt compilation evidence = do
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
         , encodeArray (map moduleRow imports)
-        , case compilationSourceSelection compilation of
-            Nothing -> encodeArray [encodeArray [], E.encodeNull]
-            Just selected -> encodeArray
-              [ encodeArray [encodeArray [text unit,text name,text certificate,text interfaceSha,text sourceSha]
-                  | ((unit,name),certificate,interfaceSha,sourceSha) <- selectedOriginalRows selected]
-              , text (renderDependencyEvidence (selectedOriginalEvidence selected))]]
+        , encodeSourceSelectedOriginals (compilationSourceSelection compilation)]
   pure (ExactCompilationReceipt parent transaction bytes receipt)
 
 publishExactCompilationReceipt :: ExactCompilationReceipt -> IO ()
@@ -2292,6 +2303,75 @@ readWorldBindingInputs env facts occurrences = do
                 packages <- capturedRequestInputToken tokens path sha
                 pure (artifact,body,packages)
               pure (Right (selected,captured))
+
+-- The Context role and acquired binding jointly selected this row at cold
+-- admission. A passive row with the same module name is never a substitute.
+worldHasSelectedPrimary :: WorldInputFacts -> (String,String) -> Bool
+worldHasSelectedPrimary facts key = Map.member key (worldPrimarySelected (worldInputsPrimary facts))
+
+worldHasSelectedSource :: WorldInputFacts -> (String,String) -> Bool
+worldHasSelectedSource facts key = case Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)) of
+  Just association -> case worldPrimaryRow association of
+    ScopeInterfaceInput _ (ModuleInterfaceEvidence proof) -> isSourceOriginal (canonicalOrigin proof)
+    _ -> False
+  _ -> False
+
+-- Resolve only demanded Context owners and their exact declared type closure.
+-- This is canonical source/type custody; Original/native execution remains a
+-- distinct consumer. No universe inventory or historical base-row scan occurs.
+readWorldSourceInputs :: HscEnv -> WorldInputFacts -> [(String,String)]
+  -> IO (Either String (Map.Map (String,String) CanonicalInterfaceProof
+      ,[(ExactIfaceArtifact,ModIface)],Map.Map (String,String) PackageImportEvidence))
+readWorldSourceInputs env facts roots = case walk Map.empty roots of
+  Left reason -> pure (Left reason)
+  Right rows -> do
+    let custody = worldInputsCustody facts
+        artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
+        packages = Map.fromList [(path,sha) | ScopeInterfaceInput (_,path,sha) _ <- Map.elems rows]
+        packageInput path cap = do
+          sha <- maybe (fail "world source package proof is outside demanded Context rows") pure (Map.lookup path packages)
+          bytes <- artifactBytes <$> capturedRequestInputToken custody path sha
+          unless (BS.length bytes <= cap) (fail "world source package proof exceeds its input bound")
+          pure bytes
+        interfaceInput artifact = capturedRequestInputToken custody (exactPath artifact) (exactSha256 artifact)
+    admitted <- extendAdmittedPackageImportsWith packageInput emptyAdmittedPackageImports
+      [row | ScopeInterfaceInput row _ <- Map.elems rows]
+    case admitted of
+      Left reason -> pure (Left reason)
+      Right selection -> do
+        valid <- validateAdmittedPackageSelection env selection
+        case valid of
+          Left reason -> pure (Left reason)
+          Right () -> do
+            decoder <- newRequestIfaceDecoder
+            closure <- readCapturedExactIfaceClosureWithCheckedValues decoder interfaceInput env artifacts []
+            case closure >>= (\verified -> selectVerifiedExactInterfaces verified artifacts) of
+              Left reason -> pure (Left reason)
+              Right interfaces -> do
+                decoded <- forM (Map.toAscList rows) $ \(key,ScopeInterfaceInput (artifact,path,sha) evidence) -> do
+                  bytes <- artifactBytes <$> capturedRequestInputToken custody path sha
+                  pure $ do
+                    packages <- decodeCapturedPackageImports artifact bytes
+                    case evidence of
+                      ModuleInterfaceEvidence proof -> Right (key,(proof,packages))
+                      _ -> Left "demanded Context source lost its canonical proof"
+                pure $ do
+                  pairs <- sequence decoded
+                  let proofs = Map.fromList [(key,proof) | (key,(proof,_)) <- pairs]
+                      packages = Map.fromList [(key,value) | (key,(_,value)) <- pairs]
+                  Right (proofs,interfaces,packages)
+  where
+    walk selected [] = Right selected
+    walk selected (key:rest) | Map.member key selected = walk selected rest
+    walk selected (key:rest) = do
+      association <- maybe (Left "demanded source lacks its exact Context association") Right
+        (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
+      let row = worldPrimaryRow association
+      case row of
+        ScopeInterfaceInput (artifact,_,_) (ModuleInterfaceEvidence proof)
+          | (exactUnit artifact,exactModule artifact) == key && isSourceOriginal (canonicalOrigin proof) ->
+              walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
+        _ -> Left "demanded Context type closure requires an unsupported non-source role"
 
 -- Conservative backing charge: receiving allowances count every retained
 -- encoded body/path, even when a separate world happens to have equal bytes.

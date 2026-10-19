@@ -69,7 +69,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
-  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
+  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
@@ -130,7 +130,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem
   , originalGroupFromProjected
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..)
+  , ExactInterfaceEvidence(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , revalidateExactScope, ExactScopeOriginal(..), extendExactScopeGeneration, extendCheckedValueScope
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -948,8 +948,8 @@ runCellPlanMode parserFlags args cellPath = do
   either throwIO (const (pure [])) result
 
 -- This initial slice performs actual whole-segment inference/output emission
--- for an empty primary base and exact checked-value aliases whose types need
--- only fixed packages. Other type closures receive an explicit typed refusal.
+-- from captured current canonical source imports and exact checked-value
+-- aliases whose types need only fixed packages. Other closures are refused.
 -- It never
 -- constructs an ExactScope or publishes a runtime world during compilation.
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
@@ -1127,6 +1127,9 @@ runWorldCellPrepareMode bound question = do
       validateDependencyEvidence (preparedFreshDependencies prepared)
       inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
         (preparedCompilationWorldInputs completion)
+      forM_ (worldCellSourceSelection inputFacts) $ \selected -> do
+        unchanged <- revalidateSourceSelectedOriginals selected
+        unless unchanged (throwIO WorldCellUnavailable)
       let (sourcePath,sourceSha) = worldCellSourceSnapshot inputFacts
           commonWrites = (sourcePath,sourceSha)
             : [(path,rawWorldID sha) | (path,sha) <- stagedOriginalOutputFiles staged]
@@ -1153,9 +1156,7 @@ runWorldCellPrepareMode bound question = do
             <> fileRef sourceName <> fileRef "dependencies.json" <> fileRef "module-package-imports.cbor"
             <> encodeListLen (fromIntegral (length (worldCellExactImports inputFacts)))
             <> foldMap moduleRow (worldCellExactImports inputFacts)
-            -- The compiler entry has checked the exact primary-empty basis.
-            -- This is no source-original selection receipt for another world.
-            <> encodeListLen 2 <> encodeListLen 0 <> encodeNull)
+            <> encodeSourceSelectedOriginals (worldCellSourceSelection inputFacts))
           sourceReceiptName = "world-source.cbor"
       BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
       let observations = [CellExpressionPlan (plannedItemEntry (typedItemPlan item))
