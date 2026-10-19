@@ -194,6 +194,11 @@ checkedPublicModuleHistories = do
       refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" reason
       outputs <- listDirectory ambient
       unless (null outputs) (fail ("world module admission wrote untracked outputs: " ++ show outputs))
+  forM_ ["-fwrite-interface","-fwrite-if-simplified-core","-shared"] $ \flag ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      prependDependency work ("{-# OPTIONS_GHC " ++ flag ++ " #-}")
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldOutputPolicyChanged
   forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
     withRequestFixture $ \_ request work -> do
       writeTarget work

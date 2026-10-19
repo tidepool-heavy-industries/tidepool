@@ -1392,8 +1392,11 @@ runWorldPublicModule producer universe baseEnv timing
             -- A cold demand checks the real module and its transitive source
             -- closure. Historical memo/candidate/home alternatives are absent.
             compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
-            let compileFlags = (hsc_dflags baseEnv)
-                  {importPaths=roots,workingDirectory=Nothing,hiDir=Just products,objectDir=Just products}
+            -- This metadata route retains the actual in-memory HMI. No lazy
+            -- realization may depend on a generated home interface file.
+            let compileFlags = foldl' gopt_unset ((hsc_dflags baseEnv)
+                  {importPaths=roots,workingDirectory=Nothing,hiDir=Just products,objectDir=Just products})
+                  [Opt_WriteInterface,Opt_WriteIfSimplifiedCore]
             setSession ((hscUpdateHPT (const emptyHomePackageTable)
               (hscUpdateFlags (const compileFlags) compileEnv))
                 {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]})
@@ -6098,6 +6101,7 @@ requireWorldOutputPolicy path admitted effective =
       ( (hiDir flags,objectDir flags,hieDir flags,stubDir flags,dumpDir flags,hpcDir flags,temp flags)
       , (outputFile_ flags,dynOutputFile_ flags,outputHi flags,dynOutputHi flags,dumpPrefixForce flags)
       , (hiSuf_ flags,hieSuf flags,objectSuf_ flags,dynHiSuf_ flags,dynObjectSuf_ flags,hcSuf flags)
+      , ghcLink flags
       , map (`gopt` flags)
           [Opt_WriteInterface,Opt_WriteIfSimplifiedCore,Opt_WriteHie,Opt_DumpToFile,Opt_Hpc
           ,Opt_KeepTmpFiles,Opt_KeepHscppFiles,Opt_KeepHcFiles,Opt_KeepSFiles,Opt_KeepLlvmFiles
