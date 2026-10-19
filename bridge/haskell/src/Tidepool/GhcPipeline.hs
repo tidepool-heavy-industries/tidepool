@@ -226,7 +226,8 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
-  , WorldPublicModuleRequest(..), WorldQueryMode(..), StructuredInspection(..), StructuredNameScope(..) )
+  , WorldPublicModuleRequest(..), WorldQueryMode(..), StructuredInspection(..), StructuredNameScope(..)
+  , StructuredNameNamespace(..), InspectionProvenance(..) )
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, registerSessionInterfaceLocation, renderSessionModule
@@ -1467,10 +1468,10 @@ handleWorldQueryFailure facts question action = reifyGhc $ \session ->
 encodeWorldQueryResult :: WorldInputFacts -> WorldPublicModuleRequest -> WorldResolution
   -> Maybe WorldModuleReceipt -> BS.ByteString -> BS.ByteString
 encodeWorldQueryResult facts question resolution defining payload =
-  let body = toStrictByteString (WorldEncoding.encodeListLen 7 <> WorldEncoding.encodeWord 1
+  let body = toStrictByteString (WorldEncoding.encodeListLen 8 <> WorldEncoding.encodeWord 1
         <> WorldEncoding.encodeBytes (worldInputsIdentityBytes facts)
         <> WorldEncoding.encodeWord (if worldQueryMode question == WorldStructuredInfo then 0 else 1)
-        <> word requested <> encodeResolution resolution
+        <> word requested <> encodeWorldQuestion (worldQueryInspection question) <> encodeResolution resolution
         <> maybe WorldEncoding.encodeNull encodeReceipt defining <> WorldEncoding.encodeBytes payload)
   in frameWorldQuery body
   where
@@ -1493,10 +1494,11 @@ encodeWorldQueryResult facts question resolution defining payload =
 -- or turn failure to acquire a world into a closed module absence.
 encodeUnavailableWorldQuery :: WorldPublicModuleRequest -> BS.ByteString
 encodeUnavailableWorldQuery question = frameWorldQuery $ toStrictByteString $
-  WorldEncoding.encodeListLen 7 <> WorldEncoding.encodeWord 1
+  WorldEncoding.encodeListLen 8 <> WorldEncoding.encodeWord 1
     <> WorldEncoding.encodeBytes root
     <> WorldEncoding.encodeWord (if worldQueryMode question == WorldStructuredInfo then 0 else 1)
     <> WorldEncoding.encodeString (Text.pack requested)
+    <> encodeWorldQuestion (worldQueryInspection question)
     <> WorldEncoding.encodeListLen 2 <> WorldEncoding.encodeString "rejected" <> WorldEncoding.encodeWord 1
     <> WorldEncoding.encodeNull <> WorldEncoding.encodeBytes BS.empty
   where
@@ -1506,10 +1508,24 @@ encodeUnavailableWorldQuery question = frameWorldQuery $ toStrictByteString $
     pairs (a:b:rest) = fromIntegral (16 * digitToInt a + digitToInt b) : pairs rest
     pairs _ = []
 
+-- Correlation belongs to the exact request, including refused or absent
+-- queries whose inspection payload cannot supply a successful name receipt.
+encodeWorldQuestion :: StructuredInspection -> WorldEncoding.Encoding
+encodeWorldQuestion question = WorldEncoding.encodeListLen 4
+  <> WorldEncoding.encodeWord (case structuredNamespace question of
+    StructuredAnyName -> 0
+    StructuredValueName -> 1
+    StructuredTypeName -> 2
+    StructuredConstructorName -> 3
+    StructuredFieldName -> 4)
+  <> WorldEncoding.encodeString (Text.pack (structuredName question))
+  <> WorldEncoding.encodeWord64 (inspectionGeneration (structuredProvenance question))
+  <> WorldEncoding.encodeString (Text.pack (inspectionFingerprint (structuredProvenance question)))
+
 frameWorldQuery :: BS.ByteString -> BS.ByteString
 frameWorldQuery body
   | toInteger (BS.length body) > 4294967295 = throw WorldQueryCorrupt
-  | otherwise = "TPWQ0001"
+  | otherwise = "TPWQ0002"
       <> BS.pack [fromIntegral (BS.length body `div` (256 ^ power)) | power <- [0..3 :: Int]] <> body
 
 

@@ -37,9 +37,10 @@ worldRequestBoundaries = do
       question = WorldPublicModuleRequest root "foreign-worker-realization" WorldStructuredInfo
         (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
           (InspectionProvenance 1 "display-only")) "/unavailable/world-answer.bin"
-      body = BS.pack [135,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
+      body = BS.pack [136,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
+        <> BS.pack [132,1,99] <> "map" <> BS.pack [1,108] <> "display-only"
         <> BS.pack [130,104] <> "rejected" <> BS.pack [1,246,64]
-      expected = "TPWQ0001" <> BS.pack [60,0,0,0] <> body
+      expected = "TPWQ0002" <> BS.pack [80,0,0,0] <> body
   args <- case workerRequestFromArgv (workerArgv [WorldPublicModule question]) of
     Right (Just request) -> pure request
     other -> fail ("invalid world query fixture: " ++ show other)
