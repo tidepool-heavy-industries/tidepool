@@ -1,154 +1,131 @@
-# Campaign status and restart entry point
+# Shared warm compiler campaign — current snapshot
 
-State: **implementation active; G0 bootstrap and first area waves launched**.
+State: **implementation active; first qualification tranche integrated and tested**.
+No measured compiler speedup, semantic Ready/hit, frozen release or deployment yet.
 
-Campaign owner: `/root/warm_compiler_campaign`, `gpt-6.1-sol` high.
-Parent coordinator: `/root` (performance fork). External pre-fork delivery/release
-owner is unconfirmed; coordinate that owner before release/main/live-host handback.
-Campaign may publish its own branch only.
-Campaign checkout: `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`.
-Campaign branch: `campaign/shared-warm-compiler`.
-Bootstrap source and contract revision: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
+Campaign owner `/root/warm_compiler_campaign` (gpt-6.1-sol high), checkout
+`/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`, branch
+`campaign/shared-warm-compiler`. Parent `/root` coordinates the performance fork;
+external pre-fork release/main/live-host owner remains unconfirmed. Campaign
+publication is authorized; release integration/deployment needs that owner.
 
-Public `github` remote refreshed deliberately at kickoff (2026-10-19):
-release `545d9950e5c3c3940f5b6bf84dfc5d16d6b1a89d` is ancestor of imported peer
-`70a92c65a02a591f76590daf4e5bfa3e6fcbf723`, which is parent of plan `5b74c2f1fe`.
-Created the campaign from release, fast-forwarded the required peer prerequisite,
-then carried the reviewed plan. The peer delta is 127 files, 6774 insertions and
-1520 deletions: pre-existing implementation, protocol/projection/fixture and
-correctness work, not campaign output or a documentation-only prerequisite.
-Optional-root repair `d24b5b20b04b70c61416d5bf68858916b7b54848` is contained.
-No parent active checkout, release branch, live Persona host or compiler changed.
+Baseline: deliberately refreshed public release
+`545d9950e5c3c3940f5b6bf84dfc5d16d6b1a89d` → imported peer
+`70a92c65a02a591f76590daf4e5bfa3e6fcbf723` → reviewed plan
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Peer delta127files/6774+/1520-
+is prerequisite implementation, not campaign output. Optional-root repair
+`d24b5b20b04b70c61416d5bf68858916b7b54848` contained. Contract C2 amendment
+`e2bd2611102566085d0c573568d820a50ed62fb3` is acknowledged by all area owners.
 
-## Actual capacity and ownership
+## Integrated checkpoint and exact checks
 
-Parent granted **14 active agents including this supervisor**. Five area
-supervisors plus eight leaf grants fill that ceiling. Maximum two direct live
-children per area; deeper descendants need explicitly reassigned grants.
-All explicit model overrides use fresh context. Dormant earlier researchers are
-not reactivated. The table records actual returned task identities; area handoffs
-record their leaf candidates, grants, settlement and review/fold receipts.
+Campaign integration `6d3b1745b465b6d0fe14104cb4020ead282f1620` contains complete
+qualification area `7db82af3f13292ce3677ee6e87272653c7d7bbf5` (reviewed leaf
+cec2a3361 roster + ac3bf6e03 capture; area joined code64636e485a).
+It fails closed on invalid physical compiler observations through cycle and
+workload reporting, registers existing profile tests, and adds the stronger
+shared-workspace Persona case to the seven-case frozen startup roster.
+Independent Sol-high full-delta review accepted; campaign joined source-only
+checks executed **89 reporter/profile +436 bundle script cases, all passed**,
+exit0, no skip/omission. These do not execute hosted/native compiler workloads.
 
-| Actual task under `/root/warm_compiler_campaign` | Model/effort | Leaf grants | Branch/check-out suffix | Current state |
-| --- | --- | ---: | --- | --- |
-| `host_inputs` | gpt-6.1-sol high | 2 | feature/shared-warm/host-inputs; tidepool-shared-warm-host-inputs-20261019 | ACK; selected_root high and selection_oracle high started |
-| `owned_inputs` | gpt-6.1-sol high | 2 | feature/shared-warm/owned-inputs; tidepool-shared-warm-owned-inputs-20261019 | ACK; rows medium and source_lifetime high started |
-| `warm_workers` | gpt-6.1-sol high | 1 | feature/shared-warm/warm-workers; tidepool-shared-warm-warm-workers-20261019 | ACK; protocol high started |
-| `reload` | gpt-6.1-sol high | 2 | feature/shared-warm/reload; tidepool-shared-warm-reload-20261019 | ACK; generation_admission high and authority_review high started |
-| `qualification` | gpt-6.1-sol high | 1 | feature/shared-warm/qualification; tidepool-shared-warm-qualification-20261019 | ACK; capture_sensitivity high started; baseline/resource route active |
+Exact campaign command: `swarm-build bash scripts/buck2-run.sh test --local-only
+-c remote.enabled=false -c tidepool.profile=fast-dev --print-passing-details
+//scripts:compiler_reuse_report_tests //scripts:native_bundle_qualification_tests`.
+Evidence `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/campaign/`:
+joined-script-tests.json/log; logSHA
+`de33f88a43a7261165f187345fe8409e9555919d712aecfc6fe4d9897d0125be`.
+Clean tested source6d3b; configure exit0, elapsed16.57s; script checks22.92s.
 
-Area source base is exact `5b74c2f1fe`; all simultaneous writers have isolated
-real checkouts/indexes. Each owns its `plans/shared-warm-compiler/AREA/HANDOFF.md`.
-Only campaign edits this STATUS and shared CONTRACTS. Every accepted leaf delta
-requires independent exact base-to-candidate Sol review, bounded repair, area
-fold and campaign fold with actual joined production/test consumer checks.
-No implementation checkpoint has yet been accepted or folded. All eight actual
-leaf identities are running under their named area: host_inputs/{selected_root,
-selection_oracle}, owned_inputs/{rows,source_lifetime}, warm_workers/protocol,
-reload/{generation_admission,authority_review}, qualification/capture_sensitivity.
-All leaves use gpt-6.1-sol high except owned_inputs/rows at medium.
+Pinned admitted `scripts/integration-status.py --strict` ran at6d3b, exit1 only
+`local_main_missing` in this intentionally isolated campaign checkout; Harness
+manifest/lock pins agree at1893773e14b02b3015d99ba63114decfd3223949.
+No main ref was manufactured or parent branch changed. Report integration-status.json.
+Its origin/main observation is cached local provenance, not public freshness.
 
-## Prerequisite execution evidence
+## Capacity and live continuation ownership
 
-Read mandatory compiler-failure HLS-REWRITE-HANDOFF.md and actual stronger Persona
-report under `/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-70a-strong-persona/`:
-`host-cases/e27eec134184eea75959071896799d075b55b040628a49a0e25165b9be2fab4e.json`.
-One selected/executed/passed test, exit 0. Process and hosted cleanup confirmed;
-compiler cleanup `not_observed`, observation complete; diagnostics incomplete.
-This is focused prerequisite evidence, not campaign or release qualification.
-Selection/custody/interface compatibility/exact issued edges/demand/current
-runtime authority remain distinct. Required historical conflicts still refuse.
+Subtree ceiling14 including campaign: five supervisors and eight reserved leaves.
+All use gpt-6.1-sol high except owned_inputs/rows medium; fresh contexts.
+Grants persist through event-bound yields, maximum2direct children per area.
+Actual10running/4completed at last concrete roster reconciliation; completed
+contexts are waiting dispositions, not permission to duplicate their assignments.
 
-## Resources and checks
+| Area/task under campaign | Reserved leaves | Current concrete state / next event owner |
+| --- | ---: | --- |
+| host_inputs | 2 | Supervisor + selected_root + selection_oracle active. Area08feadc4ea source-reviewed OrdMap/lazy-P6/borrowed-selected rows, native0/0. Same-context input-Arc reuse implementation and adversarial source-support adoption review active. Group/package rechecks retained after mutable external.hi counterexample. |
+| owned_inputs | 2 | rows active repairing26e0f31d; supervisor and source_lifetime yielded with grants reserved. Rows MUST followup_task dormant reviewer AND supervisor with repaired exact candidate/evidence/next action. Two findings: certificate-bound promotion owner; same-view immutable leaf overlay. Area4bdf767772 records review; no accepted product fold/native check. |
+| warm_workers | 1 | Supervisor + protocol audit active. Codef3a386310b (docs-tip889d82c152) Rust library and cfgtest binary compiled;4counted Rust controls passed. Haskell production worker compile active under new measured lane, observer supervisor. Exact-root Ready implementation waits host/owned owners; global-retainer audit independent. |
+| reload | 2 | Supervisor + generation_admission active; authority_review yielded reserved awaiting repair. Supervisor MUST followup_task reviewer with exact repaired checkpoint after typed NotStarted/Unconfirmed lifecycle-loss repair. Directory/generation source gate and force schema foundations unqualified; no force publication wired. |
+| qualification | 1 | Supervisor active on exact Haskell graph/resource census; capture_sensitivity completed/integrated. Terminal graph receipt delivered warm; next compiled checkpoint or final frontier-settled event owns reactivation. Final scratch audit not yet ready. |
 
-Campaign buck-out bind mount provisioned and verified via findmnt.
-Kickoff observation: `/srv/build` 102 GiB free, preserve 100 GiB unreserved
-including expected growth; memory 95 GiB available. Source/review work active;
-no campaign compiler/build/test process admitted yet. Each area must measure
-actual headroom and output growth before checks, use pinned admitted local-only
-repository commands, and retain exact pending commands for deferred checks.
-Installed `swarm-build --storage-status` failed (`exec: --: invalid option`),
-so staged bounded-storage switches are not assumed accepted or available.
-No bypass, arbitrary output deletion or shared daemon restart is authorized.
-Qualification investigates the smallest supported admission route and available
-exact baseline artifacts; compilation/execution remain unqualified until run.
+Every leaf has an isolated real checkout/index and per-area HANDOFF. Campaign alone
+edits shared STATUS/CONTRACTS. Only owning parent integrates its branch. Full
+base-to-candidate source review and meaningful compile/count evidence precede
+acceptance; source-only reviewed candidates remain explicitly unqualified.
 
-## Next actions and finite frontier
+## Native evidence and current storage admission
 
-Host: exact selected root/home census and independent oracle. Owned inputs:
-immutable row borrowing and consumed-source lifetime. Warm workers: source-free
-protocol and actual GHC lifetime analysis without speculative dependent APIs.
-Reload: generation dependency issuance/callback bypass closure. Qualification:
-independent baseline/oracle sensitivity and early joined production-path checks.
-Pipeline successor waves after exact dependencies fold; do not leave accepted
-work in leaves. Hard strategy gaps receive bounded Sol-high adversarial review,
-close only their dependency cone, and drain every already-approved independent
-successor/review/repair/fold/running-test before a MORNING decision handoff.
-No native goal is created by this subtree. No deployment is authorized.
+Warm exactf3a386310bf8be9f93720e165d5e33c80d39bd64:
+`swarm-build just build -j1 //tidepool/extract-cmd:tidepool_extract_cmd` exit0,
+216local/0cached actions54.5s; unit binary target151local/0cached49.4s.
+Counted protocol/END controls selected4/executed4/passed4 exit0; actual libtestSHA
+`6e58cbee2bf8b02538c6334349117f58ed3e907992ebd98c50a93f84d8977bb5`.
+Process cleanup confirmed; no GHC used, compiler cleanup not_observed.
+Evidence warm-workers/RUST-VALIDATION.json and protocol-rust-tests.log.
+Transport code only: source-free Unsupported route, no realization/Ready/hit claim.
 
-Explicit user wrap-up task, after all campaign subagent work settles:
-qualification performs bounded top-down scratch-space analysis by checkout/output
-owner, active versus idle use, independent required products/evidence, potential
-reclaimable output and exact safe boundaries. **Analysis only**: no deletion,
-unmount, GC or stopping others. Admission/headroom checks continue during work.
+Warm buck-out~663.5MB after Rust; daemon3810824/fork3810865 retained in its
+admitted build.slice scope, peak1946890240B. Campaign script daemon also retained.
+All live parent Persona hosts/shared workers untouched. Mounts provisioned/verified.
 
-## Active shared decisions and findings
+Installed swarm-build is the older scope launcher, with no disk-reservation
+switches; `--storage-status` failed, so no staged rollout assumed. Preserve100GiB
+unreserved including expected growth. No deletion/unmount/GC/restart/bypass.
+Recent free108268392448B (~853MiB abovefloor) admitted ONE Haskell compile-only
+lane prospective640MiB (measured historical retained outputs306618368B plus
+serialized scratch allowance; expected estimate, not proven peak). Production
+`//bridge/haskell:tidepool_extract_bin` runs first; warm observes terminal and
+re-evaluates before worker_response_test_bin/worker_response_child/cell_splitter_test_bin.
+Those exact compile-only graphs have no Rust generator dependency.
+The counted Haskell wrapper includes effects_generated→Rust runtime/toolchain/mcp;
+retained owner census~1.816GB with unresolved/absent outputs, not admitted.
+Broad host/toolchain/reload compilation and frozen runs remain disk-blocked.
 
-C2 exact census and C6 context provenance amendments are recorded in CONTRACTS;
-affected owners must acknowledge the amendment commit before broad migration.
-Owned baseline rows reuse existing value-sized RetainedArtifactRow ownership at
-P6 and borrow that same issued row on next capture; no extra transport registry.
-Package-universe source association is under bounded independent review: current
-deployment manifest owns executable digests and a libdir path, while old EPS/lazy
-objects survive requests. A newly read path/hash cannot authenticate their old
-bytes. Existing owned deployment source proof versus clean per-operation universe
-fallback is being evaluated; row/host/reload work continues independently.
-Qualification found the stronger shared-workspace case missing from frozen
-persona-startup roster and a capture observer that still labels failed-cycle hit
-counts observed. Narrow production repairs and independent controls are active.
-Installed supported metadata check `swarm-build just check-plan exomonad-host
-tidepool-toolchain` passed (metadata only, no Buck/output growth), not compilation
-or test execution. Observed free bytes108974096384 leave about1.49GiB above reserve;
-no defensible cold compile growth bound exists yet. Exact pending compile:
-`swarm-build just check exomonad-host tidepool-toolchain`.
+## Shared decisions, remaining frontier and acceptance limits
 
-## Event-driven supervision
+Home census uses authenticated selected canonical/value/lexical row witnesses,
+separate from home_units type classification, dormant custody and executable demand.
+Actual complete baseline context owner is reused; no wrapper/registry minted only
+for identity. Changed transitions require exact old/new owner evidence; no stale
+ordered-prefix source support or hash/equal-payload substitute.
 
-The user superseded periodic60s polling. All five supervisors acknowledged:
-maximize useful work per activation; if no local action remains, retain exact
-awaited event/dependency/producer-or-observer/recipient/continuation and yield.
-No timed periodic/status-only wake loops. Terminal handoff is mandatory for all
-success/refusal/failure/blocked/cancelled/stand-down outcomes with exact source,
-evidence and next action. Producer checks running recipient→send_message,
-dormant non-root recipient→followup_task, under reserved grants/no duplication.
-Auto-completion is supporting delivery, not a resumption guarantee. Process
-owners observe terminal results; only branch owner reconciles review and fold.
+Physical rows promote value-sized custody before existing source-support narrowing.
+Rejected full-frontier refresh would add O(history) work at publication. Current
+package path/hash and deployment schema1 do not own already-decoded EPS/lazy bytes:
+no group-validation skip or pinned-package claim. Source-backed/clean-universe
+options and actual global strong-owner release remain under bounded review.
 
-Host/owned supervisors may yield while their exact leaves finish current work;
-reserved grants remain held and producers own status-aware reactivation. No
-source result or build is accepted merely because a worker reports done.
+Reload uses lower RuntimeLexicalScopeLease source admission distinct from custody
+liveness. Actual new compile/install/registration gates preserve Continuing and
+independent LLM worlds. Force cannot kill independent owned children as collateral;
+real cleanup closure/fence or typed refusal required. Unknown lifecycle cleanup
+must retain identity and uncertainty. Candidate preparation stops nobody.
 
-Qualification source-only baseline executed89 unittest cases and failed19
-subtests:16 new observer-sensitivity failures and3 fixture/procedure defects
-separately classified. Buck exit32, evidence at
-`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/capture-sensitivity/before-repair.{json,log}`.
-This is actual failure discrimination, not passing acceptance. Buck logical output
-75,974,066B under measured100MiB lane; native checks remain disk-blocked.
-Warm structural candidate2ea510f075ccc8b7a7f5620faac884e610666b61 independently
-source-reviewed full5b74..candidate by campaign; redundant explicit HscEnv fields
-removed with identical sole HPT fallback and missing-HMI behavior. No native compile
-or memory-release claim, no qualified fold. Package default cold fallback held
-pending actual source-owner option review and regression controls.
+All remaining approved issuer, physical-row, reload, review/repair/fold and joined
+checks stay in frontier. Hard strategy questions close only their cone after
+bounded independent review; drain all other approved successors and running checks
+before MORNING handoff. No native goal/deployment created here.
 
-Qualification candidates cec2a3361cf6b46d3de6026a0e0b9ace416d4cd8 (roster)
-and ac3bf6e0379559b68396b7854868c3d819cd6467 (capture) independently reviewed
-full5b74..tip by campaign Sol-high; source accepted, joined area fold and script
-checks requested before campaign integration. Capture89 report cases+436 bundle
-script cases passed at its source; roster434 script cases passed at its source.
-These are script behavior, not hosted/native execution. Exact joined evidence
-and artifact identity remain pending.
-Reload source-admission owner extends existing lower RuntimeLexicalScopeLease,
-separately from custody/resource liveness, at actual compile/install/mutation.
-Force cannot stop an independent LLM child as collateral of dependent parent's
-lifetime cleanup: exact owner closure fences or typed refusal must precede stop.
-No automatic reparent/promotion is authorized. Concrete controls under development.
+Event-driven continuation: no periodic polling/status wakes. Max useful work per
+activation; if locally blocked, record awaited event/producer-or-observer/recipient/
+next action then yield. EVERY terminal outcome sends exact source/evidence/status/
+next action; running recipient→send_message, dormant non-root→followup_task.
+Auto-completion supports delivery, never replaces resumption. Command owners must
+observe terminal outcomes; no orphan process. Reserved grants/no duplicates.
+
+After all campaign subagent frontier settles, qualification MUST analyze scratch
+space bounded top-down by checkout/output owner, active versus idle use, independent
+required products/evidence, potential reclaimable outputs and exact safe boundaries.
+Analysis only: no deletion, unmount, GC or stopping others. Admission checks continue
+throughout work. Final bundle/performance qualification and deployment remain separate.
