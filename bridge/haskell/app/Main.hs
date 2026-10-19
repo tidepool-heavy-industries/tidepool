@@ -111,7 +111,9 @@ import Tidepool.RequestCompletion
   , flattenCompletion, completionResult, completionFailures, appendCleanupFailures, asCleanupFailures )
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
-import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
+import Tidepool.ExtractRequest
+  ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..) )
 import Tidepool.Introspection
   ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
@@ -190,7 +192,7 @@ main = do
 
 -- Retain the issued request result while the outer GHC scope and interpreter
 -- release. A failure before issuance remains an independent operation failure.
-runDirectInvocation :: [String] -> PhaseSink -> IO (Completion [Diag])
+runDirectInvocation :: [String] -> PhaseSink -> IO (Completion WorkerServer.WorkerResponse)
 runDirectInvocation raw sink = do
   issued <- newIORef Nothing
   outer <- captureCompletion $ withResidentCompilerScopes [] $ \runRequest ->
@@ -206,16 +208,19 @@ runDirectInvocation raw sink = do
       _ -> asCleanupFailures CompilerScopeRestore outer
 
 -- Direct and resident transports decode the same versioned worker payload.
-runWorkerInvocation :: PhaseSink -> CompilerScope -> [String] -> IO (Completion [Diag])
+runWorkerInvocation :: PhaseSink -> CompilerScope -> [String] -> IO (Completion WorkerServer.WorkerResponse)
 runWorkerInvocation sink compilerScope raw = case workerRequestFromArgv raw of
   Left failure -> captureCompletion (throwIO (InvalidWorkerRequest failure))
   Right Nothing -> captureCompletion (throwIO (InvalidWorkerRequest "worker requires a versioned request"))
   Right (Just request) -> runParsedInvocation sink compilerScope request
 
-runParsedInvocation :: PhaseSink -> CompilerScope -> WorkerRequest -> IO (Completion [Diag])
-runParsedInvocation sink compilerScope parsed = flattenCompletion <$> captureCompletion (do
-  timing <- readTimingEnabled
-  withBoundCompilerRequest sink compilerScope parsed (dispatch timing))
+runParsedInvocation :: PhaseSink -> CompilerScope -> WorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
+runParsedInvocation _ _ parsed | isJust (requestEnsureExactInputs parsed) =
+  captureCompletion (pure (WorkerServer.ExactInputsResponse (ExactInputsRejected UnsupportedOperation)))
+runParsedInvocation sink compilerScope parsed = fmap WorkerServer.DiagnosticResponse <$>
+  (flattenCompletion <$> captureCompletion (do
+    timing <- readTimingEnabled
+    withBoundCompilerRequest sink compilerScope parsed (dispatch timing)))
 
 -- Mode selection, normalized arguments and exact admission come from one owner.
 dispatch :: Bool -> BoundCompilerRequest -> IO [Diag]
@@ -230,6 +235,7 @@ dispatch timing bound =
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
           -> fail "inspection type batch requires at least two type queries and no other query kinds"
         | otherwise -> case boundRequestOperation bound of
+            EnsureExactInputsOperation _ -> fail "source-free exact input acquisition entered source dispatch"
             ActivationPreviewOperation -> runActivationPreviewMode bound file
             SourceCheckOperation -> runSourceCheckMode bound file
             CellPlanOperation -> runCellPlanMode (boundParserFlags bound) args file
