@@ -22601,12 +22601,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            available_private.native_offers().len(),
-            private.native_offers().len()
+            available_private
+                .native_offers()
+                .iter()
+                .map(|offer| offer.original())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([original_id]),
+            "the private query supplies the requested original, not all request contributions"
         );
-        for expected in private.native_offers() {
+        for expected in available_private.native_offers() {
             assert!(
-                available_private
+                private
                     .native_offers()
                     .iter()
                     .any(|offer| offer.same_issuance(expected)),
