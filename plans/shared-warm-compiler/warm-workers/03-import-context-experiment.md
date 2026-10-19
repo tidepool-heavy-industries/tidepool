@@ -1,6 +1,12 @@
-# Wave 3: checked import context experiment
+# Ordinary-cell dependency reuse and checked import-context experiment
 
-Status: bounded design prototype with a semantic and performance go/no-go. Supervisor: [warm workers](README.md). Depends on integrated [exact realizations](01-exact-realizations.md), [bounded pool](02-bounded-pool.md), the parent exact-root contract and retained current-source baselines. A successful lower-level snapshot/transport wave does not predetermine frontend adoption.
+Supervisor: [warm workers](README.md). Arm B is core ordinary-cell work under
+the [current delivery sequence](../README.md#next-complete-workflow); it begins
+with the first nonempty actor cell and does not wait for the complete pool,
+retirement or recovery matrix. Arm C is a bounded subsequent experiment with
+a semantic and performance go/no-go. Both use the exact realization, existing
+retention owner and current-source baseline. Transport success alone establishes
+neither kind of compiler reuse.
 
 ## Question and fixed language contract
 
@@ -30,20 +36,40 @@ Inputs: complete issued exact root and realization, immutable source/template/fl
 | B: persistent exact HPT, ordinary module entry | Borrow a complete selected persistent HPT/import graph, apply checked new selections, then use normal module checking and source imports | Remove full `initialHomes` reconstruction and any redundant baseline hydration where ownership proves it. Ordinary GHC import/GRE/orphan/instance processing can remain O(scope). Do not relabel this as complete frontend incrementality. |
 | C: explicit complete checked-import context / maintained scope interface | Issue a closed import projection from the exact root; borrow its immutable name/type/import/instance facts with fresh target/scratch. Use the existing source-free facade/interface owner where it preserves semantics; consume through the native module frontend or a narrowly specified query entry | Seek elimination of baseline import rendering **and** baseline name/import-environment reconstruction. A single facade import may still expand all exports and traverse instance/orphan closure; count that work. No raw saved TcGblEnv engine or ambient “latest actor session.” |
 
-Implement A/B instrumentation first. For C, specify the immutable fields and fresh mutable borrow in a reviewed short design note before coding the entry. If a maintained facade is used, it exports precisely the visible names under the existing lexical membrane, preserves original Names/instances/provenance, and remains separate from retained native custody. It does not export every retained historical implementation or become another selection issuer. A target importing one facade still needs all semantic dependencies, including negative resolution and unused instance imports.
+Implement A/B instrumentation with the real ordinary-cell join first. B retains
+eligible completed dependency answers as well as the selected HPT: HPT seeding
+alone is insufficient if the pipeline still recompiles unchanged dependencies.
+Use the existing world-owned prepared-module state and actual validity/recovery
+owners, not a second cache or a full inventory copied into a fresh cache.
+
+Fresh target, request memo, diagnostics, hooks, executor, cancellation and output
+reservations remain per attempt. They do not require discarding compatible
+immutable dependency answers. Same-world reuse and reuse in a published
+successor are separate controls. Preserve source/role/instance/negative
+dependencies, actual worker/NameCache/package/interpreter constraints, and
+independent backing ownership across predecessor eviction. Do not retain an
+ancestor world to keep its scratch alive. If a field cannot safely cross the
+boundary, retain its typed reason for recomputation and measure that cost.
+
+The initial empty-world cell implementation clears HPT and starts with no
+completed candidates. It is a correctness bootstrap, not the accepted B route.
+Failure to establish meaningful B reuse is a campaign design decision to bring
+back with evidence; it cannot silently become a completed warm-cell migration.
+
+For C, specify the immutable fields and fresh mutable borrow in a reviewed short design note before coding the entry. If a maintained facade is used, it exports precisely the visible names under the existing lexical membrane, preserves original Names/instances/provenance, and remains separate from retained native custody. It does not export every retained historical implementation or become another selection issuer. A target importing one facade still needs all semantic dependencies, including negative resolution and unused instance imports.
 
 GHCi is a mechanism comparator only: InteractiveContext retains and incrementally extends reader state, but `runTcInteractive` rebuilds TypeEnv from its retained things and unions instance/orphan context. Its naming/defaulting/declaration/evaluation behavior differs. Do not add a fourth evaluator arm merely because the parsed APIs are available. Use pinned HLS's separately owned summary/parse/typecheck/interface projections to guide output boundaries; its stale-editor rules are not execution authority.
 
 ## Prototype sequence and semantic stop points
 
 1. Retain A's exact baseline under the joined implementation revision. Count source bytes/import declarations, selected-home traversal, interface hydration, GRE expansion, instance/orphan work, frontend/finalization and products. Preserve timing nesting and actual package-source/profile identity.
-2. Implement B only within the exact realization owner. Keep fresh finder/target hooks/knots and selected HPT closure, using delta transitions from the issuing owner rather than reconstructing from all stored versions. Compare A/B outputs and counts before moving on.
+2. Implement B only within the exact realization owner. Keep fresh finder/target hooks/knots and selected HPT closure, using delta transitions from the issuing owner rather than reconstructing from all stored versions. Join nonempty binding activation, actual Prepare certification and atomic successor publication now. Compare A/B values and counts for bind then later use with a real imported home module before moving on. Empty-world or query-only successes do not pass this step.
 3. Prototype C first for repeated fixed-result pure name/signature queries and a fixed module's bounded export query in one exact scope. Charge full-scope export observations by their actual output rows/bytes rather than requiring constant total work. These already use CheckOnly; the target is elimination of repeated generated checking leaves/import assembly, not prepared codegen. Then add arbitrary TypeOf and availability controls, which still require new expression checking or exact-context solver work.
 4. If those controls pass, exercise one new executable typed cell segment and one declaration segment through normal authored source/templates and product issuance. Preserve fresh target identity, produced thin interfaces, capture origins and generated-instance retry policy. Do not remove necessary authored body compilation to meet a count target.
 5. Exercise delta histories: append, shadow, fork, changed alias/hiding, instance-only import, package-shadowing home owner, source/helper reload and old retained value. On each transition either derive a correct checked successor or explicitly recompute; do not skip required invalidation merely because no term identifier mentions the dependency.
 6. Compare all three arms through the joined actor front door, including cold worker replacement and exact input acquisition. Record each semantic mismatch as a minimized counterexample before adjusting the prototype.
 
-If C needs broad GHC internal patching, new module/unit identity semantics, disabled validation or a changed effect/value ABI, escalate with a concrete boundary proposal to the parent supervisor. Do not expand the experiment silently. Arm B can be accepted independently if it has a meaningful measured benefit and no semantic regression; C can end with a documented no-go.
+If C needs broad GHC internal patching, new module/unit identity semantics, disabled validation or a changed effect/value ABI, escalate with a concrete boundary proposal to the parent supervisor. Do not expand the experiment silently. Arm B is accepted with meaningful measured reuse and no semantic regression; C can end with a documented no-go. A negative B result requires revisiting the core performance path, rather than postponing that question until final qualification.
 
 ## Independent equivalence and refusal controls
 

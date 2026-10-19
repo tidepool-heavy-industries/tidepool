@@ -175,15 +175,22 @@ continuously. An area's numbered task waves can span several gates.
 | --- | --- | --- |
 | G0: baseline and contract | Campaign pins the fresh coordination base, common contract, owners, negative controls and baseline evidence. Area supervisors map consumers and split bounded leaves. | Each leaf acknowledges the exact contract/dependencies; unresolved architecture blocks its dependent edits. |
 | G1: exact roots and owned rows | `host-inputs` issues exact selected roots/frontdoor controls; `owned-inputs` provides admitted shared rows through its existing owner. `qualification` establishes discriminating histories and counters. Other tracks investigate their ready consumers. | Compile joined input producers/consumers and exercise an early real host-to-compiler path, including optional/required root and ownership controls. |
-| G2: delta, admission and publication | `host-inputs` migrates ready delta/admission/publication consumers. `reload` establishes generation retirement/currentness against accepted ownership facts. `owned-inputs` and `qualification` join these histories; worker design consumes the settled contracts. | Exercise small publication deltas, refusal/cancellation, fork/drop and generation retirement through production consumers; preserve exact dependency OIDs for each ready slice. |
-| G3: worker realizations | `warm-workers` consumes the required accepted G1/G2 slices to retain/share compatible realizations. Integrate reload and owned-input consumers against those actual realizations. Optional affinity requires a measured benefit and its own decision. | Run shared warm requests, independent consumer lifetime, cancellation, stale replacement and resource-refusal controls on joined source. |
-| G4: experiment and joined acceptance | Run the bounded frontend experiment with an explicit go/no-go decision, then qualify the accepted whole joined candidate. Areas repair findings in further numbered waves. Rejected experiments stay archived and unmerged. | Exact source/artifact/profile evidence, alternate-route deletion, declared correctness/resource/performance gates and parent handoff are reconciled. A no-go does not waive the accepted path's remaining gates. |
+| G2: demand-based operation | Actual held-world query/check caller, source capture and exact cold acquisition; cell producers and lifecycle work proceed alongside it. | Real source-domain and authority controls; a warm query does not perform the old full input preparation. |
+| G3: ordinary cells reuse dependencies | Warm supplies nonempty activation, Prepare/certification and retained eligible compiler answers. Host supplies exact item successors and atomic bindings/world publication. | Real bind then later use under the same actual profile/source; returned values, world transitions, strict refusals and early work/timing comparison. |
+| G4: complete and qualify | Finish mutation/fork/reload/recovery and scoped retirement, delete obsolete routes, decide conditional arm C and qualify the joined bundle. | Exact source/artifact/profile evidence and claimed behavior/performance reconcile. An intermediate candidate with explicitly unsupported force is partial delivery. |
 
 Open the next wave when its specific dependencies are ready, rather than waiting
 for unrelated areas. If the contract changes, downstream work follows the update
 protocol below before it is described as ready. A supervisor may collapse or
 split a wave when evidence changes the critical path; retain the actual DAG and
 dependency OIDs in the journal.
+
+The [next complete workflow](README.md#next-complete-workflow) controls current
+sequencing. Core dependency reuse (arm B) is part of G3. Do not defer its first
+real ordinary-cell comparison until all areas finish; only deeper import-context
+arm C is conditional. Report separately implementation gaps, product defects,
+fixture defects and pending checks. Passing component counts do not shrink an
+unimplemented consumer into a qualification task.
 
 | Track | Primary ownership question for assignments | Two adjacent checks reusing that context |
 | --- | --- | --- |
