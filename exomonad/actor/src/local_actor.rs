@@ -386,72 +386,77 @@ impl KernelContext {
         let context = self.clone();
         let result = self
             .directory
-            .prepare_root(Box::new(move |ticket| {
-                Box::pin(async move {
-                    let produced: run_control::RootOperationResult = async {
-                        let _admission = context.lifecycle.resource_admission().await?;
-                        let mut custody = StartupCustody {
-                            directory: context.directory.clone(),
-                            parent: context.identity,
-                            accounted: false,
-                        };
-                        let (child, task) =
-                            match context.myself.spawn_linked(name, actor, arguments).await {
-                                Ok(spawned) => spawned,
-                                Err(error) => {
-                                    context.directory.retain_child_cleanup(
-                                        context.identity,
-                                        cleanup(ResourceCleanup::Retire).await,
-                                    );
-                                    custody.accounted = true;
-                                    return Err(
-                                        Box::new(error) as Box<dyn std::error::Error + Send + Sync>
-                                    );
-                                }
+            .prepare_actor_resource(
+                self.identity,
+                Box::new(move |ticket| {
+                    Box::pin(async move {
+                        let produced: run_control::RootOperationResult = async {
+                            let _admission = context.lifecycle.resource_admission().await?;
+                            let mut custody = StartupCustody {
+                                directory: context.directory.clone(),
+                                parent: context.identity,
+                                accounted: false,
                             };
-                        let resource = ResourceChild {
-                            cell: child.get_cell(),
-                            cleanup: Arc::new(cleanup),
-                        };
-                        if let Err(error) = context
-                            .directory
-                            .register_resource(context.identity, ticket.id, resource.clone())
-                            .await
-                        {
-                            resource.cell.stop(None);
-                            let outcome = match tokio::time::timeout(SHUTDOWN_BUDGET, async {
-                                resource.cell.wait(Some(SHUTDOWN_BUDGET)).await?;
-                                Ok::<_, ractor::concurrency::Timeout>(
-                                    (resource.cleanup)(ResourceCleanup::Retire).await,
-                                )
-                            })
-                            .await
-                            {
-                                Ok(Ok(outcome)) => outcome,
-                                _ => crate::CleanupComponentOutcome::Unconfirmed(
-                                    "resource registration refusal cleanup is unconfirmed".into(),
-                                ),
+                            let (child, task) =
+                                match context.myself.spawn_linked(name, actor, arguments).await {
+                                    Ok(spawned) => spawned,
+                                    Err(error) => {
+                                        context.directory.retain_child_cleanup(
+                                            context.identity,
+                                            cleanup(ResourceCleanup::Retire).await,
+                                        );
+                                        custody.accounted = true;
+                                        return Err(Box::new(error)
+                                            as Box<dyn std::error::Error + Send + Sync>);
+                                    }
+                                };
+                            let resource = ResourceChild {
+                                cell: child.get_cell(),
+                                cleanup: Arc::new(cleanup),
                             };
-                            context
+                            if let Err(error) = context
                                 .directory
-                                .retain_child_cleanup(context.identity, outcome);
+                                .register_resource(context.identity, ticket.id, resource.clone())
+                                .await
+                            {
+                                resource.cell.stop(None);
+                                let outcome = match tokio::time::timeout(SHUTDOWN_BUDGET, async {
+                                    resource.cell.wait(Some(SHUTDOWN_BUDGET)).await?;
+                                    Ok::<_, ractor::concurrency::Timeout>(
+                                        (resource.cleanup)(ResourceCleanup::Retire).await,
+                                    )
+                                })
+                                .await
+                                {
+                                    Ok(Ok(outcome)) => outcome,
+                                    _ => crate::CleanupComponentOutcome::Unconfirmed(
+                                        "resource registration refusal cleanup is unconfirmed"
+                                            .into(),
+                                    ),
+                                };
+                                context
+                                    .directory
+                                    .retain_child_cleanup(context.identity, outcome);
+                                drop(task);
+                                custody.accounted = true;
+                                return Err(
+                                    Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                                );
+                            }
                             drop(task);
                             custody.accounted = true;
-                            return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                            Ok(run_control::RootAdmissionOutcome::NativeResource(resource))
                         }
-                        drop(task);
-                        custody.accounted = true;
-                        Ok(run_control::RootAdmissionOutcome::NativeResource(resource))
-                    }
-                    .await;
-                    let cleanup = if produced.is_ok() {
-                        crate::CleanupComponentOutcome::Confirmed
-                    } else {
-                        context.directory.child_cleanup(context.identity).await
-                    };
-                    (produced, cleanup)
-                })
-            }))
+                        .await;
+                        let cleanup = if produced.is_ok() {
+                            crate::CleanupComponentOutcome::Confirmed
+                        } else {
+                            context.directory.child_cleanup(context.identity).await
+                        };
+                        (produced, cleanup)
+                    })
+                }),
+            )
             .await
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?
             .map_err(Self::preparation_spawn_failure)?;
@@ -7798,6 +7803,123 @@ mod tests {
     }
 
     struct FenceResource;
+
+    struct PendingResource;
+
+    impl ractor::Actor for PendingResource {
+        type Msg = ();
+        type State = ();
+        type Arguments = (oneshot::Sender<ractor::ActorRef<()>>, oneshot::Receiver<()>);
+
+        async fn pre_start(
+            &self,
+            myself: ractor::ActorRef<()>,
+            (entered, release): Self::Arguments,
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            entered.send(myself).unwrap();
+            release.await.unwrap();
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ractor::ActorRef<()>,
+            _message: (),
+            _state: &mut (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn native_resource_preparation_retains_issued_actor_before_registration() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let child = context
+            .spawn_child(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let other = observations.lock()[1].0.clone();
+        let started = Arc::new(AtomicBool::new(false));
+        let observed = started.clone();
+        let missing = ActorRef::first(crate::ActorId(u64::MAX));
+        assert!(matches!(
+            context.directory.prepare_actor_resource(missing, Box::new(move |_| Box::pin(async move {
+                observed.store(true, Ordering::SeqCst);
+                (Err(std::io::Error::other("unissued actor must not allocate").into()), crate::CleanupComponentOutcome::Confirmed)
+            }))).await,
+            Err(run_control::DirectoryError::Unauthorized { actor }) if actor == missing
+        ));
+        assert!(!started.load(Ordering::SeqCst));
+
+        let (entered, pending) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let issued = context.clone();
+        let cleanup_count = cleaned.clone();
+        let spawning = tokio::spawn(async move {
+            issued
+                .spawn_resource(None, PendingResource, (entered, resume), move |mode| {
+                    if matches!(mode, ResourceCleanup::Retire) {
+                        cleanup_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Box::pin(async { crate::CleanupComponentOutcome::Confirmed })
+                })
+                .await
+        });
+        let pending = pending.await.unwrap();
+        let owners = context
+            .directory
+            .actor_preparation_observations(parent.identity())
+            .await
+            .unwrap();
+        assert_eq!(
+            owners.len(),
+            1,
+            "actual pending allocation has its issued actor lifetime"
+        );
+        let (preparation, source_dependent) = owners[0];
+        assert!(
+            !source_dependent,
+            "a native allocation does not inherit Haskell source authority"
+        );
+        assert!(matches!(
+            context.directory.register_resource(other.identity(), preparation, ResourceChild {
+                cell: pending.get_cell(),
+                cleanup: Arc::new(|_| Box::pin(async { crate::CleanupComponentOutcome::Confirmed })),
+            }).await,
+            Err(run_control::DirectoryError::Unauthorized { actor }) if actor == other.identity()
+        ));
+        assert!(context
+            .directory
+            .owned_resource(other.identity(), pending.get_id())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        let resource = spawning.await.unwrap().unwrap();
+        assert_eq!(resource.get_id(), pending.get_id());
+        assert!(context
+            .directory
+            .owned_resource(parent.identity(), resource.get_id())
+            .await
+            .unwrap()
+            .is_some());
+        parent
+            .shutdown_with_cleanup(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "native lifetime control",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(child.terminal().get().is_some());
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    }
 
     impl ractor::Actor for FenceResource {
         type Msg = ();
