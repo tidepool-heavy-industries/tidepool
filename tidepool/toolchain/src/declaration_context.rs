@@ -6514,6 +6514,10 @@ impl ExactCompilationRequest {
     }
 
     pub(crate) fn input_transport_files(&self) -> Vec<Arc<std::fs::File>> {
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdEnumeration,
+            1,
+        );
         let Some(materialization) = &self.materialization else {
             return Vec::new();
         };
@@ -6523,14 +6527,30 @@ impl ExactCompilationRequest {
         let selected_rows = materialization.selected_rows(metadata);
         let selected_row_visits = selected_rows.len();
         for row in selected_rows.into_values() {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputFdSelectedRowVisit,
+                1,
+            );
             for slice in row.owned_inputs.values() {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::InputFdSliceVisit,
+                    1,
+                );
                 slice_visits += 1;
                 let file = slice.compiler_file_lease();
                 files.insert(Arc::as_ptr(&file) as usize, file);
             }
         }
         let graph_paths = materialization.graph_path_refs();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdGraphVisit,
+            graph_paths.len() as u64,
+        );
         for entry in metadata.entries.values() {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputFdMetadataVisit,
+                1,
+            );
             if let ArtifactPayload::Original(product) = &entry.payload {
                 if let Some(graph) = product.execution_source() {
                     if let Some(owned) = graph_paths.get(&graph.digest()) {
@@ -6544,6 +6564,10 @@ impl ExactCompilationRequest {
             selected_row_visits, slice_visits, graph_path_visits = graph_paths.len(),
             metadata_entry_visits = metadata.entries.len(), exported_files = files.len(),
             "enumerated exact immutable input file leases");
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdExport,
+            files.len() as u64,
+        );
         files.into_values().collect()
     }
 
@@ -8150,6 +8174,10 @@ impl ExactDeclarationContext {
     pub(crate) fn compiler_metadata_snapshot(
         &self,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::CompilerMetadataSnapshot,
+            1,
+        );
         #[cfg(test)]
         COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(count.get() + 1));
         self.owner
@@ -9010,6 +9038,10 @@ impl ExactDeclarationContext {
         let mut lexical = self.owner.facts.lexical.to_vec();
         timing.advance("merge_value_support");
         for (index, value) in values.iter().enumerate() {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::RetainedValueSupportMerge,
+                1,
+            );
             let _item_span = tracing::debug_span!(
                 target: "exomonad_harness::timing", "exact.retained_value_extension.item",
                 inclusive = true, index, has_template_imports = value.template_imports().is_some(),
@@ -9108,6 +9140,10 @@ impl ExactDeclarationContext {
 
     fn observation(&self) -> &ContextObservation {
         self.owner.observations.get_or_init(|| {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::SemanticEncoding,
+                1,
+            );
             #[cfg(test)]
             self.owner
                 .semantic_issuances
@@ -9120,11 +9156,19 @@ impl ExactDeclarationContext {
                 .artifacts()
                 .metadata_snapshot();
             let semantics: Arc<[u8]> = self.semantic_bytes_from_metadata(&metadata).into();
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::SemanticEncodedByte,
+                semantics.len() as u64,
+            );
             #[cfg(test)]
             CONTEXT_OBSERVATION_WORK.with(|work| {
                 let (encodings, bytes) = work.get();
                 work.set((encodings + 1, bytes + semantics.len()));
             });
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::SemanticHashedByte,
+                semantics.len() as u64,
+            );
             let digest = sha2::Sha256::digest(&semantics).into();
             ContextObservation {
                 metadata,
@@ -9394,6 +9438,12 @@ impl ExactDeclarationContext {
         let mut native = metadata
             .artifacts
             .values()
+            .inspect(|_| {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::CompilerOldRowVisit,
+                    1,
+                );
+            })
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => Some((&entry.descriptor, product)),
                 _ => None,
@@ -10725,6 +10775,10 @@ impl ExactDeclarationContext {
             .create_new(true)
             .open(&manifest)?;
         output.write_all(&bytes)?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ScopeEncodedByte,
+            bytes.len() as u64,
+        );
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_request_references",
             reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
