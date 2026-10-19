@@ -13007,6 +13007,351 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn completed_request_keeps_two_input_permissions_separate_from_fresh_outputs() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
+            CanonicalProducerIdentity, CompilerInputProjection, ExactArtifactSelection,
+            NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
+            NativeTransportMode, OriginalCompilerInputs,
+        };
+        use crate::CompileError;
+        let producer_bytes = b"two-input-request-obligations";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let product = |module: &str, version, groups| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    groups,
+                    version,
+                    &BTreeMap::new(),
+                    format!("{module} interface").into_bytes(),
+                ),
+                producer.sha256(),
+            )
+        };
+        let import = |product: &CertifiedRecoveryProduct, ordinal| {
+            let mut binder =
+                testing::identity(&product.owner().module, &format!("entry_{ordinal}"));
+            binder.unit = product.owner().unit.clone();
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder,
+            }
+        };
+        let unused = product("UnusedRequestInput", 31, vec![(7, vec![])]);
+        let baseline = product(
+            "FixedRequestInput",
+            32,
+            vec![(7, vec![]), (9001, vec![import(&unused, 7)])],
+        );
+        let required = product(
+            "VariableRequestInput",
+            33,
+            vec![(7, vec![]), (9001, vec![])],
+        );
+        let extra = product("UnrelatedRequestOutput", 34, vec![(9001, vec![])]);
+        let mut histories = 0;
+        let mut accepted = 0;
+        for demanded in [7, 9001] {
+            let fresh = product(
+                "FreshRequestOutput",
+                35,
+                vec![
+                    (7, vec![import(&baseline, 7)]),
+                    (9001, vec![import(&required, demanded)]),
+                ],
+            );
+            let products = recovered_witness_fixtures(&[
+                unused.clone(),
+                baseline.clone(),
+                required.clone(),
+                fresh,
+                extra.clone(),
+            ]);
+            let entries = products
+                .iter()
+                .map(|row| {
+                    Arc::new(
+                        ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let unused_interface = Arc::new(ArtifactEntry::canonical(
+                products[0].product.module_interface().unwrap().clone(),
+            ));
+            for selected in [None, Some(7), Some(9001)] {
+                for grant_full in [false, true] {
+                    for extra_output in [false, true] {
+                        histories += 1;
+                        let inventory = ArtifactInventory::default();
+                        let full_baseline = inventory
+                            .admit_shared(
+                                &inventory.empty_view(),
+                                vec![entries[0].clone(), entries[1].clone()],
+                            )
+                            .unwrap();
+                        let full_baseline = issue_fixture_compiler_support(
+                            CompilerInputProjection::from_issued_entries(&[
+                                entries[0].clone(),
+                                entries[1].clone(),
+                            ])
+                            .unwrap(),
+                            full_baseline,
+                        )
+                        .unwrap();
+                        let baseline_entries = vec![unused_interface.clone(), entries[1].clone()];
+                        let baseline_view = inventory
+                            .admit_recovery_selection(
+                                &inventory.empty_view(),
+                                baseline_entries.clone(),
+                                &BTreeSet::from([NativeGroupKey {
+                                    artifact: entries[1].descriptor.id,
+                                    original_ordinal: 7,
+                                }]),
+                            )
+                            .unwrap();
+                        let baseline_support = issue_fixture_compiler_support(
+                            CompilerInputProjection::from_issued_entries(&baseline_entries)
+                                .unwrap(),
+                            baseline_view,
+                        )
+                        .unwrap()
+                        .retain_offers(
+                            full_baseline
+                                .native_offers()
+                                .iter()
+                                .filter(|offer| offer.original() == entries[1].descriptor.id)
+                                .cloned(),
+                        )
+                        .unwrap();
+                        assert!(baseline_support
+                            .native_availability()
+                            .rows()
+                            .all(|row| row.original_owner() != products[0].product.owner()));
+                        let full_required = inventory
+                            .admit_shared(&inventory.empty_view(), vec![entries[2].clone()])
+                            .unwrap();
+                        let required_projection =
+                            CompilerInputProjection::from_issued_entries(&[entries[2].clone()])
+                                .unwrap();
+                        let full_required = issue_fixture_compiler_support(
+                            required_projection.clone(),
+                            full_required,
+                        )
+                        .unwrap();
+                        let selected_groups = selected
+                            .into_iter()
+                            .map(|ordinal| NativeGroupKey {
+                                artifact: entries[2].descriptor.id,
+                                original_ordinal: ordinal,
+                            })
+                            .collect::<BTreeSet<_>>();
+                        let mut required_support = if grant_full {
+                            // Retain this same issued Full carrier while changing only
+                            // execution demand. A fresh admission would change bindings.
+                            let mut graph = full_required.artifacts().capture_graph_selection();
+                            let namespace = graph.namespace.clone();
+                            let unused = graph
+                                .roots
+                                .iter()
+                                .filter(|node| match node {
+                                    ArtifactBindingNode::Group(group) => {
+                                        !selected_groups.contains(&NativeGroupKey {
+                                            artifact: group.binding.artifact(),
+                                            original_ordinal: group.original_ordinal,
+                                        })
+                                    }
+                                    ArtifactBindingNode::Artifact(_) => false,
+                                })
+                                .copied()
+                                .collect::<Vec<_>>();
+                            graph.roots.retain(|node| !unused.contains(node));
+                            graph.custody_roots.extend(unused);
+                            graph.custody_roots.sort();
+                            graph.custody_roots.dedup();
+                            let chosen = full_required
+                                .artifacts()
+                                .select_issued(
+                                    namespace.iter().map(|binding| binding.artifact).collect(),
+                                    &ExactArtifactSelection::from_recovered_graph_selection(graph),
+                                )
+                                .unwrap();
+                            let support =
+                                issue_fixture_compiler_support(required_projection.clone(), chosen)
+                                    .unwrap()
+                                    .retain_normalized_availability(
+                                        full_required.native_availability(),
+                                    )
+                                    .unwrap();
+                            if selected.is_none() {
+                                support.for_source_owners(&BTreeSet::new()).unwrap()
+                            } else {
+                                support
+                            }
+                        } else if selected.is_some() {
+                            let chosen = inventory
+                                .admit_recovery_selection(
+                                    &inventory.empty_view(),
+                                    vec![entries[2].clone()],
+                                    &selected_groups,
+                                )
+                                .unwrap();
+                            issue_fixture_compiler_support(required_projection, chosen).unwrap()
+                        } else {
+                            full_required
+                                .selected_interfaces()
+                                .unwrap()
+                                .support_for_owners(vec![entries[2].descriptor.owner.clone()])
+                                .unwrap()
+                                .retain_custody(full_required.artifacts())
+                                .unwrap()
+                        };
+                        required_support = required_support
+                            .retain_offers(full_required.native_offers().iter().cloned())
+                            .unwrap();
+                        let support = baseline_support.merge(&required_support).unwrap();
+                        let context = Arc::new(
+                            ExactDeclarationContext::new(&[], &[], vec![])
+                                .unwrap()
+                                .extend_issued_compiler_support(&support)
+                                .unwrap(),
+                        );
+                        let before = context.artifact_view().capture_graph_selection();
+                        let root = tempfile::tempdir().unwrap();
+                        let request = ExactCompileContext::new(context.clone())
+                            .prepare_compilation(&root.path().join("input"), producer_bytes)
+                            .unwrap();
+                        let input = request.compiler_inputs();
+                        let baseline_row =
+                            input.native_availability(entries[1].descriptor.id).unwrap();
+                        assert!(baseline_row.permits(7));
+                        assert!(!baseline_row.permits(9001));
+                        assert!(input
+                            .native_availability(entries[0].descriptor.id)
+                            .is_none());
+                        let required_row = input.native_availability(entries[2].descriptor.id);
+                        for ordinal in [7, 9001] {
+                            assert_eq!(
+                                required_row.is_some_and(|row| row.permits(ordinal)),
+                                grant_full || selected == Some(ordinal)
+                            );
+                        }
+                        let operation = InventoryOperation::new(Default::default());
+                        let mut selection =
+                            CertifiedSourceSelection::from_compiler_inputs(input, &operation)
+                                .unwrap();
+                        let output_indices = if extra_output { vec![3, 4] } else { vec![3] };
+                        for index in &output_indices {
+                            let output = &products[*index].product;
+                            selection
+                                .admit_current(
+                                    output.owner(),
+                                    ProductOrigin::RetainedCore,
+                                    output.module_interface().unwrap(),
+                                    &operation,
+                                )
+                                .unwrap();
+                        }
+                        let physical = input
+                            .artifacts()
+                            .inventory()
+                            .admit_shared_with_demand(
+                                input.artifacts(),
+                                output_indices
+                                    .iter()
+                                    .map(|index| entries[*index].clone())
+                                    .collect(),
+                                NativeArtifactDemand::ScopeInterfaces,
+                            )
+                            .unwrap();
+                        let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+                        let expected = grant_full || selected == Some(demanded);
+                        if !expected {
+                            assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
+                                if matches!(error.failure,
+                                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                                        artifact, original_ordinal,
+                                    } if artifact == entries[2].descriptor.id
+                                        && original_ordinal == demanded)),
+                                "demanded={demanded} selected={selected:?} full={grant_full} extra={extra_output}");
+                        } else {
+                            accepted += 1;
+                            let completed = result.unwrap_or_else(|error| panic!(
+                                "demanded={demanded} selected={selected:?} full={grant_full} extra={extra_output}: {error:?}"
+                            ));
+                            assert!(completed
+                                .issued_artifacts()
+                                .selected_native_groups()
+                                .iter()
+                                .all(|group| output_indices
+                                    .iter()
+                                    .all(|index| group.artifact != entries[*index].descriptor.id)));
+                            let next = ExactCompileContext::new(context.clone())
+                                .prepare_compilation_with_private_input(
+                                    &root.path().join("output"),
+                                    producer_bytes,
+                                    None,
+                                    Some(completed),
+                                )
+                                .unwrap();
+                            let next = next.compiler_inputs();
+                            assert_eq!(
+                                next.artifacts().selected_native_groups(),
+                                input.artifacts().selected_native_groups()
+                            );
+                            assert!(next
+                                .native_availability(entries[1].descriptor.id)
+                                .unwrap()
+                                .permits(7));
+                            assert!(!next
+                                .native_availability(entries[1].descriptor.id)
+                                .unwrap()
+                                .permits(9001));
+                            assert!(next.native_availability(entries[0].descriptor.id).is_none());
+                            let required =
+                                next.native_availability(entries[2].descriptor.id).unwrap();
+                            for ordinal in [7, 9001] {
+                                assert_eq!(
+                                    required.permits(ordinal),
+                                    grant_full || selected == Some(ordinal)
+                                );
+                            }
+                            let facts =
+                                next.private_native_availability().snapshot_facts().unwrap();
+                            assert_eq!(
+                                facts[&entries[1].descriptor.id].mode,
+                                NativeTransportMode::IssuedGroups
+                            );
+                            assert_eq!(
+                                facts[&entries[2].descriptor.id].mode == NativeTransportMode::Full,
+                                grant_full
+                            );
+                            for index in &output_indices {
+                                assert_eq!(
+                                    facts[&entries[*index].descriptor.id].mode,
+                                    NativeTransportMode::Full
+                                );
+                            }
+                            assert_eq!(facts.contains_key(&entries[4].descriptor.id), extra_output);
+                        }
+                        assert_eq!(context.artifact_view().capture_graph_selection(), before);
+                    }
+                }
+            }
+        }
+        assert_eq!(histories, 24);
+        assert_eq!(accepted, 16);
+        eprintln!(
+            "two_input_request_histories={histories} accepted={accepted} refused={}",
+            histories - accepted
+        );
+    }
+
+    #[test]
     fn completed_type_output_preserves_baseline_original_permissions() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
