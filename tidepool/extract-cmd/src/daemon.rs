@@ -4985,7 +4985,7 @@ mod tests {
                         )),
                     ),
                 },
-                _resource_permit: permit,
+                _resource_permit: Some(permit),
                 _admission_permit: Some(AdmissionPermit(marker)),
                 prior: None,
             });
