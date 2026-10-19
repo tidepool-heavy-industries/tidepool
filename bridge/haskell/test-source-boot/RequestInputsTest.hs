@@ -599,7 +599,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       mutatePublished "world-published-authority1-map5" authorityCID (set "version" (TInt 1) authority)
         (Just "unsupported compiler world descriptor version")
       forM_ ["roles","offers","native_availability","input_decisions"] $ \name -> do
-        mutatePublished ("world-published-missing-" ++ name) authorityCID (remove name authority)
+        mutatePublished ("world-published-missing-" ++ name) authorityCID (remove (T.pack name) authority)
           (Just "invalid compiler world descriptor fields")
         root <- worldFixtureFieldLink name authority
         requireCorrupt (Just "compiler world block child is absent") ("world-published-absent-" ++ name)
