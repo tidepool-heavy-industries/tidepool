@@ -853,6 +853,8 @@ struct AuthenticatedOriginalGroup {
 
 #[cfg(test)]
 thread_local! {
+    static ORIGINAL_VALIDATION_OWNER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ORIGINAL_VALIDATION_GROUP_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ADMITTED_ORIGINAL_GROUP_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -6383,44 +6385,72 @@ pub(crate) fn validate_available_originals_with_validation(
             ));
         }
     }
-    if advertised_originals.is_empty() {
-        return validate_selected_originals_with_validation(
-            available,
-            &[],
-            advertised,
-            validation,
-            OriginalNativeUse::Availability,
-            None,
-        )
-        .map(|_| ());
-    }
+    let inventory = OriginalValidationInventory::new(available)?;
+    let mut facts = OriginalGroupFacts::new();
+    let mut first = true;
     for original in advertised_originals {
-        let mut checked = advertised.clone();
-        let mut roots = advertised
-            .iter()
-            .filter(|key| key.artifact == original)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if let Some(proof) = qualified.get(&original) {
-            let closure = proof
-                .groups()
-                .iter()
-                .map(|group| crate::artifact_inventory::NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal,
-                })
-                .collect::<BTreeSet<_>>();
-            checked.extend(closure.iter().copied());
-            roots.extend(closure);
+        let closure = qualified
+            .get(&original)
+            .map(|proof| {
+                proof
+                    .groups()
+                    .iter()
+                    .map(|group| crate::artifact_inventory::NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if first {
+            // Preserve the first root's sorted error order. After success every
+            // base fact is authenticated; later roots need only private additions.
+            let mut base = advertised.iter().peekable();
+            let mut private = closure.iter().peekable();
+            loop {
+                let key = match (base.peek(), private.peek()) {
+                    (Some(left), Some(right)) if left < right => base.next(),
+                    (Some(left), Some(right)) if left > right => private.next(),
+                    (Some(_), Some(_)) => {
+                        private.next();
+                        base.next()
+                    }
+                    (Some(_), None) => base.next(),
+                    (None, Some(_)) => private.next(),
+                    (None, None) => break,
+                }
+                .expect("one remaining group key");
+                facts.insert(*key, inventory.authenticate_group(key)?);
+            }
+            first = false;
+        } else {
+            for key in &closure {
+                if !facts.contains_key(key) {
+                    facts.insert(*key, inventory.authenticate_group(key)?);
+                }
+            }
         }
-        validate_selected_originals_with_validation(
-            available,
-            &[],
-            &checked,
-            validation,
-            OriginalNativeUse::Availability,
-            Some(&roots),
-        )?;
+        let own = advertised.range(
+            crate::artifact_inventory::NativeGroupKey {
+                artifact: original,
+                original_ordinal: 0,
+            }..=crate::artifact_inventory::NativeGroupKey {
+                artifact: original,
+                original_ordinal: u32::MAX,
+            },
+        );
+        let roots = own
+            .copied()
+            .chain(closure.iter().copied())
+            .collect::<BTreeSet<_>>();
+        for key in roots {
+            inventory.validate_imports(
+                &key,
+                &facts,
+                |required| advertised.contains(required) || closure.contains(required),
+                validation,
+            )?;
+        }
     }
     Ok(())
 }
@@ -6690,40 +6720,65 @@ pub(crate) fn validate_selected_owned_products_in_context_with_validation(
     .map(|_| ())
 }
 
-#[track_caller]
-fn validate_selected_originals_with_validation(
-    available: &BTreeMap<
+type OriginalGroupFacts<'a> = BTreeMap<
+    crate::artifact_inventory::NativeGroupKey,
+    (&'a AuthenticatedOriginalGroup, &'a OriginalNativeWitness),
+>;
+
+/// Borrow one immutable inventory for this validation call. Authentication of
+/// group facts is separate from each root's allowed dependency membership.
+struct OriginalValidationInventory<'a> {
+    available: &'a BTreeMap<
         crate::artifact_inventory::ArtifactId,
-        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+        &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
     >,
-    current_groups: &[PendingCertifiedGroup],
-    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
-    validation: &mut PackageInterfaceValidation,
-    native_use: OriginalNativeUse,
-    validation_roots: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
-) -> CertResult<Vec<PendingCertifiedGroup>> {
-    use crate::artifact_inventory::NativeGroupKey;
-    let mut native_ids = std::collections::HashMap::new();
-    let mut home_modules = BTreeSet::new();
-    for (id, product) in available {
-        let owner = product.owner();
-        if let Some(old) = native_ids
-            .insert(owner.clone(), *id)
-            .filter(|old| old != id)
-        {
-            return Err(CertificationError::OriginalSelectionConflict(Box::new(
-                OriginalSelectionConflict {
-                    selected: owner.clone(),
-                    artifacts: vec![old, *id],
-                },
-            )));
+    native_ids: std::collections::HashMap<CachedHomeOwner, crate::artifact_inventory::ArtifactId>,
+    home_modules: BTreeSet<(String, String)>,
+}
+
+impl<'a> OriginalValidationInventory<'a> {
+    fn new(
+        available: &'a BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
+        >,
+    ) -> CertResult<Self> {
+        let mut native_ids = std::collections::HashMap::new();
+        let mut home_modules = BTreeSet::new();
+        for (id, product) in available {
+            #[cfg(test)]
+            ORIGINAL_VALIDATION_OWNER_VISITS.with(|count| count.set(count.get() + 1));
+            let owner = product.owner();
+            if let Some(old) = native_ids
+                .insert(owner.clone(), *id)
+                .filter(|old| old != id)
+            {
+                return Err(CertificationError::OriginalSelectionConflict(Box::new(
+                    OriginalSelectionConflict {
+                        selected: owner.clone(),
+                        artifacts: vec![old, *id],
+                    },
+                )));
+            }
+            home_modules.insert((owner.unit.clone(), owner.module.clone()));
         }
-        home_modules.insert((owner.unit.clone(), owner.module.clone()));
+        Ok(Self {
+            available,
+            native_ids,
+            home_modules,
+        })
     }
-    let mut originals = BTreeMap::new();
-    for key in selected {
-        let product = available
+
+    fn authenticate_group(
+        &self,
+        key: &crate::artifact_inventory::NativeGroupKey,
+    ) -> CertResult<(&'a AuthenticatedOriginalGroup, &'a OriginalNativeWitness)> {
+        #[cfg(test)]
+        ORIGINAL_VALIDATION_GROUP_LOOKUPS.with(|count| count.set(count.get() + 1));
+        let product = self
+            .available
             .get(&key.artifact)
+            .copied()
             .ok_or(CertificationError::Mismatch("selected original artifact"))?;
         let witness = product
             .original_native()
@@ -6738,46 +6793,22 @@ fn validate_selected_originals_with_validation(
         let group = witness
             .group(key.original_ordinal)
             .ok_or(CertificationError::Mismatch("selected original group"))?;
-        if originals.insert(*key, (group, witness)).is_some() {
-            return Err(CertificationError::Mismatch(
-                "duplicate selected original ordinal",
-            ));
-        }
+        Ok((group, witness.as_ref()))
     }
-    let mut inherited = BTreeSet::new();
-    for group in current_groups {
-        let key = NativeGroupKey {
-            artifact: *native_ids
-                .get(group.owner())
-                .ok_or(CertificationError::Mismatch(
-                    "current group has no exact original identity",
-                ))?,
-            original_ordinal: group.group().original_ordinal(),
-        };
-        let (original, _) = originals.get(&key).ok_or(CertificationError::Mismatch(
-            "current group outside selected closure",
-        ))?;
-        if original.owner != group.owner
-            || !(Arc::ptr_eq(&original.group, &group.group) || original.group == group.group)
-            || !(Arc::ptr_eq(&original.imports, &group.imports)
-                || original.imports == group.imports)
-        {
-            return Err(CertificationError::Mismatch("shared original home groups"));
-        }
-        if !inherited.insert(key) {
-            return Err(CertificationError::Mismatch(
-                "duplicate current original ordinal",
-            ));
-        }
-    }
-    let mut additional = Vec::new();
-    // Package refusal uses the complete admitted home census. Native source
-    // membership uses exact artifact keys, never a module-only source map.
-    let package_sources = SourceGroupMap::new();
-    for (key, (group, witness)) in &originals {
-        if validation_roots.is_some_and(|roots| !roots.contains(key)) {
-            continue;
-        }
+
+    fn validate_imports(
+        &self,
+        key: &crate::artifact_inventory::NativeGroupKey,
+        originals: &OriginalGroupFacts<'_>,
+        contains: impl Fn(&crate::artifact_inventory::NativeGroupKey) -> bool,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<()> {
+        use crate::artifact_inventory::NativeGroupKey;
+        let (group, witness) = originals[key];
+        let native_ids = &self.native_ids;
+        let home_modules = &self.home_modules;
+        let available = self.available;
+        let package_sources = SourceGroupMap::new();
         for import in group.imports() {
             match import {
                 PendingImportOwner::Source {
@@ -6798,14 +6829,19 @@ fn validate_selected_originals_with_validation(
                         artifact: *artifact,
                         original_ordinal: *original_ordinal,
                     };
-                    if originals.get(&required).is_none_or(|(original, _)| {
-                        original.owner != *owner || !original.group.binders().contains(binder)
-                    }) {
+                    if !contains(&required)
+                        || originals.get(&required).is_none_or(|(original, _)| {
+                            original.owner != *owner || !original.group.binders().contains(binder)
+                        })
+                    {
                         if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
                         {
-                            let selected_group = originals.get(&required).map(|(original, _)| {
-                                (&original.owner, original.group.binders().contains(binder))
-                            });
+                            let selected_group = originals
+                                .get(&required)
+                                .filter(|_| contains(&required))
+                                .map(|(original, _)| {
+                                    (&original.owner, original.group.binders().contains(binder))
+                                });
                             let available_group = available
                                 .get(artifact)
                                 .and_then(|product| {
@@ -6818,6 +6854,7 @@ fn validate_selected_originals_with_validation(
                                 });
                             let selected_ordinals = originals
                                 .keys()
+                                .filter(|key| contains(key))
                                 .filter(|key| key.artifact == *artifact)
                                 .map(|key| key.original_ordinal)
                                 .collect::<Vec<_>>();
@@ -6867,6 +6904,68 @@ fn validate_selected_originals_with_validation(
                 PendingImportOwner::Retained { .. } => {}
             }
         }
+        Ok(())
+    }
+}
+
+#[track_caller]
+fn validate_selected_originals_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    current_groups: &[PendingCertifiedGroup],
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+    native_use: OriginalNativeUse,
+    validation_roots: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
+) -> CertResult<Vec<PendingCertifiedGroup>> {
+    use crate::artifact_inventory::NativeGroupKey;
+    let inventory = OriginalValidationInventory::new(available)?;
+    let native_ids = &inventory.native_ids;
+    let mut originals = BTreeMap::new();
+    for key in selected {
+        let (group, witness) = inventory.authenticate_group(key)?;
+        if originals.insert(*key, (group, witness)).is_some() {
+            return Err(CertificationError::Mismatch(
+                "duplicate selected original ordinal",
+            ));
+        }
+    }
+    let mut inherited = BTreeSet::new();
+    for group in current_groups {
+        let key = NativeGroupKey {
+            artifact: *native_ids
+                .get(group.owner())
+                .ok_or(CertificationError::Mismatch(
+                    "current group has no exact original identity",
+                ))?,
+            original_ordinal: group.group().original_ordinal(),
+        };
+        let (original, _) = originals.get(&key).ok_or(CertificationError::Mismatch(
+            "current group outside selected closure",
+        ))?;
+        if original.owner != group.owner
+            || !(Arc::ptr_eq(&original.group, &group.group) || original.group == group.group)
+            || !(Arc::ptr_eq(&original.imports, &group.imports)
+                || original.imports == group.imports)
+        {
+            return Err(CertificationError::Mismatch("shared original home groups"));
+        }
+        if !inherited.insert(key) {
+            return Err(CertificationError::Mismatch(
+                "duplicate current original ordinal",
+            ));
+        }
+    }
+    let mut additional = Vec::new();
+    // Package refusal uses the complete admitted home census. Native source
+    // membership uses exact artifact keys, never a module-only source map.
+    for (key, (group, _)) in &originals {
+        if validation_roots.is_some_and(|roots| !roots.contains(key)) {
+            continue;
+        }
+        inventory.validate_imports(key, &originals, |_| true, validation)?;
         if native_use == OriginalNativeUse::SelectedGroups && !inherited.contains(key) {
             additional.push(group.admitted());
         }
@@ -11167,6 +11266,312 @@ pub(crate) mod tests {
                 _ => unreachable!("validation and materialization disagree"),
             }
         }
+    }
+
+    // The prior per-original algorithm is an independent traversal oracle for
+    // call-local sharing and root membership; it retains the selected validator.
+    fn reference_available_originals(
+        available: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            &crate::recovery_artifacts::CertifiedRecoveryProduct,
+        >,
+        advertised: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+        private: &[crate::artifact_inventory::QualifiedNativeAvailability],
+    ) -> CertResult<()> {
+        let originals = advertised
+            .iter()
+            .map(|key| key.artifact)
+            .collect::<BTreeSet<_>>();
+        let mut qualified = BTreeMap::new();
+        for proof in private {
+            if !originals.contains(&proof.original()) {
+                return Err(CertificationError::Mismatch(
+                    "private availability proof has no offered root",
+                ));
+            }
+            if qualified.insert(proof.original(), proof).is_some() {
+                return Err(CertificationError::Mismatch(
+                    "multiple private availability carrier proofs",
+                ));
+            }
+        }
+        let mut validation = PackageInterfaceValidation::default();
+        if originals.is_empty() {
+            return validate_selected_originals_with_validation(
+                available,
+                &[],
+                advertised,
+                &mut validation,
+                OriginalNativeUse::Availability,
+                None,
+            )
+            .map(|_| ());
+        }
+        for original in originals {
+            let mut checked = advertised.clone();
+            let mut roots = advertised
+                .iter()
+                .filter(|key| key.artifact == original)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if let Some(proof) = qualified.get(&original) {
+                let closure = proof
+                    .groups()
+                    .iter()
+                    .map(|group| crate::artifact_inventory::NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    })
+                    .collect::<BTreeSet<_>>();
+                checked.extend(closure.iter().copied());
+                roots.extend(closure);
+            }
+            validate_selected_originals_with_validation(
+                available,
+                &[],
+                &checked,
+                &mut validation,
+                OriginalNativeUse::Availability,
+                Some(&roots),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn available_original_validation_authenticates_shared_facts_once() {
+        use crate::artifact_inventory::{ArtifactEntry, NativeGroupKey};
+        let products = (0..8)
+            .map(|index| {
+                full_native_fixture(
+                    &format!("SharedFacts{index}"),
+                    (0..8).map(|ordinal| (ordinal, vec![])).collect(),
+                    7,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entries = products
+            .iter()
+            .map(|product| ArtifactEntry::original([1; 32], product.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let available = entries
+            .iter()
+            .zip(&products)
+            .map(|(entry, product)| (entry.descriptor.id, product))
+            .collect::<BTreeMap<_, _>>();
+        let advertised = entries
+            .iter()
+            .flat_map(|entry| {
+                (0..8).map(move |ordinal| NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: ordinal,
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let before = (
+            ORIGINAL_VALIDATION_OWNER_VISITS.with(std::cell::Cell::get),
+            ORIGINAL_VALIDATION_GROUP_LOOKUPS.with(std::cell::Cell::get),
+        );
+        validate_available_originals_with_validation(
+            &available,
+            &advertised,
+            &[],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let after = (
+            ORIGINAL_VALIDATION_OWNER_VISITS.with(std::cell::Cell::get),
+            ORIGINAL_VALIDATION_GROUP_LOOKUPS.with(std::cell::Cell::get),
+        );
+        assert_eq!((after.0 - before.0, after.1 - before.1), (8, 64));
+        reference_available_originals(&available, &advertised, &[]).unwrap();
+        assert_eq!(
+            (
+                ORIGINAL_VALIDATION_OWNER_VISITS.with(std::cell::Cell::get) - after.0,
+                ORIGINAL_VALIDATION_GROUP_LOOKUPS.with(std::cell::Cell::get) - after.1
+            ),
+            (64, 512)
+        );
+        for ordinal in [0, 4, u32::MAX] {
+            let mut selected = advertised.clone();
+            selected.insert(NativeGroupKey {
+                artifact: entries[0].descriptor.id,
+                original_ordinal: ordinal,
+            });
+            let actual = validate_available_originals_with_validation(
+                &available,
+                &selected,
+                &[],
+                &mut PackageInterfaceValidation::default(),
+            );
+            assert_eq!(
+                actual.map_err(|error| format!("{error:?}")),
+                reference_available_originals(&available, &selected, &[])
+                    .map_err(|error| format!("{error:?}"))
+            );
+        }
+        // An unused payload needs an owner census entry, not a native witness.
+        let unused =
+            original_groups_fixture("UnusedUncaptured", vec![(7, vec![])], 7, &BTreeMap::new());
+        assert!(unused.original_native().is_none());
+        let mut with_unused = available.clone();
+        with_unused.insert(crate::artifact_inventory::ArtifactId([0; 32]), &unused);
+        validate_available_originals_with_validation(
+            &with_unused,
+            &advertised,
+            &[],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(reference_available_originals(&with_unused, &advertised, &[]).is_ok());
+        let mut duplicate = available.clone();
+        duplicate.insert(crate::artifact_inventory::ArtifactId([0; 32]), &products[0]);
+        for selected in [&advertised, &BTreeSet::new()] {
+            let actual = validate_available_originals_with_validation(
+                &duplicate,
+                selected,
+                &[],
+                &mut PackageInterfaceValidation::default(),
+            );
+            assert!(matches!(
+                &actual,
+                Err(CertificationError::OriginalSelectionConflict(_))
+            ));
+            assert_eq!(
+                actual.map_err(|error| format!("{error:?}")),
+                reference_available_originals(&duplicate, selected, &[])
+                    .map_err(|error| format!("{error:?}"))
+            );
+        }
+    }
+
+    #[test]
+    fn available_original_validation_keeps_issued_private_closures_root_local() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, NativeGroupKey, NativeOriginalRequirement,
+        };
+        let leaf = full_native_fixture("PrivateFactsLeaf", vec![(5, vec![])], 7);
+        let binder = leaf
+            .original_native()
+            .unwrap()
+            .group(5)
+            .unwrap()
+            .group
+            .binders()[0]
+            .clone();
+        let dependency = PendingImportOwner::Source {
+            owner: leaf.owner().clone(),
+            original_ordinal: 5,
+            binder,
+        };
+        let left = full_native_fixture("PrivateFactsLeft", vec![(11, vec![dependency.clone()])], 7);
+        let right = full_native_fixture("PrivateFactsRight", vec![(11, vec![dependency])], 7);
+        let leaf_entry = Arc::new(ArtifactEntry::original([1; 32], leaf.clone()).unwrap());
+        let mut roots = [
+            Arc::new(ArtifactEntry::original([1; 32], left.clone()).unwrap()),
+            Arc::new(ArtifactEntry::original([1; 32], right.clone()).unwrap()),
+        ];
+        roots.sort_by_key(|entry| entry.descriptor.id);
+        let key = |entry: &ArtifactEntry, ordinal| NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: ordinal,
+        };
+        let hidden = key(&leaf_entry, 5);
+        let advertised = roots
+            .iter()
+            .map(|entry| key(entry, 11))
+            .collect::<BTreeSet<_>>();
+        let inventory = ArtifactInventory::default();
+        let qualified_view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![roots[1].clone(), leaf_entry.clone()],
+                &BTreeSet::from([key(&roots[1], 11), hidden]),
+            )
+            .unwrap();
+        let proof =
+            NativeOriginalRequirement::from_selected_view(roots[1].descriptor.id, &qualified_view)
+                .unwrap()
+                .unwrap();
+        let qualification = proof
+            .qualify_availability(&qualified_view)
+            .unwrap()
+            .unwrap();
+        assert!(qualification
+            .groups()
+            .iter()
+            .any(
+                |group| group.binding.artifact() == hidden.artifact && group.original_ordinal == 5
+            ));
+        let products = [&left, &right, &leaf];
+        let available = roots
+            .iter()
+            .chain(std::iter::once(&leaf_entry))
+            .map(|entry| {
+                let product = products
+                    .iter()
+                    .copied()
+                    .find(|product| {
+                        product.owner().unit == entry.descriptor.owner.unit
+                            && product.owner().module == entry.descriptor.owner.module
+                    })
+                    .unwrap();
+                (entry.descriptor.id, product)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let private = [qualification.clone()];
+        let check = |available: &BTreeMap<_, _>, selected: &BTreeSet<_>, private: &[_]| {
+            let actual = validate_available_originals_with_validation(
+                available,
+                selected,
+                private,
+                &mut PackageInterfaceValidation::default(),
+            );
+            let expected = reference_available_originals(available, selected, private);
+            assert_eq!(
+                actual
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}")),
+                expected
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
+            );
+            actual
+        };
+        // These advertised keys are deliberately incomplete validation input.
+        // A genuine second-root proof must not fill the first root's omission.
+        assert!(matches!(
+            check(&available, &advertised, &private),
+            Err(CertificationError::Mismatch("source binder/group closure"))
+        ));
+        let complete = advertised.iter().copied().chain([hidden]).collect();
+        check(&available, &complete, &private).unwrap();
+        let mut missing = available.clone();
+        missing.remove(&hidden.artifact);
+        // Earlier root import refusal precedes later private-key resolution.
+        assert!(matches!(
+            check(&missing, &advertised, &private),
+            Err(CertificationError::Mismatch("source binder/group closure"))
+        ));
+        let only_first = BTreeSet::from([key(&roots[0], 11)]);
+        assert!(matches!(
+            check(&available, &only_first, &private),
+            Err(CertificationError::Mismatch(
+                "private availability proof has no offered root"
+            ))
+        ));
+        assert!(matches!(
+            check(
+                &available,
+                &advertised,
+                &[qualification.clone(), qualification]
+            ),
+            Err(CertificationError::Mismatch(
+                "multiple private availability carrier proofs"
+            ))
+        ));
     }
 
     #[test]
