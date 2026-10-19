@@ -458,8 +458,8 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       receiving <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
       _ <- readExactScopeWithOwner bounded receiving >>= either fail pure
       -- Change only image order: the same issued complete scope now retains
-      -- Source first. The one-image Dependency scope must evict that optional
-      -- decode while the previously issued complete scope remains usable.
+      -- Source first. Restoring the same full images Dependency first must
+      -- evict Source's optional decode while the old complete scope stays usable.
       (_,codec) <- readScopeCodecFixture thirdPath
       (arenas,images) <- case scopeCodecAcquisition codec of
         Just (ContinueCodecOriginals arenas (TList images)) -> pure (arenas,images)
@@ -475,10 +475,15 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
         let kind = if asynchronous then "async" else "io"
         atomicOwner <- newExactInputOwner
         oldLive <- readExactScopeWithOwner atomicOwner failedPath >>= either fail pure
-        _ <- readExactScopeWithOwner atomicOwner receiving >>= either fail pure
+        _ <- readExactScopeWithOwner atomicOwner thirdPath >>= either fail pure
         let oldInterfaces = [iface | (iface,_,_) <- scopeInterfaces oldLive]
             decodeOld = readScopedInterfaces (prHscEnv (pprPipelineResult original)) oldLive oldInterfaces >>= either fail pure
         _ <- decodeOld
+        (_,beforeFailed) <- captureDiagnostics decodeOld
+        unless (total "exact_iface_read_calls.CanonicalSource" beforeFailed == 1
+            && total "exact_iface_decode_reuse.CanonicalSource" beforeFailed == 0
+            && total "exact_iface_decode_reuse.CanonicalDependency" beforeFailed == 1)
+          (fail "publication control did not establish Dependency-only inactive decoder retention")
         attempted <- failRetainedCountWrite asynchronous (readExactScopeWithOwner atomicOwner failedPath)
         unless (case (kind,attempted) of
             ("io",Right (Left reason)) -> "injected retained-count write failure" `isInfixOf` reason
@@ -490,9 +495,9 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
             && total "exact_iface_decode_reuse.CanonicalSource" afterFailed == 0
             && total "exact_iface_decode_reuse.CanonicalDependency" afterFailed == 2)
           (fail ("failed " ++ kind ++ " acquisition split raw custody from decoder retention: " ++ afterFailed))
-        (_,stillPrevious) <- captureDiagnostics (readExactScopeWithOwner atomicOwner receiving >>= either fail pure)
+        (_,stillPrevious) <- captureDiagnostics (readExactScopeWithOwner atomicOwner thirdPath >>= either fail pure)
         unless (total "original_inputs.certificate.hits" stillPrevious == 1
-            && total "original_inputs.certificate.misses" stillPrevious == 0)
+            && total "original_inputs.certificate.misses" stillPrevious == 1)
           (fail "failed acquisition discarded previous raw input facts")
       forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
         bytes <- scopeInterfaceBytes live iface
