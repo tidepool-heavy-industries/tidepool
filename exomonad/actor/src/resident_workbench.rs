@@ -4380,31 +4380,37 @@ macro_rules! resident_request_roster {
         enum ResidentRequest { $($variant($request),)* }
 
         impl ResidentRequest {
-    fn decode(
-        request: &HaskellValue,
-        table: &DataConTable,
-    ) -> Result<Self, ResidentActorWorkbenchError> {
-        tracing::trace!(constructor = %request_constructor(request, table), "decoding resident request");
-        $(match <$request as FromHaskell>::from_value(request, table) {
-            Ok(decoded) => return Ok(Self::$variant(decoded)),
-            Err(BridgeError::UnknownDataCon(_)) => {}
-            Err(source) => return Err(ResidentActorWorkbenchError::RequestDecode {
-                constructor: request_constructor(request, table), source,
-            }),
-        })*
-        Err(ResidentActorWorkbenchError::UnsupportedRequest {
-            constructor: request_constructor(request, table),
-        })
-    }
+            fn decode(
+                request: &HaskellValue,
+                table: &DataConTable,
+            ) -> Result<Self, ResidentActorWorkbenchError> {
+                tracing::trace!(constructor = %request_constructor(request, table), "decoding resident request");
+                $(match <$request as FromHaskell>::from_value(request, table) {
+                    Ok(decoded) => return Ok(Self::$variant(decoded)),
+                    Err(BridgeError::UnknownDataCon(_)) => {}
+                    Err(source) => return Err(ResidentActorWorkbenchError::RequestDecode {
+                        constructor: request_constructor(request, table), source,
+                    }),
+                })*
+                Err(ResidentActorWorkbenchError::UnsupportedRequest {
+                    constructor: request_constructor(request, table),
+                })
+            }
 
-    #[cfg(test)]
-    fn recognizing_members(request: &HaskellValue, table: &DataConTable) -> Vec<&'static str> {
-        let mut members = Vec::new();
-        $(if !matches!(<$request as FromHaskell>::from_value(request, table), Err(BridgeError::UnknownDataCon(_))) {
-            members.push(stringify!($variant));
-        })*
-        members
-    }
+            #[cfg(test)]
+            fn request_types() -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($variant), std::any::type_name::<$request>()
+                    .rsplit("::").next().expect("request enum type")),)*]
+            }
+
+            #[cfg(test)]
+            fn recognizing_members(request: &HaskellValue, table: &DataConTable) -> Vec<&'static str> {
+                let mut members = Vec::new();
+                $(if !matches!(<$request as FromHaskell>::from_value(request, table), Err(BridgeError::UnknownDataCon(_))) {
+                    members.push(stringify!($variant));
+                })*
+                members
+            }
         }
 
         pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
@@ -16196,69 +16202,65 @@ pub(crate) mod request_tests {
                 && matches!(fields.as_slice(), [HaskellValue::Con(error, changed)] if Some(*error) == tidepool_bridge::get_qualified(&table, "Tidepool.Effects.Core.ScopeChanged", 2) && changed.len() == 2)
         ));
     }
+    fn request_constructor_fixture(
+        module: &str,
+        name: &str,
+        arity: usize,
+    ) -> (DataConTable, tidepool_repr::DataConId) {
+        let mut table = tidepool_test_data::standard_datacon_table();
+        let id = tidepool_repr::DataConId(1000);
+        table
+            .insert_checked(tidepool_repr::DataCon {
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: module.into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.into(),
+                        record_parent: None,
+                    },
+                    "Request",
+                ),
+                id,
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity as u32,
+                field_bangs: Vec::new(),
+                qualified_name: Some(format!("{module}.{name}")),
+                type_name: "Request".into(),
+            })
+            .unwrap();
+        (table, id)
+    }
+
     #[test]
-    fn resident_request_constructor_domains_are_disjoint() {
-        use tidepool_repr::{DataCon, DataConId};
+    fn resident_schema_request_constructors_have_one_decoder() {
+        let request_types = ResidentRequest::request_types();
         let mut recognized = std::collections::BTreeSet::new();
-        let mut constructors = Vec::new();
         for effect in tidepool_protocol::effects::all() {
+            // Other schema owners (for example runtime Ask and concrete
+            // handlers) are intentionally outside this resident request sum.
+            let Some((expected, _)) = request_types
+                .iter()
+                .find(|(_, name)| *name == effect.req_enum)
+            else {
+                continue;
+            };
             for verb in effect.verbs {
-                constructors.push(("Tidepool.Effects.Core", verb.ctor, verb.args.len()));
-            }
-        }
-        // These requests are authored outside the protocol schema owner.
-        constructors.extend([
-            ("Tidepool.Agent.Reply.Internal", "CurrentRequestWith", 1),
-            ("Tidepool.Agent.Watch.Internal", "ListRoutesWith", 0),
-        ]);
-        for (module, name, arity) in constructors {
-            let mut table = tidepool_test_data::standard_datacon_table();
-            let id = DataConId(1000);
-            table
-                .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
-                        tidepool_repr::execution_schema::SymbolIdentity {
-                            unit: "fixture".into(),
-                            module: module.into(),
-                            namespace: "constructor".into(),
-                            occurrence: name.into(),
-                            record_parent: None,
-                        },
-                        "Request",
-                    ),
-                    id,
-                    name: name.into(),
-                    tag: 1,
-                    rep_arity: arity as u32,
-                    field_bangs: Vec::new(),
-                    qualified_name: Some(format!("{module}.{name}")),
-                    type_name: "Request".into(),
-                })
-                .unwrap();
-            // Recognition must precede field decoding. Wrong arity exercises
-            // every matching decoder without manufacturing typed payloads.
-            let value = HaskellValue::Con(id, vec![HaskellValue::Con(id, vec![]); arity + 1]);
-            let members = ResidentRequest::recognizing_members(&value, &table);
-            assert!(
-                members.len() <= 1,
-                "overlapping request constructor {module}.{name}: {members:?}"
-            );
-            if let Some(member) = members.first() {
-                recognized.insert(*member);
-                if name == "GetRuntimeInfoWith" {
-                    assert!(matches!(
-                        ResidentRequest::decode(&HaskellValue::Con(id, vec![]), &table),
-                        Ok(ResidentRequest::RuntimeInfo(
-                            crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith
-                        ))
-                    ));
-                }
-                if name == "ListRoutesWith" {
-                    assert!(matches!(
-                        ResidentRequest::decode(&HaskellValue::Con(id, vec![]), &table),
-                        Ok(ResidentRequest::Watches(WatchesReq::ListRoutesWith))
-                    ));
-                }
+                let (table, id) = request_constructor_fixture(
+                    "Tidepool.Effects.Core",
+                    verb.ctor,
+                    verb.args.len(),
+                );
+                let value =
+                    HaskellValue::Con(id, vec![HaskellValue::Con(id, vec![]); verb.args.len() + 1]);
+                assert_eq!(
+                    ResidentRequest::recognizing_members(&value, &table),
+                    vec![*expected],
+                    "resident schema constructor {} must have exactly its registered decoder",
+                    verb.ctor
+                );
+                recognized.insert(*expected);
                 assert!(matches!(
                     ResidentRequest::decode(&value, &table),
                     Err(ResidentActorWorkbenchError::RequestDecode {
@@ -16266,13 +16268,49 @@ pub(crate) mod request_tests {
                         ..
                     })
                 ));
+                if verb.ctor == "GetRuntimeInfoWith" {
+                    assert!(matches!(
+                        ResidentRequest::decode(&HaskellValue::Con(id, vec![]), &table),
+                        Ok(ResidentRequest::RuntimeInfo(
+                            crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith
+                        ))
+                    ));
+                }
             }
         }
         assert_eq!(
             recognized.len(),
-            29,
-            "every resident request family must be exercised: {recognized:?}"
+            27,
+            "schema-owned resident families: {recognized:?}"
         );
+    }
+
+    #[test]
+    fn resident_handwritten_reply_and_watch_routes_keep_literal_contracts() {
+        // These are bounded semantic cases, not exhaustive constructor
+        // reflection for the handwritten request enums.
+        let (table, id) =
+            request_constructor_fixture("Tidepool.Agent.Reply.Internal", "CurrentRequestWith", 1);
+        let value = HaskellValue::Con(id, vec![7_i64.to_value(&table).unwrap()]);
+        assert_eq!(
+            ResidentRequest::recognizing_members(&value, &table),
+            vec!["Replies"]
+        );
+        assert!(matches!(
+            ResidentRequest::decode(&value, &table),
+            Ok(ResidentRequest::Replies(RepliesReq::CurrentRequestWith(7)))
+        ));
+        let (table, id) =
+            request_constructor_fixture("Tidepool.Agent.Watch.Internal", "ListRoutesWith", 0);
+        let value = HaskellValue::Con(id, vec![]);
+        assert_eq!(
+            ResidentRequest::recognizing_members(&value, &table),
+            vec!["Watches"]
+        );
+        assert!(matches!(
+            ResidentRequest::decode(&value, &table),
+            Ok(ResidentRequest::Watches(WatchesReq::ListRoutesWith))
+        ));
     }
 
     #[test]
