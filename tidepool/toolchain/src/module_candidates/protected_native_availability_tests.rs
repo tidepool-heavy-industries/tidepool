@@ -202,28 +202,49 @@ fn protected_catalog_availability_preserves_receiving_interface_only_selection()
         support.artifacts().capture_graph_selection().namespace
     );
 
-    // Malformed custody does not cross the receiver merely because it carries
-    // an owner already protected by the request.
+    // Reconstructing the valid owner packet must reach the receiver before
+    // perturbing one field at its enforcing canonical/native binding boundary.
     let product = &selected.contextual_native_availability[0];
-    for (certification, packages) in [
-        (vec![0xff], product.package_imports_bytes().to_vec()),
-        (product.certification_bytes().to_vec(), vec![0xff]),
-    ] {
-        let malformed = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+    let reconstruct = |certification, packages| {
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
             packages,
             certification,
+        )
+        .with_source_sha256(canonical.source_sha256())
+        .with_module_interface(canonical.clone())
+    };
+    let valid = reconstruct(
+        product.certification_bytes().to_vec(),
+        product.package_imports_bytes().to_vec(),
+    )
+    .expect("unchanged fixture bytes bind to their original canonical companion");
+    let reconstructed = CandidateSet {
+        manifest_path: selected.manifest_path.clone(),
+        by_owner: BTreeMap::new(),
+        contextual_native_availability: vec![valid],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    assert!(OriginalCompilerInputs::from_candidates(&baseline, producer, &reconstructed).is_ok());
+    for (label, certification, packages) in [
+        (
+            "certification",
+            vec![0xff],
+            product.package_imports_bytes().to_vec(),
+        ),
+        (
+            "packages",
+            product.certification_bytes().to_vec(),
+            vec![0xff],
+        ),
+    ] {
+        assert!(
+            reconstruct(certification, packages).is_err(),
+            "invalid {label} must refuse at the canonical/native binding owner"
         );
-        let invalid = CandidateSet {
-            manifest_path: selected.manifest_path.clone(),
-            by_owner: BTreeMap::new(),
-            contextual_native_availability: vec![malformed],
-            catalog_owner: None,
-            input_transport: Vec::new(),
-        };
-        assert!(OriginalCompilerInputs::from_candidates(&baseline, producer, &invalid).is_err());
     }
 }
 
