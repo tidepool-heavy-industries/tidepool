@@ -19,8 +19,8 @@
 mod admission;
 mod source_admission;
 pub use source_admission::{
-    RuntimeSourceAdmission, RuntimeSourceClaim, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+    RuntimeSourceAdmission, RuntimeSourceCompilerTransaction, RuntimeSourceFence,
+    RuntimeSourceLeaseClaim, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
 };
 mod binding_table;
 mod dialect;
@@ -31,6 +31,8 @@ pub use generation_lease::GenerationExhausted;
 mod exact_recovery_acceptance_tests;
 pub mod facade;
 mod lexical_projection;
+#[cfg(test)]
+mod prepared_target_tests;
 mod published_source;
 #[cfg(test)]
 mod recovery_test_fixture;

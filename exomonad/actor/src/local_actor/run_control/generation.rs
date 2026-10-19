@@ -162,26 +162,27 @@ impl RunState {
 impl RunControlClient {
     /// Send under the gate; waiting for the directory and startup happens after
     /// releasing it. A subsequent fence observation cannot overtake this send.
-    fn generation_enqueue<T: Send + 'static>(
+    fn source_enqueue<T: Send + 'static>(
         &self,
-        dependency: &GenerationDependency,
+        dependency: &SourceDependency,
         message: impl FnOnce(oneshot::Sender<T>) -> RunControlMessage,
     ) -> Result<oneshot::Receiver<T>, GenerationDirectoryError> {
         let (reply, receiver) = oneshot::channel();
+        let message = message(reply);
         dependency
-            .with_open_admission(|| self.owner.send_message(message(reply)))?
+            .with_open_admission(|| self.owner.send_message(message))?
             .map_err(|_| DirectoryError::Unavailable)?;
         Ok(receiver)
     }
 
-    pub(crate) async fn reserve_generation_worker(
+    pub(crate) async fn reserve_source_worker(
         &self,
-        dependency: &GenerationDependency,
+        dependency: &SourceDependency,
         parent: ActorRef,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, GenerationDirectoryError> {
         let receiver =
-            self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveWorker {
+            self.source_enqueue(dependency, |reply| RunControlMessage::ReserveWorker {
                 parent,
                 incarnation,
                 dependency: Some(dependency.clone()),
@@ -190,14 +191,14 @@ impl RunControlClient {
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 
-    pub(crate) async fn reserve_generation_successor(
+    pub(crate) async fn reserve_source_successor(
         &self,
-        dependency: &GenerationDependency,
+        dependency: &SourceDependency,
         predecessor: ActorRef,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, GenerationDirectoryError> {
         let receiver =
-            self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveSuccessor {
+            self.source_enqueue(dependency, |reply| RunControlMessage::ReserveSuccessor {
                 predecessor,
                 incarnation,
                 dependency: Some(dependency.clone()),
@@ -206,18 +207,17 @@ impl RunControlClient {
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 
-    pub(crate) async fn reserve_generation_actor(
+    pub(crate) async fn reserve_source_actor(
         &self,
-        dependency: &GenerationDependency,
+        dependency: &SourceDependency,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, GenerationDirectoryError> {
-        let receiver = self.generation_enqueue(dependency, |reply| {
-            RunControlMessage::ReserveGenerationActor {
+        let receiver =
+            self.source_enqueue(dependency, |reply| RunControlMessage::ReserveSourceActor {
                 dependency: dependency.clone(),
                 incarnation,
                 reply,
-            }
-        })?;
+            })?;
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 

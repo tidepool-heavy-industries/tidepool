@@ -528,12 +528,6 @@ impl KernelContext {
         lifetime: crate::WorkerLifetime,
         dependency: &crate::resident_workbench::generation_admission::SourceDependency,
     ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
-        let (dependency, _bootstrap_claim) = dependency
-            .registration_dependency()
-            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
-        let Some(dependency) = dependency else {
-            return self.reserve_worker_creation(lifetime).await;
-        };
         let admission = self
             .lifecycle
             .resource_admission()
@@ -541,11 +535,11 @@ impl KernelContext {
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
         let mut reservation = if lifetime == crate::WorkerLifetime::RunOwned {
             self.directory
-                .reserve_generation_actor(&dependency, self.identity.incarnation)
+                .reserve_source_actor(dependency, self.identity.incarnation)
                 .await
         } else {
             self.directory
-                .reserve_generation_worker(&dependency, self.identity, self.identity.incarnation)
+                .reserve_source_worker(dependency, self.identity, self.identity.incarnation)
                 .await
         }
         .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
@@ -557,12 +551,6 @@ impl KernelContext {
         &self,
         dependency: &crate::resident_workbench::generation_admission::SourceDependency,
     ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
-        let (dependency, _bootstrap_claim) = dependency
-            .registration_dependency()
-            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
-        let Some(dependency) = dependency else {
-            return self.reserve_successor_creation().await;
-        };
         let admission = self
             .lifecycle
             .resource_admission()
@@ -570,7 +558,7 @@ impl KernelContext {
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
         let mut reservation = self
             .directory
-            .reserve_generation_successor(&dependency, self.identity, self.identity.incarnation)
+            .reserve_source_successor(dependency, self.identity, self.identity.incarnation)
             .await
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
         reservation.retain_parent_admission(admission);

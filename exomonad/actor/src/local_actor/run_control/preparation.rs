@@ -365,7 +365,7 @@ pub(super) enum PreparationMessage {
     Start {
         id: u64,
         expected_worker: Option<ActorRef>,
-        dependency: Option<GenerationDependency>,
+        dependency: Option<SourceDependency>,
         operation: RootOperation,
         compiler: RetainedActorExit,
         reply: oneshot::Sender<RootDelivery>,
@@ -519,7 +519,7 @@ impl Actor for PreparationSupervisor {
                 );
                 let compiler_scope = match dependency {
                     Some(dependency) => compiler_scope.with_source_dependency(
-                        &crate::resident_workbench::generation_admission::SourceDependency::Generation(dependency),
+                        &dependency,
                     ),
                     None => compiler_scope.for_preparation(),
                 };
