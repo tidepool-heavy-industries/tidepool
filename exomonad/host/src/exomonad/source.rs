@@ -871,6 +871,18 @@ impl RetainedSourceGraph {
         if let Some(captured) = captured.as_ref() {
             return Ok(Some(Arc::clone(captured)));
         }
+        if let Some(catalog) = catalog {
+            match catalog.validate_captured_source_lookup(&self.include_paths, &self.manifests) {
+                Ok(()) => {}
+                Err(tidepool_toolchain::toolchain::ModulePackageError::Interrupted(error)) => {
+                    return Err(captured_compiler_source_error(&error));
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "captured compiler world catalog lookup unsupported");
+                    return Ok(None);
+                }
+            }
+        }
         let allowance = CapturedCompilerSources::capture_byte_allowance()
             .map_err(|error| captured_compiler_source_error(&error))?;
         let mut budget = super::workspace::CapturedSourceReadBudget::new(allowance);

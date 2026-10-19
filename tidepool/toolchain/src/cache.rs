@@ -106,6 +106,12 @@ impl SourceRootManifest {
             .map(|(path, digest)| (path.as_path(), digest))
     }
 
+    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+        self.files
+            .binary_search_by(|(candidate, _)| candidate.as_path().cmp(path))
+            .is_ok()
+    }
+
     fn fingerprint(&self, prefix: &Path, hasher: &mut blake3::Hasher) {
         frame(hasher, &(self.files.len() as u64).to_le_bytes());
         for (rel, digest) in &self.files {

@@ -718,6 +718,75 @@ impl DeploymentModulePackage {
     pub fn source_selection(&self) -> &NativeCatalogSourceSelection {
         &self.catalog.source_selection
     }
+
+    /// Restrict filename-based world lookup to the catalog's actual first
+    /// source choices in this captured namespace. This issues no native grant.
+    pub fn validate_captured_source_lookup(
+        &self,
+        roots: &[PathBuf],
+        manifests: &[crate::cache::SourceRootManifest],
+    ) -> Result<(), ModulePackageError> {
+        if roots.len() != manifests.len()
+            || roots.iter().collect::<BTreeSet<_>>().len() != roots.len()
+        {
+            return Err(ModulePackageError::Format(
+                "ambiguous captured source roots",
+            ));
+        }
+        let catalog_roots = self.source_selection().include_roots();
+        let mut next_root = 0;
+        for root in &catalog_roots {
+            let Some(offset) = roots[next_root..]
+                .iter()
+                .position(|candidate| candidate == root)
+            else {
+                return Err(ModulePackageError::Format(
+                    "captured catalog source root order",
+                ));
+            };
+            next_root += offset + 1;
+        }
+        for record in &self.records {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+            if record.include != catalog_roots
+                || record
+                    .module
+                    .split('.')
+                    .any(|part| part.is_empty() || part.contains('/') || part.contains('\\'))
+            {
+                return Err(ModulePackageError::Format(
+                    "unrepresentable catalog source target",
+                ));
+            }
+            let relative = PathBuf::from(record.module.replace('.', "/"));
+            let ordinary = relative.with_extension("hs");
+            let literate = relative.with_extension("lhs");
+            let mut winner = None;
+            for (root, files) in roots.iter().zip(manifests) {
+                let ordinary_exists = files.contains_path(&ordinary);
+                let literate_exists = files.contains_path(&literate);
+                if ordinary_exists && literate_exists {
+                    return Err(ModulePackageError::Format(
+                        "ambiguous catalog source suffix",
+                    ));
+                }
+                if ordinary_exists || literate_exists {
+                    winner = Some(root.join(if ordinary_exists {
+                        &ordinary
+                    } else {
+                        &literate
+                    }));
+                    break;
+                }
+            }
+            if winner.as_deref() != Some(record.source.as_path()) {
+                return Err(ModulePackageError::Format(
+                    "unrepresentable catalog source winner",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn source_identity(&self) -> &str {
         &self.source_identity
     }
@@ -1662,7 +1731,12 @@ mod tests {
                     "Jev" => NativeSourceRole::Jev,
                     _ => NativeSourceRole::Stdlib,
                 };
-                source.join(role.relative_root()).join(format!("{name}.hs"))
+                let file = if name == "Nonconventional" {
+                    "catalog-extra.hs".to_owned()
+                } else {
+                    format!("{name}.hs")
+                };
+                source.join(role.relative_root()).join(file)
             };
             for name in names {
                 fs::write(
@@ -1891,6 +1965,74 @@ mod tests {
         fn catalog(&self) -> Catalog {
             serde_json::from_slice(&fs::read(self.output.join("catalog.json")).unwrap()).unwrap()
         }
+    }
+
+    #[test]
+    fn captured_catalog_lookup_requires_actual_first_source_winner() {
+        fn manifests(roots: &[PathBuf]) -> Vec<crate::cache::SourceRootManifest> {
+            roots
+                .iter()
+                .map(|root| {
+                    crate::cache::SourceRootManifest::from_file_digests(
+                        crate::cache::source_root_manifest(root).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect()
+        }
+        let fixture = Fixture::new();
+        let package = fixture.load().unwrap();
+        let roots = package.source_selection().include_roots();
+        package
+            .validate_captured_source_lookup(&roots, &manifests(&roots))
+            .unwrap();
+
+        let shadow = tempfile::tempdir().unwrap();
+        fs::write(shadow.path().join("Library.hs"), "module Library where\n").unwrap();
+        let shadowed = std::iter::once(shadow.path().to_owned())
+            .chain(roots.iter().cloned())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            package.validate_captured_source_lookup(&shadowed, &manifests(&shadowed)),
+            Err(ModulePackageError::Format(
+                "unrepresentable catalog source winner"
+            ))
+        ));
+
+        let mut reordered = roots.clone();
+        reordered.swap(0, 1);
+        assert!(matches!(
+            package.validate_captured_source_lookup(&reordered, &manifests(&reordered)),
+            Err(ModulePackageError::Format(
+                "captured catalog source root order"
+            ))
+        ));
+        let mut duplicated = roots.clone();
+        duplicated.push(roots[0].clone());
+        assert!(matches!(
+            package.validate_captured_source_lookup(&duplicated, &manifests(&duplicated)),
+            Err(ModulePackageError::Format(
+                "ambiguous captured source roots"
+            ))
+        ));
+
+        fs::write(roots[1].join("Library.lhs"), "> module Library where\n").unwrap();
+        assert!(matches!(
+            package.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "ambiguous catalog source suffix"
+            ))
+        ));
+
+        let nonconventional = Fixture::with_modules(&["Nonconventional"]);
+        let package = nonconventional.load().unwrap();
+        let roots = package.source_selection().include_roots();
+        assert!(matches!(
+            package.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "unrepresentable catalog source winner"
+            ))
+        ));
     }
 
     fn combine_rows(encoded: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
