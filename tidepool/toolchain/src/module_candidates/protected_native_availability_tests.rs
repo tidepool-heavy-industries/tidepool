@@ -57,7 +57,7 @@ fn original_product(record: &Record) -> crate::recovery_artifacts::CertifiedReco
 
 fn assert_empty_offer(selected: CandidateSet) {
     assert!(selected.by_owner.is_empty());
-    assert!(selected.native_availability.is_empty());
+    assert!(selected.contextual_native_availability.is_empty());
     let manifest: Value =
         ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
     assert!(manifest.as_array().unwrap()[4]
@@ -92,13 +92,13 @@ fn compatible_protected_original_is_private_and_absent_from_manifest() {
     let selected = select(scratch.path(), vec![record.clone()], &context).unwrap();
 
     assert!(selected.by_owner.is_empty());
-    assert_eq!(selected.native_availability.len(), 1);
+    assert_eq!(selected.contextual_native_availability.len(), 1);
     assert_eq!(
-        selected.native_availability[0].owner(),
+        selected.contextual_native_availability[0].owner(),
         &computed_owner(&record)
     );
     assert_eq!(
-        selected.native_availability[0].product_bytes(),
+        selected.contextual_native_availability[0].product_bytes(),
         record.products
     );
     let manifest: Value =
@@ -280,10 +280,10 @@ fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts(
         };
         let selected = select(scratch.path(), vec![record], &context).unwrap();
         if expected {
-            prop_assert_eq!(selected.native_availability.len(), 1);
+            prop_assert_eq!(selected.contextual_native_availability.len(), 1);
             prop_assert!(selected.by_owner.is_empty());
         } else {
-            prop_assert!(selected.native_availability.is_empty());
+            prop_assert!(selected.contextual_native_availability.is_empty());
             prop_assert!(selected.by_owner.is_empty());
         }
         completed.set(completed.get() + 1);
@@ -412,7 +412,7 @@ fn protected_root_selection_matches_a_full_scan_oracle() {
             .collect::<Vec<_>>();
         let selected = select(scratch.path(), arranged, &context).unwrap();
         let actual_private = selected
-            .native_availability
+            .contextual_native_availability
             .iter()
             .map(|product| product.owner().clone())
             .collect::<BTreeSet<_>>();
@@ -468,7 +468,7 @@ fn protected_deployment_record_refuses_changed_source_and_competing_definitions(
     let context = context_for(std::slice::from_ref(&record), &BTreeSet::from([key]));
     let intact = select(scratch.path(), vec![record.clone()], &context).unwrap();
     assert!(intact.by_owner.is_empty());
-    assert_eq!(intact.native_availability.len(), 1);
+    assert_eq!(intact.contextual_native_availability.len(), 1);
     assert!(select(
         scratch.path(),
         vec![record.clone(), record.clone()],
@@ -527,7 +527,7 @@ fn protected_native_closure_issues_missing_type_dependencies_privately() {
     assert!(selected.by_owner.is_empty());
     assert_eq!(
         selected
-            .native_availability
+            .contextual_native_availability
             .iter()
             .map(|product| product.owner().module.as_str())
             .collect::<Vec<_>>(),

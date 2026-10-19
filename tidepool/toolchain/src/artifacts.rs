@@ -8180,6 +8180,33 @@ mod module_product_tests {
                 .iter()
                 .any(|group| group.owner().module == module
                     && group.origin() == ProductOrigin::Cached));
+            let selected = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                shadowed
+                    .source_selection
+                    .as_ref()
+                    .expect("a completed worker selection"),
+                &shadowed.artifact_view,
+            )
+            .unwrap();
+            let original = shadowed
+                .recovery_products
+                .iter()
+                .find(|product| product.owner().module == module)
+                .expect("fresh source has a certified Original");
+            let original_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                original.module_interface().unwrap().producer_sha256(),
+                original,
+            );
+            assert!(
+                selected
+                    .role_projection()
+                    .snapshot_roles()
+                    .iter()
+                    .any(|(owner, role)| {
+                        owner.module == module && role.original() == Some(original_id)
+                    }),
+                "the completed worker, not optional availability, selects the fresh Original"
+            );
         }
         assert!(
             shadowed

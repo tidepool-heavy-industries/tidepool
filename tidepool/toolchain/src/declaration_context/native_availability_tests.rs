@@ -4324,14 +4324,25 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
     );
     let replacement = product("AvailableDependency", 183);
     let recovered = recovered_witness_fixtures(&[dependency, consumer, replacement]);
-    let products = recovered.iter().map(|row| row.product.clone()).collect::<Vec<_>>();
-    let entries = products.iter().map(|product| {
-        Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
-    }).collect::<Vec<_>>();
-    assert_eq!(products[0].module_interface(), products[2].module_interface());
+    let products = recovered
+        .iter()
+        .map(|row| row.product.clone())
+        .collect::<Vec<_>>();
+    let entries = products
+        .iter()
+        .map(|product| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        products[0].module_interface(),
+        products[2].module_interface()
+    );
     assert_ne!(entries[0].descriptor.id, entries[2].descriptor.id);
     let inventory = ArtifactInventory::default();
-    let issued = inventory.admit_shared(&inventory.empty_view(), entries[..2].to_vec()).unwrap();
+    let issued = inventory
+        .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
+        .unwrap();
     let complete = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
         issued,
@@ -4340,35 +4351,70 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         let baseline = if selected_original {
             complete.clone()
         } else {
-            complete.selected_interfaces().unwrap()
-                .support_for_owners(vec![entries[0].descriptor.owner.clone(), entries[1].descriptor.owner.clone()])
-                .unwrap().retain_template_availability(&complete).unwrap()
+            complete
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(vec![
+                    entries[0].descriptor.owner.clone(),
+                    entries[1].descriptor.owner.clone(),
+                ])
+                .unwrap()
+                .retain_template_availability(&complete)
+                .unwrap()
         };
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
-            producer: producer.sha256(), compiler_support: baseline.clone(),
-            lexical: Default::default(), template_imports: None,
+            producer: producer.sha256(),
+            compiler_support: baseline.clone(),
+            lexical: Default::default(),
+            template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("availability-only-does-not-read-manifest"),
-            by_owner: BTreeMap::new(), native_availability: vec![products[2].clone()],
-            catalog_owner: None, input_transport: Vec::new(),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: vec![products[2].clone()],
+            catalog_owner: None,
+            input_transport: Vec::new(),
         };
         let input = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-            .expect("available B cannot compete with the incoming compiler roles").unwrap();
-        assert_eq!(input.role_projection(), baseline.projection(), "custody cannot select B");
-        assert_eq!(input.native_availability(), baseline.native_availability(), "custody cannot issue Full B");
-        assert_eq!(input.issued_offers(), baseline.native_offers(), "custody cannot add an offer for B");
-        assert_eq!(input.issued_input_decisions(), Some(baseline.input_decisions()));
-        assert!(input.issued_artifacts().artifact_ids().contains(&entries[2].descriptor.id));
+            .expect("available B cannot compete with the incoming compiler roles")
+            .unwrap();
+        assert_eq!(
+            input.role_projection(),
+            baseline.projection(),
+            "custody cannot select B"
+        );
+        assert_eq!(
+            input.native_availability(),
+            baseline.native_availability(),
+            "custody cannot issue Full B"
+        );
+        assert_eq!(
+            input.issued_offers(),
+            baseline.native_offers(),
+            "custody cannot add an offer for B"
+        );
+        assert_eq!(
+            input.issued_input_decisions(),
+            Some(baseline.input_decisions())
+        );
+        assert!(input
+            .issued_artifacts()
+            .artifact_ids()
+            .contains(&entries[2].descriptor.id));
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context))
             .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(input))
             .expect("the historical consumer remains usable beside available B");
         let inputs = request.compiler_inputs();
         assert_eq!(inputs.projection(), baseline.projection());
-        assert!(inputs.native_availability(entries[2].descriptor.id).is_none());
-        assert!(inputs.native_availability(entries[0].descriptor.id).unwrap().permits(7));
+        assert!(inputs
+            .native_availability(entries[2].descriptor.id)
+            .is_none());
+        assert!(inputs
+            .native_availability(entries[0].descriptor.id)
+            .unwrap()
+            .permits(7));
         assert!(inputs.artifacts().binding_dependencies().iter().any(|(from, to, edge)| {
             matches!((from, to, edge),
                 (crate::artifact_inventory::ArtifactBindingNode::Group(from),
@@ -4379,9 +4425,19 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                     && to.original_ordinal == 7)
         }));
         let availability = inputs.private_native_availability();
-        assert!(inputs.advertised_native_originals().receipt_original(
-            &availability, "main", "AvailableDependency", &products[2].owner().module_version,
-        ).unwrap().is_none(), "available B must not become a direct native advertisement");
+        assert!(
+            inputs
+                .advertised_native_originals()
+                .receipt_original(
+                    &availability,
+                    "main",
+                    "AvailableDependency",
+                    &products[2].owner().module_version,
+                )
+                .unwrap()
+                .is_none(),
+            "available B must not become a direct native advertisement"
+        );
     }
 }
 
@@ -9087,7 +9143,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-manifest-not-consumed-by-native-issuance"),
         by_owner: BTreeMap::new(),
-        native_availability: vec![fresh],
+        contextual_native_availability: vec![fresh],
         catalog_owner: None,
         input_transport: Vec::new(),
     };
@@ -9348,7 +9404,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("native-issuance-does-not-read-manifest"),
             by_owner: BTreeMap::new(),
-            native_availability: if mixed_fresh {
+            contextual_native_availability: if mixed_fresh {
                 vec![native.clone(), fresh.clone()]
             } else {
                 vec![native.clone()]
@@ -9448,7 +9504,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("selected-fragment-native-issuance-only"),
             by_owner: BTreeMap::new(),
-            native_availability: vec![native.clone()],
+            contextual_native_availability: vec![native.clone()],
             catalog_owner: None,
             input_transport: Vec::new(),
         };
@@ -9562,7 +9618,7 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("candidate-native-issuance-only"),
             by_owner: BTreeMap::new(),
-            native_availability: if mixed_fresh {
+            contextual_native_availability: if mixed_fresh {
                 vec![native.clone(), fresh.clone()]
             } else {
                 vec![native.clone()]
@@ -9908,7 +9964,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-native-issuance-only"),
         by_owner: BTreeMap::new(),
-        native_availability: vec![fresh],
+        contextual_native_availability: vec![fresh],
         catalog_owner: None,
         input_transport: Vec::new(),
     };

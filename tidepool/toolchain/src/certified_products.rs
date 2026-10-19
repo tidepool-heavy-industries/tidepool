@@ -17410,7 +17410,7 @@ pub(crate) mod tests {
                     (("main".into(), "A".into()), a),
                     (("main".into(), "B".into()), b),
                 ]),
-                native_availability: Vec::new(),
+                contextual_native_availability: Vec::new(),
             },
             CertifiedReceipt {
                 source_recipe: WorkerExecutionSource::Ordinary,

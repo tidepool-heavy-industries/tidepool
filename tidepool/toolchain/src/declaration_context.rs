@@ -776,7 +776,47 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         candidates: &crate::module_candidates::CandidateSet,
     ) -> Result<Option<Self>, CompileError> {
-        Self::with_checked_candidate_products(context, producer, &candidates.native_availability)
+        if candidates.contextual_native_availability.is_empty() {
+            return Self::reuse_selected_authored(context);
+        }
+        let source = context.compiler_source_support();
+        let mut validation = PackageInterfaceValidation::default();
+        let entries = candidates
+            .contextual_native_availability
+            .iter()
+            .map(|product| {
+                ArtifactEntry::original_with_validation(
+                    producer.sha256(),
+                    product.clone(),
+                    &mut validation,
+                )
+                .map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dependencies = crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?;
+        // These protected catalog rows supply authenticated custody. Their
+        // availability does not choose a compiler Original or issue body roots.
+        let custody = source.projection().admit_interfaces_with_native_offers(
+            source.artifacts(),
+            entries,
+            &[],
+            &dependencies,
+        )?;
+        let retained = source.retain_custody(&custody)?;
+        Ok(Some(Self::from_issued_support(&retained)))
+    }
+
+    /// Transfer an already admitted selection without reissuing its permissions.
+    pub(crate) fn from_issued_support(
+        source: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Self {
+        Self {
+            demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
+            projection: source.projection().clone(),
+            artifacts: source.artifacts().clone(),
+            native_offers: source.native_offers().to_vec(),
+            native_availability: source.native_availability().clone(),
+        }
     }
 
     fn with_checked_candidate_products(
