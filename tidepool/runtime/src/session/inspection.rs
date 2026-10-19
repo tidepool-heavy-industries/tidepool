@@ -164,6 +164,11 @@ pub struct InfoEntry {
     pub display: String,
     pub availability: InspectionAvailability,
     pub references: Vec<IdentifierRef>,
+    /// The entry's canonical resolved identity. `references` are the
+    /// identifiers the declaration mentions or resolves; this is the entry
+    /// itself, so a local and a global sharing `(name, module, kind)` remain
+    /// distinguishable.
+    pub identity: IdentifierRef,
 }
 
 /// Whether a callable's required effects fit the inspecting actor's row.
@@ -205,6 +210,9 @@ pub struct TypeMatch {
     pub quality: TypeMatchQuality,
     pub availability: InspectionAvailability,
     pub references: Vec<IdentifierRef>,
+    /// The matched value's canonical resolved identity. `references` are
+    /// dependencies, not the matched declaration itself.
+    pub identity: IdentifierRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1558,7 +1566,7 @@ fn unsigned(value: &CborValue, what: &str) -> Result<u64, CompileError> {
 }
 
 fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
-    let fields = array_len(value, 6, "TypeMatch")?;
+    let fields = array_len(value, 7, "TypeMatch")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "TypeMatch module")?.into()),
@@ -1578,6 +1586,7 @@ fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
             .iter()
             .map(decode_identifier_ref)
             .collect::<Result<_, _>>()?,
+        identity: decode_identifier_ref(&fields[6])?,
     })
 }
 
@@ -1602,7 +1611,7 @@ fn decode_scopes(value: &CborValue) -> Result<Vec<NameScope>, CompileError> {
 }
 
 fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
-    let fields = array_len(value, 6, "Info entry")?;
+    let fields = array_len(value, 7, "Info entry")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "Info module")?.into()),
@@ -1617,6 +1626,7 @@ fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
             .iter()
             .map(decode_identifier_ref)
             .collect::<Result<_, _>>()?,
+        identity: decode_identifier_ref(&fields[6])?,
     })
 }
 
@@ -1799,6 +1809,11 @@ mod tests {
                         CborValue::Text("Just".into()),
                         CborValue::Text("Constructor".into()),
                     ])]),
+                    CborValue::Array(vec![
+                        CborValue::Text("GHC.Internal.Maybe".into()),
+                        CborValue::Text("Maybe".into()),
+                        CborValue::Text("Type".into()),
+                    ]),
                 ])]),
             ]),
             CborValue::Array(vec![
@@ -1944,6 +1959,11 @@ mod tests {
                     CborValue::Text("Usable".into()),
                     CborValue::Text(availability.into()),
                     CborValue::Array(vec![]),
+                    CborValue::Array(vec![
+                        CborValue::Text("Example".into()),
+                        CborValue::Text("run".into()),
+                        CborValue::Text("Value".into()),
+                    ]),
                 ])]),
             ])])
         };
