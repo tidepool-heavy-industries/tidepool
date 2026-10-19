@@ -59,14 +59,14 @@ use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    run_inspections, BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType,
+    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType,
     HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
     PendingPreparedInstall, PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent,
     ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
     RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
 };
 #[cfg(test)]
-use tidepool_runtime::session::{run_turn, TurnRequest};
+use tidepool_runtime::session::{run_inspections, run_turn, TurnRequest};
 use tidepool_runtime::{classify_compile, spawn_blocking_in_span, CompileError, FailureClass};
 use tracing::Instrument;
 
