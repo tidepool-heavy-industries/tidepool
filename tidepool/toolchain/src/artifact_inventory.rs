@@ -18,8 +18,8 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
-    RecordedInputNativeDecision,
+    CompilerSourceSupport, DemandCompilerProjection, DemandCompilerProjectionWork, InputNativeDecision,
+    IssuedInputNativeDecisions, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
