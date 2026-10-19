@@ -218,17 +218,36 @@ fn prepared_promotion_witness_refuses_exhaustion_before_mutation() {
         let token = table
             .prepare_exact_binding_promotion_in(source, target, &[first, second])
             .unwrap();
+        let token = table
+            .prepare_binding_publication_removals(token, &["first".to_owned()])
+            .unwrap();
         let before = table.scope_witness(&tree, target);
         let before_visible = visible(&table, &tree, target);
         assert!(matches!(
             table.prepared_promotion_scope_witness(&tree, &token),
             Err(BindingPromotionError::MutationWitnessExhausted { revision: observed, advances })
-                if observed == revision && advances == token.revision_advances()
+                if observed == revision && advances == 2
         ));
         assert_eq!(table.scope_witness(&tree, target), before);
         assert_eq!(visible(&table, &tree, target), before_visible);
         assert_eq!(table.revision, revision);
     }
+
+    let mut tree = ScopeTree::new();
+    let source = tree.mint_isolated();
+    let target = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let id = table.bind_in(source, entry("last", 3)).unwrap();
+    table.revision = u64::MAX - 1;
+    let token = table
+        .prepare_exact_binding_promotion_in(source, target, &[id])
+        .unwrap();
+    let predicted = table
+        .prepared_promotion_scope_witness(&tree, &token)
+        .unwrap();
+    without_allocations(|| table.commit_exact_binding_promotion(token));
+    assert_eq!(table.mutation_revision(), Some(u64::MAX));
+    assert_eq!(table.scope_witness(&tree, target), Some(predicted));
 }
 
 #[test]
