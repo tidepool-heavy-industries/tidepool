@@ -10,7 +10,7 @@ import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
 import qualified Data.Set as Set
 import GHC (ParsedModule (..))
-import GHC.Driver.DynFlags (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset)
+import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset)
 import GHC.Driver.Env (HscEnv, hsc_dflags, hscUpdateFlags)
 import GHC.Rename.Expr (rnLExpr)
 import GHC.Rename.Unbound (isUnboundName)
