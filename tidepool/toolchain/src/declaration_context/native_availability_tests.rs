@@ -893,8 +893,8 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
     let availability = final_inputs.native_availability(original).unwrap();
     let final_proof = availability
         .offers()
-        .find(|offer| offer.original() == original)
-        .and_then(|offer| offer.proof())
+        .filter(|offer| offer.original() == original)
+        .find_map(|offer| offer.proof())
         .unwrap();
     assert_eq!(final_proof.original, original);
     assert_eq!(availability.original_owner(), consumer.owner());
@@ -1330,8 +1330,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         let issued = input
             .native_offers()
             .iter()
-            .find(|offer| offer.original() == consumer_entry.descriptor.id)
-            .and_then(|offer| offer.proof())
+            .filter(|offer| offer.original() == consumer_entry.descriptor.id)
+            .find_map(|offer| offer.proof())
             .cloned()
             .unwrap();
         assert!(
@@ -1372,8 +1372,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .native_availability(consumer_entry.descriptor.id)
             .unwrap()
             .offers()
-            .find(|offer| offer.original() == consumer_entry.descriptor.id)
-            .and_then(|offer| offer.proof())
+            .filter(|offer| offer.original() == consumer_entry.descriptor.id)
+            .find_map(|offer| offer.proof())
             .cloned()
             .unwrap();
         let retained_offer = request
@@ -4491,8 +4491,8 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .unwrap();
     let retained = availability
         .offers()
-        .find(|offer| offer.original() == authored_id)
-        .and_then(|offer| offer.proof())
+        .filter(|offer| offer.original() == authored_id)
+        .find_map(|offer| offer.proof())
         .unwrap();
     assert_eq!(&retained.selection, &proof.selection);
     assert!(request
@@ -6576,8 +6576,8 @@ fn replay_native_transport_history(
     let proof = produced
         .native_offers()
         .iter()
-        .find(|offer| offer.original() == dependent_entry.descriptor.id)
-        .and_then(|offer| offer.proof())
+        .filter(|offer| offer.original() == dependent_entry.descriptor.id)
+        .find_map(|offer| offer.proof())
         .unwrap()
         .clone();
     assert!(
