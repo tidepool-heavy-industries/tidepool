@@ -3,7 +3,7 @@
 Contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`,
 branch `feature/shared-warm/reload`, source checkpoint
-`804a4d3e2f253f69ef81ca76eacc6229cfe7deea`.
+`3b91e6f73949f5b23f6d6bc00afef2664faa518f`.
 Campaign owner: `/root/warm_compiler_campaign`; area owner:
 `/root/warm_compiler_campaign/reload`.
 
@@ -59,10 +59,10 @@ an informed worker yields.
   reviews/folds it and requests cumulative independent review.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
   `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
-  and is dormant with its grant reserved. Awaited event: the area owner
-  `followup_task` supplies the exact joined R1 candidate and actual compile/
-  focused-gate evidence, or a concrete source exception requiring review.
-  The area owner repairs findings, requests exact rereview and owns the fold.
+  and is active on the new bootstrap-world alias counterexample below. Awaited
+  event: bounded owner-strategy review, then the area owner supplies the exact
+  joined R1 candidate and actual compile/focused-gate evidence. The area owner
+  repairs findings, requests exact rereview and owns the fold.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
 and continuation. A terminal producer sends exact base/candidate/evidence/status
@@ -108,16 +108,37 @@ entire invocation/actor to substitute for selective cleanup is too broad.
 A Closing/no-executor lifecycle snapshot is not terminal cleanup proof: a
 cleanup executor can attach later. Retain uncertainty until actual settlement.
 
+Bootstrap contexts issued before first generation A currently retain an unbound
+independent-world alias. That alias must not continue admitting fresh source work
+after A retires. Campaign accepted one-time binding on the same captured world
+owner: begin a Publishing/source-admission fence at the real first publication
+claim before IO can become uncertain; bind once to first actually visible A;
+old aliases forever consult A. Only confirmed nonpublication/no-effects may
+reopen an unbound world. Unknown publication remains unavailable even when the
+visibility callback never ran. Candidate preparation must not fill the binding.
+B retains external parent prerequisites only, excluding its retired bootstrap A.
+The R1 leaf implements this closure; the independent high reviewer checks actual
+atomicity and initial failure/uncertainty plus typed-child histories.
+
 ## Verification admission and pending commands
 
 The area buck-out bind mount is provisioned and was verified; account is
 `inanna`. Observed `/srv/build` available space was 102 GiB with a required
 100 GiB unreserved floor, insufficient for a cold 32 GiB lane. Host memory was
 97 GiB available. No build bypass, cache deletion, broad cleanup or shared
-compiler/daemon restart is authorized. Configuration/materialization is deferred.
+compiler/daemon restart is authorized. Native test configuration/materialization is deferred. The already-realized
+pinned development shell supports light formatting and Cargo source metadata
+without native compilation or a Buck daemon.
 
-Once storage admission permits, use this checkout's pinned tools and regenerate
-new Rust source mappings through `scripts/buck2-first-party.py`. Build the exact
+Pinned rustfmt check and the source generator plus `--check` passed for the
+current area source; `exomonad/actor/BUCK` now declares the directory module.
+Required workspace submodule `ce60f76888c94e9d7229615f27762d02933549b1` is
+initialized from the verified local campaign repository. Receipts are under
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/` in
+`formatting.json`, `source-generation.log` and `source-generation-check.log`.
+This is syntax/metadata evidence, with zero native compilations/tests. The
+joined R1 modules need the same owning source generation after integration.
+Once storage admission permits, build the exact
 protocol generator, refresh its tracked mirrors through
 `scripts/protocol-snapshots.py --generator EXACT_BUILT_GENERATOR --refresh`,
 then check the mirrors. Generated files must not be hand edited.
@@ -143,4 +164,5 @@ joined gate and refusal controls. Preserve immutable source/prompt observation,
 old compiled pure continuation, independent IO and exact historical dependencies.
 Retain source/artifact/profile identity, nonzero selected/executed counts,
 exit/logs, compiler END and lifecycle cleanup reports. Current verification is
-source review and `git diff --check` only; no compilation/test acceptance exists.
+source review, pinned formatting, source metadata and `git diff --check`; no
+compilation/test acceptance exists.
