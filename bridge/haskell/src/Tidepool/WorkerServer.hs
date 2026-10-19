@@ -9,12 +9,9 @@ import Control.Monad (replicateM, unless)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import qualified Data.Text.Lazy as LT
-import qualified Data.Text.Lazy.Encoding as LTE
 import Data.Word (Word32)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
@@ -23,6 +20,7 @@ import System.IO
   , openBinaryFile, stderr, stdin, stdout )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), ReportOutcome(..), renderDiagsJson)
 import Tidepool.ExtractRequest (EnsureExactInputsOutcome(..), encodeEnsureExactInputsOutcomeWithin)
+import Tidepool.ExtractUtil (boundedUtf8)
 import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics (CaptureAssessment(..), renderCompletion)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -242,16 +240,6 @@ responseDiagnostics (DiagnosticResponse diagnostics) = diagnostics
 responseDiagnostics (ExactInputsResponse (ExactInputsRejected cause)) =
   [Diag Nothing DiagError ("exact input acquisition rejected: " ++ show cause)]
 responseDiagnostics (ExactInputsResponse _) = []
-
--- Force only the remaining response budget and one growth sentinel while
--- encoding. Do not concatenate or strictly encode bytes before their check.
-boundedUtf8 :: Integer -> String -> Maybe BS.ByteString
-boundedUtf8 remaining value
-  | remaining < 0 = Nothing
-  | otherwise =
-      let bytes = LBS.toStrict (LBS.take (fromInteger remaining + 1)
-            (LTE.encodeUtf8 (LT.pack value)))
-      in if toInteger (BS.length bytes) > remaining then Nothing else Just bytes
 
 -- Shared with the Rust response decoder. Prepared/native products remain files;
 -- exceeding this diagnostic budget is infrastructure failure, never truncation.

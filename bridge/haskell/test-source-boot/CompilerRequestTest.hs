@@ -5,9 +5,12 @@ import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
   , BodyOutcome(..), CleanupStage(..), cleanupStage, cleanupException, withCompletionRelease )
 
-import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throw, throwIO, try)
 import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (isInfixOf)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
 import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
@@ -22,7 +25,7 @@ import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
+import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics)
 import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
@@ -39,6 +42,7 @@ import Tidepool.DiagJson (InputRejection(..))
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
+  worldAcquisitionDiagnostics
   requireObservationPackageEnvironment
   let root = replicate 64 'a'
       resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
@@ -69,6 +73,43 @@ worldRequestBoundaries = do
       pure (void (scopedEnsureWorld scope resident),void (runBoundWorldQuery request))
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
+
+-- Exercise the production human diagnostic emitter without manufacturing a
+-- rooted package/world. Actual Complete dispatch still requires the HOST probe.
+worldAcquisitionDiagnostics :: IO ()
+worldAcquisitionDiagnostics = do
+  let reason = "read/decode WorldInputsCorrupt"
+      manifest = "/captured/\x03bb/world.cbor"
+      detail = "fixture decode failure: \x03bb"
+      emittedBytes = BS.length . TextEncoding.encodeUtf8 . Text.pack
+  (_,ordinary) <- captureDiagnostics (emitWorldAcquisitionRejection reason manifest detail)
+  unless (all (`isInfixOf` ordinary) [reason,manifest,detail])
+    (fail "world acquisition diagnostic lost its typed read cause/path/detail")
+  limited <- timeout 5000000 $ captureDiagnostics $
+    emitWorldAcquisitionRejection reason (repeat '\x1f30a') (repeat '\n')
+  case limited of
+    Just (_,output) | reason `isInfixOf` output
+      , "diagnostic field exceeds 4096 UTF-8 bytes" `isInfixOf` output
+      , emittedBytes output < 74 * 1024 -> pure ()
+    _ -> fail "world acquisition diagnostic did not bound lazy UTF-8 fields"
+  (_,escaped) <- captureDiagnostics $
+    emitWorldAcquisitionRejection reason (replicate 4096 '\0') (replicate 4096 '\n')
+  unless (emittedBytes escaped < 74 * 1024 && "\\u0000" `isInfixOf` escaped)
+    (fail "world acquisition diagnostic JSON expansion exceeded its bounded allowance")
+  -- A lazy formatting IOException reaches the actual emitter's exception
+  -- boundary. This is not a physical stderr/capture failure simulation.
+  (refusal,_) <- captureDiagnostics $ do
+    emitWorldAcquisitionRejection reason manifest
+      (throw (userError "injected world diagnostic formatting failure"))
+    pure (ExactInputsRejected AcquisitionRejected)
+  unless (refusal == ExactInputsRejected AcquisitionRejected)
+    (fail "diagnostic failure replaced the original acquisition rejection")
+  cancelled <- try (captureDiagnostics (emitWorldAcquisitionRejection reason manifest
+    (throw ThreadKilled))) :: IO (Either SomeException ((),String))
+  case cancelled of
+    Left failure | fromException failure == Just ThreadKilled -> pure ()
+    Left failure -> throwIO failure
+    Right _ -> fail "world acquisition diagnostic swallowed cancellation"
 
 -- These are raw closed-source data/I/O controls, not rooted world issuers.
 -- They enter the same materialization owner used before world publication.
