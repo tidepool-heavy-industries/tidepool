@@ -4,7 +4,7 @@ use crate::{
     ModelRequestLimits, ModelRequestObservationEnvelope, ModelSelectionEnvelope,
     ModelUsageEnvelope, OpenAIModel, OpenAIReasoning, Reasoning,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn hook() -> ModelControlStep {
     ModelControlStep::ModelHook {
@@ -87,8 +87,6 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
     let request = ModelRequestEnvelope {
         instructions: "instruction".into(),
         input: "input".into(),
-        model: None,
-        reasoning: Some(Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)),
         limits: ModelRequestLimits {
             requests: None,
             tools: None,
@@ -98,7 +96,11 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         tools: Vec::new(),
         result_schema: None,
         after_tool: true,
-        selection: None,
+        selection: ModelSelectionEnvelope {
+            catalog_identity: "frozen-catalog".into(),
+            key: "deepseek".into(),
+            reasoning: Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+        },
     };
     let valid = serde_json::to_value(&request).unwrap();
     assert_eq!(
@@ -106,12 +108,11 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         request
     );
     let mut selected = request.clone();
-    selected.reasoning = None;
-    selected.selection = Some(ModelSelectionEnvelope {
+    selected.selection = ModelSelectionEnvelope {
         catalog_identity: "frozen-catalog".into(),
         key: "argon".into(),
         reasoning: Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
-    });
+    };
     let selected_wire = serde_json::to_value(&selected).unwrap();
     assert_eq!(
         selected_wire["selection"]["catalog_identity"],
@@ -137,14 +138,9 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
             json!({"tag":"CustomModel","contents":["OpenAIPlan","same-id"]}),
         ),
     ] {
-        let mut selected = request.clone();
-        selected.model = Some(selection);
-        let encoded = serde_json::to_value(&selected).unwrap();
-        assert_eq!(encoded["model"], expected);
-        assert_eq!(
-            serde_json::from_value::<ModelRequestEnvelope>(encoded).unwrap(),
-            selected
-        );
+        let encoded = serde_json::to_value(&selection).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(serde_json::from_value::<Model>(encoded).unwrap(), selection);
     }
     for selection in [
         json!("luna"),
@@ -153,9 +149,7 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         json!({"tag":"CustomModel","contents":true}),
         json!({"tag":"Sol","foreign":"value"}),
     ] {
-        let mut malformed = valid.clone();
-        malformed["model"] = selection;
-        assert!(serde_json::from_value::<ModelRequestEnvelope>(malformed).is_err());
+        assert!(serde_json::from_value::<Model>(selection).is_err());
     }
     for reasoning in [
         Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekNone),
@@ -167,7 +161,7 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         Reasoning::OpenAIReasoning(OpenAIReasoning::OpenAIHigh),
     ] {
         let mut selected = request.clone();
-        selected.reasoning = Some(reasoning);
+        selected.selection.reasoning = reasoning;
         assert_eq!(
             serde_json::from_value::<ModelRequestEnvelope>(
                 serde_json::to_value(&selected).unwrap()
@@ -176,17 +170,35 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
             selected
         );
     }
-    let mut retired_effort = valid.clone();
-    retired_effort["effort"] = json!("ModelLowEffort");
-    assert!(serde_json::from_value::<ModelRequestEnvelope>(retired_effort).is_err());
+    // Selection is one required catalogue-qualified fact. Legacy top-level
+    // model/reasoning fields cannot supplement or replace it.
+    for (field, value) in [
+        ("model", json!({"tag":"DeepSeekFlash"})),
+        (
+            "reasoning",
+            serde_json::to_value(&request.selection.reasoning).unwrap(),
+        ),
+        ("effort", json!("ModelLowEffort")),
+    ] {
+        let mut retired = valid.clone();
+        retired[field] = value;
+        assert!(serde_json::from_value::<ModelRequestEnvelope>(retired).is_err());
+    }
     let mut omitted = valid.clone();
-    omitted.as_object_mut().unwrap().remove("model");
-    assert_eq!(
-        serde_json::from_value::<ModelRequestEnvelope>(omitted)
-            .unwrap()
-            .model,
-        None
-    );
+    omitted.as_object_mut().unwrap().remove("selection");
+    let mut null_selection = valid.clone();
+    null_selection["selection"] = Value::Null;
+    for refused in [omitted, null_selection] {
+        assert!(serde_json::from_value::<ModelRequestEnvelope>(refused).is_err());
+    }
+    for field in ["catalog_identity", "key", "reasoning"] {
+        let mut omitted = valid.clone();
+        omitted["selection"].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ModelRequestEnvelope>(omitted).is_err());
+    }
+    let mut foreign_selection = valid.clone();
+    foreign_selection["selection"]["foreign"] = json!(true);
+    assert!(serde_json::from_value::<ModelRequestEnvelope>(foreign_selection).is_err());
     let mut foreign = valid.clone();
     foreign["effort"] = json!("foreign");
     let mut negative = valid;
