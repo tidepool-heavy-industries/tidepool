@@ -185,6 +185,23 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
             "cgroup": Path("/proc/self/cgroup").read_text(),
         })
 
+    def test_cache_mode_drops_local_only_and_remote_disabled(self):
+        self.write_config(
+            f"buck2 = {self.buck}\ngit = {self.action_tools}/git\n"
+            f"action_path = {self.action_tools}\n"
+            "[remote]\nenabled = false\nlocal = true\ncache = true\n"
+        )
+        result = self.run_runner(
+            "build", "--local-only", "-c", "remote.enabled=false",
+            "-c", "tidepool.profile=fast-dev", "//pkg:target",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cache mode owns execution", result.stderr)
+        self.assertEqual(
+            json.loads(self.buck_log.read_text())["args"],
+            ["build", "-c", "tidepool.profile=fast-dev", "//pkg:target"],
+        )
+
     def test_ready_marker_does_not_change_explicit_remote_arguments(self):
         args = ["test", "--remote-only", "-c", "remote.enabled=true", "//pkg:target"]
         result = self.run_runner(*args, TIDEPOOL_BUCK_SHELL="ready")

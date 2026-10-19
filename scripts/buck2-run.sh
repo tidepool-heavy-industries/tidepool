@@ -114,10 +114,57 @@ fi
 # same retained revision as HEAD before any build can consume that declaration.
 workspace_gitlink_index=$("$git_bin" -C "$PWD" ls-files --stage -- .exomonad/workspace) || refuse 'cannot read workspace Gitlink index'
 [[ $workspace_gitlink_index == "160000 $workspace_gitlink_revision 0"$'\t.exomonad/workspace' ]] || refuse 'workspace Gitlink index differs from retained pin'
+# Cache mode owns execution: the configuration already disables remote
+# execution, so `--local-only` and `-c remote.enabled=false` add nothing except
+# selecting the local-only platform, which bypasses the shared action cache.
+# Normalize here, at the one entry point every recipe and helper goes through.
+remote_value() {
+  local key=$1 section= line
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == '['*']' ]]; then
+      section=${line#[}
+      section=${section%]}
+      continue
+    fi
+    if [[ $section == remote && $line == "$key = "* ]]; then
+      printf '%s\n' "${line#"$key = "}"
+    fi
+  done < .buckconfig.local
+}
+forwarded=("$@")
+if [[ $(remote_value cache) == true && $(remote_value enabled) == false ]]; then
+  filtered=()
+  while (( ${#forwarded[@]} > 0 )); do
+    case "${forwarded[0]}" in
+      --local-only)
+        forwarded=("${forwarded[@]:1}")
+        ;;
+      -c)
+        if [[ ${forwarded[1]-} == remote.enabled=false ]]; then
+          forwarded=("${forwarded[@]:2}")
+        else
+          filtered+=("${forwarded[0]}")
+          forwarded=("${forwarded[@]:1}")
+        fi
+        ;;
+      -c=remote.enabled=false|-cremote.enabled=false)
+        forwarded=("${forwarded[@]:1}")
+        ;;
+      *)
+        filtered+=("${forwarded[0]}")
+        forwarded=("${forwarded[@]:1}")
+        ;;
+    esac
+  done
+  if (( ${#filtered[@]} != $# )); then
+    printf 'buck2-run: cache mode owns execution; dropped --local-only/remote.enabled=false\n' >&2
+  fi
+  forwarded=("${filtered[@]}")
+fi
 if [[ -n ${TIDEPOOL_BUCK_CONFIG_FILE:-} ]]; then
   shared_config=$(mktemp)
   trap 'rm -f -- "$shared_config"' EXIT
-  if ! python3 scripts/buck2-config-args.py "$TIDEPOOL_BUCK_CONFIG_FILE" -- "$@" > "$shared_config"; then
+  if ! python3 scripts/buck2-config-args.py "$TIDEPOOL_BUCK_CONFIG_FILE" -- "${forwarded[@]}" > "$shared_config"; then
     refuse 'shared Buck configuration is invalid or conflicts with command-line configuration'
   fi
   mapfile -d '' -t configured_args < "$shared_config"
@@ -125,4 +172,4 @@ if [[ -n ${TIDEPOOL_BUCK_CONFIG_FILE:-} ]]; then
   trap - EXIT
   exec "$buck_bin" "${configured_args[@]}"
 fi
-exec "$buck_bin" "$@"
+exec "$buck_bin" "${forwarded[@]}"
