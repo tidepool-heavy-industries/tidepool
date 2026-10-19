@@ -666,7 +666,7 @@ exactScopeBinders = withScratch $ \work -> do
         case result of
           Left reason -> do
             putStrLn ("native binder ordinal refusal: " ++ reason)
-            unless ("expected word" `isInfixOf` reason || "expected uint" `isInfixOf` reason) $
+            unless ("\"expected word\"" `isInfixOf` reason) $
               fail ("native binder outline did not reach ordinal refusal: " ++ reason)
           Right _ -> fail "native binder outline was accepted as native ordinals"
       answer = binder "value" "answer" Nothing
