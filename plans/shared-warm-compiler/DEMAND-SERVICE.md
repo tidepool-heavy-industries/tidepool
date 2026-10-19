@@ -192,6 +192,35 @@ type of a bound value does not evaluate that value. An arbitrary new expression
 still needs the appropriate checker. Already retained owner-issued type evidence
 may answer a matching inspection without another compiler invocation; do not
 turn the service abstraction into a rule to repeat work whose answer is known.
+
+### Follow-up: rich compiler-query effects
+
+After the ordinary-cell reuse milestone, design a small typed Haskell effect
+surface for querying the same held compiler world. This is authorized planning
+follow-up, not another prerequisite for the current campaign. Reconsider which
+parts of today's lookup plumbing become unnecessary once the compiler can answer
+directly.
+
+Start from concrete discovery tasks: enumerate visible module exports; inspect
+binding types, constructors and constraints; follow defining source spans; and
+find bounded constructor/consumer neighborhoods. Establish which answers GHC
+already retains, which require checking, and which need separately authored
+documentation or an index. Semantic intent search is not a capability supplied
+by GHC merely because a compiler is resident.
+
+Return structured, retained evidence with exact world/source identity, scope,
+completeness and continuation locations. Keep acquisition separate from display
+and authored ranking, so Persona can compose Jev or model-based selection over
+candidates. Type inspection must not evaluate values or execute tools. Existing
+source grants, stale-world rules and compile-time execution restrictions apply.
+Compare the design against current structured lookup and remove superseded
+routes during migration; avoid a second discovery registry or compiler loop.
+
+Acceptance should include real Persona tasks, exact-view/stale-view controls,
+bounded navigation without refetching, and measurements showing that an already
+known answer avoids target compilation and broad world reconstruction. Preserve
+honest negative results: no match in a searched scope does not prove absence
+from the entire installed API.
 No new model-facing tool vocabulary or GHCi REPL subsystem is required by this
 wave. New convenience API work follows actual demonstrated friction.
 
