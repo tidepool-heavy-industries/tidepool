@@ -171,12 +171,21 @@ Pinned GHC9.12.2 metadata confirms Just's defining module GHC.Internal.Maybe;
 retained `pinned-base-maybe-interface.json` and `.txt` are metadata evidence only,
 not an executed service query.
 
-The approved next gate freezes864 for runtime/actor production and cfg-test
-compilation, then the two exact finite key controls. selected_root owns command
-observation and HOST LIVE admission/settlement. Actual frontend2 follows a full
-join of reviewed Reload `ce554a87d11c9a3f51834882e09d884fc5743c0b`, which fixes
-publication cleanup purpose; its actual notebook execution is still pending.
-No source merge occurs during the frozen early gate. The service command is:
+At exact864, runtime/actor production and cfg-test compilation passed26 local
+actions, and matched worker/test resources passed14 local actions. Both exact
+finite key controls selected/executed/passed1 each. Report
+`host-inputs/host-world/WORLD-QUERY-864-TERMINAL.json` binds commands, binary hashes
+and counts. Runtime executable SHA256 is
+`40ca1e77ec42d9e3f34677b3438254c6ba521a1bf467ef6c20f4a1972ff6d123`.
+All clients settled; HOST14GiB total/8GiB growth was released, with the idle daemon
+retained in its existing scope. The area full-history merge40741919d4 has exactly
+the tested864 production tree; its only difference is this handoff.
+
+Actual frontend2 follows the explicit full-history join of reviewed Reload
+`ce554a87d11c9a3f51834882e09d884fc5743c0b`, which fixes publication cleanup purpose.
+Its nine owning targets compiled and its first maintained notebook passed; the
+remaining notebook/control cohort is still pending. selected_root owns this
+source-only join, followed by independent review and fresh native admission. The service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 No ordinary-cell/new-hash/profile API is imported into this query candidate.
 
