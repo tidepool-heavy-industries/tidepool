@@ -12795,12 +12795,87 @@ mod tests {
         certified_product_artifact_view(producer, products, &[], None).unwrap()
     }
 
-    struct CompilerSupportFixture {
-        artifacts: ArtifactView,
-        projection: CompilerInputProjection,
+    // Valid support keeps the complete checked input owner; recorded-role
+    // controls deliberately carry no native availability or choice decisions.
+    enum CompilerSupportFixture {
+        Complete(RequestCompilerInputs),
+        RecordedRoles {
+            artifacts: ArtifactView,
+            projection: CompilerInputProjection,
+        },
+    }
+
+    impl CompilerSupportFixture {
+        fn artifacts(&self) -> &ArtifactView {
+            match self {
+                Self::Complete(inputs) => inputs.compiler_source_support().artifacts(),
+                Self::RecordedRoles { artifacts, .. } => artifacts,
+            }
+        }
+
+        fn projection(&self) -> &CompilerInputProjection {
+            match self {
+                Self::Complete(inputs) => inputs.projection(),
+                Self::RecordedRoles { projection, .. } => projection,
+            }
+        }
+
+        fn source_selection(
+            &self,
+        ) -> Result<crate::certified_products::CertifiedSourceSelection, CompileError> {
+            let operation =
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+            match self {
+                Self::Complete(inputs) => {
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                        inputs,
+                        &inputs.metadata,
+                        &operation,
+                    )
+                }
+                Self::RecordedRoles {
+                    artifacts,
+                    projection,
+                } => crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    projection,
+                    &artifacts.metadata_snapshot(),
+                    &operation,
+                ),
+            }
+            .map_err(compiler_evidence_failure)
+        }
     }
 
     fn support_offer(products: &[CertifiedRecoveryProduct]) -> CompilerSupportFixture {
+        let producer = products
+            .first()
+            .and_then(|product| product.module_interface())
+            .map_or([2; 32], |interface| interface.producer_sha256());
+        let output = OriginalCompilerInputs::from_checked_support_products(
+            &crate::artifact_inventory::CompilerSourceSupport::empty(),
+            producer,
+            products,
+        )
+        .unwrap();
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap(),
+        );
+        CompilerSupportFixture::Complete(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        )
+    }
+
+    fn recorded_role_support_offer(
+        products: &[CertifiedRecoveryProduct],
+    ) -> CompilerSupportFixture {
         let producer = products
             .first()
             .and_then(|product| product.module_interface())
@@ -12809,10 +12884,9 @@ mod tests {
             .iter()
             .map(|product| Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap()))
             .collect::<Vec<_>>();
-        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        CompilerSupportFixture {
+        CompilerSupportFixture::RecordedRoles {
             artifacts: support_view(products),
-            projection,
+            projection: CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         }
     }
 
@@ -12824,16 +12898,10 @@ mod tests {
             admissions: &[ExactSourceAdmission],
             produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)?;
+            let selection = fixture.source_selection()?;
             self.admit_program_support_with_selection(
                 context,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 admissions,
                 produced_types,
                 &selection,
@@ -12847,16 +12915,10 @@ mod tests {
             segment: &ExactProgramSegmentAdmission,
             produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)?;
+            let selection = fixture.source_selection()?;
             self.admit_program_segment_support_with_selection(
                 context,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 segment,
                 produced_types,
                 &selection,
@@ -12884,12 +12946,12 @@ mod tests {
         assert!(request.program.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
 
-        let types = CompilerSupportFixture {
+        let types = CompilerSupportFixture::RecordedRoles {
             projection: CompilerInputProjection::from_issued_entries(&[Arc::new(
                 ArtifactEntry::canonical(product.module_interface().unwrap().clone()),
             )])
             .unwrap(),
-            artifacts: offer.artifacts.clone(),
+            artifacts: offer.artifacts().clone(),
         };
         let mut request = program_request(directory.path(), empty.clone());
         let retained = request
@@ -12918,7 +12980,7 @@ mod tests {
         assert_eq!(admitted.compiler_original_products().unwrap().len(), 2);
         assert_eq!(
             admitted.compiler_input_roles(),
-            source_offer.projection.roles()
+            source_offer.projection().roles()
         );
         assert!(request.program.program_support.is_some());
         assert_eq!(request.program_source_lexical().len(), 2);
@@ -12936,7 +12998,12 @@ mod tests {
         let mut request = program_request(directory.path(), empty.clone());
         assert!(uncertified.original_native().is_none());
         let retained = request
-            .admit_fixture_support(empty.clone(), &support_offer(&[uncertified]), &[], None)
+            .admit_fixture_support(
+                empty.clone(),
+                &recorded_role_support_offer(&[uncertified]),
+                &[],
+                None,
+            )
             .unwrap();
         assert!(retained.compiler_original_products().unwrap().is_empty());
         assert!(retained
@@ -12952,14 +13019,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let before = empty.semantic_sha256();
-        let selection = |fixture: &CompilerSupportFixture| {
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &fixture.projection,
-                &fixture.artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap()
-        };
+        let selection = |fixture: &CompilerSupportFixture| fixture.source_selection().unwrap();
         let missing = support_offer(&[support_product("Hidden")]);
         let mut request = program_request(directory.path(), empty.clone());
         let refusal = request
@@ -13017,7 +13077,8 @@ mod tests {
         let hidden = support_product("Hidden");
         let issued = support_offer(&[generated.clone(), hidden.clone()]);
         let private =
-            OriginalCompilerInputs::from_selection(&selection(&issued), &issued.artifacts).unwrap();
+            OriginalCompilerInputs::from_selection(&selection(&issued), issued.artifacts())
+                .unwrap();
         let support = support_view(std::slice::from_ref(&hidden));
         let continued = private
             .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
@@ -13038,7 +13099,7 @@ mod tests {
         assert_eq!(
             continued.projection.roles(),
             support_offer(std::slice::from_ref(&hidden))
-                .projection
+                .projection()
                 .roles()
         );
         assert!(
@@ -13058,9 +13119,12 @@ mod tests {
             "continuation must retain every issued non-generated original role"
         );
         let hidden_issuance = support_offer(std::slice::from_ref(&hidden));
-        let hidden_support =
-            recover_fixture_compiler_support(hidden_issuance.projection, support.clone(), [])
-                .unwrap();
+        let hidden_support = recover_fixture_compiler_support(
+            hidden_issuance.projection().clone(),
+            support.clone(),
+            [],
+        )
+        .unwrap();
         let types = hidden_support
             .selected_interfaces()
             .unwrap()
@@ -13094,7 +13158,8 @@ mod tests {
         );
         let issued = support_offer(&[generated, hidden.clone(), foreign.clone()]);
         let private =
-            OriginalCompilerInputs::from_selection(&selection(&issued), &issued.artifacts).unwrap();
+            OriginalCompilerInputs::from_selection(&selection(&issued), issued.artifacts())
+                .unwrap();
         assert!(
             private
                 .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
@@ -13111,7 +13176,7 @@ mod tests {
         assert_eq!(preserved.projection.roles().len(), 2);
         assert!(
             issued
-                .artifacts
+                .artifacts()
                 .descriptors()
                 .iter()
                 .any(|entry| entry.owner == identity("fixture", "Consumer")),
@@ -18688,7 +18753,7 @@ mod tests {
             ArtifactEntry::canonical(interface.clone()),
         )])
         .unwrap();
-        CompilerSupportFixture {
+        CompilerSupportFixture::RecordedRoles {
             artifacts: certified_product_artifact_view(producer, &[], &[interface], None).unwrap(),
             projection,
         }
@@ -18746,7 +18811,7 @@ mod tests {
                 .compiler_support
                 .artifacts()
                 .artifact_ids(),
-            support.artifacts.artifact_ids()
+            support.artifacts().artifact_ids()
         );
         // These are the two value-interface consumers after checked/program support.
         for context in [
@@ -18792,7 +18857,7 @@ mod tests {
             .clone()
             .extend_program_value_interface(value.clone())
             .unwrap();
-        let support = CompilerSupportFixture {
+        let support = CompilerSupportFixture::RecordedRoles {
             projection: CompilerInputProjection::from_issued_entries(&[
                 Arc::new(ArtifactEntry::interface(
                     value.interface().clone(),
@@ -18888,8 +18953,8 @@ mod tests {
                 .clone()
                 .extend_issued_compiler_support(
                     &recover_fixture_compiler_support(
-                        support.projection.clone(),
-                        support.artifacts.clone(),
+                        support.projection().clone(),
+                        support.artifacts().clone(),
                         [],
                     )
                     .unwrap(),
@@ -19110,14 +19175,24 @@ mod tests {
                 .unwrap();
             let support = recover_fixture_compiler_support(
                 issued.compiler_input_projection().clone(),
-                updated,
+                updated.retain_custody(issued.artifact_view()).unwrap(),
                 issued
                     .compiler_source_support()
                     .native_offers()
                     .iter()
                     .cloned(),
             )
+            .unwrap()
+            .restore_snapshot_evidence(&issued.snapshot())
             .unwrap();
+            assert_eq!(
+                support.input_decisions(),
+                issued.compiler_source_support().input_decisions()
+            );
+            support
+                .native_availability()
+                .validate_role_coverage(support.projection())
+                .unwrap();
             issued = issued.rebuild(|facts| facts.compiler_support = support);
         }
         issued.normalize().unwrap();
@@ -19145,11 +19220,11 @@ mod tests {
         let transient = request.program.program_support.as_ref().unwrap();
         assert_eq!(
             transient.compiler_support.projection().roles(),
-            offer.projection.roles()
+            offer.projection().roles()
         );
         assert_eq!(
             transient.compiler_support.artifacts().artifact_ids(),
-            offer.artifacts.artifact_ids()
+            offer.artifacts().artifact_ids()
         );
         assert!(!transient
             .compiler_support
@@ -19794,17 +19869,10 @@ mod tests {
         let mut request = program_request(directory.path(), baseline.clone());
         let context = {
             let fixture = &support_offer(&[hidden.clone(), owner.clone(), relay.clone()]);
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             request.admit_program_support_with_selection(
                 baseline,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 &[support_admission(directory.path())],
                 None,
                 &selection,
@@ -19899,17 +19967,10 @@ mod tests {
         }
         let context = {
             let fixture = &support_offer(&[hidden.clone(), owner, relay, additional]);
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             request.admit_program_support_with_selection(
                 context,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 &[later],
                 None,
                 &selection,
@@ -19978,17 +20039,10 @@ mod tests {
         );
         assert!({
             let fixture = &support_offer(&[altered]);
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             request.admit_program_support_with_selection(
                 context,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 &[],
                 None,
                 &selection,
@@ -20380,6 +20434,9 @@ mod tests {
             ),
             [2; 32],
         );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
         let owner = product.owner().clone();
         let context = Arc::new(
             baseline
@@ -20521,6 +20578,9 @@ mod tests {
             support_product("PhysicalInput"),
             producer_sha256,
         );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -20619,6 +20679,9 @@ mod tests {
             ),
             producer_sha256,
         );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let context = Arc::new(
             baseline
@@ -20653,10 +20716,16 @@ mod tests {
             support_product("Support"),
             producer_sha256,
         );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
         let unchanged = crate::certified_products::fixture_finalized_product(
             support_product("Unchanged"),
             producer_sha256,
         );
+        let unchanged = crate::certified_products::tests::recovered_witness_fixtures(&[unchanged])
+            .remove(0)
+            .product;
         let inventory = ArtifactInventory::default();
         let entries = [
             product.module_interface().unwrap(),
@@ -20905,7 +20974,7 @@ mod tests {
         let fixture = support_offer(&[support_product("Consumer")]);
         let hidden_support = recover_fixture_compiler_support(
             CompilerInputProjection::default(),
-            fixture.artifacts.clone(),
+            fixture.artifacts().clone(),
             [],
         )
         .unwrap();
@@ -20933,8 +21002,12 @@ mod tests {
         write_receipt(&receipt, &value);
         request.validate_receipt(&receipt, None, &hidden).unwrap();
 
-        let selected_support =
-            recover_fixture_compiler_support(fixture.projection, fixture.artifacts, []).unwrap();
+        let selected_support = recover_fixture_compiler_support(
+            fixture.projection().clone(),
+            fixture.artifacts().clone(),
+            [],
+        )
+        .unwrap();
         let selected = hidden
             .as_ref()
             .clone()
@@ -21149,17 +21222,10 @@ mod tests {
             .is_empty());
         let repeated = {
             let fixture = &support;
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             projected.admit_program_segment_support_with_selection(
                 context.clone(),
-                &fixture.artifacts,
+                fixture.artifacts(),
                 &segment,
                 None,
                 &selection,
@@ -21186,17 +21252,10 @@ mod tests {
         );
         let hidden_refusal = {
             let fixture = &support;
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             projected.admit_program_support_with_selection(
                 context.clone(),
-                &fixture.artifacts,
+                fixture.artifacts(),
                 segment.admissions(),
                 None,
                 &selection,
@@ -21216,17 +21275,10 @@ mod tests {
         )]);
         let changed_refusal = {
             let fixture = &changed;
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &fixture.projection,
-                    &fixture.artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .map_err(compiler_evidence_failure)
-                .unwrap();
+            let selection = fixture.source_selection().unwrap();
             projected.admit_program_segment_support_with_selection(
                 context,
-                &fixture.artifacts,
+                fixture.artifacts(),
                 &segment,
                 None,
                 &selection,
