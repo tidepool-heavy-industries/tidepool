@@ -1325,7 +1325,21 @@ pub(crate) struct DemandNativeInputsWork {
     pub(crate) reused_rows: usize,
     pub(crate) changed_rows: usize,
     pub(crate) reused_facts: usize,
+    pub(crate) fact_copies: usize,
+    pub(crate) fact_insertions: usize,
     pub(crate) advertised: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    // Observe the actual fact-copy/insertion sites, including legacy callers
+    // which do not return the operation-local work record.
+    static NATIVE_DEMAND_FACT_EDITS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn take_native_demand_fact_edits() -> (usize, usize) {
+    NATIVE_DEMAND_FACT_EDITS.with(|work| work.replace((0, 0)))
 }
 
 #[derive(Clone, Copy)]
@@ -1720,8 +1734,15 @@ impl RequestNativeAvailability {
             }
         }
         let mut rows = BTreeMap::new();
-        let mut facts = imbl::OrdMap::new();
-        let mut changed_rows = selected_ids.len() != self.0.len();
+        // Every selected key is looked up in this same row owner below. Equal
+        // cardinality therefore preserves its exact membership on success.
+        let same_membership = selected_ids.len() == self.0.len();
+        let mut facts = if same_membership {
+            self.1.clone()
+        } else {
+            imbl::OrdMap::new()
+        };
+        let mut changed_rows = !same_membership;
         // Only demanded direct/dependency keys are observed. In particular, an
         // equal-canonical historical dependency does not become a direct root.
         for id in selected_ids {
@@ -1782,26 +1803,45 @@ impl RequestNativeAvailability {
             } else {
                 NativeInputClassification::PrivateInput
             };
-            budget.reserve::<(ArtifactId, NativeAvailabilitySnapshotFacts, [usize; 8])>(1)?;
-            budget.strings(
-                row.original_owner()
-                    .unit
-                    .len()
-                    .saturating_add(row.original_owner().module.len()),
-            )?;
-            let row_facts =
-                if selected.mode != row.mode || selected.contributions != row.contributions {
+            let changed_fact =
+                selected.mode != row.mode || selected.contributions != row.contributions;
+            if !changed_fact {
+                work.reused_facts += 1;
+            }
+            if changed_fact || !same_membership {
+                budget.reserve::<(ArtifactId, NativeAvailabilitySnapshotFacts, [usize; 8])>(1)?;
+                budget.strings(
+                    row.original_owner()
+                        .unit
+                        .len()
+                        .saturating_add(row.original_owner().module.len()),
+                )?;
+                let row_facts = if changed_fact {
                     budget.row_facts(&selected)?;
                     work.changed_rows += 1;
                     Self::changed_row_facts(&selected)?
                 } else {
-                    work.reused_facts += 1;
-                    self.1
-                        .get(&id)
-                        .ok_or_else(|| failure("normalized native row lacks its maintained facts"))?
-                        .clone()
+                    let retained = self.1.get(&id).ok_or_else(|| {
+                        failure("normalized native row lacks its maintained facts")
+                    })?;
+                    work.fact_copies += 1;
+                    #[cfg(test)]
+                    NATIVE_DEMAND_FACT_EDITS.with(|observed| {
+                        let (copies, inserts) = observed.get();
+                        observed.set((copies + 1, inserts));
+                    });
+                    retained.clone()
                 };
-            facts.insert(id, row_facts);
+                if !same_membership || self.1.get(&id) != Some(&row_facts) {
+                    work.fact_insertions += 1;
+                    #[cfg(test)]
+                    NATIVE_DEMAND_FACT_EDITS.with(|observed| {
+                        let (copies, inserts) = observed.get();
+                        observed.set((copies, inserts + 1));
+                    });
+                    facts.insert(id, row_facts);
+                }
+            }
             budget.reserve::<(ArtifactId, Arc<NativeTransportAvailability>, [usize; 4])>(1)?;
             if selected == **row {
                 work.reused_rows += 1;
@@ -17913,7 +17953,7 @@ mod tests {
             (NativeArtifactDemand::AllGroups, true),
         ] {
             let mut baseline = None;
-            for unrelated in [0, 32, 128] {
+            for unrelated in [1, 32, 128] {
                 let cold = demanded_native_fixture(unrelated, mode, partial);
                 let operation = InventoryOperation::new(Default::default());
                 let demand = cold
@@ -18021,6 +18061,18 @@ mod tests {
         let child = cold.projection().snapshot_roles()[&child_owner]
             .original()
             .unwrap();
+        take_native_demand_fact_edits();
+        let unchanged = cold
+            .native_selection
+            .availability
+            .for_compiler_roles(cold.projection(), cold.artifacts())
+            .unwrap();
+        assert!(unchanged.same_acquisition(&cold.native_selection.availability));
+        assert_eq!(
+            take_native_demand_fact_edits(),
+            (0, 0),
+            "unchanged legacy selection must not copy or insert maintained facts"
+        );
         let roles = cold
             .projection()
             .for_source_owners(&BTreeSet::from([parent_owner.clone()]));
@@ -18035,6 +18087,7 @@ mod tests {
         );
         let operation = InventoryOperation::new(Default::default());
         let mut work = DemandNativeInputsWork::default();
+        take_native_demand_fact_edits();
         NativeOfferContribution::take_group_binding_scope_visits();
         let selected = cold
             .native_selection
@@ -18066,6 +18119,15 @@ mod tests {
         assert_eq!(selected.persistent_facts().len(), 2);
         assert!(work.closure_edges > 0);
         assert!(work.changed_rows > 0);
+        assert_eq!(
+            work.fact_copies, 0,
+            "unchanged membership shares unchanged fact entries"
+        );
+        assert_eq!(work.fact_insertions, work.changed_rows);
+        assert_eq!(
+            take_native_demand_fact_edits(),
+            (work.fact_copies, work.fact_insertions)
+        );
 
         // The old exact-key group lookup really enumerates its proof scopes;
         // this positive control connects zero above to the costly old issuer.
