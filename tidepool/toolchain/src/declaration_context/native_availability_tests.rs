@@ -125,6 +125,9 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
     let Value::Array(fields) = value else {
         panic!("scope array");
     };
+    assert_eq!(fields.len(), 11);
+    assert_eq!(fields[0], text("TPEXACTSCOPE"));
+    assert_eq!(fields[1], text("16"));
     fields
 }
 
@@ -233,49 +236,92 @@ fn partial_context(
     ))
 }
 
+struct NativeWireRow {
+    selected_ordinals: Vec<u32>,
+    availability: Value,
+    classification: Value,
+}
+
+fn native_wire_rows(
+    request: &ExactCompilationRequest,
+) -> BTreeMap<(String, String), NativeWireRow> {
+    let fields = scope(request);
+    let mut rows = BTreeMap::new();
+    for row in fields[6].as_array().expect("native rows") {
+        let [unit, module, _, _, _, _, selected, _, availability, classification] =
+            row.as_array().expect("native row").as_slice()
+        else {
+            panic!("native row has ten fields");
+        };
+        let key = (
+            unit.as_text().expect("native unit").to_owned(),
+            module.as_text().expect("native module").to_owned(),
+        );
+        let selected_ordinals = selected
+            .as_array()
+            .expect("selected native ordinals")
+            .iter()
+            .map(|ordinal| u32::try_from(ordinal.as_integer().expect("native ordinal")).unwrap())
+            .collect();
+        match availability
+            .as_array()
+            .expect("native availability")
+            .as_slice()
+        {
+            [tag] if tag == &text("full-carrier") => {}
+            [tag, ordinals] if tag == &text("issued-groups") => {
+                for ordinal in ordinals.as_array().expect("available native ordinals") {
+                    u32::try_from(ordinal.as_integer().expect("available native ordinal")).unwrap();
+                }
+            }
+            _ => panic!("unknown native availability"),
+        }
+        assert!(matches!(
+            classification.as_text(),
+            Some("compiler-original" | "private-native")
+        ));
+        assert!(
+            rows.insert(
+                key,
+                NativeWireRow {
+                    selected_ordinals,
+                    availability: availability.clone(),
+                    classification: classification.clone(),
+                }
+            )
+            .is_none(),
+            "duplicate native wire owner"
+        );
+    }
+    rows
+}
+
+fn wire_row(request: &ExactCompilationRequest, module: &str) -> NativeWireRow {
+    let mut matches = native_wire_rows(request)
+        .into_iter()
+        .filter(|((_, name), _)| name == module);
+    let (_, row) = matches.next().expect("native wire owner");
+    assert!(matches.next().is_none(), "ambiguous native module name");
+    row
+}
+
 fn wire_groups(request: &ExactCompilationRequest) -> BTreeMap<String, Vec<u32>> {
-    scope(request)[6]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            let row = row.as_array().unwrap();
-            let module = row[1].as_text().unwrap().to_owned();
-            let ordinals = row[6]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|group| {
-                    let ordinal = group.as_integer().unwrap();
-                    u32::try_from(ordinal).unwrap()
-                })
-                .collect();
-            (module, ordinals)
-        })
-        .collect()
+    let mut groups = BTreeMap::new();
+    for ((_, module), row) in native_wire_rows(request) {
+        assert!(
+            groups.insert(module, row.selected_ordinals).is_none(),
+            "ambiguous native module name"
+        );
+    }
+    groups
 }
 
 fn wire_mode(request: &ExactCompilationRequest, module: &str) -> Value {
-    scope(request)[6]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row.as_array().unwrap()[1] == text(module))
-        .unwrap()
-        .as_array()
-        .unwrap()[8]
-        .clone()
+    wire_row(request, module).availability
 }
+
 fn wire_classification(request: &ExactCompilationRequest, module: &str) -> Value {
-    scope(request)[6]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row.as_array().unwrap()[1] == text(module))
-        .unwrap()
-        .as_array()
-        .unwrap()[9]
-        .clone()
+    wire_row(request, module).classification
 }
 fn full_mode() -> Value {
     Value::Array(vec![text("full-carrier")])
@@ -3050,6 +3096,13 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     let request = ExactCompileContext::new(context.clone())
         .prepare_compilation(root.path(), PRODUCER)
         .unwrap();
+    let inputs = request.compiler_inputs();
+    let issued = inputs.native_availability(entry.descriptor.id).unwrap();
+    assert!(matches!(&issued.mode, NativeTransportMode::Full));
+    assert_eq!(
+        issued.classification,
+        NativeInputClassification::PrivateInput
+    );
     assert_eq!(wire_mode(&request, "PrivateFullInterface"), full_mode());
     assert_eq!(
         wire_classification(&request, "PrivateFullInterface"),
@@ -3063,7 +3116,6 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .unwrap()
         .product
         .is_none());
-    let inputs = request.compiler_inputs();
     assert!(inputs
         .projection()
         .roles()
@@ -3207,8 +3259,16 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
             Some(private),
         )
         .unwrap();
-    assert_eq!(wire_mode(&next, "PrivateFullInterface"), full_mode());
-    assert!(wire_groups(&next)["PrivateFullInterface"].is_empty());
+    let next_inputs = next.compiler_inputs();
+    let next_availability = next_inputs
+        .native_availability(entry.descriptor.id)
+        .unwrap();
+    assert!(matches!(&next_availability.mode, NativeTransportMode::Full));
+    assert_eq!(
+        next_availability.classification,
+        NativeInputClassification::PrivateInput
+    );
+    assert!(next_inputs.artifacts().selected_native_groups().is_empty());
     let next_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         next.compiler_inputs(),
         &validation.inventory,
@@ -5913,6 +5973,7 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
     let native = product("UnavailableOriginal", 83);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap());
+    let original = entry.descriptor.id;
     let inventory = ArtifactInventory::default();
     let artifacts = inventory
         .admit_shared_with_demand(
@@ -5938,12 +5999,25 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
     let request = ExactCompileContext::new(context)
         .prepare_compilation(root.path(), PRODUCER)
         .unwrap();
+    let inputs = request.compiler_inputs();
+    let issued = inputs.native_availability(original).unwrap();
+    assert!(matches!(&issued.mode, NativeTransportMode::IssuedGroups));
+    assert!(issued.issued_ordinals().is_empty());
+    assert_eq!(
+        issued.classification,
+        NativeInputClassification::CompilerRole
+    );
+    assert!(inputs
+        .projection()
+        .roles()
+        .iter()
+        .any(|role| role.original() == Some(original)));
     assert_eq!(wire_mode(&request, "UnavailableOriginal"), issued_mode(&[]));
     assert_eq!(
         wire_classification(&request, "UnavailableOriginal"),
         text("compiler-original")
     );
-    assert!(wire_groups(&request)["UnavailableOriginal"].is_empty());
+    assert!(inputs.artifacts().selected_native_groups().is_empty());
     assert!(request.groups.is_empty());
 }
 
@@ -7915,16 +7989,19 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
         let request = ExactCompileContext::new(Arc::new(restored))
             .prepare_compilation(&root.path().join(format!("request-{index}")), PRODUCER)
             .unwrap();
-        assert_eq!(
-            wire_mode(&request, "BoundOffer"),
-            if index == 0 {
-                full_mode()
-            } else {
-                issued_mode(&[])
-            }
-        );
         let availability =
             &request.compiler_inputs().native_selection.availability[&entry.descriptor.id];
+        assert_eq!(
+            &availability.mode,
+            if index == 0 {
+                &NativeTransportMode::Full
+            } else {
+                &NativeTransportMode::IssuedGroups
+            }
+        );
+        if index != 0 {
+            assert!(availability.issued_ordinals().is_empty());
+        }
         for ordinal in [7, 9001] {
             assert_eq!(availability.permits(ordinal), index == 0);
         }
