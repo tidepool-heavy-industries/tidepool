@@ -110,3 +110,31 @@ The owner must then rerun the entire nonzero fresh-worker case through the
 checked-bind/input-work assertions; fixing this early oracle is not a workflow
 pass. Rows owns successor checks; host/area own lexical test repair and joined
 qualification.
+
+## Successor native evidence acknowledgment
+
+Subsequently inspected the producer's terminal evidence for exact29d6467c,
+without starting new native jobs. `native-check-state.json` records the pinned
+fast-dev exact toolchain/runtime check-plan build with `-j1`, local execution
+and remote disabled, exit0. Its exact label list is
+`check-targets-29d6467c.txt`; `check-direct-reuse.log` ends BUILD SUCCEEDED,
+build ID `12de0974-5dbd-41a8-a6c9-8ffeea0c6c39`,27 local actions.
+
+`native-results-29d6467c.json` and all six referenced individual case reports
+agree on executed1, passed1, failed0 and exit0 for baseline borrowing/cleanup,
+concurrent produced capture, direct-complete same-Arc/zero-detach reuse,
+original dedicated row/sibling release, same-view cold materialization and the
+sixteen-promotion current frontier. All record the pre-execution toolchain test
+executable SHA256
+`776235e328c0de1ebbea9b459c7091e28a64e314146d96309e9419f450710ca0`.
+The checkout remained clean at exact29. Source acceptance therefore has affected
+production/cfg(test) compilation and these six nonzero executed controls behind
+it; this does not expand into joined runtime/actor acceptance.
+
+Individual reports explicitly retain incomplete resource-hash coverage for
+directory-valued resources and unobserved hosted/compiler cleanup fields.
+Those fields are not converted to complete closure or END settlement evidence.
+Prior exact49 results remain separate17pass/1lexical-fail evidence. Runtime
+oracle repair and the complete fresh-worker checked-bind rerun remain with
+their owning area; no later workflow pass is inferred here. Producer reports
+all jobs terminal and holds further work for actual integration findings.
