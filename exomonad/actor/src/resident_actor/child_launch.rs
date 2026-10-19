@@ -420,7 +420,7 @@ where
             .as_ref()
             .map(|(lease, _)| lease.clone());
         let actor_reservation = kernel
-            .reserve_worker_creation(lifetime)
+            .reserve_source_worker_creation(lifetime, descriptor.source_dependency())
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         if !launch_worktrees.is_empty() {
@@ -517,6 +517,7 @@ where
                     descriptor.placement().resource_scope,
                     seed.as_ref(),
                     descriptor.source_layer(),
+                    descriptor.source_dependency(),
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
@@ -1311,7 +1312,22 @@ mod tests {
                         }))
                         .with_child_bootstrap_program(bootstrap_program());
                     let startup = runner
-                        .provision_child_session(id, RealmId::fresh(), None, &[])
+                        .provision_child_session(
+                            id,
+                            RealmId::fresh(),
+                            None,
+                            &[],
+                            crate::ActorDescriptor::new(
+                                "independent child fixture",
+                                crate::ActorPlacement {
+                                    session: id,
+                                    resource_scope: RealmId::ROOT,
+                                    lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+                                },
+                            )
+                            .admit_independent_world()
+                            .source_dependency(),
+                        )
                         .await
                         .unwrap()
                         .startup_lease;

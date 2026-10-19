@@ -199,19 +199,26 @@ async fn counted_publication_history(preparation: crate::CompilerPreparationClie
     let mut owners = Vec::new();
     let mut durable_owners = Vec::new();
     for (id, name) in [(1, "counted"), (2, "unrelated")] {
-        let context = ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(id)),
-            placement: crate::ActorPlacement {
+        let context = {
+            let context_actor = crate::ActorRef::first(crate::ActorId(id));
+            let context_placement = crate::ActorPlacement {
                 session: session_id,
                 lexical_scope: session.mint_scope(ScopeId::ROOT).unwrap(),
                 resource_scope: RealmId::fresh(),
-            },
-            effect_policy: EffectRunPolicy::HandleOrSuspend,
-            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            source_imports: Default::default(),
-            haskell_effects_alias: surface.row().into(),
-            current_model: None,
-            source_layer: Vec::new().into(),
+            };
+            ActorSessionContext {
+                actor: context_actor,
+                placement: context_placement,
+                effect_policy: EffectRunPolicy::HandleOrSuspend,
+                live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                source_imports: Default::default(),
+                haskell_effects_alias: surface.row().into(),
+                current_model: None,
+                source_layer: Vec::new().into(),
+                ..crate::ActorDescriptor::new("fixture", context_placement)
+                    .admit_independent_world()
+                    .session_context(context_actor)
+            }
         };
         let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();
         let durable = RecoveryPublicOwner::new(&path, context.actor.incarnation.0).unwrap();

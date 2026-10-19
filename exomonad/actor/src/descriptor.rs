@@ -64,6 +64,7 @@ impl Eq for PromptReloadPreparer {}
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
+    source_dependency: crate::resident_workbench::generation_admission::SourceDependency,
     label: Option<String>,
     effect_policy: EffectRunPolicy,
     live_payload: LivePayloadPolicy,
@@ -96,6 +97,8 @@ impl ActorDescriptor {
     #[must_use]
     pub(crate) fn new_optional(label: Option<String>, placement: ActorPlacement) -> Self {
         Self {
+            source_dependency:
+                crate::resident_workbench::generation_admission::SourceDependency::Unqualified,
             label,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
@@ -477,6 +480,7 @@ impl ActorDescriptor {
     #[must_use]
     pub fn session_context(&self, actor: ActorRef) -> ActorSessionContext {
         ActorSessionContext {
+            source_dependency: self.source_dependency.clone(),
             actor,
             placement: self.placement,
             effect_policy: self.effect_policy,
@@ -493,6 +497,46 @@ impl ActorDescriptor {
                 .map(|(permission, reasoning)| (permission.model().clone(), reasoning)),
             source_layer: crate::mount::ActorSourceRoots::Deployment(self.source_layer.clone()),
         }
+    }
+
+    pub(crate) fn with_source_dependency(
+        mut self,
+        dependency: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Self {
+        self.source_dependency = dependency;
+        self
+    }
+
+    pub(crate) fn source_dependency(
+        &self,
+    ) -> &crate::resident_workbench::generation_admission::SourceDependency {
+        &self.source_dependency
+    }
+
+    pub(crate) fn admit_dependent_world(
+        self,
+        parent: crate::resident_workbench::generation_admission::GenerationDependency,
+    ) -> Self {
+        self.with_source_dependency(
+            crate::resident_workbench::generation_admission::SourceDependency::World(
+                crate::resident_workbench::generation_admission::BootstrapWorld::new(Some(parent)),
+            ),
+        )
+    }
+
+    /// Called by root admission and the independently captured LLM world owner.
+    pub(crate) fn admit_independent_world(self) -> Self {
+        if matches!(
+            self.source_dependency,
+            crate::resident_workbench::generation_admission::SourceDependency::World(_)
+        ) {
+            return self;
+        }
+        self.with_source_dependency(
+            crate::resident_workbench::generation_admission::SourceDependency::World(
+                crate::resident_workbench::generation_admission::BootstrapWorld::new(None),
+            ),
+        )
     }
 }
 

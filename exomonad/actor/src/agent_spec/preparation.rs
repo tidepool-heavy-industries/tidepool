@@ -350,8 +350,11 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let admitted = crate::capabilities::CompilerOwnerScope::current()
-                .and_then(|owner| owner.shared_preparation(client.producer()).admit_work());
+            let admitted = crate::capabilities::CompilerOwnerScope::current().and_then(|owner| {
+                client
+                    .compiler_scope(owner.shared_preparation(client.producer()))
+                    .admit_work()
+            });
             let compiler_work = match admitted {
                 Ok(ticket) => ticket,
                 Err(error) => {

@@ -100,9 +100,10 @@ impl ExactExportSurface {
     /// Issue a selected interface through the same compiler join owner used by
     /// cumulative declaration views. The original modules remain dependencies;
     /// only this interface is a new lexical root.
-    pub fn materialize(
+    pub(super) fn materialize(
         &self,
         view: &SessionCompileView,
+        admit: &dyn Fn() -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializedFacade, ExactFacadeError> {
         if view.session() != self.session {
@@ -117,6 +118,7 @@ impl ExactExportSurface {
             includes,
         } = &self.authority
         {
+            let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
             let projection = issue_projection(
                 &baseline.context,
                 &baseline.owner,
@@ -140,6 +142,7 @@ impl ExactExportSurface {
         let source = render_legacy_facade(&identity, self);
         let path = view.session_root().join(identity.relative_hs_path());
         if !std::fs::read(&path).is_ok_and(|existing| existing == source.as_bytes()) {
+            let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
             let parent = path
                 .parent()
                 .ok_or_else(|| ExactFacadeError::InvalidPath(path.clone()))?;
@@ -210,11 +213,12 @@ pub struct MaterializedFacade {
 impl MaterializedFacade {
     /// Narrow this issued interface by original identities. The selected groups
     /// and implementation closure come from this owner, never caller evidence.
-    pub fn select_exact_exports(
+    pub(super) fn select_exact_exports(
         &self,
         selected: &[ExportIdentity],
         includes: &[PathBuf],
         root: &Path,
+        admit: &dyn Fn() -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<Self>, ExactFacadeError> {
         let inherited = self
@@ -247,6 +251,7 @@ impl MaterializedFacade {
             roots: vec![owner.clone()],
             lexical: inherited.context().lexical_graph().to_vec(),
         };
+        let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
         let projection = issue_projection(
             inherited.context(),
             &owner,
@@ -343,6 +348,97 @@ fn render_legacy_facade(identity: &FacadeIdentity, surface: &ExactExportSurface)
     source
 }
 
+impl super::PersistentSession {
+    fn admit_facade_source(
+        &self,
+        scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
+        if let Some(refusal) = &self.source_refusal {
+            return Err(refusal.clone());
+        }
+        if let Some(hook) = &self.source_admission_hook {
+            hook()?;
+        }
+        let admission = if self.source_context_active {
+            self.source_admission.clone()
+        } else {
+            self.source_admission_in(scope)
+        };
+        admission
+            .as_ref()
+            .map(super::RuntimeSourceAdmission::admit)
+            .transpose()
+    }
+
+    pub fn materialize_facade(
+        &self,
+        surface: &ExactExportSurface,
+        view: &SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<MaterializedFacade, ExactFacadeError> {
+        if self.lib().session_id() != view.session() {
+            return Err(ExactFacadeError::WrongSession {
+                surface: self.lib().session_id(),
+                view: view.session(),
+            });
+        }
+        surface.materialize(
+            view,
+            &|| self.admit_facade_source(view.lexical_scope()),
+            settlement,
+        )
+    }
+    pub fn select_facade_exact_exports(
+        &self,
+        scope: tidepool_codegen::scope::ScopeId,
+        facade: &MaterializedFacade,
+        selected: &[ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<MaterializedFacade>, ExactFacadeError> {
+        facade.select_exact_exports(
+            selected,
+            includes,
+            root,
+            &|| self.admit_facade_source(scope),
+            settlement,
+        )
+    }
+}
+
+impl<H, O> super::ResidentSession<H, O>
+where
+    H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
+    O: super::OutputSink + Sync,
+{
+    pub fn materialize_facade(
+        &self,
+        surface: &ExactExportSurface,
+        view: &SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<MaterializedFacade, ExactFacadeError> {
+        self.state.materialize_facade(surface, view, settlement)
+    }
+    pub fn select_facade_exact_exports(
+        &self,
+        facade: &MaterializedFacade,
+        selected: &[ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<MaterializedFacade>, ExactFacadeError> {
+        self.state.select_facade_exact_exports(
+            self.run_context().lexical_scope,
+            facade,
+            selected,
+            includes,
+            root,
+            settlement,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,7 +486,7 @@ mod tests {
             .unwrap();
         let view = session.compile_view_in(ScopeId::ROOT).unwrap();
         let facade = tidepool_testing::with_settlement(|settlement| {
-            full_surface.materialize(&view, settlement)
+            full_surface.materialize(&view, &|| Ok(None), settlement)
         })
         .unwrap();
         let inherited = facade.projection().unwrap();
@@ -413,7 +509,7 @@ mod tests {
             .map(|export| export.head.clone())
             .collect::<Vec<_>>();
         let reused = tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&all, &[], root.path(), settlement)
+            facade.select_exact_exports(&all, &[], root.path(), &|| Ok(None), settlement)
         })
         .unwrap()
         .unwrap();
@@ -445,7 +541,7 @@ mod tests {
             .map(|export| export.head.clone())
             .collect::<Vec<_>>();
         let narrowed_facade = tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&wanted, &include, root.path(), settlement)
+            facade.select_exact_exports(&wanted, &include, root.path(), &|| Ok(None), settlement)
         })
         .unwrap()
         .unwrap();
@@ -453,7 +549,7 @@ mod tests {
         let mut wrong = wanted[0].clone();
         wrong.unit = "foreign".into();
         assert!(matches!(tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&[wrong.clone()], &include, root.path(), settlement)
+            facade.select_exact_exports(&[wrong.clone()], &include, root.path(), &|| Ok(None), settlement)
         }), Err(ExactFacadeError::UnselectedExport(identity)) if identity == wrong));
         assert_eq!(narrowed.receipt().exports(), selected);
         assert_eq!(
@@ -619,9 +715,10 @@ mod tests {
             surface.declarations(),
             Err(ExactExportError::UncertifiedExports)
         ));
-        let facade =
-            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
-                .expect("materialize facade");
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            surface.materialize(&view, &|| Ok(None), settlement)
+        })
+        .expect("materialize facade");
         let (path, source) = facade.source_artifact().unwrap();
         assert!(source.contains("Finding(..)"));
         assert!(source.contains("review"));
