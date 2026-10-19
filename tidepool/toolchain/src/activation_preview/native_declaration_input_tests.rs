@@ -787,22 +787,43 @@ proptest::proptest! {
 fn preview_reuses_selected_original_with_issued_group_custody() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let fixture = issued_declarations(true)[0].clone();
-    let inventory = ArtifactInventory::default();
-    let full = inventory
-        .admit_shared_with_demand(
-            &inventory.empty_view(),
-            vec![fixture.canonical.clone(), fixture.original.clone()],
-            NativeArtifactDemand::ScopeInterfaces,
+    let crate::artifact_inventory::ArtifactPayload::Original(product) = &fixture.original.payload
+    else {
+        panic!("preview fixture must carry its certified original product");
+    };
+    let candidate =
+        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
+            &crate::artifact_inventory::CompilerSourceSupport::empty(),
+            producer,
+            std::slice::from_ref(product),
         )
         .unwrap();
-    let projection =
-        CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
+    let support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&candidate)
+            .unwrap();
+    let issued = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&support)
+            .unwrap(),
+    );
+    let issued_directory = tempfile::tempdir().unwrap();
+    let issued_request = issued
+        .prepare_compilation(issued_directory.path(), PRODUCER)
+        .unwrap();
+    let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        issued_request.compiler_inputs(),
+        &issued_request.compiler_inputs().metadata,
+        &validation.inventory,
+    )
+    .unwrap();
     let target = fixture.original.descriptor.owner.clone();
     let context = Arc::new(
-        ExactDeclarationContext::from_authenticated_execution(
+        ExactDeclarationContext::from_source_selection(
             producer,
-            &full,
-            projection,
+            &selection,
+            issued_request.compiler_inputs().artifacts(),
             vec![ExactLexicalNode {
                 owner: target.clone(),
                 imports: vec![],
