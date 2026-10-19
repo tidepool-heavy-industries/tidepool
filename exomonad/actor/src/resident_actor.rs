@@ -4514,11 +4514,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .actor_callback_execution
                 .as_ref()
                 .and_then(|callback| callback.scope.clone()),
-            issued_snapshot: self
-                .actor_callback_execution
-                .as_ref()
-                .and_then(|callback| callback.snapshot.clone())
-                .or_else(|| self.actor_program_snapshot.clone()),
+            issued_snapshot: self.actor_callback_execution.as_ref().map_or_else(
+                || self.actor_program_snapshot.clone(),
+                |callback| callback.snapshot.clone(),
+            ),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner,
@@ -7973,8 +7972,21 @@ where
             ResidentActorBoundary::RouteRegistration {
                 registration,
                 entry,
-                execution,
+                mut execution,
             } => Box::pin(async move {
+                let dependency = execution.source_dependency().clone();
+                execution.snapshot = effect_owner.issued_snapshot().map(|snapshot| {
+                    crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                        crate::resident_workbench::InstalledToolLease::source_callback_custody(
+                            context.actor,
+                            snapshot.installation().source().clone(),
+                            dependency.clone(),
+                        ),
+                    )
+                });
+                execution.scope = effect_owner
+                    .callback_scope()
+                    .or(Some(dependency.source_lease()?));
                 let owner = kernel
                     .resolve(context.actor)
                     .await
