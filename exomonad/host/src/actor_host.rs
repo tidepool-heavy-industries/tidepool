@@ -169,8 +169,8 @@ use std::time::Duration;
 use exomonad_actor::{
     ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal, ActorWorkbenchSource,
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
-    LocalActorRef, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
-    ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
+    LocalActorRef, LocalResidentDeployment, LocalResidentInstallation, ResidentForest,
+    WorkspaceAdmission, WorkspaceAdmissionError,
 };
 
 use exomonad_actor::Reasoning;
@@ -263,7 +263,7 @@ type ExomonadHandlerStack = HCons<
         >,
     >,
 >;
-type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
+type ExomonadSession = ResidentSession<ExomonadHandlerStack, CapturedOutput>;
 
 fn host_handlers(
     workspace_root: &Path,
@@ -1918,14 +1918,16 @@ async fn run_owned(
         .and_then(|hooks| hooks.web_transport.take())
         .map(tidepool_handlers::WebHandler::with_transport)
         .unwrap_or(web);
-    let CompiledRoot {
-        source,
+    let (
         root,
-        program,
-        child_session_factory,
-        image_registry,
-        recovery_store,
-    } = run_compiler_preparation(|settlement| {
+        CompiledRootMetadata {
+            source,
+            program,
+            child_session_factory,
+            image_registry,
+            recovery_store,
+        },
+    ) = exomonad_actor::CompilerPreparationOwner::new().prepare_resident_root(|settlement| {
         compile_root(
             &config,
             &config.run_directory,
@@ -1942,7 +1944,6 @@ async fn run_owned(
     })?;
     let prior_actor_records = actor_recovery.records().await?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
-    let (descriptor, machine, entry) = root.into_parts();
     let prepared_validation = config
         .workspace_inputs
         .as_ref()
@@ -1950,16 +1951,11 @@ async fn run_owned(
         .map(|inputs| {
             let mut supported = host_context_support();
             supported.extend(
-                exomonad_tool::InstalledEffectSupport::installed_effect_support(machine.handlers()),
+                exomonad_tool::InstalledEffectSupport::installed_effect_support(root.handlers()),
             );
             (inputs, source.clone(), supported)
         });
-    let exomonad_actor::ResidentRootEntry::Startup(entry) = entry else {
-        return Err(runtime_error(
-            "root startup requires its installed executable entry",
-        ));
-    };
-    let bootstrap_identity = entry
+    let bootstrap_identity = root
         .compile_input_identity()
         .ok_or_else(|| {
             runtime_error(
@@ -1973,10 +1969,9 @@ async fn run_owned(
         bindings.clone(),
         runtime_namespace(&run_root),
     );
-    let (forest, deployments) = ResidentForest::new(
+    let (forest, deployments, root_admission) = ResidentForest::from_prepared_root(
         source,
-        descriptor.placement().session,
-        machine,
+        root,
         Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
     )
@@ -2071,8 +2066,7 @@ async fn run_owned(
             Some((_, identity)) => {
                 forest
                     .admit_pending_root_with_identity(
-                        descriptor,
-                        entry,
+                        root_admission,
                         identity,
                         startup_intent.clone(),
                     )
@@ -2082,7 +2076,7 @@ async fn run_owned(
                 let mut intent = startup_intent.clone();
                 let run_root = run_root.clone();
                 forest
-                    .admit_pending_root(descriptor, entry, move |identity| {
+                    .admit_pending_root(root_admission, move |identity| {
                         intent.conversation = embedded_recovery::conversation(
                             &embedded_recovery::host_identity(&run_root, "/root", identity),
                         );
@@ -3379,13 +3373,11 @@ fn compile_driver(
     })
 }
 
-/// [`compile_root`]'s output: the workbench source template, the root's retained
-/// executable entry, its compiled driver turn (reused as-is by a factory-built
-/// child machine — see the composite facade test), and the composition
-/// root's one [`exomonad_actor::ChildSessionFactory`].
-struct CompiledRoot {
+/// Host configuration retained alongside the fresh root recipe. Native startup
+/// installation belongs to the consuming compiler preparation owner; authored
+/// evaluation belongs to the admitted actor after its committed binding.
+struct CompiledRootMetadata {
     source: ActorWorkbenchSource,
-    root: ExomonadRoot,
     program: Arc<tidepool_runtime::session::CompiledTurn>,
     child_session_factory:
         exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
@@ -3411,7 +3403,16 @@ fn compile_root(
     run_journal_mode: JournalOpenMode,
     embedded_startup: Option<embedded_recovery::ObservedStartupRecovery<'_>>,
     settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        ActorDescriptor,
+        ExomonadSession,
+        Arc<tidepool_runtime::session::CompiledTurn>,
+        Option<tidepool_runtime::session::RecoveryPublicOwner>,
+        CompiledRootMetadata,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let state_root = config.workspace.join(".exomonad/state");
     std::fs::create_dir_all(&state_root)?;
     let child_workspace_root = config.workspace.clone();
@@ -3450,15 +3451,17 @@ fn compile_root(
         Arc::clone(&host_incarnation),
         settlement,
     )?;
-    if let Some(startup) = embedded_startup {
+    let predecessor = if let Some(startup) = embedded_startup {
         startup
             .validate_manifest(
                 &library,
                 run_root,
                 active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
             )
-            .map_err(|error| crate::exomonad::boot_stage_refusal("startup manifest", error))?;
-    }
+            .map_err(|error| crate::exomonad::boot_stage_refusal("startup manifest", error))?
+    } else {
+        None
+    };
     let event_registry = WorktreeRegistry::open(worktree_directory, "registry")?;
     let event_journal = EventJournal::open(run_directory, "repo-events.jsonl")?;
     let event_handler = RepoEventHandler::with_registry_namespace(
@@ -3609,10 +3612,6 @@ fn compile_root(
     // every child session bootstraps with this same driver image rather
     // than a second compile of it.
     machine.set_image_registry(Arc::clone(&image_registry));
-    let entry =
-        tracing::info_span!(target: "tidepool::actor_host::startup", "prepare_startup_entry")
-            .in_scope(|| machine.prepare_startup_entry(compiled.code()))?;
-    machine.seal_recovery_initialization_scope(lexical_scope)?;
     let capabilities =
         admitted_capabilities(config.workspace_inputs.as_ref()).map_err(runtime_error)?;
     let root_model = capabilities
@@ -3651,14 +3650,19 @@ fn compile_root(
         .validate_conversation_selection()
         .map_err(runtime_error)?;
     let source = host_workbench_source(config, preamble, include, toolset_support)?;
-    Ok(CompiledRoot {
-        source,
-        root: ResidentActorRoot::pending(descriptor, machine, entry),
-        program: compiled,
-        child_session_factory,
-        image_registry,
-        recovery_store,
-    })
+    Ok((
+        descriptor,
+        machine,
+        Arc::clone(&compiled),
+        predecessor,
+        CompiledRootMetadata {
+            source,
+            program: compiled,
+            child_session_factory,
+            image_registry,
+            recovery_store,
+        },
+    ))
 }
 
 fn host_workbench_source(

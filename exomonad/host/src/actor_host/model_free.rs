@@ -127,16 +127,18 @@ impl ModelFreeSession {
             worktrees.clone(),
             crate::exomonad::source::SourceRootOwner::Temporary(Arc::clone(&session_root)),
         )?;
-        let (source, descriptor, machine, outcome, program, child_session_factory, image_registry) =
-            super::run_compiler_preparation(|settlement| {
-                let super::CompiledRoot {
-                    source,
-                    root,
-                    program,
-                    child_session_factory,
-                    image_registry,
-                    ..
-                } = compile_root(
+        let (
+            root,
+            super::CompiledRootMetadata {
+                source,
+                program,
+                child_session_factory,
+                image_registry,
+                ..
+            },
+        ) = exomonad_actor::CompilerPreparationOwner::new().prepare_resident_root(
+            |settlement| {
+                compile_root(
                     config,
                     &session_directory,
                     &worktree_directory,
@@ -148,28 +150,12 @@ impl ModelFreeSession {
                     super::JournalOpenMode::Create,
                     None,
                     settlement,
-                )?;
-                let (descriptor, mut machine, entry) = root.into_parts();
-                let outcome = match entry {
-                    exomonad_actor::ResidentRootEntry::Prepared(outcome) => outcome,
-                    exomonad_actor::ResidentRootEntry::Startup(entry) => {
-                        machine.run_startup_entry(entry, settlement)?
-                    }
-                };
-                Ok((
-                    source,
-                    descriptor,
-                    machine,
-                    outcome,
-                    program,
-                    child_session_factory,
-                    image_registry,
-                ))
-            })?;
-        let (forest, mut deployments) = ResidentForest::new(
+                )
+            },
+        )?;
+        let (forest, mut deployments, root_admission) = ResidentForest::from_prepared_root(
             source,
-            descriptor.placement().session,
-            machine,
+            root,
             Some(transform(fork_workspace_admission(
                 worktrees.clone(),
                 authority.clone(),
@@ -203,21 +189,7 @@ impl ModelFreeSession {
             forest = forest.with_cell_model_factory(factory);
         }
         let forest = Arc::new(forest);
-        let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;
-        match forest
-            .bind_durable_root_public_owner(actor.identity())
-            .await
-        {
-            Ok(tidepool_runtime::session::PublicManifestCommit::Durable) => {}
-            outcome => {
-                return Err(failed_root_start_cleanup(
-                    forest,
-                    hosted,
-                    format!("model-free root declaration ownership is unavailable: {outcome:?}"),
-                )
-                .await);
-            }
-        }
+        let (actor, hosted) = forest.admit_root(root_admission).await?;
         authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);
         if let Some(layers) = &source_layers {
             layers.bind_run(actor.identity().into());

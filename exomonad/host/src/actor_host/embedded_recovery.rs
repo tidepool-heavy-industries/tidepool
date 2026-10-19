@@ -152,7 +152,8 @@ impl ObservedStartupRecovery<'_> {
         library: &tidepool_runtime::session::SessionLib,
         run_root: &Path,
         accepted_source: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<Option<tidepool_runtime::session::RecoveryPublicOwner>, Box<dyn std::error::Error>>
+    {
         if !self.startup.lease.owns_run(run_root)? {
             return Err("startup binding lacks its exact run lease".into());
         }
@@ -184,7 +185,7 @@ impl ObservedStartupRecovery<'_> {
             }) {
                 return Err("root startup lost its retained public recovery domain".into());
             }
-            return Ok(());
+            return Ok(None);
         }
         for record in super::root_startup_chain(records)? {
             let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -198,8 +199,9 @@ impl ObservedStartupRecovery<'_> {
                 continue;
             };
             if library.validate_recovered_public_owner(&pin.public_owner.owner)? {
+                let predecessor = pin.public_owner.owner.clone();
                 self.startup.manifest = Some((record.admission.actor, pin));
-                return Ok(());
+                return Ok(Some(predecessor));
             }
         }
         Err("root recovery domain owner is outside the exact startup chain".into())
