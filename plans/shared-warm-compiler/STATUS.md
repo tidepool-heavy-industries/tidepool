@@ -1,6 +1,11 @@
 # Shared warm compiler campaign — current snapshot
 
-The campaign is incomplete. Tested product **bedfe31be13c8afe1388d5be7444063bbab0eff5**
+The campaign is incomplete. **Consolidated source70c1d7995a** on
+`integration/shared-warm-cell` joins full Warm4c12, owned-input source/decoder/native
+parcels and HostACA3 histories with qualified944b. It is not yet joined-compiled or
+executed. The next gate is its directly affected production/cfg(test) consumers.
+
+Tested product **bedfe31be13c8afe1388d5be7444063bbab0eff5**
 joins the reviewed Reload publisher/opaque-root/reply foundation with the qualified
 actual public-module query. Eight production/cfg(test)/actor integration consumers
 compiled;154 workflow checks and43 counted tests passed. Ordinary-cell Prepare,
@@ -10,7 +15,8 @@ acceptance is claimed.
 
 Owner `/root/warm_compiler_campaign`, gpt-6.1-sol high. Checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`, branch
-`campaign/shared-warm-compiler`, authoritative remote `github`. Parent `/root`
+`integration/shared-warm-cell`, authoritative remote `github`. The preserved
+qualified branch `campaign/shared-warm-compiler` remains at944b86057d. Parent `/root`
 coordinates the performance fork; external release/main/live-host owner is
 unconfirmed. Campaign publication is authorized; deployment is separate.
 
@@ -33,7 +39,9 @@ bedfe receives full independently reviewed Reload9852..f062 history (tested area
 codefc748/c934), including actual terminal-intent/readiness repair, transactional
 publisher reopen, opaque original-source root and retained reply definition.
 Earlier integrated Hostf70 actual-query, Warm397 and Qualification943a foundations
-remain. New matched publication/native-demand/ordinary-cell branches are separate.
+remain. Source consolidation70c1 now receives matched publication/native-demand/World runtime
+basis histories. Ordinary-cell certified Prepare and actual atomic adopter remain
+unfinished; source consolidation does not inherit component execution acceptance.
 
 | Exact source | Actual joined evidence | Limits |
 | --- | --- | --- |
@@ -54,11 +62,11 @@ reserved grants survive event yields; no new actor or native grant is implied.
 
 | Area | Current result | Next owned action |
 | --- | --- | --- |
-| Host (2 leaves) | Actual query qualified and joined. New World runtime basis/BindingTable witness **aca3d5de** compiled eight owning consumers and passed3controls; clients settled. | SINGLE actual per-item finalizer and atomic bindings/world adopter awaits Warm's SAME certified Prepare cap. Advance private roots from actual binder/native deltas, then publish using SAME final promotion/removals/exact-base CAS; no snapshot rebuild or caller revision formula. |
-| Owned inputs (2 leaves) | Packagea7c125 foundation qualified. Typed Exact/World source adapterf064; keyed membership/closed demanded Product view6fcc (docs4ed969) source accepted, native0. Full receiving reviews retained. | Complete World source/Product constructor after Warm supplies actual closed checked/scaffold/instance/support basis. SAME output/operation/captured bytes; no raw binding/maps pairing or temporary predecessor-world chain. Existing rows and reviewer grants retained. |
-| Warm (2 leaves) | Old query qualified. Prepare transportc940 compiled and passed4 Rust controls (not actual compiler execution). Matched Context6 composition at24d9 compiled Rust/actual worker/SourceBoot wrapper, then actual Tasty1 failed sealed package evidence BEFORE new Published tuple12. Same sealed packages+iface whitelist repair is Warm/protocol owned; prior mechanical failures retained. Native helper5ee repairs public InterfaceOnly promotion and unchanged fact-map reconstruction; source-only receiving review. | Parent owns actual native/checked/scaffold/instance/prototype basis, Rust output certifier and Prepare cap/private successor. Protocol owns matched reader/profile/genuine Published fixture and captured-source alias receipt; dependency leaf owns exact keyed helpers/B backing. Join actual consumers, not independently completed caches. |
-| Reload (2 leaves) | **f062 foundation joined/qualified atbedfe**. Separate04cd mount policy compiled6 and passed15controls. Lower2a421 caller fixture retry compiled2 and passed6 runtime discard controls; oldd4387failures before discard retained. | Finite raw Ordinary product/purpose migration, original lease admission, actual final-slot owner and Display lease identity remain area work. Raw direct-session integration held for correct purpose migration. R2Checking/selective force and full retirement remain required later; force explicitly unsupported in partial candidate. |
-| Qualification (1 leaf) | Birth9529 full source review accepted;666ee12PASS plus separate9529 passive-refusal1PASS at distinct binaries. Actual tuple12 Published fixture2b1498 and matching Haskell reader source accepted; matched execution pending Warm. | Warm owns explicit wake for paired fixture/profile terminal; Qualification receives whole joined evidence before fold. Exact frozen Persona and performance remain later gates. Final scratch analysis only after all approved frontiers settle. |
+| Host (2 leaves) | World runtime basis/BindingTable witness **aca3d5de** compiled eight owning consumers and passed3controls; full history now consolidated at70c1. Actual common-public-scope fixture migration is included. | SINGLE actual per-item finalizer and atomic bindings/world adopter awaits Warm's SAME certified Prepare cap. Advance private roots from actual binder/native deltas, then publish using SAME final promotion/removals/exact-base CAS; no snapshot rebuild or caller revision formula. |
+| Owned inputs (2 leaves) | Packagea7c125 foundation qualified. SAME-output SOURCE2 decodera446 and closed demanded Product/membership/borrower a9d20/786010, native exact-ID926264 source accepted and consolidated through Warm4c12. OWN consolidation packet verifies ten product ancestors; no orphan code parcel remains. | Complete World source/Product constructor after Warm supplies actual closed checked/scaffold/instance/support basis. SAME output/operation/captured bytes; no raw binding/maps pairing or temporary predecessor-world chain. Existing rows and reviewer grants retained. |
+| Warm (2 leaves) | Full **4c12** source consolidated at70c1. Actual Rust production/cfg(test)/candidate issuer compiled3 PASS. First native permission-row fixture failed before hot helper; independent remaining controls are owner-observed, not assumed passing. Matched6959 Context6/Published8/descriptor2 actual Tasty1 PASS, independently received by OWN+Qualification. | Parent owns actual closed native/checked/scaffold/instance/prototype basis and certified Prepare/private successor. Dependency leaf repairs exact fixture and projects selected encoded native facts with honest reachable proof cost; no full-cold fallback. Protocol retains matched/source-domain ownership. |
+| Reload (2 leaves) | **f062 qualified atbedfe**; separate04cd15PASS, lower2a4216PASS and actual lexical-cleanup a4882PASS. Shared raw boundary **f362** is source-consolidated/incomplete: early runtime cfg(test) failed21 caller/fixture errors, tests0. | Parent repairs removed raw routes/callers and seals bootstrap metadata before actual final-C native installation. Actual checked lower path also needs SAME active original-A retention distinct from target-B; narrow existing admission/prefix propagation is coordinated with Host. Final-slot/Display and full force remain required. |
+| Qualification (1 leaf) | Birth9529 full source review accepted;666ee12PASS plus separate9529 passive1PASS. Matched6959 real Published fixture Tasty1 PASS independently received; Rust-only reader mismatch hold closed for this format component. | New SOURCE2/Ready/ordinary/B/frozen/performance acceptance is separate and pending actual joined consumers. Final scratch analysis only after all approved frontiers settle. |
 
 Parents own successive review/repair/folds. Campaign reads actual critical consumers
 and tests integrated histories. Current native allowances/process observers are in
@@ -91,8 +99,8 @@ install; committed prefix/effects remain honest and uncertain work is not replay
 
 Published native birth has four immutable roots including roles; Context6/Published8/
 descriptor2 explicitly refuse old authority shapes. Pure Recorded facts cannot
-retain per-view Acquired owners or endorse live native output. Rust component
-passes do not qualify the mismatched old worker. Existing whole source-publication
+retain per-view Acquired owners or endorse live native output. Matched6959 executes the genuine tuple12 writer/reader with the matching worker;
+that component pass does not qualify new SOURCE2, Ready or ordinary-cell consumers. Existing whole source-publication
 lexical/metadata scans are not ordinary-successor changed-path work; no full
 publication O(delta) claim is made.
 
@@ -105,9 +113,11 @@ conflict refusal passed. Exact frozen Persona rerun remains UNKNOWN. Evidence:
 No certificate equality or required-edge weakening is authorized.
 
 A new bounded source review confirms public raw `run_turn`/Ordinary `CompiledTurn`
-omits original runtime lease A, while later install gates only current B. Current
-actor checked-prefix/item path remains protected; no executed exploit/current actor
-regression is claimed. Reload owns removal/refusal of the raw retained-context live
+omits original runtime lease A, while later install gates only current B. Actual actor hooks still protect the current actor route; no executed exploit is
+claimed. Source review additionally proves the lower checked admission can retain
+canonical targetB without active originalA. Reload owns SAME existing-admission A
+retention through prefix/product/install, coordinated with Host; B custody remains
+distinct and no new raw capture API is introduced. Reload owns removal/refusal of the raw retained-context live
 route, using existing opaque owner/prepared products: admit actual A before compiler
 effects, seal SAME END/checkpoint, and admit original+actual target at install.
 Explicit independently acquired bootstrap and parse-only purposes remain separate;
@@ -127,7 +137,9 @@ current owners; `campaign/HANDOFF-INDEX.json` records exact paths/hashes at snap
 This is continuity support, not stop/completion. Source/compilation/execution,
 review/fold obligations, next commands, dependencies and live observers are explicit.
 
-Campaign native session31983 is TERMINAL0. Its14GiB TOTAL/16growth allowance is
+Integration70c1 has no native result yet; fresh admission/configuration and the
+smallest joined production/cfg(test) compile are campaign owned. All previously
+qualified campaign native session31983 commands are TERMINAL0. Its14GiB TOTAL/16growth allowance is
 released. Idle Buck705523/fork705564 remain globally charged in
 `build.slice/inanna-build-1792430608-705441.scope`; old570528 expired. Settlement:
 scope6518751232B, cumulative peak13168066560B, global41050849280B,

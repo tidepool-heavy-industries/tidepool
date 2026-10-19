@@ -8,13 +8,17 @@ stop/completion/deployment instruction. Read [STATUS.md](STATUS.md),
 
 - Owner `/root/warm_compiler_campaign`, gpt-6.1-sol high; checkout
   `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`.
-- Branch `campaign/shared-warm-compiler`, authoritative remote `github`.
+- Active consolidation branch `integration/shared-warm-cell`, source70c1d7995a.
+  Full Warm4c12+OWN histories and HostACA3 are merged with ancestry preserved.
+  Source consolidated, joined compilation/execution pending. Qualified
+  `campaign/shared-warm-compiler` remains944b; authoritative remote `github`.
 - Tested product **bedfe31be13c8afe1388d5be7444063bbab0eff5** receives full reviewed
   Reload f062 foundation into earlier qualified actual-query aa59. This handoff's
   documentation commit preserves that tested product. Exact published OID/push
   receipt is in private `campaign/CONTINUATION.json`; verify actual Git HEAD/status.
-- Only campaign plan Markdown is being updated at this terminal boundary. No
-  campaign product WIP or running native command. Do not reset/stash another owner.
+- Both source merges are committed; Host applied the exact common-public-scope
+  fixture migration in the receiving checkout. No campaign native process yet;
+  next command is fresh admitted configure and direct joined consumer compile. Do not reset/stash another owner.
 - Parent `/root` coordinates performance fork; release/main/live-host owner remains
   unconfirmed. Campaign publication is authorized, release/deploy is separate.
 
@@ -51,9 +55,10 @@ from old samples or stop that daemon without ownership checks.
 
 1. **Warm owns the actual Prepare/output certifier and private successor.**
    Supply real closed native/checked/scaffold/instance/prototype authority; no
-   full cold support passed to generic hot certifier. Native helper5ee is source
-   accepted, cost execution still pending scaled generic-path discriminator.
-   OWN rows6fcc/4ed supplies keyed membership and closed demanded Product view;
+   full cold support passed to generic hot certifier. Native exact-ID926264 plus OWN rows a9d20/786010 supplies keyed membership and
+   closed demanded Product view, consolidated through Warm4c12. Rust3 targets PASS
+   at4c12; first actual native fixture failed missing normalized permission row
+   before the hot helper and is dependency-leaf owned. Cost is not qualified;
    full constructor remains actual issuer dependent. Cold primary issuance once,
    value-only successors share it; no full retained-value fold or hot full scan.
 2. **Host owns the SINGLE runtime per-item/final atomic adopter.** ACA3 component
@@ -66,14 +71,13 @@ from old samples or stop that daemon without ownership checks.
    activation, atomic association, prior output deletion, predecessor eviction and
    matched B warm/cold counters are required. Unsupported prologue/expressions/GRE
    explicitly refuse and remain later migration obligations. No invented test target.
-4. **Warm owns matched publication gate and wakes Qualification/campaign.** Rust
-   birth9529 has full source acceptance and12PASS at666ee plus separate passive1PASS
-   at9529. Tuple12 genuine issuer2b1498 and matching Context6/Published8/descriptor2
-   reader are composed. Actual24d9 Rust/worker/wrapper compiled, then Tasty1 failed
-   sealed package evidence before new tuple12; exact sealed packages+iface reader
-   whitelist repair is protocol owned. Do not fold an unmatched wire break.
-   Captured-source transport aliases must normalize against SAME immutable ordered
-   root domain; no reopening retired worker materializations or logical-world change.
+4. **Matched publication6959 format component is independently accepted.** Actual
+   genuine Published tuple12/Context6/Published8/descriptor2 Tasty1 PASS; OWN and
+   Qualification verified the receipt and retained products. Earlier24d9 sealed
+   package proof failure remains retained. Both package+iface sealed whitelist
+   repair preserves path/hash/profile proof. This is not SOURCE2/Ready/ordinary/B
+   acceptance. Actual SOURCE2 aliases normalize against SAME ordered captured
+   namespace; no filesystem reopening or logical selection change.
 5. **Reload owns coherent next R1 and raw-live-source migration.** f062 is joined.
    Separate04cd mount policy passed15controls;2a421 lower fixture retry passed6,
    with earlierd4387 MissingTransaction failures retained. Raw public Ordinary turn
@@ -81,7 +85,10 @@ from old samples or stop that daemon without ownership checks.
    existing opaque owner products, actual precompiler A admission, SAME END/checkpoint
    and original+target install. Explicit independently acquired bootstrap is separate;
    no fresh unrelated B wrapper. Actual finalslot/Display lease, R2Checking/force and
-   full retirement remain approved work. Current checked actor path is protected.
+   full retirement remain approved work. Actor hooks still protect actor route. Source-proven lower checked omission of
+   originalA beside canonicalB is repaired through existing admission/prefix/product
+   fields by Reload, with Host World constructor migration. No new raw capture API.
+   Shared raw f362 early cfg(test) failed21 mechanical callers/tests0; repair active.
 6. **Qualification owns exact frozen/performance and final scratch analysis.**
    Frozen428b role-promotion source repair is already in d334/943a/campaign; actual
    retained lookup preserves roles via ScopeInterfaces+custody. Component positive/
