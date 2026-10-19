@@ -220,3 +220,29 @@ oracle preserved. Reload's new issuer/service controls passed, but before-ACK
 operational advertisement supersedes its publisher source acceptance until repair.
 Old eea acquisition failure carrier was incomplete and its exact cause remains
 unproven; later successful acquisition does not retrospectively diagnose it.
+
+
+## Joined foundation and actual query checkpoint aa59c48c03
+
+Complete independently reviewed Warm397, Host3141 and Qualification943a histories
+joined at f88aad4ce7. Owning nine consumers passed2364 local/0remote actions in
+1225.45s after the prior Buck daemon expired; this is build timing, not runtime.
+Workflow154 and counted Rust27 passed: toolchain7/runtime1/actor15/notebook4.
+`campaign/foundation-join-f88/TERMINAL.json` reconciles103 report/stream/binary/resource
+hashes. Compiler/hosted cleanup not_observed, incomplete diagnostics and directory
+resource hashing remain per-report; no blanket cleanup or release acceptance.
+
+Complete Hostf70 actual query history joined at aa59. Owning actor cfg(test) compile
+passed, then SAME actual service Rooted2 selected/executed/PASS2. The actual frontend
+strict Right/name/provenance guard committed its binding; SAME query with only wrong
+expected name failed the exact authored guard before binding. History3, helper zero-old-work
+and positive calibration, transfer/fences, source precedence/captured absence/newfile,
+unsupported/mismatch/CAS and requested-versus-defining reexports all passed.
+`campaign/query-qualified-join/TERMINAL.json` reconciles19 report/stream/executable/
+regular-resource/area-packet hashes. Actual frontend has no HostWorkObservation,
+so helper-zero assertions do not prove zero work for that frontend. Both Rooted
+process/compiler cleanup confirmed; hosted not_observed, diagnostic/directory limits
+retained. Source aa59 stayed clean and frozen until terminal verification. Campaign
+14TOTAL/8growth released, idle Buck570528 globally retained; cumulative scope peak
+14,056,955,904B is not a phase/client peak. No ordinary-cell/private successor/B,
+frozen/fullforce or performance acceptance follows.

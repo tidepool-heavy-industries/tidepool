@@ -1,15 +1,13 @@
 # Shared warm compiler: delivery plan
 
-Status: active implementation campaign. Reviewed host, custody, worker and canonical
-reload foundations are integrated; see [current status](STATUS.md). Exact6f9 joined
-ten production/test/Haskell consumers,154 workflow cases, Rust2 and Haskell2 passed.
-Actual Rooted queries executed2: source-domain/reexport/absence history passed;
-the other case passed cold and initial hot queries before a fixture failure.
-Genuine frontend/growing-history controls, required ordinary-cell/publication/recovery
-migration and measured improvement remain unqualified. Paired inspect/prepareCell
-contracts are accepted; new-profile protocol and exact publication-owner repairs
-are actively implementing and compiling. No full Ready lifecycle or speedup is claimed.
-
+Status: active, incomplete implementation campaign; see [current status](STATUS.md).
+Integrated aa59 passed both actual service-backed public-module query histories,
+including strict frontend resumption and growing-history controls. Joined f88 compiled
+nine production/test consumers and passed154 workflow plus27 counted Rust checks.
+The critical next outcome is a genuine nonempty three-root/import ordinary cell,
+private successor, atomic bindings/world publication and second-cell use with exact
+world-owned dependency reuse. Query acceptance does not establish ordinary-cell
+migration, frozen qualification, full force/drain or a measured speedup.
 
 This directory is the handoff for a Sol supervision tree. Read this file, the
 [shared contracts](CONTRACTS.md), and the [supervisor assignment](supervisor/README.md)
