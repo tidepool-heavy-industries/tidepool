@@ -1219,3 +1219,155 @@ fn accumulating_availability_encodes_only_the_added_membership() {
         previous = next;
     }
 }
+
+fn reachable_fixture() -> (StagedBlocks, Vec<Cid>, BTreeMap<Cid, Vec<Cid>>) {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let leaf = writer.materialize_value(&("leaf", 0u64)).unwrap();
+    let a = writer.materialize_value(&("a", vec![leaf, leaf])).unwrap();
+    let b = writer.materialize_value(&("b", vec![leaf])).unwrap();
+    let top = writer.materialize_value(&("top", vec![a, b])).unwrap();
+    let orphan = writer.materialize_value(&("unreachable", 1u64)).unwrap();
+    let edges = [
+        (leaf, vec![]),
+        (a, vec![leaf, leaf]),
+        (b, vec![leaf]),
+        (top, vec![a, b]),
+        (orphan, vec![]),
+    ]
+    .into_iter()
+    .collect();
+    (
+        writer.finish().unwrap(),
+        vec![leaf, a, b, top, orphan],
+        edges,
+    )
+}
+
+// Independent graph oracle uses the fixture's declared edges, not the
+// production CBOR link scanner or incremental retain/release algorithm.
+fn full_incoming(roots: &[Cid], edges: &BTreeMap<Cid, Vec<Cid>>) -> BTreeMap<Cid, u64> {
+    let mut pending = roots.to_vec();
+    let mut counts = BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for root in roots {
+        *counts.entry(*root).or_default() += 1;
+    }
+    while let Some(cid) = pending.pop() {
+        if seen.insert(cid) {
+            for child in &edges[&cid] {
+                *counts.entry(*child).or_default() += 1;
+                pending.push(*child);
+            }
+        }
+    }
+    counts
+}
+
+fn frontier_counts(frontier: &ReachableBlocks) -> BTreeMap<Cid, u64> {
+    frontier
+        .blocks
+        .iter()
+        .map(|(cid, block)| (*cid, block.incoming))
+        .collect()
+}
+
+#[test]
+fn reachable_blocks_count_duplicate_edges_and_release_obsolete_fork_paths() {
+    let (staged, nodes, edges) = reachable_fixture();
+    let roots = vec![nodes[1], nodes[1], nodes[0], nodes[2]];
+    let original = ReachableBlocks::default()
+        .replace_roots(&staged, roots.clone())
+        .unwrap();
+    assert_eq!(frontier_counts(&original), full_incoming(&roots, &edges));
+    assert_eq!(original.blocks[&nodes[1]].incoming, 2);
+    assert_eq!(original.blocks[&nodes[0]].incoming, 4);
+    assert!(!original.blocks.contains_key(&nodes[4]));
+    let weak = Arc::downgrade(&original.blocks[&nodes[1]].bytes);
+    let fork = original.clone();
+    let changed = original.replace_roots(&staged, vec![nodes[2]]).unwrap();
+    assert_eq!(
+        frontier_counts(&changed),
+        full_incoming(&[nodes[2]], &edges)
+    );
+    assert!(!changed.blocks.contains_key(&nodes[1]));
+    drop(original);
+    drop(staged);
+    assert!(
+        weak.upgrade().is_some(),
+        "live fork still owns the old path"
+    );
+    drop(fork);
+    assert!(
+        weak.upgrade().is_none(),
+        "successor does not own the predecessor path"
+    );
+    let empty = changed
+        .replace_roots(
+            &StagedBlocks {
+                blocks: vec![],
+                metrics: Default::default(),
+            },
+            vec![],
+        )
+        .unwrap();
+    assert!(empty.blocks.is_empty());
+}
+
+#[test]
+fn current_block_frontier_materializes_only_changed_hamt_paths() {
+    let empty = ReachableBlocks::default();
+    let facts = (0u64..1024)
+        .map(|n| (n, format!("value-{n}")))
+        .collect::<OrdMap<_, _>>();
+    let mut first = Materializer::new(&empty);
+    let base = first.materialize_map(None, &facts).unwrap();
+    let cold = first.finish().unwrap();
+    let frontier = empty
+        .replace_roots(&cold, vec![*base.root().cid()])
+        .unwrap();
+    let mut next_facts = facts.clone();
+    next_facts.insert(500, "changed".into());
+    let mut writer = Materializer::new(&frontier);
+    let next = writer.materialize_map(Some(&base), &next_facts).unwrap();
+    let delta = writer.finish().unwrap();
+    assert_eq!(delta.metrics().changed_entries, 1);
+    assert!(delta.metrics().offered_bytes < cold.metrics().offered_bytes / 4);
+    assert!(delta.metrics().cid_validation_bytes < cold.metrics().cid_validation_bytes / 4);
+    let successor = frontier
+        .replace_roots(&delta, vec![*next.root().cid()])
+        .unwrap();
+    let restored = hydrate_map::<u64, String, _>(&successor, next.root()).unwrap();
+    assert_eq!(restored.facts(), &next_facts);
+    let mut unchanged = Materializer::new(&successor);
+    let same = unchanged.materialize_map(Some(&next), &next_facts).unwrap();
+    let none = unchanged.finish().unwrap();
+    assert_eq!(none.metrics().changed_entries, 0);
+    assert_eq!(none.metrics().serialized_bytes, 0);
+    assert_eq!(none.metrics().offered_bytes, 0);
+    assert_eq!(none.metrics().cid_validation_bytes, 0);
+    assert!(none.blocks().is_empty());
+    let same_frontier = successor
+        .replace_roots(&none, vec![*same.root().cid()])
+        .unwrap();
+    assert_eq!(frontier_counts(&same_frontier), frontier_counts(&successor));
+}
+
+proptest! {
+    #[test]
+    fn reachable_frontier_histories_match_full_recomputation(
+        edits in prop::collection::vec((0usize..3, prop::collection::vec(0usize..5, 0..6)), 1..48)
+    ) {
+        let (staged, nodes, edges) = reachable_fixture();
+        let mut forks = vec![ReachableBlocks::default(); 3];
+        for (slot, selected) in edits {
+            let roots = selected.into_iter().map(|index| nodes[index]).collect::<Vec<_>>();
+            let base = forks[(slot+1)%3].clone();
+            forks[slot] = base.replace_roots(&staged, roots.clone()).unwrap();
+            prop_assert_eq!(frontier_counts(&forks[slot]), full_incoming(&roots, &edges));
+            for other in &forks {
+                prop_assert_eq!(frontier_counts(other), full_incoming(&other.roots, &edges));
+            }
+        }
+    }
+}

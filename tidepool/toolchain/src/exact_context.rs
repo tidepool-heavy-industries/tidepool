@@ -186,6 +186,145 @@ impl StagedBlocks {
     }
 }
 
+/// Current-root block custody for an immutable snapshot. Reference counts are
+/// local to this frontier, so forks share bytes without owning predecessor
+/// frontiers. Only staged/replaced paths change during publication.
+#[derive(Clone, Default)]
+pub(crate) struct ReachableBlocks {
+    roots: Vec<Cid>,
+    blocks: OrdMap<Cid, ReachableBlock>,
+}
+
+#[derive(Clone)]
+struct ReachableBlock {
+    bytes: Arc<[u8]>,
+    children: Arc<[Cid]>,
+    incoming: u64,
+}
+
+impl ReachableBlocks {
+    pub(crate) fn blocks(&self) -> impl Iterator<Item = (&Cid, &Arc<[u8]>)> {
+        self.blocks.iter().map(|(cid, block)| (cid, &block.bytes))
+    }
+
+    /// Link all new roots before removing old roots: shared descendants never
+    /// transiently disappear. Staged blocks outside the new closure are dropped.
+    pub(crate) fn replace_roots(
+        &self,
+        staged: &StagedBlocks,
+        roots: Vec<Cid>,
+    ) -> Result<Self, SnapshotError> {
+        if roots == self.roots {
+            return Ok(self.clone());
+        }
+        let pending = staged
+            .blocks
+            .iter()
+            .map(|(cid, bytes)| (*cid, bytes))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut next = self.clone();
+        for root in &roots {
+            next.retain(*root, &pending)?;
+        }
+        for root in &self.roots {
+            next.release(*root)?;
+        }
+        next.roots = roots;
+        Ok(next)
+    }
+
+    fn retain(
+        &mut self,
+        cid: Cid,
+        staged: &std::collections::BTreeMap<Cid, &Arc<[u8]>>,
+    ) -> Result<(), SnapshotError> {
+        if let Some(block) = self.blocks.get_mut(&cid) {
+            block.incoming = block
+                .incoming
+                .checked_add(1)
+                .ok_or_else(|| malformed("snapshot block reference overflow"))?;
+            return Ok(());
+        }
+        let bytes = staged.get(&cid).ok_or(SnapshotError::MissingBlock(cid))?;
+        verify_block(&cid, bytes)?;
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(&bytes[..]).map_err(malformed)?;
+        let mut children = Vec::new();
+        snapshot_links(&value, &mut children)?;
+        // Preserve edge multiplicity, including identical child CIDs.
+        for child in &children {
+            self.retain(*child, staged)?;
+        }
+        self.blocks.insert(
+            cid,
+            ReachableBlock {
+                bytes: Arc::clone(bytes),
+                children: children.into(),
+                incoming: 1,
+            },
+        );
+        Ok(())
+    }
+
+    fn release(&mut self, cid: Cid) -> Result<(), SnapshotError> {
+        let block = self
+            .blocks
+            .get_mut(&cid)
+            .ok_or_else(|| malformed("released snapshot block is not retained"))?;
+        if block.incoming > 1 {
+            block.incoming -= 1;
+            return Ok(());
+        }
+        let children = Arc::clone(&block.children);
+        self.blocks.remove(&cid);
+        for child in children.iter() {
+            self.release(*child)?;
+        }
+        Ok(())
+    }
+}
+
+impl Blockstore for ReachableBlocks {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.blocks.get(cid).map(|block| block.bytes.to_vec()))
+    }
+    fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+        Err(malformed("immutable snapshot frontier cannot accept writes").into())
+    }
+}
+
+fn snapshot_links(
+    value: &ciborium::value::Value,
+    links: &mut Vec<Cid>,
+) -> Result<(), SnapshotError> {
+    use ciborium::value::Value;
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                snapshot_links(value, links)?;
+            }
+        }
+        Value::Map(values) => {
+            for (key, value) in values {
+                snapshot_links(key, links)?;
+                snapshot_links(value, links)?;
+            }
+        }
+        Value::Tag(42, body) => {
+            let Value::Bytes(bytes) = body.as_ref() else {
+                return Err(malformed("snapshot CID link is not bytes"));
+            };
+            let Some((&0, cid)) = bytes.split_first() else {
+                return Err(malformed("snapshot CID link lacks identity prefix"));
+            };
+            links.push(Cid::try_from(cid).map_err(malformed)?);
+        }
+        Value::Tag(_, _) => return Err(malformed("unsupported snapshot CBOR tag")),
+        _ => (),
+    }
+    Ok(())
+}
+
 /// FVM HAMTs and their unsynchronized child caches never leave this owner.
 /// The caller retains immutable CID storage for this operation. Another store
 /// or publication attempt requires a fresh materializer and authentication.
