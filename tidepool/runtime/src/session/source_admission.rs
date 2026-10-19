@@ -179,11 +179,25 @@ impl RuntimeSourceAdmission {
         }
     }
     pub fn fence(&self) -> Result<RuntimeSourceFence, SourceAdmissionError> {
+        self.fence_inner(false)
+    }
+    /// Publication cannot expose its target while a source action is active.
+    /// Busy refusal leaves the existing phase untouched under this same lock.
+    pub fn fence_if_idle(&self) -> Result<RuntimeSourceFence, SourceAdmissionError> {
+        self.fence_inner(true)
+    }
+    fn fence_inner(&self, require_idle: bool) -> Result<RuntimeSourceFence, SourceAdmissionError> {
         let mut state = self.0.state.lock();
         if state.phase != SourceAdmissionPhase::Open {
             return Err(SourceAdmissionError::Closed {
                 scope: self.0.scope,
                 phase: state.phase,
+            });
+        }
+        if require_idle && (state.claims != 0 || state.unconfirmed != 0) {
+            return Err(SourceAdmissionError::BootstrapBusy {
+                claims: state.claims,
+                unconfirmed: state.unconfirmed,
             });
         }
         let attempt = state.next_attempt;

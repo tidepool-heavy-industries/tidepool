@@ -1894,6 +1894,29 @@ fn retain_unconfirmed_generation(
 pub(crate) struct ActorGenerationPublisher<H, O> {
     access: ResidentMachineAccess<H, O>,
     state: Arc<InstalledToolsState>,
+    owner: ActorPublicationOwner,
+}
+
+#[derive(Clone)]
+pub(crate) enum ActorPublicationOwner {
+    Actor(crate::LifecycleHandle),
+    Preparation(crate::CompilerPreparationClient),
+}
+impl ActorPublicationOwner {
+    fn matches_actor(&self, actor: ActorRef) -> bool {
+        match self {
+            Self::Actor(lifecycle) => lifecycle.identity() == actor,
+            Self::Preparation(_) => true,
+        }
+    }
+    fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
+        match self {
+            Self::Actor(lifecycle) => lifecycle
+                .retained_terminal()
+                .with_live_source_settlement(settle),
+            Self::Preparation(owner) => owner.with_live_source_settlement(settle),
+        }
+    }
 }
 
 /// The exact prepared selection reserved by the current installation owner.
@@ -1911,6 +1934,7 @@ struct ActorPublicationGuard {
     target_fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
     target_prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
+    owner: ActorPublicationOwner,
     settled: bool,
 }
 
@@ -1928,6 +1952,7 @@ impl ActorPublicationGuard {
         target: generation_admission::GenerationDependency,
         source: &generation_admission::SourceDependency,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        owner: ActorPublicationOwner,
     ) -> Result<Option<Self>, ResidentActorWorkbenchError> {
         target.runtime_lease().validate_source_issuer()?;
         let world = match (&expected, source) {
@@ -1947,21 +1972,7 @@ impl ActorPublicationGuard {
             None
         };
         let target_fence = if world.is_none() {
-            let fence = target.runtime_admission().fence()?;
-            let claims = fence.pending_claims();
-            let unconfirmed = fence.unconfirmed_claims();
-            if claims != 0 {
-                if unconfirmed == 0 {
-                    fence.reopen()?;
-                }
-                return Err(
-                    generation_admission::GenerationAdmissionError::BootstrapBusy {
-                        claims,
-                        unconfirmed,
-                    }
-                    .into(),
-                );
-            }
+            let fence = target.runtime_admission().fence_if_idle()?;
             Some(fence)
         } else {
             None
@@ -1986,12 +1997,10 @@ impl ActorPublicationGuard {
             same
         };
         if !same {
-            if let Some(world) = world {
-                world.refused();
-            }
-            if let Some(fence) = target_fence {
-                fence.reopen()?;
-            }
+            // No selected owner remains to authorize restoration. Abandoned
+            // candidate fences remain closed; custody is retained separately.
+            drop(world);
+            drop(target_fence);
             return Ok(None);
         }
         Ok(Some(Self {
@@ -2001,6 +2010,7 @@ impl ActorPublicationGuard {
             target_fence,
             target_prerequisite,
             decision,
+            owner,
             settled: false,
         }))
     }
@@ -2041,68 +2051,66 @@ impl ActorPublicationGuard {
     }
 
     fn refused(mut self) {
-        {
-            let mut current = self.state.0.lock();
-            if matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt))
-            {
+        let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
+            self.owner.with_live_source_settlement(|| {
+                let mut current = self.state.0.lock();
+                if !matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt)) {
+                    return Err(());
+                }
                 *current = match &self.attempt.expected {
-                    ActorRequestSnapshot::Bootstrap(lease) => {
-                        InstalledToolsAvailability::Available(lease.clone())
-                    }
-                    ActorRequestSnapshot::Generation(generation) => {
-                        InstalledToolsAvailability::Generation(generation.clone())
-                    }
-                    ActorRequestSnapshot::SourceCallback(_) => {
-                        unreachable!("callback is not current publication")
-                    }
+                    ActorRequestSnapshot::Bootstrap(lease) => InstalledToolsAvailability::Available(lease.clone()),
+                    ActorRequestSnapshot::Generation(generation) => InstalledToolsAvailability::Generation(generation.clone()),
+                    ActorRequestSnapshot::SourceCallback(_) => unreachable!("callback is not current publication"),
                 };
-            }
-        }
-        // No installation or machine guard survives source-fence settlement.
-        if let Some(world) = self.world.take() {
-            world.refused();
-        }
-        if let Some(fence) = self.target_fence.take() {
-            // This path has a completed, known-unpublished operation only.
-            // A stale/unknown source owner remains closed on settlement failure.
-            if fence.reopen().is_err() {
-                return;
-            }
-        }
-        self.settled = true;
+                reopen.commit();
+                Ok(())
+            }).unwrap_or(Err(()))
+        };
+        self.settled = if let Some(world) = self.world.take() {
+            world.refused_when(restore)
+        } else {
+            self.target_fence
+                .take()
+                .expect("publication target fence")
+                .reopen_with(self.attempt.target.runtime_lease(), restore)
+                .is_ok_and(|result| result.is_ok())
+        };
     }
 
     fn confirmed(mut self) -> bool {
-        let current = || {
-            let mut current = self.state.0.lock();
-            let selected = match &*current {
-                InstalledToolsAvailability::PublicationVisible {
-                    attempt,
-                    generation,
-                } if Arc::ptr_eq(attempt, &self.attempt)
-                    && generation.dependency().same_prepared(&self.attempt.target) =>
-                {
-                    Some(generation.clone())
-                }
-                _ => None,
-            };
-            if let Some(generation) = selected {
-                *current = InstalledToolsAvailability::Generation(generation);
-                true
-            } else {
-                false
-            }
+        let promote = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
+            self.owner
+                .with_live_source_settlement(|| {
+                    let mut current = self.state.0.lock();
+                    let selected = match &*current {
+                        InstalledToolsAvailability::PublicationVisible {
+                            attempt,
+                            generation,
+                        } if Arc::ptr_eq(attempt, &self.attempt)
+                            && generation.dependency().same_prepared(&self.attempt.target) =>
+                        {
+                            Some(generation.clone())
+                        }
+                        _ => None,
+                    };
+                    let Some(generation) = selected else {
+                        return Err(());
+                    };
+                    *current = InstalledToolsAvailability::Generation(generation);
+                    reopen.commit();
+                    Ok(())
+                })
+                .unwrap_or(Err(()))
         };
-        let mut confirmed = if let Some(world) = self.world.take() {
-            world.confirmed_when(current)
+        let confirmed = if let Some(world) = self.world.take() {
+            world.confirmed_when(promote)
         } else {
-            current()
+            self.target_fence
+                .take()
+                .expect("publication target fence")
+                .reopen_with(self.attempt.target.runtime_lease(), promote)
+                .is_ok_and(|result| result.is_ok())
         };
-        if confirmed {
-            if let Some(fence) = self.target_fence.take() {
-                confirmed = fence.reopen().is_ok();
-            }
-        }
         self.settled = confirmed;
         confirmed
     }
@@ -2216,6 +2224,11 @@ where
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        if !self.owner.matches_actor(prepared.checkout_context.actor) {
+            return Ok(ActorGenerationCommit::Refused(
+                "publication owner belongs to another actor".into(),
+            ));
+        }
         let machine_owner = {
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
             Arc::downgrade(&owner)
@@ -2236,6 +2249,7 @@ where
                 .clone(),
             prepared.checkout_context.source_dependency(),
             publication.clone(),
+            self.owner.clone(),
         )?
         else {
             return Ok(ActorGenerationCommit::Refused(
@@ -2940,10 +2954,12 @@ where
     pub(crate) fn generation_publisher(
         &self,
         state: Arc<InstalledToolsState>,
+        owner: ActorPublicationOwner,
     ) -> ActorGenerationPublisher<H, O> {
         ActorGenerationPublisher {
             access: self.access.sharing(),
             state,
+            owner,
         }
     }
 }
@@ -20975,7 +20991,10 @@ pub(crate) mod request_tests {
             };
             assert_eq!(prepared.installation_work, expected_work);
             let initial = match workbench
-                .generation_publisher(state.clone())
+                .generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(preparation_client.clone()),
+                )
                 .publish(
                     prepared,
                     tidepool_runtime::session::PublicationDecision::new(),
@@ -21090,11 +21109,14 @@ pub(crate) mod request_tests {
                     .revision;
                 assert!(matches!(
                     workbench
-                        .generation_publisher(if cancelled {
-                            state.clone()
-                        } else {
-                            Arc::new(InstalledToolsState::default())
-                        })
+                        .generation_publisher(
+                            if cancelled {
+                                state.clone()
+                            } else {
+                                Arc::new(InstalledToolsState::default())
+                            },
+                            ActorPublicationOwner::Preparation(preparation_client.clone())
+                        )
                         .publish(rejected, decision, ActorGenerationPublication::Terminal,)
                         .await
                         .unwrap(),
@@ -21148,7 +21170,10 @@ pub(crate) mod request_tests {
                 );
             assert!(matches!(
                 foreign_owner
-                    .generation_publisher(state.clone())
+                    .generation_publisher(
+                        state.clone(),
+                        ActorPublicationOwner::Preparation(preparation_client.clone())
+                    )
                     .publish(
                         foreign,
                         tidepool_runtime::session::PublicationDecision::new(),
@@ -21179,7 +21204,10 @@ pub(crate) mod request_tests {
             assert!(!Arc::ptr_eq(&initial, &current));
             assert!(matches!(
                 workbench
-                    .generation_publisher(state.clone())
+                    .generation_publisher(
+                        state.clone(),
+                        ActorPublicationOwner::Preparation(preparation_client.clone())
+                    )
                     .publish(
                         stale,
                         tidepool_runtime::session::PublicationDecision::new(),
@@ -21256,7 +21284,10 @@ pub(crate) mod request_tests {
                 "an unrelated public owner forces the prepared replacement to rebase"
             );
             let replacement = match workbench
-                .generation_publisher(state.clone())
+                .generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(preparation_client.clone()),
+                )
                 .publish(
                     prepared,
                     tidepool_runtime::session::PublicationDecision::new(),
@@ -21444,7 +21475,10 @@ pub(crate) mod request_tests {
             let decision = tidepool_runtime::session::PublicationDecision::new();
             assert!(matches!(
                 workbench
-                    .generation_publisher(state.clone())
+                    .generation_publisher(
+                        state.clone(),
+                        ActorPublicationOwner::Preparation(preparation_client.clone())
+                    )
                     .publish(
                         late_prepared,
                         decision.clone(),

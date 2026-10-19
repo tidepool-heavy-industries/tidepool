@@ -332,7 +332,12 @@ impl GenerationSupport {
                 .unwrap()
         };
         let generation = match workbench
-            .generation_publisher(fixture.installed_tools.clone())
+            .generation_publisher(
+                fixture.installed_tools.clone(),
+                crate::resident_workbench::ActorPublicationOwner::Actor(
+                    fixture.admission.lifecycle.clone(),
+                ),
+            )
             .publish(
                 prepared,
                 tidepool_runtime::session::PublicationDecision::new(),

@@ -3635,6 +3635,17 @@ where
     if let Some(terminal) = state.terminal.get() {
         return terminal;
     }
+    let requested = match &disposition {
+        Disposition::Stop(terminal) => terminal.clone(),
+        Disposition::Replaced { summary, .. } => ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: summary.clone(),
+            diagnostic: None,
+        },
+    };
+    // Record the actual terminal disposition before asynchronous lifecycle
+    // closure. Source settlement cannot reopen admission in that closing gap.
+    state.terminal.request_shutdown(requested);
     // Serialized mailbox execution closes completion admission here: queued
     // completion cannot run across this snapshot or after stopping the actor.
 
@@ -7870,6 +7881,10 @@ mod tests {
         assert_eq!(actor.address().get_status(), ractor::ActorStatus::Stopped);
         assert_eq!(actor.terminal().get().unwrap().kind, expected.kind);
         assert_eq!(actor.terminal().get().unwrap().summary, expected.summary);
+        assert_eq!(
+            actor.terminal().requested_shutdown(),
+            Some(expected.clone())
+        );
         assert!(actor.terminal().cleanup().is_some());
         let context = observations.lock()[0].0.clone();
         assert!(context
@@ -10372,6 +10387,7 @@ mod tests {
             ]
         );
         assert_eq!(terminal.successor(), Some(successor.identity()));
+        assert_eq!(terminal.requested_shutdown(), Some(published.clone()));
         assert!(terminal.cleanup().unwrap().is_confirmed());
 
         placeholder_task.await.unwrap();

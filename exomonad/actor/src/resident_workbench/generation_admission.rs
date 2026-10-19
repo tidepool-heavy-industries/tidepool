@@ -149,18 +149,7 @@ impl BootstrapWorld {
         if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
-        let fence = scope.source_admission().fence()?;
-        if fence.pending_claims() != 0 || fence.unconfirmed_claims() != 0 {
-            let claims = fence.pending_claims();
-            let unconfirmed = fence.unconfirmed_claims();
-            if unconfirmed == 0 {
-                fence.reopen()?;
-            }
-            return Err(GenerationAdmissionError::BootstrapBusy {
-                claims,
-                unconfirmed,
-            });
-        }
+        let fence = scope.source_admission().fence_if_idle()?;
         state.phase = WorldPhase::Publishing(target.clone());
         let attempt = Arc::new(());
         state.publication = Some(attempt.clone());
@@ -312,47 +301,74 @@ impl WorldPublication {
         }
         state.phase = WorldPhase::Bound(target.clone());
     }
-    pub(super) fn confirmed_when(mut self, current: impl FnOnce() -> bool) -> bool {
+    pub(super) fn confirmed_when(
+        mut self,
+        current: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
         let mut state = self.world.0.state.lock();
         if !state
             .publication
             .as_ref()
             .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
             || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target))
-            || !current()
         {
             return false;
         }
-        self.fence
+        let confirmed = self
+            .fence
             .take()
             .expect("initial source publication fence")
-            .reopen()
-            .expect("confirmed publisher owns source fence");
-        self.settled = true;
-        state.publication = None;
-        true
+            .reopen_with(self.visibility.target.runtime_lease(), current)
+            .is_ok_and(|result| result.is_ok());
+        if confirmed {
+            self.settled = true;
+            state.publication = None;
+        }
+        confirmed
     }
     #[cfg(test)]
     pub(super) fn confirmed(self) {
-        assert!(self.confirmed_when(|| true));
+        assert!(self.confirmed_when(|reopen| {
+            reopen.commit();
+            Ok(())
+        }));
     }
-    pub(super) fn refused(mut self) {
+    pub(super) fn refused_when(
+        mut self,
+        current: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
         let mut state = self.world.0.state.lock();
-        if state
+        if !state
             .publication
             .as_ref()
             .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
-            && matches!(state.phase, WorldPhase::Publishing(_))
+            || !matches!(state.phase, WorldPhase::Publishing(_))
         {
-            state.phase = WorldPhase::Bootstrap;
-            state.publication = None;
+            return false;
         }
-        self.fence
+        let refused = self
+            .fence
             .take()
             .expect("initial source publication fence")
-            .reopen()
-            .expect("refused publisher owns source fence");
-        self.settled = true;
+            .reopen_with(self.visibility.target.runtime_lease(), current)
+            .is_ok_and(|result| result.is_ok());
+        if refused {
+            state.phase = WorldPhase::Bootstrap;
+            state.publication = None;
+            self.settled = true;
+        }
+        refused
+    }
+    #[cfg(test)]
+    pub(super) fn refused(self) {
+        assert!(self.refused_when(|reopen| {
+            reopen.commit();
+            Ok(())
+        }));
     }
 }
 impl Drop for WorldPublication {
@@ -635,6 +651,7 @@ impl GenerationFence {
     pub(crate) async fn wait_for_claims(&self) -> Result<(), GenerationAdmissionError> {
         self.fence.wait_for_claims().await
     }
+    #[cfg(test)]
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
         self.fence.reopen()
     }
@@ -692,6 +709,7 @@ mod tests {
     /// publication/visibility entry. They allocate no compiler code or durable head.
     struct PublicationFixture {
         _history: History,
+        preparation: Option<crate::CompilerPreparationOwner>,
         source: SourceDependency,
         state: Arc<super::super::InstalledToolsState>,
         generation: Arc<super::super::ActorGeneration>,
@@ -751,6 +769,7 @@ mod tests {
             });
             Self {
                 _history: history,
+                preparation: Some(crate::CompilerPreparationOwner::new()),
                 source,
                 state,
                 generation,
@@ -821,6 +840,9 @@ mod tests {
                 self.generation.dependency().clone(),
                 &self.source,
                 decision,
+                super::super::ActorPublicationOwner::Preparation(
+                    self.preparation.as_ref().unwrap().client(),
+                ),
             )
             .unwrap()
             .unwrap()
@@ -834,6 +856,81 @@ mod tests {
                 super::super::InstalledToolsObservation::SourceUnavailable(_)
             ));
         }
+    }
+
+    #[test]
+    fn publisher_terminal_clear_before_confirmation_never_reopens_retained_target() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::new()
+            } else {
+                PublicationFixture::after_confirmed_c()
+            };
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            fixture.state.clear();
+            assert!(!owner.confirmed());
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_closed_actual_preparation_owner_prevents_confirmation_and_refusal_reopen() {
+        for confirmed in [true, false] {
+            let mut fixture = PublicationFixture::new();
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            if confirmed {
+                assert!(owner.visibility().install(fixture.generation.clone()));
+            }
+            drop(fixture.preparation.take());
+            if confirmed {
+                assert!(!owner.confirmed());
+            } else {
+                owner.refused();
+            }
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_terminal_clear_before_refusal_does_not_restore_bootstrap_aliases() {
+        let fixture = PublicationFixture::new();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        fixture.state.clear();
+        owner.refused();
+        assert!(fixture.source.claim().is_err());
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn publisher_busy_target_refuses_without_fencing_original_admission() {
+        let fixture = PublicationFixture::new();
+        let claim = fixture.generation.scope.admit_source().unwrap();
+        let result = super::super::ActorPublicationGuard::reserve(
+            fixture.state.clone(),
+            fixture.expected.clone(),
+            fixture.generation.dependency().clone(),
+            &fixture.source,
+            tidepool_runtime::session::PublicationDecision::new(),
+            super::super::ActorPublicationOwner::Preparation(
+                fixture.preparation.as_ref().unwrap().client(),
+            ),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::ResidentActorWorkbenchError::SourceAdmission(
+                GenerationAdmissionError::BootstrapBusy {
+                    claims: 1,
+                    unconfirmed: 0
+                }
+            ))
+        ));
+        assert!(fixture.state.snapshot_for_call().is_ok());
+        fixture.source.claim().unwrap();
+        drop(claim);
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        owner.refused();
+        fixture.source.claim().unwrap();
     }
 
     #[test]
