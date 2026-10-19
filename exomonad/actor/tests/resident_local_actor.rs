@@ -854,29 +854,6 @@ async fn resident_either_text_display_expands_the_retained_value() {
             "import qualified Tidepool.Inspection as Inspect\nimport qualified Data.Text as Text",
         )
         .await;
-    let bare = fixture
-        .read(
-            "either-notebook",
-            "Right (Text.pack \"first\\nsecond\") :: Either Text.Text Text.Text",
-        )
-        .await;
-    assert_eq!(
-        bare["items"][0]["output"], "Right first\nsecond",
-        "{bare:?}"
-    );
-    let failed = fixture
-        .read(
-            "either-failure",
-            "Left (Text.pack \"unavailable\\nretained failure\") :: Either Text.Text Text.Text",
-        )
-        .await;
-    assert_eq!(
-        failed["items"][0]["output"], "Left unavailable\nretained failure",
-        "{failed:?}"
-    );
-    let first = fixture
-        .read("retained-display", "retainedDisplay <- Inspect.display (Right (Text.pack \"begin\\n\" <> Text.replicate 16000 (Text.pack \"λ\\n\") <> Text.pack \"end\\n\") :: Either Text.Text Text.Text)")
-        .await;
     let page = |reply: &serde_json::Value| -> serde_json::Value {
         reply["items"]
             .as_array()
@@ -887,6 +864,51 @@ async fn resident_either_text_display_expands_the_retained_value() {
             .expect("real display publication")
             .clone()
     };
+    for (key, source, expected) in [
+        (
+            "either-notebook",
+            "Right (Text.pack \"first\\nsecond\") :: Either Text.Text Text.Text",
+            "Right first\nsecond",
+        ),
+        (
+            "either-failure",
+            "Left (Text.pack \"unavailable\\nretained failure\") :: Either Text.Text Text.Text",
+            "Left unavailable\nretained failure",
+        ),
+    ] {
+        let retained = fixture.read(key, source).await;
+        let installed = retained["items"][0]["installedBindings"]
+            .as_array()
+            .expect("bare expression issues its retained binding");
+        assert_eq!(installed.len(), 1, "{retained:?}");
+        let binding = installed[0].as_str().expect("issued binding name");
+        assert_eq!(retained["publication"]["status"], "published");
+        assert_eq!(
+            retained["publication"]["bindings"],
+            serde_json::json!([binding])
+        );
+        assert_eq!(retained["items"][0]["output"], format!("[bound {binding}]"));
+        assert!(
+            retained["items"][0]["operations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|operation| operation
+                    .get("display")
+                    .is_none_or(serde_json::Value::is_null)),
+            "retaining a bare expression does not implicitly display it: {retained:?}"
+        );
+        let displayed = fixture
+            .read(
+                &format!("{key}-display"),
+                &format!("Inspect.display {binding}"),
+            )
+            .await;
+        assert_eq!(page(&displayed)["text"], expected, "{displayed:?}");
+    }
+    let first = fixture
+        .read("retained-display", "retainedDisplay <- Inspect.display (Right (Text.pack \"begin\\n\" <> Text.replicate 16000 (Text.pack \"λ\\n\") <> Text.pack \"end\\n\") :: Either Text.Text Text.Text)")
+        .await;
     let mut current = page(&first);
     let identity = current["identity"].clone();
     assert!(current["text"]
