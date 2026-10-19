@@ -710,9 +710,28 @@ mod tests {
         assert!(finish_retirement(owner.path()).is_err());
         assert!(std::fs::symlink_metadata(&guard).is_err());
         std::fs::remove_dir(owner.path().join(FINALIZED)).unwrap();
-        finish_retirement(owner.path()).unwrap();
+        assert_eq!(
+            crate::frontend::run(vec![
+                "--finish-compiler-service-source-retirement".into(),
+                owner.path().as_os_str().to_owned(),
+            ])
+            .unwrap(),
+            0
+        );
         finish_retirement(owner.path()).unwrap();
         assert!(owner.path().join(FINALIZED).is_file());
+    }
+
+    #[test]
+    fn native_retirement_refuses_copied_owner_and_missing_pending() {
+        let (owner, _guard) = pending_retirement();
+        let other = tempfile::tempdir().unwrap();
+        for name in [FINALIZATION, HANDOFF, COMPLETION] {
+            std::fs::copy(owner.path().join(name), other.path().join(name)).unwrap();
+        }
+        assert!(finish_retirement(other.path()).is_err());
+        std::fs::remove_file(owner.path().join(FINALIZATION)).unwrap();
+        assert!(finish_retirement(owner.path()).is_err());
     }
 
     #[test]
@@ -724,7 +743,8 @@ mod tests {
         assert!(finish_retirement(owner.path()).is_err());
         assert!(std::fs::read_link(&guard).is_ok());
         std::fs::remove_file(&guard).unwrap();
-        std::os::unix::fs::symlink("/nix/store/00000000000000000000000000000000-python", &guard).unwrap();
+        std::os::unix::fs::symlink("/nix/store/00000000000000000000000000000000-python", &guard)
+            .unwrap();
         std::fs::write(owner.path().join(COMPLETION), b"unrelated completion").unwrap();
         assert!(finish_retirement(owner.path()).is_err());
         assert!(!owner.path().join(FINALIZED).exists());
