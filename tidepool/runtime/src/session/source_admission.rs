@@ -19,6 +19,12 @@ pub enum SourceAdmissionError {
         scope: ScopeId,
         phase: SourceAdmissionPhase,
     },
+    #[error("source compiler work requires its owning runtime transaction")]
+    MissingTransaction,
+    #[error("source compiler transactions cannot borrow a foreign or nested transaction")]
+    ForeignTransaction,
+    #[error("source lexical lease belongs to a stale issuing epoch")]
+    StaleSourceLease,
     #[error("source-dependent admission has no issuing world")]
     Unqualified,
     #[error("initial source publication is unavailable")]
@@ -224,6 +230,9 @@ pub struct RuntimeSourceFence {
     attempt: u64,
 }
 impl RuntimeSourceFence {
+    pub fn unconfirmed_claims(&self) -> usize {
+        self.owner.0.state.lock().unconfirmed
+    }
     pub fn pending_claims(&self) -> usize {
         let state = self.owner.0.state.lock();
         state.claims + state.unconfirmed
@@ -290,19 +299,72 @@ mod tests {
     fn fencing_source_refuses_late_binding_without_retiring_custody() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let scope = session.mint_isolated_scope_with_lease().unwrap();
-        let mut before =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "before", 70);
+        let mut before = session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    crate::session::prepared::tests::rooted_publication_fixture(
+                        session, "before", 70,
+                    )
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
         before.scope = scope.scope();
         session
-            .bind_replacing_decls_in(scope.scope(), vec![before], &mut |_| {})
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    session.bind_replacing_decls_in(scope.scope(), vec![before], report)
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action
             .unwrap();
-        let mut late =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "late", 71);
+        let mut late = session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "late", 71)
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
         late.scope = scope.scope();
         let before_handles = session.value_handle_count();
         let fence = scope.source_admission().fence().unwrap();
         assert!(matches!(
-            session.bind_replacing_decls_in(scope.scope(), vec![late], &mut |_| {}),
+            session
+                .with_source_compiler_transaction(
+                    scope.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, report| session.bind_replacing_decls_in(
+                        scope.scope(),
+                        vec![late],
+                        report
+                    )
+                )
+                .unwrap()
+                .into_outcome()
+                .action,
             Err(SessionError::SourceAdmission(
                 SourceAdmissionError::Closed { .. }
             ))
@@ -422,5 +484,135 @@ mod tests {
             }
             prop_assert!(admitted > 0 && refused > 0);
         }
+    }
+}
+
+/// One physical compiler scope retains every earned lower claim until its END.
+/// The original lease is independent of the recipient's current placement.
+pub struct RuntimeSourceCompilerTransaction {
+    pub(super) source: Arc<super::RuntimeLexicalScopeLease>,
+    origin: crate::CompilerTransactionOrigin,
+    hook: Option<SourceAdmissionHook>,
+    holds: Mutex<SourceCompilerHolds>,
+    closed: std::sync::atomic::AtomicBool,
+}
+#[derive(Default)]
+struct SourceCompilerHolds {
+    hook_admitted: bool,
+    claims: Vec<(RuntimeSourceAdmission, RuntimeSourceClaim)>,
+}
+impl RuntimeSourceCompilerTransaction {
+    pub(super) fn admit(
+        &self,
+        target: Option<RuntimeSourceAdmission>,
+    ) -> Result<(), SourceAdmissionError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire)
+            || crate::CompilerTransactionOrigin::current().as_ref() != Some(&self.origin)
+        {
+            return Err(SourceAdmissionError::ForeignTransaction);
+        }
+        self.source.validate_source_issuer()?;
+        let mut holds = self.holds.lock();
+        if !holds.hook_admitted {
+            if let Some(hook) = &self.hook {
+                hook()?;
+            }
+            holds.hook_admitted = true;
+        }
+        for admission in std::iter::once(self.source.source_admission().clone()).chain(target) {
+            if !holds
+                .claims
+                .iter()
+                .any(|(held, _)| held.same_owner(&admission))
+            {
+                let claim = admission.admit()?;
+                holds.claims.push((admission, claim));
+            }
+        }
+        self.source.validate_source_issuer()?;
+        Ok(())
+    }
+    fn settle(&self, confirmed: bool) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        if !confirmed && !self.holds.lock().claims.is_empty() {
+            self.source.retain_unconfirmed_source_custody();
+        }
+        for (_, claim) in self.holds.lock().claims.drain(..) {
+            if !confirmed {
+                claim.retain_unconfirmed();
+            }
+        }
+    }
+}
+
+pub(super) fn run_source_compiler_transaction<T>(
+    source: Arc<super::RuntimeLexicalScopeLease>,
+    workload: tidepool_toolchain::artifacts::CompileWorkload,
+    cancellation: crate::CompilerTransactionCancellation,
+    supplemental_hook: Option<SourceAdmissionHook>,
+    close_sink: impl FnOnce(crate::CompilerTransactionClose),
+    action: impl FnOnce(
+        Arc<RuntimeSourceCompilerTransaction>,
+        &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> T,
+) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+    if let Err(error) = source.validate_source_issuer() {
+        close_sink(crate::CompilerTransactionClose::NotStarted);
+        return Err(error);
+    }
+    if crate::CompilerTransactionOrigin::current().is_some() {
+        close_sink(crate::CompilerTransactionClose::NotStarted);
+        return Err(SourceAdmissionError::ForeignTransaction);
+    }
+    let context = std::cell::RefCell::new(None::<Arc<RuntimeSourceCompilerTransaction>>);
+    let returned = std::cell::Cell::new(false);
+    Ok(crate::settle_compiler_transaction_cancellable_for_workload(
+        workload,
+        cancellation,
+        |close| {
+            if let Some(context) = context.borrow().as_ref() {
+                context.settle(returned.get() && close.resources_retired());
+            }
+            close_sink(close);
+        },
+        |report| {
+            let issued = Arc::new(RuntimeSourceCompilerTransaction {
+                source,
+                origin: crate::CompilerTransactionOrigin::current().expect("actual compiler owner"),
+                hook: supplemental_hook,
+                holds: Mutex::new(SourceCompilerHolds::default()),
+                closed: std::sync::atomic::AtomicBool::new(false),
+            });
+            *context.borrow_mut() = Some(issued.clone());
+            let value = action(issued, report);
+            returned.set(true);
+            value
+        },
+    ))
+}
+
+impl super::RuntimeLexicalScopeLease {
+    /// Run one off-checkout source compiler phase with the original strong lease.
+    /// The borrowed capability can only be used inside this physical owner.
+    pub fn with_source_compiler_transaction<T>(
+        self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(
+            &RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(crate::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+        run_source_compiler_transaction(
+            self.clone(),
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |owner, report| action(&owner, report),
+        )
     }
 }

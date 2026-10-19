@@ -527,6 +527,10 @@ where
                 .placement_custody
                 .provisioned(descriptor.placement());
         }
+        environment
+            .runner
+            .adopt_final_source_scope(descriptor.session_context(context.actor))
+            .await?;
         let entry = environment
             .runner
             .transfer_mailbox_value(

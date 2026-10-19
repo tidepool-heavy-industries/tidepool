@@ -595,6 +595,7 @@ pub(super) struct RuntimeAdmissionOwner {
 
 struct RuntimeLexicalScopeRecord {
     lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    unconfirmed_source_custody: Option<Arc<RuntimeLexicalScopeLease>>,
     source_admission: super::RuntimeSourceAdmission,
 }
 
@@ -624,6 +625,37 @@ pub struct RuntimeLexicalScopeLease {
     source_admission: super::RuntimeSourceAdmission,
 }
 impl RuntimeLexicalScopeLease {
+    pub fn validate_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+        if self.owner_epoch != self.owner.epoch() {
+            return Err(super::SourceAdmissionError::StaleSourceLease);
+        }
+        let scopes = self.owner.lexical_leases.lock();
+        if !scopes.get(&self.scope).is_some_and(|record| {
+            record.source_admission.same_owner(&self.source_admission)
+                && record
+                    .lease
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                    .is_some_and(|lease| std::ptr::eq(lease.as_ref(), self))
+        }) {
+            return Err(super::SourceAdmissionError::StaleSourceLease);
+        }
+        Ok(())
+    }
+    /// Unknown source completion retains the exact physical scope in its
+    /// existing owner record. This intentionally prevents lease-drop retirement;
+    /// old-world custody is not released by admitting a recovered context.
+    pub fn retain_unconfirmed_source_custody(self: &Arc<Self>) {
+        let mut scopes = self.owner.lexical_leases.lock();
+        if let Some(record) = scopes.get_mut(&self.scope) {
+            if record.source_admission.same_owner(&self.source_admission) {
+                record
+                    .unconfirmed_source_custody
+                    .get_or_insert_with(|| self.clone());
+            }
+        }
+    }
+
     pub fn source_admission(&self) -> &super::RuntimeSourceAdmission {
         &self.source_admission
     }
@@ -1487,6 +1519,10 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub fn source_lease(&self) -> Arc<RuntimeLexicalScopeLease> {
+        self._retained_scope.clone()
+    }
+
     pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
         &self.catalog_selection
     }
@@ -1972,7 +2008,12 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
-        self.prepared_lexical_scope_lease_with_source(scope, self.source_admission.clone())
+        self.prepared_lexical_scope_lease_with_source(
+            scope,
+            self.source_transaction
+                .as_ref()
+                .map(|owner| owner.source.source_admission().clone()),
+        )
     }
 
     pub(super) fn prepared_lexical_scope_lease_with_source(
@@ -2005,6 +2046,7 @@ impl PersistentSession {
             scope,
             RuntimeLexicalScopeRecord {
                 lease: Some(Arc::downgrade(&lease)),
+                unconfirmed_source_custody: None,
                 source_admission,
             },
         );
@@ -2043,14 +2085,17 @@ impl PersistentSession {
     }
 
     pub(super) fn inherit_source_admission(&self, source: ScopeId, target: ScopeId) {
-        let source_admission = self
-            .source_admission_in(source)
-            .or_else(|| self.source_admission.clone());
+        let source_admission = self.source_admission_in(source).or_else(|| {
+            self.source_transaction
+                .as_ref()
+                .map(|owner| owner.source.source_admission().clone())
+        });
         if let Some(source_admission) = source_admission {
             self.admission_owner().lexical_leases.lock().insert(
                 target,
                 RuntimeLexicalScopeRecord {
                     lease: None,
+                    unconfirmed_source_custody: None,
                     source_admission,
                 },
             );

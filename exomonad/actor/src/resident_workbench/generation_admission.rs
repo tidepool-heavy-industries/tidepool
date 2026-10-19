@@ -17,6 +17,7 @@ pub(crate) struct BootstrapWorld(Arc<BootstrapWorldOwner>);
 #[derive(Debug)]
 struct BootstrapWorldOwner {
     prerequisite: Option<GenerationDependency>,
+    scope: std::sync::OnceLock<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     state: parking_lot::Mutex<WorldState>,
 }
 
@@ -48,6 +49,7 @@ impl BootstrapWorld {
     pub(crate) fn new(prerequisite: Option<GenerationDependency>) -> Self {
         Self(Arc::new(BootstrapWorldOwner {
             prerequisite,
+            scope: std::sync::OnceLock::new(),
             state: parking_lot::Mutex::new(WorldState {
                 phase: WorldPhase::Bootstrap,
                 claims: 0,
@@ -60,15 +62,38 @@ impl BootstrapWorld {
         &self.0.prerequisite
     }
 
+    pub(crate) fn adopt_scope(
+        &self,
+        scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Result<(), GenerationAdmissionError> {
+        if let Some(existing) = self.0.scope.get() {
+            if !Arc::ptr_eq(existing, &scope) {
+                return Err(GenerationAdmissionError::StaleSourceLease);
+            }
+            return Ok(());
+        }
+        self.0
+            .scope
+            .set(scope)
+            .map_err(|_| GenerationAdmissionError::StaleSourceLease)
+    }
+
     fn claim(&self) -> Result<SourceClaim, GenerationAdmissionError> {
         let mut state = self.0.state.lock();
         match &state.phase {
             WorldPhase::Bootstrap if state.unconfirmed == 0 => {
                 let prerequisite = self
                     .0
-                    .prerequisite
-                    .as_ref()
-                    .map(|parent| parent.runtime_admission().admit())
+                    .scope
+                    .get()
+                    .map(|scope| scope.source_admission().clone())
+                    .or_else(|| {
+                        self.0
+                            .prerequisite
+                            .as_ref()
+                            .map(|parent| parent.runtime_admission().clone())
+                    })
+                    .map(|admission| admission.admit())
                     .transpose()?;
                 state.claims += 1;
                 Ok(SourceClaim::Bootstrap(BootstrapClaim {
@@ -79,8 +104,12 @@ impl BootstrapWorld {
             }
             WorldPhase::Bound(dependency) => {
                 let admission = dependency.runtime_admission().clone();
+                let scope = dependency.0.scope.clone();
                 drop(state);
-                Ok(SourceClaim::Runtime(admission.admit()?))
+                Ok(SourceClaim::Runtime {
+                    claim: admission.admit()?,
+                    scope,
+                })
             }
             WorldPhase::Bootstrap => Err(GenerationAdmissionError::BootstrapBusy {
                 claims: state.claims,
@@ -112,11 +141,35 @@ impl BootstrapWorld {
             .as_ref()
             .map(|parent| parent.runtime_admission().admit())
             .transpose()?;
+        let scope = self
+            .0
+            .scope
+            .get()
+            .ok_or(GenerationAdmissionError::Unqualified)?;
+        if !scope
+            .source_admission()
+            .same_owner(target.runtime_admission())
+        {
+            return Err(GenerationAdmissionError::StaleSourceLease);
+        }
+        let fence = scope.source_admission().fence()?;
+        if fence.pending_claims() != 0 || fence.unconfirmed_claims() != 0 {
+            let claims = fence.pending_claims();
+            let unconfirmed = fence.unconfirmed_claims();
+            if unconfirmed == 0 {
+                fence.reopen()?;
+            }
+            return Err(GenerationAdmissionError::BootstrapBusy {
+                claims,
+                unconfirmed,
+            });
+        }
         state.phase = WorldPhase::Publishing(target.clone());
         Ok(WorldPublication {
             world: self.clone(),
             settled: false,
             prerequisite,
+            fence: Some(fence),
         })
     }
 }
@@ -129,14 +182,25 @@ impl PartialEq for BootstrapWorld {
 impl Eq for BootstrapWorld {}
 
 pub(crate) enum SourceClaim {
-    Runtime(tidepool_runtime::session::RuntimeSourceClaim),
+    Runtime {
+        claim: tidepool_runtime::session::RuntimeSourceClaim,
+        scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    },
     Bootstrap(BootstrapClaim),
 }
 impl SourceClaim {
     pub(crate) fn retain_unconfirmed(self) {
         match self {
-            Self::Runtime(claim) => claim.retain_unconfirmed(),
+            Self::Runtime { claim, scope } => {
+                scope.retain_unconfirmed_source_custody();
+                claim.retain_unconfirmed();
+            }
             Self::Bootstrap(mut claim) => {
+                if let Some(scope) = claim.world.0.scope.get() {
+                    scope.retain_unconfirmed_source_custody();
+                } else if let Some(parent) = &claim.world.0.prerequisite {
+                    parent.0.scope.retain_unconfirmed_source_custody();
+                }
                 let mut state = claim.world.0.state.lock();
                 state.claims -= 1;
                 state.unconfirmed += 1;
@@ -167,6 +231,7 @@ pub(super) struct WorldPublication {
     world: BootstrapWorld,
     settled: bool,
     prerequisite: Option<tidepool_runtime::session::RuntimeSourceClaim>,
+    fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
 }
 impl WorldPublication {
     pub(super) fn visible(&mut self, target: &GenerationDependency) {
@@ -178,6 +243,11 @@ impl WorldPublication {
         state.phase = WorldPhase::Bound(target.clone());
     }
     pub(super) fn confirmed(mut self) {
+        self.fence
+            .take()
+            .expect("initial source publication fence")
+            .reopen()
+            .expect("confirmed publisher owns source fence");
         self.settled = true;
     }
     pub(super) fn refused(mut self) {
@@ -185,6 +255,11 @@ impl WorldPublication {
         if matches!(state.phase, WorldPhase::Publishing(_)) {
             state.phase = WorldPhase::Bootstrap;
         }
+        self.fence
+            .take()
+            .expect("initial source publication fence")
+            .reopen()
+            .expect("refused publisher owns source fence");
         self.settled = true;
     }
 }
@@ -197,7 +272,7 @@ impl Drop for WorldPublication {
             let mut state = self.world.0.state.lock();
             if let WorldPhase::Publishing(target) | WorldPhase::Bound(target) = &state.phase {
                 let target = target.clone();
-                state.uncertainty_fence = target.runtime_admission().fence().ok();
+                state.uncertainty_fence = self.fence.take();
                 state.phase = WorldPhase::Unavailable(target);
             }
         }
@@ -205,82 +280,93 @@ impl Drop for WorldPublication {
 }
 
 impl SourceDependency {
-    pub(crate) fn runtime_admission(
+    pub(crate) fn source_lease(
         &self,
-    ) -> Result<Option<tidepool_runtime::session::RuntimeSourceAdmission>, GenerationAdmissionError>
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, GenerationAdmissionError>
     {
         match self {
+            Self::Generation(dependency) => Ok(dependency.0.scope.clone()),
             Self::World(world) => match &world.0.state.lock().phase {
-                WorldPhase::Bootstrap => Ok(world
+                WorldPhase::Bootstrap => world
                     .0
-                    .prerequisite
-                    .as_ref()
-                    .map(|parent| parent.runtime_admission().clone())),
-                WorldPhase::Bound(dependency) => Ok(Some(dependency.runtime_admission().clone())),
-                WorldPhase::Publishing(_) | WorldPhase::Unavailable(_) => {
-                    Err(GenerationAdmissionError::BootstrapUnavailable)
-                }
+                    .scope
+                    .get()
+                    .cloned()
+                    .ok_or(GenerationAdmissionError::Unqualified),
+                WorldPhase::Bound(dependency) => Ok(dependency.0.scope.clone()),
+                _ => Err(GenerationAdmissionError::BootstrapUnavailable),
             },
-            Self::Generation(dependency) => Ok(Some(dependency.runtime_admission().clone())),
             Self::Unqualified => Err(GenerationAdmissionError::Unqualified),
+        }
+    }
+
+    pub(crate) fn adopt_final_scope<H, O>(
+        &self,
+        session: &mut tidepool_runtime::session::ResidentSession<H, O>,
+        scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<(), crate::ResidentActorWorkbenchError>
+    where
+        H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
+        O: tidepool_runtime::session::OutputSink + Sync,
+    {
+        if let Self::World(world) = self {
+            if world.0.scope.get().is_none() {
+                let lease = session.adopt_initial_notebook_scope_with_source(
+                    scope,
+                    world
+                        .prerequisite()
+                        .as_ref()
+                        .map(|p| p.runtime_admission().clone()),
+                )?;
+                world.adopt_scope(lease)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Actor bootstrap accounting supplements, but never replaces, the lower lease.
+    pub(crate) fn claim_actor_world(
+        &self,
+    ) -> Result<Option<SourceClaim>, GenerationAdmissionError> {
+        let Self::World(world) = self else {
+            return Ok(None);
+        };
+        let mut state = world.0.state.lock();
+        match state.phase {
+            WorldPhase::Bootstrap if state.unconfirmed == 0 => {
+                state.claims += 1;
+                Ok(Some(SourceClaim::Bootstrap(BootstrapClaim {
+                    world: world.clone(),
+                    settled: false,
+                    prerequisite: None,
+                })))
+            }
+            WorldPhase::Bound(_) => Ok(None),
+            _ => Err(GenerationAdmissionError::BootstrapUnavailable),
         }
     }
 
     pub(crate) fn claim(&self) -> Result<SourceClaim, GenerationAdmissionError> {
-        match self {
+        let lease = match self {
+            Self::World(world) => world.0.scope.get().cloned(),
+            Self::Generation(generation) => Some(generation.0.scope.clone()),
+            Self::Unqualified => None,
+        };
+        if let Some(lease) = &lease {
+            lease.validate_source_issuer()?;
+        }
+        let claim = match self {
             Self::World(world) => world.claim(),
-            Self::Generation(dependency) => Ok(SourceClaim::Runtime(
-                dependency.runtime_admission().admit()?,
-            )),
+            Self::Generation(dependency) => Ok(SourceClaim::Runtime {
+                claim: dependency.runtime_admission().admit()?,
+                scope: dependency.0.scope.clone(),
+            }),
             Self::Unqualified => Err(GenerationAdmissionError::Unqualified),
+        }?;
+        if let Some(lease) = &lease {
+            lease.validate_source_issuer()?;
         }
-    }
-
-    /// Pure continuation may run while source mutation remains refused. An
-    /// unbound world checkout itself holds a claim through its synchronous use.
-    pub(super) fn checkout_admission(
-        &self,
-    ) -> (
-        Result<Option<tidepool_runtime::session::RuntimeSourceAdmission>, GenerationAdmissionError>,
-        Option<SourceClaim>,
-    ) {
-        match self {
-            Self::World(world) => {
-                let mut state = world.0.state.lock();
-                match &state.phase {
-                    WorldPhase::Bootstrap if state.unconfirmed == 0 => {
-                        let prerequisite = match world
-                            .0
-                            .prerequisite
-                            .as_ref()
-                            .map(|parent| parent.runtime_admission().admit())
-                            .transpose()
-                        {
-                            Ok(claim) => claim,
-                            Err(error) => return (Err(error), None),
-                        };
-                        state.claims += 1;
-                        (
-                            Ok(world
-                                .0
-                                .prerequisite
-                                .as_ref()
-                                .map(|parent| parent.runtime_admission().clone())),
-                            Some(SourceClaim::Bootstrap(BootstrapClaim {
-                                world: world.clone(),
-                                settled: false,
-                                prerequisite,
-                            })),
-                        )
-                    }
-                    WorldPhase::Bound(dependency) => {
-                        (Ok(Some(dependency.runtime_admission().clone())), None)
-                    }
-                    _ => (Err(GenerationAdmissionError::BootstrapUnavailable), None),
-                }
-            }
-            _ => (self.runtime_admission(), None),
-        }
+        Ok(claim)
     }
 
     /// Typed descendants may inherit only a selected world, never erase an
@@ -377,6 +463,7 @@ struct GenerationAdmissionOwner {
     generation: NotebookGenerationId,
     _source: crate::CheckpointSourceLayer,
     admission: tidepool_runtime::session::RuntimeSourceAdmission,
+    scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     prerequisite: Option<GenerationDependency>,
 }
 
@@ -402,7 +489,7 @@ impl GenerationDependency {
         actor: crate::ActorRef,
         generation: NotebookGenerationId,
         source: crate::CheckpointSourceLayer,
-        scope: &tidepool_runtime::session::RuntimeLexicalScopeLease,
+        scope: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
         prerequisite: Option<GenerationDependency>,
     ) -> Self {
         Self(Arc::new(GenerationAdmissionOwner {
@@ -410,6 +497,7 @@ impl GenerationDependency {
             generation,
             _source: source,
             admission: scope.source_admission().clone(),
+            scope: scope.clone(),
             prerequisite,
         }))
     }
@@ -519,6 +607,7 @@ mod tests {
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        world.adopt_scope(first.0.scope.clone()).unwrap();
         // Preparing and discarding a candidate does not bind or fence aliases.
         drop(alias.claim().unwrap());
         let mut publication = world.begin_publication(&first).unwrap();
@@ -543,14 +632,14 @@ mod tests {
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        world.adopt_scope(first.0.scope.clone()).unwrap();
         let claim = alias.claim().unwrap();
         assert!(matches!(
             world.begin_publication(&first),
             Err(GenerationAdmissionError::BootstrapBusy { claims: 1, .. })
         ));
         drop(claim);
-        let (runtime, checkout) = alias.checkout_admission();
-        assert!(runtime.unwrap().is_none());
+        let checkout = alias.claim().unwrap();
         assert!(world.begin_publication(&first).is_err());
         drop(checkout);
         alias.claim().unwrap().retain_unconfirmed();
@@ -567,9 +656,16 @@ mod tests {
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        world.adopt_scope(first.0.scope.clone()).unwrap();
         world.begin_publication(&first).unwrap().refused();
         drop(alias.claim().unwrap());
-        let different = generation(&mut session, first.generation().next().unwrap(), None);
+        let different = GenerationDependency::new(
+            first.actor(),
+            first.generation().next().unwrap(),
+            crate::CheckpointSourceLayer::default(),
+            &first.0.scope,
+            None,
+        );
         drop(world.begin_publication(&different).unwrap());
         assert!(alias.claim().is_err());
         assert!(world.begin_publication(&first).is_err());
@@ -590,7 +686,8 @@ mod tests {
             NotebookGenerationId::INITIAL,
             world.prerequisite().clone(),
         );
-        let (_, checkout) = alias.checkout_admission();
+        world.adopt_scope(child.0.scope.clone()).unwrap();
+        let checkout = alias.claim().unwrap();
         assert!(world.begin_publication(&child).is_err());
         assert_eq!(parent.fence().unwrap().pending_claims(), 1);
         drop(checkout);
@@ -604,6 +701,7 @@ mod tests {
             NotebookGenerationId::INITIAL,
             world.prerequisite().clone(),
         );
+        world.adopt_scope(child.0.scope.clone()).unwrap();
         let mut publication = world.begin_publication(&child).unwrap();
         publication.visible(&child);
         publication.confirmed();
@@ -634,6 +732,7 @@ mod tests {
             NotebookGenerationId::INITIAL,
             world.prerequisite().clone(),
         );
+        world.adopt_scope(child.0.scope.clone()).unwrap();
         let mut publication = world.begin_publication(&child).unwrap();
         let fence = parent.fence().unwrap();
         assert_eq!(fence.pending_claims(), 1);
@@ -674,37 +773,6 @@ mod tests {
         ));
         assert!(fence.reopen().is_err());
         assert!(scope.admit_work().is_err());
-    }
-
-    #[tokio::test]
-    async fn continuation_ticket_settles_lazily_transferred_source_claim() {
-        let mut history = History::new();
-        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
-        let services = crate::capabilities::WorkbenchServices::new();
-        let owner = services.with_compiler_owner(super::super::CompilerCloseOwner::ActorLifecycle(
-            crate::RetainedActorExit::new(),
-        ));
-        let ticket = owner.admit_continuation().unwrap();
-        let claims = ticket.runtime_source_claims();
-        claims
-            .lock()
-            .push(dependency.runtime_admission().admit().unwrap());
-        let fence = dependency.fence().unwrap();
-        ticket.run(|close| {
-            close(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
-                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
-                    tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
-                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
-                        disconnect: None,
-                    },
-                ),
-            ))
-        });
-        assert!(matches!(
-            fence.wait_for_claims().await,
-            Err(GenerationAdmissionError::Unconfirmed { .. })
-        ));
-        assert!(fence.reopen().is_err());
     }
 
     #[test]
