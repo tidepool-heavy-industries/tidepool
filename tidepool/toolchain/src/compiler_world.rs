@@ -45,6 +45,12 @@ impl fmt::Debug for CapturedCompilerSources {
 }
 
 impl CapturedCompilerSources {
+    /// Bound source retention during the existing owner traversal, before bodies
+    /// accumulate. The factory also checks exact framed encoding size.
+    pub fn capture_byte_allowance() -> Result<u64, CompileError> {
+        capture_allowance()
+    }
+
     /// Capture data only. The cold world builder couples it with the admitted
     /// primary selection and actual physical rows before the service issues a world.
     pub fn from_captured_roots(
