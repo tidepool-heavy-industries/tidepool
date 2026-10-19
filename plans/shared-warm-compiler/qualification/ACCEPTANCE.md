@@ -13,16 +13,16 @@ and dormant retained owners cannot supply this census.
 | Boundary | Independent observation and refusal control | Current evidence / next check |
 | --- | --- | --- |
 | Optional roots and required closure | Both equal-interface Original winners; retained old values; exact required historical child and ordinal; unrelated groups excluded; genuine required conflict refuses | Imported focused before/after evidence; host-inputs owns independent root/home model and next-request checks. New candidate unqualified until its counted controls run. |
-| Shared-source startup and continuation | Scaffolded shared root, required derived-JSON marker, Jev Packet/Response, preserved runtime spec; memory/files, native lookup, notebook lookup, pure display | Exact `70a` direct run passed 1/1, exit 0. Process/host cleanup confirmed; compiler `not_observed`, diagnostics incomplete. Registered in `persona-startup` for the next rebuilt/frozen bundle; new frozen execution pending. |
+| Shared-source startup and continuation | Scaffolded shared root, required derived-JSON marker, Jev Packet/Response, preserved runtime spec; memory/files, native lookup, notebook lookup, pure display | Exact `70a` direct run passed 1/1, exit 0. Process/host cleanup confirmed; compiler `not_observed`, diagnostics incomplete. Sealed roster7. New frozen e6 executed1/fail1 at genuine required A versus selected catalog B native lookup after startup/Files/Memory; all cleanup confirmed, diagnostics complete. Exact edge/issuer evidence retained; first contradictory operand boundary remains open. |
 | Captures and operation identity | Wrong worker/digest, failed/cancelled request and missing/duplicate completion cannot claim zero work or known reuse | Reviewed capture repair `ac3bf6e0379559b68396b7854868c3d819cd6467`, joined at `64636e485a901a289b2edf8d85abcc919538f581`; 89 reporter/profile cases and 436 bundle script cases passed there. Six physical-cycle, six workload and four actual renderer sensitivity failures were retained before repair, separate from three fixture defects. Raw events and legitimate earlier cycle evidence survive. |
-| Publication and fork/drop | Parent/two children diverge in both orders; same scope conflict versus independent worlds; surviving old value keeps display/type/native support; last owner releases | Host-inputs owns publication routes; no candidate execution yet. Compare maintained support with independently recomputed primary facts. |
+| Publication and fork/drop | Parent/two children diverge in both orders; same scope conflict versus independent worlds; surviving old value keeps display/type/native support; last owner releases | Host-inputs `c6c7d8ad` passed 17 component controls, with synthetic issuer boundaries; actual publication/recovery and demand-service path still need joined evidence. Compare maintained support with independently recomputed primary facts. |
 | Physical inputs and retention | Resident hit avoids baseline encoding, part/FD enumeration and export; cold/miss acquires required facts; selected slice versus backing owners remain distinct | Owned-inputs and worker owners must supply counters at actual consumers; no work-elimination claim yet. Commit/publication costs remain inside the ledger. |
 | Compiler-service demand boundary | Query/check/execute demands; unchanged requests avoid full host input-map materialization, baseline FD enumeration, image serialization and worker rehydration; fixed changed dependencies plus growing unrelated history leave these counts flat. Genuine GHC-demanded transitive growth remains permitted. Private candidates publish atomically in Rust; lost workers cold-restore without source replay | Required by current delivery contract; baseline whole-map/FD/serialization counts unobserved. Component issuance/Ready evidence or AABA outputs do not qualify this boundary. Actual joined controls remain pending. |
 | Worker and recovery | A→A→B→A on fixed pool, actor/world identity separate; replace/evict and cold-authenticate exact portable root; accepted loss never replays source | Pending accepted worker checkpoint; corruption/missing selected proof refuses. |
-| Reload | Preparation failure/no-op/default blockers stop nobody; force fences old admissions; partial retirement stays partial; Continuing/source-neutral custody and independent LLM worlds survive | Reload source-reviewed area `59d801946394aee98fb7bfc30a9cf181b494df48` (docs `7d5bf5ea0a`): production/cfg(test) compile and execution unexecuted. Eighteen new controls plus joined resume→bind and pre-bind refusal; aggregate Unknown is injected, not a real post-resume GHC END fault. R1 WatchRoute/forms/reply/display successors and earliest coherent host acceptance remain pending. |
+| Reload | Preparation failure/no-op/default blockers stop nobody; force fences old admissions; partial retirement stays partial; Continuing/source-neutral custody and independent LLM worlds survive | Foundation runtime4PASS/1ReadyFAIL and actor7PASS/4FAIL are separate. Later joined345194431d four targets compiled; focused runtime2PASS/1 initial StaleStagedDeclaration FAIL. Corrected Sleep d9efb188 executed1PASS with real hidden bind and injected aggregate Unconfirmed, not real GHC END fault. Immutable6d3 three actor discriminators executed/fail3 before target controls: baseline capture1060 refusal; both quoted cases19882 context equality before durability. Prerequisite reproduction, no causal waiver. R1 registration/R2/R3 and coherent host acceptance remain open. |
 | Measurement | Whole-wall ledger, matching physical IDs, known changed-input sensitivity, three increasing sizes with fixed D/A/output | Exact frozen `6d3` minimal AABA and Persona13 baseline passed 1/1 each with accepted owner-issued workload/frozen timing claims. No matched candidate comparison. Detailed AABA attribution completed; predeclare benefit/variance/resource bounds before a paired sweep. Historical `20d7`/B108 is not the denominator. |
 | Frontend experiment | Normal-module/GHC semantic parity, fresh target identities, measured import/HPT work and bounded retained owners | Go/no-go pending; no-go leaves valid lower-level gains eligible and ordinary frontend scope cost explicit. |
-| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Exact `6d3` build/freeze/verify and AABA/Persona13 passed; stronger shared Persona failed in readonly fixture setup before host startup. Immutable failure retained; fixture repair successor pending review/compile/refreeze. Candidate release and deployment unqualified. |
+| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Exact `6d3` build/freeze/verify and AABA/Persona13 passed; stronger shared Persona failed in readonly fixture setup after daemon start/zero requests. Reviewed e6 fixture repair compiled, two native controls passed, bundle frozen/verified; its stronger Persona failed genuine native lookup. Both immutable outcomes retained. Candidate release and deployment unqualified. |
 | Final storage analysis | Bounded top-down by registered checkout/output owner; active versus idle users; retained products/evidence and safe possible reclaim boundaries | After campaign workers settle, analysis only. No deletion, GC, unmount or stopping another owner. |
 
 Required early commands after pinned preparation and observed disk admission:
@@ -49,9 +49,9 @@ base-to-capture deltas with no findings. The clean joined code revision
 reporter/profile and 436 bundle script cases, exit 0. The latter includes exact
 seven-case startup selection and missing-shared-history refusal. This qualifies
 script selection/report behavior; it does not execute the seven hosted cases.
-Logs and exact commands are retained in the handoff. Native production/test
-compilation, current joined host history and frozen/performance qualification
-remain pending.
+Logs and exact commands are retained in the handoff. Later native compilation
+and component execution have their own source-bound receipts; joined demand-service,
+paired performance and frozen acceptance remain pending.
 
 The first joined script run used 120770560 allocated output bytes (within the
 128 MiB revised total envelope); `/srv/build` remained at 108777586688 bytes
@@ -61,7 +61,7 @@ target and host configurations, without missing outputs. That is terminal
 artifact size, not a compiler scratch or cache-upload peak, and cannot establish
 a cold native build upper bound by itself.
 
-## Immutable baseline gate in progress
+## Immutable baseline outcomes
 
 The exact current denominator is clean source `6d3b1745b465b6d0fe14104cb4020ead282f1620`,
 profile `fast-dev`, workspace `ce60f76888c94e9d7229615f27762d02933549b1`, in an
@@ -80,8 +80,26 @@ Source retention, native bundle assembly (872 local actions, 718.763 s), freeze
 and bundled verify passed within refreshed admission. Frozen minimal AABA and
 Persona13 each executed/passed one case; exact-scope workload and frozen timing
 claims accepted. Cleanup confirmed in all three domains; Persona13 diagnostics
-remain incomplete. Strong shared-root Persona executed/failed one before host
-startup because the fixture copied a read-only lock into an editable workspace.
-Original frozen baseline retained unchanged; source repair successor is pending.
+remain incomplete. Strong shared-root Persona executed/failed one during fixture setup after daemon
+start and zero compiler requests because a readonly lock was copied into an
+editable workspace. Original frozen baseline remains unchanged. Reviewed e6
+repair passed production/cfg(test), two controls, bundle freeze/verify; new frozen
+strong Persona executed/failed one at an exact required-edge conflict. Its exact A/B identities and earlier issued dependency
+chain are retained; failed current root operands remain unobserved. Strict refusal
+remains required. No candidate semantic acceptance follows from the fixture repair.
+
 A bounded detailed AABA capture completed; no paired speedup, frontend go or
 candidate release/deployment acceptance exists.
+
+First public-module acceptance enters the actual frontend/API with implicit current
+world; it preserves world/provenance and avoids unnecessary target compilation
+when a retained exact proof suffices. Changed bindings must produce a private
+exact successor and atomically expose it after clean outer END. Query/check do
+not publish. Current source-free Ready framing and memo controls do not establish
+this path; Haskell production previously returned UnsupportedOperation. Cold
+restore, abandoned/cancelled END, growing unrelated history and hidden work moved
+to commit remain required adversarial controls. No absent counter is zero.
+
+The new service may break internal APIs and explicitly version/refuse old persisted
+authority. Qualification must not depend on legacy adapters or test authority
+factories. Immutable baseline bundles, user files and evidence remain preserved.
