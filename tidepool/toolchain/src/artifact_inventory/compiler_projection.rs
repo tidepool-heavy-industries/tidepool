@@ -918,7 +918,9 @@ impl CompilerSourceSupport {
                 operation.reserve::<(ExactModuleIdentity, ResolvedCompilerRole, [usize; 8])>(1),
             )?;
             charge(operation.reserve::<(ExactModuleIdentity, CompilerInputRole, [usize; 8])>(1))?;
-            charge(operation.reserve::<(ExactModuleIdentity, RecordedCompilerRole, [usize; 8])>(1))?;
+            charge(
+                operation.reserve::<(ExactModuleIdentity, RecordedCompilerRole, [usize; 8])>(1),
+            )?;
             charge(operation.reserve::<(ExactModuleIdentity, Arc<ArtifactEntry>, [usize; 4])>(1))?;
             for _ in 0..5 {
                 charge(operation.charge(owner.unit.len()))?;
