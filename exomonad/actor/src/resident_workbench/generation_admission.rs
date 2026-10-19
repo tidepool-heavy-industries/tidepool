@@ -311,13 +311,15 @@ impl SourceDependency {
     {
         if let Self::World(world) = self {
             if world.0.scope.get().is_none() {
-                let lease = session.adopt_initial_notebook_scope_with_source(
-                    scope,
-                    world
-                        .prerequisite()
-                        .as_ref()
-                        .map(|p| p.runtime_admission().clone()),
-                )?;
+                let lease = session
+                    .adopt_initial_notebook_scope_with_source(
+                        scope,
+                        world
+                            .prerequisite()
+                            .as_ref()
+                            .map(|p| p.runtime_admission().clone()),
+                    )
+                    .map_err(tidepool_runtime::session::ResidentError::Session)?;
                 world.adopt_scope(lease)?;
             }
         }
