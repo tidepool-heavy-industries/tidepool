@@ -9954,7 +9954,7 @@ mod authored_publication_tests {
                     session.state.bind_replacing_decls_in(scope.scope(), vec![value], report).unwrap();
                     let fence = scope.source_admission().fence().unwrap();
                     assert_eq!(fence.pending_claims(), 1, "actual binding claim remains held inside its owner");
-                    fence.reopen().unwrap();
+                    fence.reopen(&scope).unwrap();
                     if unwind { panic!("compiler action unwind"); }
                     // Synthetic aggregate uncertainty checks joined custody, not a GHC END fault.
                     report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled, tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None })));
@@ -9965,7 +9965,7 @@ mod authored_publication_tests {
             assert_eq!(fence.pending_claims(), 1);
             assert_eq!(fence.unconfirmed_claims(), 1);
             assert!(matches!(
-                fence.reopen(),
+                fence.reopen(&scope),
                 Err(super::super::SourceAdmissionError::Unconfirmed { .. })
             ));
         }
@@ -10084,8 +10084,8 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_fence.reopen(),
-                    Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
+                    Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
                 assert!(target_weak.upgrade().is_none());
@@ -10277,7 +10277,7 @@ mod authored_publication_tests {
                 1,
                 "distinct lexical owners sharing a gate earn only one gate claim"
             );
-            fence.reopen().unwrap();
+            fence.reopen(&source).unwrap();
             id
         });
         recipient.state.retire_scope(captured.scope());

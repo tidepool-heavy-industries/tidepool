@@ -653,7 +653,8 @@ impl GenerationFence {
     }
     #[cfg(test)]
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
-        self.fence.reopen()
+        let lease = self.dependency.runtime_lease();
+        self.fence.reopen(lease)
     }
     pub(crate) fn retire(
         self,

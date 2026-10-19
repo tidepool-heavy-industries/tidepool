@@ -17264,8 +17264,8 @@ pub(crate) mod request_tests {
             let original = context.source_dependency().source_lease().unwrap();
             let target = history_context.source_dependency().source_lease().unwrap();
             assert!(!Arc::ptr_eq(&original, &target));
-            for (original_gate, gate) in [(true, original.source_admission()), (false, target.source_admission())] {
-                let fence = gate.fence().unwrap();
+            for (original_gate, lease) in [(true, &original), (false, &target)] {
+                let fence = lease.source_admission().fence().unwrap();
                 let refusal = HostWorkObservation::new();
                 let rejected = workbench.query_public_module_world(transferred.clone(), tidepool_runtime::session::NameQuery {
                     scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
@@ -17279,7 +17279,7 @@ pub(crate) mod request_tests {
                         tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
                 }
                 assert_world_hot_work(&refusal.snapshot(), WorldEnsureExpectation::RefusedBeforeEnsure);
-                fence.reopen().unwrap();
+                fence.reopen(lease).unwrap();
             }
             let checked = HostWorkObservation::new();
             let check_observation = checked.clone();
