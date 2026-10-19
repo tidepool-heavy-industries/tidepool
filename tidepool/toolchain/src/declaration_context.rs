@@ -17154,6 +17154,17 @@ mod tests {
             .find(|role| role.original() == Some(hidden_original))
             .unwrap();
         let projection = context.compiler_input_projection().within_view(&retained);
+        let issued = context
+            .compiler_source_support()
+            .source_support(&projection.snapshot_roles().keys().cloned().collect())
+            .unwrap();
+        assert_eq!(issued.projection(), &projection);
+        let mut narrowed = context.as_ref().clone().rebuild(|facts| {
+            facts.compiler_support = issued;
+            facts.lexical = facts.lexical.replace(lexical.clone()).unwrap();
+        });
+        narrowed.normalize().unwrap();
+        let snapshot = narrowed.snapshot();
         let roles = projection.roles();
         let mut graph = retained.capture_graph_selection();
         graph.namespace = context
@@ -17182,7 +17193,7 @@ mod tests {
         )
         .unwrap()
         .retain_offers(
-            context
+            narrowed
                 .compiler_source_support()
                 .native_offers()
                 .iter()
@@ -17190,7 +17201,17 @@ mod tests {
         )
         .unwrap()
         .retain_custody(&retained)
+        .unwrap()
+        .restore_snapshot_evidence(&snapshot)
         .unwrap();
+        assert_eq!(
+            support.input_decisions(),
+            narrowed.compiler_source_support().input_decisions()
+        );
+        support
+            .native_availability()
+            .validate_role_coverage(&projection)
+            .unwrap();
         drop(inventory);
         let mut next = context.as_ref().clone();
         next = next.rebuild(|facts| {
@@ -17882,7 +17903,14 @@ mod tests {
         let support = if sparse {
             issue_fixture_compiler_support(projection, artifacts).unwrap()
         } else {
-            recover_fixture_compiler_support(projection, artifacts, []).unwrap()
+            let output = OriginalCompilerInputs::from_checked_support_products(
+                &crate::artifact_inventory::CompilerSourceSupport::empty(),
+                [7; 32],
+                &products,
+            )
+            .unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
         };
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             compiler_support: support,
@@ -19530,6 +19558,9 @@ mod tests {
                 hidden.module_interface().unwrap().interface_sha256(),
             )])),
         );
+        let relay = crate::certified_products::tests::recovered_witness_fixtures(&[relay])
+            .remove(0)
+            .product;
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
