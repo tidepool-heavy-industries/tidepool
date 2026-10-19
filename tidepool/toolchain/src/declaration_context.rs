@@ -4608,12 +4608,13 @@ impl RetainedArtifactMaterialization {
     fn graph_path_refs<'a>(&'a self) -> BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile> {
         let mut paths = BTreeMap::new();
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
-            paths.extend(
-                owner
-                    .graph_paths
-                    .iter()
-                    .map(|(digest, path)| (*digest, path.as_ref())),
-            );
+            paths.extend(owner.graph_paths.iter().map(|(digest, path)| {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+                    1,
+                );
+                (*digest, path.as_ref())
+            }));
         });
         paths
     }
@@ -6543,7 +6544,7 @@ impl ExactCompilationRequest {
         }
         let graph_paths = materialization.graph_path_refs();
         crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::InputFdGraphVisit,
+            crate::host_work::HostWorkCounter::InputFdDistinctGraph,
             graph_paths.len() as u64,
         );
         for entry in metadata.entries.values() {
@@ -9035,7 +9036,19 @@ impl ExactDeclarationContext {
             "exact.retained_value_extension",
             "copy_lexical_baseline",
         );
-        let mut lexical = self.owner.facts.lexical.to_vec();
+        let mut lexical = self
+            .owner
+            .facts
+            .lexical
+            .iter()
+            .map(|node| {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::RetainedLexicalRowCopy,
+                    1,
+                );
+                node.clone()
+            })
+            .collect::<Vec<_>>();
         timing.advance("merge_value_support");
         for (index, value) in values.iter().enumerate() {
             crate::host_work::record_host_work(
@@ -9166,7 +9179,7 @@ impl ExactDeclarationContext {
                 work.set((encodings + 1, bytes + semantics.len()));
             });
             crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::SemanticHashedByte,
+                crate::host_work::HostWorkCounter::SemanticDigestInputByte,
                 semantics.len() as u64,
             );
             let digest = sha2::Sha256::digest(&semantics).into();
@@ -9440,7 +9453,7 @@ impl ExactDeclarationContext {
             .values()
             .inspect(|_| {
                 crate::host_work::record_host_work(
-                    crate::host_work::HostWorkCounter::CompilerOldRowVisit,
+                    crate::host_work::HostWorkCounter::SemanticArtifactRowVisit,
                     1,
                 );
             })
@@ -10768,6 +10781,10 @@ impl ExactDeclarationContext {
             self.published_scope_value()?,
             acquisition,
         )?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ScopeEncodedByte,
+            bytes.len() as u64,
+        );
         let manifest = root.join("exact-declaration-scope.cbor");
         use std::io::Write;
         let mut output = std::fs::OpenOptions::new()
@@ -10775,10 +10792,6 @@ impl ExactDeclarationContext {
             .create_new(true)
             .open(&manifest)?;
         output.write_all(&bytes)?;
-        crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::ScopeEncodedByte,
-            bytes.len() as u64,
-        );
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_request_references",
             reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
@@ -16273,6 +16286,65 @@ mod tests {
             }
             check_native_selection_reference(&inputs, &RequestNativeAvailability(Arc::new(rows)));
         }
+    }
+
+    #[test]
+    fn input_work_counts_encoded_scope_before_failed_write_and_empty_value_fold() {
+        use crate::host_work::{HostWorkCounter, HostWorkObservation};
+        let (context, producer) = metadata_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let initial = HostWorkObservation::new();
+        let request = initial
+            .scope(|| context.prepare_compilation(directory.path(), &producer))
+            .unwrap();
+        let initial_work = initial.snapshot();
+        assert_eq!(initial_work.get(HostWorkCounter::SemanticEncoding), 1);
+        assert_eq!(
+            initial_work.get(HostWorkCounter::ScopeEncodedByte),
+            std::fs::metadata(&request.manifest).unwrap().len(),
+        );
+        let refused = HostWorkObservation::new();
+        let refusal = refused
+            .scope(|| context.prepare_compilation(directory.path(), &producer))
+            .err()
+            .expect("the already-created physical manifest refuses replacement");
+        assert!(matches!(refusal, CompileError::Io(error)
+            if error.kind() == std::io::ErrorKind::AlreadyExists));
+        assert!(refused.snapshot().get(HostWorkCounter::ScopeEncodedByte) > 0);
+        assert_eq!(refused.snapshot().get(HostWorkCounter::SemanticEncoding), 0);
+
+        let files = HostWorkObservation::new();
+        let exported = files.scope(|| request.input_transport_files());
+        assert!(!exported.is_empty());
+        assert_eq!(files.snapshot().get(HostWorkCounter::InputFdEnumeration), 1);
+        assert_eq!(
+            files.snapshot().get(HostWorkCounter::InputFdExport),
+            exported.len() as u64,
+        );
+
+        let lexical_count = context.lexical_graph().len();
+        assert!(lexical_count > 0);
+        let empty_values = HostWorkObservation::new();
+        empty_values
+            .scope(|| {
+                context
+                    .as_ref()
+                    .clone()
+                    .extend_retained_value_artifacts(&[])
+            })
+            .unwrap();
+        assert_eq!(
+            empty_values
+                .snapshot()
+                .get(HostWorkCounter::RetainedLexicalRowCopy),
+            lexical_count as u64,
+        );
+        assert_eq!(
+            empty_values
+                .snapshot()
+                .get(HostWorkCounter::RetainedValueSupportMerge),
+            0,
+        );
     }
 
     #[test]
