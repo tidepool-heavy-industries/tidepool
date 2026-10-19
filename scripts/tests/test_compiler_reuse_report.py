@@ -137,6 +137,35 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(request['stages']['source_frontend']['counts'], {})
         self.assertEqual(request['stages']['source_frontend']['status'], 'observed')
 
+    def test_cycle_views_require_valid_physical_request_evidence(self):
+        for boundary in ('missing_terminal', 'duplicate_terminal', 'failed', 'abandoned',
+                         'duplicate_start', 'wrong_digest'):
+            with self.subTest(boundary=boundary):
+                rows = copy.deepcopy(trace(completed([packet()])))
+                if boundary == 'missing_terminal':
+                    rows.pop()
+                elif boundary == 'duplicate_terminal':
+                    rows.append(copy.deepcopy(rows[-1]))
+                elif boundary in ('failed', 'abandoned'):
+                    rows[-1]['fields'].update(message='compiler request failed' if boundary == 'failed'
+                                              else 'compiler request abandoned by client', exit_code=1)
+                elif boundary == 'duplicate_start':
+                    rows.append(copy.deepcopy(rows[0]))
+                else:
+                    conflicting = copy.deepcopy(rows[1])
+                    conflicting['span']['compile_request'] = 'different-request'
+                    rows.append(conflicting)
+                report = REPORT.analyze(rows)
+                request = report['requests'][0]
+                self.assertEqual(report['status'], 'incomplete')
+                self.assertEqual(request['status'], 'UNKNOWN')
+                self.assertEqual(len(request['events']), 2)  # Raw observations remain inspectable.
+                for observation in (request['stages']['source_frontend'],
+                                    request['cycle_stages'][0]['stages']['source_frontend']):
+                    self.assertEqual(observation['status'], 'UNKNOWN')
+                    self.assertIsNone(observation['counts'])
+                    self.assertIsNone(observation['bytes'])
+
     def test_cycle_views_do_not_hide_an_incomplete_later_cycle(self):
         first = completed([packet('hit')])
         later = packet('work')
@@ -722,6 +751,31 @@ class ReuseEvidenceControls(unittest.TestCase):
                 {'stage': 'prepared_body', 'normal': 'control2', 'disabled': 'control3'}]}
             report = REPORT.analyze(rows)
             self.assertEqual(REPORT.analyze_workload(manifest, report)['status'], 'observed')
+            for capture in ('absent', 'missing_worker', 'wrong_worker', 'wrong_digest',
+                            'duplicate_start', 'duplicate_terminal'):
+                with self.subTest(capture=capture):
+                    altered = copy.deepcopy(rows)
+                    first_diagnostics = [row for row in altered if row['span']['request_ordinal'] == 1
+                                         and 'line' in row['fields']]
+                    if capture == 'absent':
+                        altered = [row for row in altered if row not in first_diagnostics]
+                    elif capture in ('missing_worker', 'wrong_worker', 'wrong_digest'):
+                        for row in first_diagnostics:
+                            # Each row owns its envelope; trace() shares a span for fixture convenience.
+                            row['span'] = dict(row['span'])
+                            if capture == 'missing_worker':
+                                row['span'].pop('worker_pid')
+                            elif capture == 'wrong_worker':
+                                row['span']['worker_pid'] = 999
+                            else:
+                                row['span']['compile_request'] = 'wrong-request'
+                    else:
+                        message = 'compiler request started' if capture == 'duplicate_start' else 'compiler request finished'
+                        altered.append(copy.deepcopy(next(row for row in altered
+                            if row['span']['request_ordinal'] == 1 and row['fields'].get('message') == message)))
+                    incomplete = REPORT.analyze(altered)
+                    self.assertEqual(incomplete['status'], 'incomplete')
+                    self.assertEqual(REPORT.analyze_workload(manifest, incomplete)['status'], 'incomplete')
             growth_identities = [dict(cases[index]['identity']) for index in (4, 5)]
             cases[4]['identity'] = dict(cases[0]['identity'])
             cases[5]['identity'] = dict(cases[1]['identity'])
