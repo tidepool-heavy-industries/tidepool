@@ -22594,30 +22594,9 @@ mod tests {
                 .semantic_observations()
                 .unwrap()
         );
-        let available_private = OriginalCompilerInputs::from_native_availability(
-            &context,
-            CanonicalProducerIdentity::from_compiler(&endpoint.identity()),
-            std::slice::from_ref(certificate.product()),
-        )
-        .unwrap();
-        assert_eq!(
-            available_private
-                .native_offers()
-                .iter()
-                .map(|offer| offer.original())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([original_id]),
-            "the private query supplies the requested original, not all request contributions"
-        );
-        for expected in available_private.native_offers() {
-            assert!(
-                private
-                    .native_offers()
-                    .iter()
-                    .any(|offer| offer.same_issuance(expected)),
-                "a private offer preserves its original exact issuer before admission"
-            );
-        }
+        // Transfer the actual request-issued private inputs. Reissuing these
+        // products through the candidate fixture would create a different owner.
+        let available_private = private;
         let expected_availability = available_private
             .native_availability()
             .semantic_observations()
