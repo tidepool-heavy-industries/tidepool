@@ -14420,15 +14420,7 @@ pub(crate) mod tests {
                 .unwrap();
             let empty_graph = empty_support.artifacts().capture_graph_selection();
             assert!(empty_graph.bindings.contains(&issued_a_binding));
-            assert_eq!(
-                empty_graph.namespace,
-                issued_graph
-                    .namespace
-                    .iter()
-                    .filter(|binding| binding.artifact != support_entry.descriptor.id)
-                    .copied()
-                    .collect::<Vec<_>>()
-            );
+            assert_eq!(empty_graph.namespace, issued_graph.namespace);
             assert!(empty_support
                 .artifacts()
                 .artifact_ids()
