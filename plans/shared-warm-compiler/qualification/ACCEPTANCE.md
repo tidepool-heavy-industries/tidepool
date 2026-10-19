@@ -17,11 +17,12 @@ and dormant retained owners cannot supply this census.
 | Captures and operation identity | Wrong worker/digest, failed/cancelled request and missing/duplicate completion cannot claim zero work or known reuse | Reviewed capture repair `ac3bf6e0379559b68396b7854868c3d819cd6467`, joined at `64636e485a901a289b2edf8d85abcc919538f581`; 89 reporter/profile cases and 436 bundle script cases passed there. Six physical-cycle, six workload and four actual renderer sensitivity failures were retained before repair, separate from three fixture defects. Raw events and legitimate earlier cycle evidence survive. |
 | Publication and fork/drop | Parent/two children diverge in both orders; same scope conflict versus independent worlds; surviving old value keeps display/type/native support; last owner releases | Host-inputs owns publication routes; no candidate execution yet. Compare maintained support with independently recomputed primary facts. |
 | Physical inputs and retention | Resident hit avoids baseline encoding, part/FD enumeration and export; cold/miss acquires required facts; selected slice versus backing owners remain distinct | Owned-inputs and worker owners must supply counters at actual consumers; no work-elimination claim yet. Commit/publication costs remain inside the ledger. |
+| Compiler-service demand boundary | Query/check/execute demands; unchanged requests avoid full host input-map materialization, baseline FD enumeration, image serialization and worker rehydration; fixed changed dependencies plus growing unrelated history leave these counts flat. Genuine GHC-demanded transitive growth remains permitted. Private candidates publish atomically in Rust; lost workers cold-restore without source replay | Required by current delivery contract; baseline whole-map/FD/serialization counts unobserved. Component issuance/Ready evidence or AABA outputs do not qualify this boundary. Actual joined controls remain pending. |
 | Worker and recovery | A→A→B→A on fixed pool, actor/world identity separate; replace/evict and cold-authenticate exact portable root; accepted loss never replays source | Pending accepted worker checkpoint; corruption/missing selected proof refuses. |
-| Reload | Preparation failure/no-op/default blockers stop nobody; force fences old admissions; partial retirement stays partial; Continuing/source-neutral custody and independent LLM worlds survive | Reload owns coherent reload tests and gate; qualification owns joined review/recovery checks after its exact checkpoint. |
-| Measurement | Whole-wall ledger, matching physical IDs, known changed-input sensitivity, three increasing sizes with fixed D/A/output | No current paired baseline or candidate frozen measurement. Historical `20d7`/B108 is not the denominator. Predeclare useful benefit/variance/resource bounds after calibration. |
+| Reload | Preparation failure/no-op/default blockers stop nobody; force fences old admissions; partial retirement stays partial; Continuing/source-neutral custody and independent LLM worlds survive | Reload source-reviewed area `59d801946394aee98fb7bfc30a9cf181b494df48` (docs `7d5bf5ea0a`): production/cfg(test) compile and execution unexecuted. Eighteen new controls plus joined resume→bind and pre-bind refusal; aggregate Unknown is injected, not a real post-resume GHC END fault. R1 WatchRoute/forms/reply/display successors and earliest coherent host acceptance remain pending. |
+| Measurement | Whole-wall ledger, matching physical IDs, known changed-input sensitivity, three increasing sizes with fixed D/A/output | Exact frozen `6d3` minimal AABA and Persona13 baseline passed 1/1 each with accepted owner-issued workload/frozen timing claims. No matched candidate comparison. Detailed AABA attribution completed; predeclare benefit/variance/resource bounds before a paired sweep. Historical `20d7`/B108 is not the denominator. |
 | Frontend experiment | Normal-module/GHC semantic parity, fresh target identities, measured import/HPT work and bounded retained owners | Go/no-go pending; no-go leaves valid lower-level gains eligible and ordinary frontend scope cost explicit. |
-| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Build/freeze/run pending; no deployment authorized by qualification. |
+| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Exact `6d3` build/freeze/verify and AABA/Persona13 passed; stronger shared Persona failed in readonly fixture setup before host startup. Immutable failure retained; fixture repair successor pending review/compile/refreeze. Candidate release and deployment unqualified. |
 | Final storage analysis | Bounded top-down by registered checkout/output owner; active versus idle users; retained products/evidence and safe possible reclaim boundaries | After campaign workers settle, analysis only. No deletion, GC, unmount or stopping another owner. |
 
 Required early commands after pinned preparation and observed disk admission:
@@ -37,9 +38,9 @@ On initial inspection `/srv/build` had `108974096384` bytes available, leaving
 about 1.49 GiB above the 100 GiB unreserved floor. The installed `swarm-build`
 is the plain scope launcher and does not implement disk reservation flags.
 Metadata `swarm-build just check-plan exomonad-host tidepool-toolchain` passed;
-that is neither compilation nor test execution. Cold native compilation has no
-measured safe growth bound yet and remains deferred. Source-only script tests
-have a separately measured bounded route under investigation.
+that is neither compilation nor test execution. That initial storage blocker was later removed through ROOT-owned safe retirement.
+Native and frozen gates now use fresh actual resource accounting; the installed
+launcher still has no supported disk-reservation flags.
 
 Roster candidate `cec2a3361cf6b46d3de6026a0e0b9ace416d4cd8` passed 434 bundle script
 cases. Campaign independently reviewed the complete base-to-roster and
@@ -59,3 +60,28 @@ literal dependencies found 564742267 logical / 586035200 allocated bytes across
 target and host configurations, without missing outputs. That is terminal
 artifact size, not a compiler scratch or cache-upload peak, and cannot establish
 a cold native build upper bound by itself.
+
+## Immutable baseline gate in progress
+
+The exact current denominator is clean source `6d3b1745b465b6d0fe14104cb4020ead282f1620`,
+profile `fast-dev`, workspace `ce60f76888c94e9d7229615f27762d02933549b1`, in an
+isolated checkout. Its predeclared commands and independent oracle review are
+bound by the current handoff. No old frozen descriptor matched this source; the
+production source-contract owner correctly refused the older bundle.
+
+The first paired-join discriminator compiled production, unit and declared
+resources, then reproduced the old lexical-library assertion: 1 selected and
+executed, 0 passed, libtest 101 / runner 1. Later native-selection/bind/capture
+assertions were not reached. The owner is repairing the test oracle separately;
+this immutable baseline remains unchanged. Process cleanup was confirmed,
+hosted/compiler cleanup not observed and diagnostic evidence incomplete.
+
+Source retention, native bundle assembly (872 local actions, 718.763 s), freeze
+and bundled verify passed within refreshed admission. Frozen minimal AABA and
+Persona13 each executed/passed one case; exact-scope workload and frozen timing
+claims accepted. Cleanup confirmed in all three domains; Persona13 diagnostics
+remain incomplete. Strong shared-root Persona executed/failed one before host
+startup because the fixture copied a read-only lock into an editable workspace.
+Original frozen baseline retained unchanged; source repair successor is pending.
+A bounded detailed AABA capture completed; no paired speedup, frontend go or
+candidate release/deployment acceptance exists.

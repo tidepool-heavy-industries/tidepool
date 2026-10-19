@@ -1,149 +1,132 @@
-# Qualification handoff
+# Qualification continuation
 
-Owner: `/root/warm_compiler_campaign/qualification`, parent
-`/root/warm_compiler_campaign`. Isolated real checkout
+Owner `/root/warm_compiler_campaign/qualification`; parent
+`/root/warm_compiler_campaign`. Area checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-qualification-20261019`, branch
-`feature/shared-warm/qualification`, base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Buck output is a provisioned XFS bind
-to `/srv/build/buck-out/selfserve-tidepool-shared-warm-qualification-20261019`.
-The owned Buck daemon PID `3801210` was first started inside the admitted
-source-only script run; its observed cgroup is
-`/build.slice/inanna-build-1792396822-3801102.scope`. Record current identity and
-activity again before any closeout. It remains warm for the receiving campaign.
+`feature/shared-warm/qualification`, source contract
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. One allocated independent child,
+`capture_sensitivity`, is completed and reserved; no further descendants granted.
+Qualification owns this handoff, `ACCEPTANCE.md` and `docs/compiler-work-map.md`.
+Host-inputs owns selection/home oracles; reload owns coherent reload host tests.
+C2 amendment `e2bd2611102566085d0c573568d820a50ed62fb3` is incorporated.
 
-## Current ownership and received contracts
+## Accepted source parcel
 
-One descendant granted and started:
-`/root/warm_compiler_campaign/qualification/capture_sensitivity`, explicit
-`gpt-6.1-sol` high, fresh context, own `tidepool-shared-warm-capture-20261019`
-checkout. Owns existing compiler reuse/profile reporter and sensitivity tests,
-including their existing Buck script target. No descendants granted to it.
-Host-inputs owns independent selected-root/home model and compiler projection
-tests. Reload owns coherent reload host tests and authored continuation fixture;
-qualification coordinates before editing host history tests.
+Roster `cec2a3361cf6b46d3de6026a0e0b9ace416d4cd8` and reporter
+`ac3bf6e0379559b68396b7854868c3d819cd6467` received independent campaign
+Sol-high full-base review with no findings. Complete histories joined at
+`64636e485a901a289b2edf8d85abcc919538f581`; docs tip
+`7db82af3f13292ce3677ee6e87272653c7d7bbf5`. Campaign integrated the area at
+`6d3b1745b465b6d0fe14104cb4020ead282f1620` and reran both declared script
+targets: 89 reporter/profile cases and 436 bundle qualification cases passed,
+exit 0, log SHA-256
+`de33f88a43a7261165f187345fe8409e9555919d712aecfc6fe4d9897d0125be`.
 
-Read/received C2 amendment `e2bd2611102566085d0c573568d820a50ed62fb3`:
-selected canonical/value/lexical rows carry their authenticated home witnesses;
-type-classification `home_units` is separate. Dormant custody and mentioned modules
-do not issue selected home membership. Observer worker notified; no semantic
-census is inferred by capture counts.
+The sealed Persona startup roster now includes the existing stronger shared-root
+case (seven total), with missing-receipt refusal. The reporter refuses known
+reuse counts for invalid physical requests and requires observed successful
+request identity for workload promotion. Six physical-cycle, six workload and
+four actual renderer sensitivity failures were retained before repair, separate
+from three fixture defects. Raw events and valid earlier completed cycles survive.
+These script checks do not execute hosted cases or establish performance.
 
-## Baseline and active work
+## Exact current baseline
 
-`ACCEPTANCE.md` owns the current boundary/status matrix. Exact historical stronger
-Persona report was inspected and summarized privately at
-`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/BASELINE-FOCUSED.json`.
-The original report hash is
-`0a958282d02a0157c64ce0436eaa4ecd68a3c5c8052ce8406d7a5776e41baddb`.
-One case executed/passed, exit 0, direct compiler/minimal trace. Process and hosted
-cleanup confirmed, compiler cleanup `not_observed` with observation complete,
-diagnostics incomplete. This does not qualify frozen resident timing or cleanup.
+Immutable checkout
+`/srv/swarm/checkouts/tidepool-shared-warm-baseline-6d3-20261019`, branch
+`baseline/shared-warm/6d3`, remains clean at exact `6d3b1745b465b6d0fe14104cb4020ead282f1620`.
+Its initialized workspace is `ce60f76888c94e9d7229615f27762d02933549b1`.
+Pinned `--tests --browser` configure passed. Buck output is its own provisioned
+XFS bind; daemon `3900579` and actual rustc/GHC descendants were observed under
+`/build.slice/inanna-build-1792400225-3900502.scope`.
 
-The qualification candidate registers the existing stronger shared-workspace case
-in `PERSONA_STARTUP_TESTS` (6→7), extend the existing exact-roster refusal control
-to reject its missing receipt, and update the work map and acceptance matrix.
-Source review verified scaffolded shared Jev resolution, required derived JSON
-marker and runtime-spec wrapper, both actual lookup renderers, and later pure
-display. No new test-only authority or workspace construction path.
+Private evidence root:
+`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-6d3`.
+`BASELINE-PLAN.json` predeclares source/profile/Harness, frozen destination,
+canary then shared-root Persona then Persona13 calibration, negative source
+identity and measurement claim gates. Independent read-only review is at sibling
+`baseline-oracle-review/REVIEW.md`. No exact current bundle was reusable: the
+production build-contract owner refused an old source bundle. Historical timings
+and the stronger `70a` Persona report are not this baseline.
 
-Capture worker confirmed a reporting defect: failed physical request makes
-aggregate stages unknown but retained per-cycle stages remain observed; the
-production profile renderer displays those counts. Same-schema fail-closed repair
-and renderer controls passed the owned source-only target. Earlier complete cycles in a successful
-request with a later incomplete stage retain their legitimate separate evidence.
+The first maintained discriminator compiled production, unit binary and declared
+runner resources, then executed exactly one case:
+`session::turn::tests::paired_join_compiles_source_hidden_checked_bind_in_fresh_worker`.
+Unchanged `6d3` failed the same logical-library versus actual-import lexical
+assertion at `turn.rs:8693` as owned49, before native-selection, checked-bind or
+capture controls. Selected/executed 1, passed 0, failed 1; libtest exit 101,
+runner exit 1. `DISCRIMINATOR.json` binds source, profile, command, report and
+binary. Report SHA-256
+`4fff5a9e049235a69dff22cb6bad587f853ad7d9b79e472d66ebac940039b124`;
+binary SHA-256
+`9562fe99f3297924415a3482ff17f723be74ccf9ee5abe0c8828e4a86d46195e`.
+Process cleanup confirmed; hosted/compiler cleanup `not_observed`, diagnostics
+incomplete. The immutable baseline is unmodified. Owned-inputs received the
+result and owns the authorized test-only oracle repair. Its next preserved
+native-selection assertion then failed separately; that investigation remains
+owned there. This does not qualify later checks or overall baseline behavior.
 
-## Checks and admission
+Catalog-source build and production `retain-sources` completed exit 0. The exact
+inventory is rooted at
+`/nix/store/msjzwn4ihkizn2j3f4pbjij6my9v64pz-tidepool-catalog-sources`.
+The full baseline native bundle built with `-j1`: 872 local actions, 718.763 s,
+exit 0. Own output was 8676220928 allocated B; scope peak 10665754624 B,
+within parent-approved 32 GiB output / 24 GiB expected memory allowances.
+Freeze (14.528 s) and bundled verify (2.893 s) passed. Descriptor SHA-256
+`2ec9745698f1a578403e7524397d3fe573d97efdb8cb489457f3ca007775e72e`
+binds exact source/profile/Harness/workspace and seven-case startup roster.
 
-Executed metadata only, exit 0:
-`swarm-build just check-plan exomonad-host tidepool-toolchain`. This lists owning
-production/test targets; it is neither compilation nor test execution.
-`git diff --check` passed on this candidate.
+Frozen AABA passed 1/1, outputs 42/42/43/42, cohort 88.110 s. Primary Persona13
+passed 1/1, all 13 phases, cohort 387.000 s. Both had process, hosted and compiler
+cleanup confirmed; diagnostics complete for AABA and incomplete for Persona13.
+Bundled `read_measurement` and exact-scope `require_claim` accepted workload and
+frozen timing independently for both. `CANARY-TERMINAL.json`,
+`AABA-PHASES-minimal.json` and `PERSONA13-TERMINAL.json` retain source, artifact,
+report identity, actual counts, intervals, known work and unknown split limits.
+No paired speedup or frontend go decision is justified.
 
-Source-only own preparation `swarm-build bash scripts/buck2-configure.sh` exited 0,
-using exact initialized `ce60f7` and generation `generation.nECAYt7J`. No source
-copy/compiler build appeared in its retained log; Buck output remained 0 B.
-Then `swarm-build bash scripts/buck2-run.sh run --local-only -c remote.enabled=false
--c tidepool.profile=fast-dev //scripts:native_bundle_qualification_tests` exited 0:
-434 actual unittest cases, 20.269 s suite wall, 23.146 s enclosing command.
-Evidence: `roster-script-tests.{json,log}` under the private area evidence root.
-Own output was 103010304 allocated B, within 100 MiB; no native Rust/GHC action.
+The stronger shared-source Persona selected/executed 1 and failed before host
+startup at fixture `configure_persona` rewriting scaffolded `flake.lock`: readonly
+0444 source mode was propagated by the test lock provider's `fs::copy`. Runner 1 /
+libtest 101; process/compiler cleanup confirmed, hosted cleanup unknown,
+diagnostics incomplete. `SHARED-PERSONA-TERMINAL.json` preserves the failure.
+The original frozen bundle remains immutable. Independent source review found
+that destination is an editable authored workspace artifact. Candidate
+`38c53f8b107e0f9b4ae6cc0d5857e657f7144112` uses the existing atomic writer,
+adds an actual-scaffold readonly-source regression, and fixes the analogous
+recovery fixture source-copy/edit boundary. Independent campaign source review accepted; compiled successor
+execution remains pending; no permission bypass or frozen patch is authorized.
 
-Initial `/srv/build` free `108974096384` B leaves about 1.49 GiB above the required
-100 GiB unreserved floor. Actual launcher is the plain scope wrapper; new disk
-reservation flags are unsupported. Current native compile lacks a measured safe
-growth bound. Exact pending commands are in `ACCEPTANCE.md`; host preparation
-requires `--tests --browser`, never an ambient compiler or borrowed config.
+A bounded full-profile AABA capture completed after minimal-profile calibration,
+through the same descriptor: one case passed with cleanup confirmed and accepted
+workload/frozen timing. The complete 58.6 MB raw trace is retained; the runner
+detail sample was truncated, so diagnostics remain incomplete.
+`AABA-PHASES-full.json` retains exact per-request counts and legacy phases; its
+compiler-stage report is incomplete for check-only requests and absent transport
+stages. Specific observed per-request facts do not imply full-stage qualification.
+`STATE.json` owns the current baseline terminal receipt. Minimal tracing
+left serialize/hydrate/GHC/import/output-admission splits unknown; physical
+service duration is not GHC-only time. Preserve both trace settings separately.
 
-Campaign approved a separate bounded source-only script route: existing realized
-toolchain inputs, about 13 MiB source snapshot and 100 MiB output envelope,
-refreshed headroom before launch, stop on unexpected materialization/growth.
-Capture checkout's first configure stopped before Buck: recorded workspace
-submodule was missing, and Nix copied a source path during evaluation. Raw failure
-is retained; no compiler build or Buck output growth. Worker must verify exact
-local `ce60f7` Git objects and initialize through a single-command file override
-before a coordinated retry. The retry exited 0. Correct status capture is retained
-separately from the configure failure. These are procedure failures, not passing skips.
-Capture worker's repair target passed 89 actual cases; its existing bundle
-script target passed 436. Pre-repair 89 cases had 16 targeted failing sensitivity
-subtests (six physical-cycle, six workload and four production renderer controls)
-and 3 independently identified fixture defects. Candidate
-`ac3bf6e0379559b68396b7854868c3d819cd6467` and roster candidate
-`cec2a3361cf6b46d3de6026a0e0b9ace416d4cd8` received campaign independent Sol-high
-full `5b74..candidate` review with no findings. The child's complete private
-`capture-sensitivity/HANDOFF.md` records exact counts/argv/hash/cgroups. Its Buck
-daemon `3795171` and forkserver `3795212` remain warm for possible review repairs;
-no leaf command remains running.
+## Resources and next events
 
-Both reviewed histories were merged preserving ancestry at
-`64636e485a901a289b2edf8d85abcc919538f581`. At that committed clean join:
+ROOT's owner-safe retirement materially recovered storage. The installed
+`swarm-build` remains the plain scope launcher; unsupported reservation flags
+must not be assumed. Fresh actual memory and storage observations precede each
+heavy phase. Read-only historical dependency censuses and native reconciliation
+are retained at the private area root; terminal artifact bytes are not scratch
+peak upper bounds. Native host/worker/owned/reload candidates are independently
+owned, and their component passes do not replace the exact frozen joined gate.
 
-```sh
-swarm-build bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c tidepool.profile=fast-dev --print-passing-details //scripts:compiler_reuse_report_tests //scripts:native_bundle_qualification_tests
-```
+No periodic wake loop. An active command retains its observer through terminal.
+Emit success/refusal/failure/blocked/cancelled evidence to campaign and affected
+owners: inspect status, `send_message` to running recipients or `followup_task`
+to completed recipients with exact source, report and next action. Auto-completion
+does not restart a parent. When no ready frontier remains, retain producer,
+event, recipient and continuation before yielding.
 
-Exit 0, two Buck tests passed with no skips/omissions; actual unittest counts
-were 89 (0.621 s) and 436 (19.993 s), whole command 21.268 s.
-`joined-script-tests.{json,log}` retains source and command; log SHA-256
-`66a51e4c49741a466b5bd39666a9aa33e375855c343cf9f7b776624c122e0650`.
-Own output 120770560 allocated B fits the refreshed 128 MiB total envelope;
-free `/srv/build` was 108777586688 B. This is source-only script execution, not
-native Rust/GHC or hosted/frozen qualification.
-
-Read-only extract-cmd census: `extract-cmd-retained-output-census-v3.json` in
-private evidence. 187 literal declared owner references resolve with no missing
-outputs across target `15f8` and host `c401` configurations. Retained regular
-files, following only file symlinks and deduplicating inodes, total 564742267
-logical / 586035200 allocated B. Earlier census v1 accidentally recognized URL
-colons as labels; v2 corrected parsing and v3 included host buildscript outputs.
-Only v3 is the current result. It is not transient scratch/peak admission proof.
-
-## Next continuation
-
-1. Campaign receives the reviewed source-only area join and its exact passing
-   joined script evidence, records area-to-campaign mapping, and runs the joined
-   campaign's relevant source-only check. No code finding is open in this parcel.
-3. At each accepted host/owned-input/worker/reload fold, update work map from
-   production source and run its smallest discriminating joined history. Preserve
-   exact deferred commands and native unqualified status until disk admission
-   supports real compilation and counted execution.
-4. Baseline/candidate freeze, matched calibration and repetitions, frontend go/no-go,
-   integrated frozen qualification remain pending; deployment remains separate.
-5. After campaign subagent work settles, perform bounded top-down scratch analysis
-   by checkout/output owner, active versus idle users, required retained products
-   and evidence, possible reclaimable outputs and exact safe boundaries. Analysis
-   only: no deletion, GC, unmount or stopping another owner.
-
-## Event-driven continuation
-
-No periodic wake loop. After recording this result to the owning campaign and
-affected dependents, qualification waits for the campaign's first compiled
-host/worker/reload checkpoint, an admission decision, a concrete review repair,
-or the final campaign-settled event needed for storage analysis. The producer
-must inspect recipient state: send to a running owner, or use `followup_task`
-with exact candidate/evidence/action for a completed owner. Auto-completion does
-not restart a parent. The command owner observes terminal settlement before
-emitting success/refusal/failure/blocked/cancelled events; no orphan commands.
-
-No active native tests, frozen jobs or live Persona changes owned by qualification.
-Source/WIP and private evidence retained. Semantic, performance, frozen release
-and deployment remain distinct from this accepted script parcel.
+After all campaign source/child/build frontiers settle, perform the requested
+bounded top-down scratch analysis by checkout/output owner, active versus idle
+users, required independent products/evidence and exact possible reclaim
+boundaries. Analysis only: no deletion, GC, unmount or stopping others.
+Deployment and live Persona changes remain outside qualification authorization.

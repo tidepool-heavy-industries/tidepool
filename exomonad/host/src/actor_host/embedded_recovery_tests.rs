@@ -1397,7 +1397,8 @@ async fn production_authored_root_failure_is_not_evaluated_before_durable_bindin
             if entry.file_type().unwrap().is_dir() {
                 copy_actors(&entry.path(), &output);
             } else {
-                std::fs::copy(entry.path(), output).unwrap();
+                let bytes = std::fs::read(entry.path()).unwrap();
+                tidepool_atomic_write::write_durable(&output, &bytes).unwrap();
             }
         }
     }
