@@ -13223,6 +13223,7 @@ pub(crate) mod tests {
                                 .unwrap(),
                         );
                         let before = context.artifact_view().capture_graph_selection();
+                        let before_context = context.as_ref().clone();
                         let root = tempfile::tempdir().unwrap();
                         let request = ExactCompileContext::new(context.clone())
                             .prepare_compilation(&root.path().join("input"), producer_bytes)
@@ -13410,6 +13411,8 @@ pub(crate) mod tests {
                             assert_eq!(facts.contains_key(&entries[4].descriptor.id), extra_output);
                         }
                         assert_eq!(context.artifact_view().capture_graph_selection(), before);
+                        assert_eq!(context.as_ref(), &before_context);
+                        assert_eq!(request.context().as_ref(), &before_context);
                     }
                 }
             }
