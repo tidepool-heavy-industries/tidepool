@@ -17225,7 +17225,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn scope_bindings_reads_the_admitted_world_without_an_extract_worker() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (machines, context, source, _root) = actor_registry_fixture();
             let (captured, _owner) = world_query_test_source_files_with_support(
                 &[vec![(
                     "WorldScope.hs",
@@ -17233,7 +17233,6 @@ pub(crate) mod request_tests {
                 )]],
                 &source.base_include,
             );
-            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(
                 machines,
                 source.bind_preparation(preparation_client),
