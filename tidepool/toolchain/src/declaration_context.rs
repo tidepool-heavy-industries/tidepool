@@ -15323,10 +15323,16 @@ mod tests {
                                 .unwrap();
                         }
                         context = context
-                            .extend_checked_original_products(
-                                issuer.owner.facts.producer,
+                            .extend_issued_compiler_support(&match support_offer(
                                 std::slice::from_ref(&product),
-                            )
+                            ) {
+                                CompilerSupportFixture::Complete(inputs) => {
+                                    inputs.compiler_source_support().clone()
+                                }
+                                CompilerSupportFixture::RecordedRoles { .. } => {
+                                    unreachable!("closed compiler output fixture")
+                                }
+                            })
                             .unwrap();
                         if lexical_carrier {
                             edit_lexical(&mut context, |nodes| {
@@ -17770,14 +17776,28 @@ mod tests {
         let old = initial
             .as_ref()
             .clone()
-            .extend_checked_original_products(initial.owner.facts.producer, &[epoch(old_epoch)])
+            .extend_issued_compiler_support(&match support_offer(&[epoch(old_epoch)]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
             .unwrap()
             .extend(&[], &[], lexical.clone())
             .unwrap();
         let child = initial
             .as_ref()
             .clone()
-            .extend_checked_original_products(initial.owner.facts.producer, &[epoch(new_epoch)])
+            .extend_issued_compiler_support(&match support_offer(&[epoch(new_epoch)]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
             .unwrap()
             .extend(&[], &[], lexical)
             .unwrap();
@@ -20391,7 +20411,14 @@ mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[hidden])
+                .extend_issued_compiler_support(&match support_offer(&[hidden]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
@@ -20520,7 +20547,14 @@ mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &products)
+                .extend_issued_compiler_support(&match support_offer(&products) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
@@ -20588,7 +20622,14 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[hidden, relay])
+                .extend_issued_compiler_support(&match support_offer(&[hidden, relay]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let entries = context
@@ -21101,7 +21142,15 @@ mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], std::slice::from_ref(&hidden))
+                .extend_issued_compiler_support(&match support_offer(std::slice::from_ref(&hidden))
+                {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
@@ -21327,7 +21376,14 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[original])
+                .extend_issued_compiler_support(&match support_offer(&[original]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), context.clone());
@@ -21689,7 +21745,14 @@ mod tests {
             baseline
                 .as_ref()
                 .clone()
-                .extend_checked_original_products([2; 32], &[product])
+                .extend_issued_compiler_support(&match support_offer(&[product]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let hidden = support_product("AdmissionHidden");
@@ -21923,7 +21986,14 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products(producer_sha256, &[product])
+                .extend_issued_compiler_support(&match support_offer(&[product]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let physical = context
@@ -22051,7 +22121,14 @@ mod tests {
             baseline
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(producer_sha256, &[product])
+                .extend_issued_compiler_support(&match support_offer(&[product]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let directory = tempfile::tempdir().unwrap();
@@ -22359,7 +22436,14 @@ mod tests {
             baseline
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(producer_sha256, &[product])
+                .extend_issued_compiler_support(&match support_offer(&[product]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let directory = tempfile::tempdir().unwrap();
@@ -24857,7 +24941,14 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products(producer_sha256, &[product])
+                .extend_issued_compiler_support(&match support_offer(&[product]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed compiler output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let collision = root.join("collision");
