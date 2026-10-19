@@ -3,7 +3,9 @@
 Production workflow map checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde`;
 campaign qualification observations below use base
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090` and their named joined revision.
-This is the current production workflow, not a list of proposed optimizations.
+The later source changes below were inspected at campaign `c10837d44d`;
+qualification records their actual consumers separately from the demand-service
+amendment. Proposed world/resolver owners are not existing production facts.
 Stage names identify ownership boundaries; their timings are not additive.
 Use [compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
@@ -85,7 +87,7 @@ Paths below name the owning modules; symbols are searchable anchors.
 | **P3 Output admission** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `prepare_cell_program_outputs`, `read_program_output`; [`certified_products.rs`](../tidepool/toolchain/src/certified_products.rs) `CertifiedSegmentOriginals::issue` → checked receipt, typed target, certified segment | Named output existence/access/size, source/producer/receipt/package/native checks. Runtime output reader and ordinary invocation-layout reader remain distinct frontdoors. Segment certification issues completed availability once for its consumer. |
 | **P4 Ordered continuation** | [`declaration_context.rs`](../tidepool/toolchain/src/declaration_context.rs) `ProgramAdmissionContinuation`, `admit_program_support_inner`; planned declaration certifier → updated exact support/lexical/value context | Each item adds genuinely new facts and preserves its prefix, original segment baseline, source adjacency, produced-type exclusions and private native choices. Fresh value-interface append avoids full admission/dependency reconstruction, but still carries persistent rows/parent owners. Planned declarations borrow issued original inputs; redundant baseline reopen/merge and unused generic fingerprint parse are gone. Dummy `__result` compilation remains. |
 | **P5 Prepared capture** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `capture_prepared_items`; [`checked_cell.rs`](../tidepool/toolchain/src/checked_cell.rs) `PreparedCheckedItemOutput::capture` → `PreparedCellProgram` | Before END: exact checked-cell/item/source/purpose/generation association, binders/sites/typed entry, target demand and entry requirements. Target and entry closures differ. Source-publication selection still validates all applicable rows; no narrow-query bypass of malformed unused evidence. This is not yet a sealed contextual value. |
-| **P6 Contextual seal** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `PreparedCellProgram::seal` → one `PreparedValueSourceSupport`; [`checked_cell.rs`](../tidepool/toolchain/src/checked_cell.rs) `CheckedItemOffer::seal_prepared` / value `capture_output` → exact item, checked values and ordered prefix | After END: host cancellation, same-cell owner/order, per-output original execution, source/type/template support and immutable output ownership. Broad duplicate value artifact custody is removed; template and original execution facts still differ across outputs. Pending segment candidate publication follows item seals, with cancellation checks. |
+| **P6 Contextual seal** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `PreparedCellProgram::seal` → lazy `PreparedValueSourceSupport` at the first native item; [`checked_cell.rs`](../tidepool/toolchain/src/checked_cell.rs) `CheckedItemOffer::seal_prepared` / value `capture_output` → exact item, checked values and ordered prefix | Declaration-only sealing constructs no value support; a mixed cell constructs one at its first native item. That source property still needs an enabled actual seal 0/1 span observation. After END: host cancellation, same-cell owner/order, per-output original execution, source/type/template support and immutable output ownership. Broad duplicate value artifact custody is removed; template and original execution facts still differ across outputs. Pending segment candidate publication follows item seals, with cancellation checks. |
 | **P7 Admit/install** | [`turn.rs`](../tidepool/runtime/src/session/turn.rs), [`admission.rs`](../tidepool/runtime/src/session/admission.rs) `RuntimeCheckedPrefix`, [`resident.rs`](../tidepool/runtime/src/session/resident.rs) `install_certified_turn_in` → admitted current turn, installed target/dependency images and source leases | Current scope/reservations/generations/imports, complete image/table/constructor metadata, source-scope recheck, atomic root registration/rollback. Reusable compiled plans do not reserve future runtime state. |
 | **P8 Activate/render** | Original provenance/site witnesses → demand-specific InterfaceOnly type projection; [`resident.rs`](../tidepool/runtime/src/session/resident.rs) `RuntimeActivationInput` binds parked frame/runtime scope → live payload; original execution → display dictionaries | Empty input demand still validates target/table/sites/bundle and producer. Type evidence, live payload and captured original instance environment are separate. Eager whole original-interface materialization is removed from no-demand sealing; actual witnessed type demand projects through its owner. |
 | **P9 Publish** | [`paired_publication.rs`](../tidepool/runtime/src/session/paired_publication.rs) `FinalExecutionIntent` + exact current views/leases → staged durable publication and installation acknowledgement | Semantic interference requires recertification; metadata-only changes may restage. Do not rerun effects to reconstruct completed intent. Compiler candidate publication in P6 is not this runtime/store commit. |
@@ -185,10 +187,70 @@ a full-profile AABA attribution capture is separate. These are baseline
 observations, not a candidate comparison or a speedup.
 
 The same frozen baseline's stronger shared-root Persona failed in editable
-workspace fixture setup during fixture setup before compiler requests: a read-only frozen lock was copied
-with its mode and then overwritten. The exact failure remains retained; a new
-source repair/build/freeze is required. It supplies no compiler defect or passing
-Persona semantic evidence. Candidate frozen release qualification remains open.
+workspace setup after resident daemon start and zero compiler requests: a readonly
+frozen lock was copied with its mode and then overwritten. The original bundle
+remains immutable. Reviewed fixture repair `38c53f8b`, area source `e6d713626d`,
+uses the existing durable atomic writer into a fresh writable inode. Production,
+cfg(test), declared resources and two counted scaffold/recovery controls passed;
+its newly frozen bundle verified.
+
+That new frozen stronger Persona reached startup and Files/Memory, then failed
+all five native lookup answers before physical submission. Effective selected
+catalog `Jev.Tidepool` B differs from exact required historical A. Real retained
+`Jev.Operators` group edges consume A; matching source/product/interface bytes
+cannot substitute certification or bindings. All cleanup domains were confirmed
+and diagnostics complete. The exact current root operands and first contradictory
+composition stage remain unobserved; production roles before/after value support,
+authored fallback and catalog/private composition are the discriminating next
+observation. The strict consumed-native validator remains correct. See the
+[exact frozen report](/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/fixture-repair-e6d/run-shared-persona/report.json)
+and [issuer review](/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-oracle-review/FROZEN-NATIVE-LOOKUP-REVIEW.md).
+This is a failed semantic gate, separate from the valid fixture repair.
+
+## Later joined source and remaining physical work
+
+At inspected campaign `c10837d44d`, selected compiler roles use persistent
+`imbl::OrdMap` rows and shared home-unit storage. `PreparedValueSourceSupport`
+borrows selected rows from its exact context, avoiding a full metadata-snapshot
+copy; lexical import composition and retained-source implementation census remain.
+Its ordinary debug span `exact.value_source_support.prepare` measures actual
+constructor calls only when enabled. Synthetic issuer controls do not observe
+real P6 constructor counts.
+
+Owned checked inputs avoid writing/rehashing the certified baseline on the
+same-owner route, and owned output rows preserve immutable acquisition owners.
+`CheckedInputWork` counts initial files/bytes and output hashes, not every compiler
+read or publication copy. `RetainedArtifactMaterialization::selected_rows` still
+visits retained owners/rows and selected metadata. `input_transport_files` still
+walks selected slices, graph paths and metadata to collect physical leases;
+`original_inputs::encode_image` still encodes selected parts. No eliminated full
+FD enumeration, serialization or rehydration is established.
+
+Rust source-free `EnsureExactInputs` framing and END guards exist; inspected
+Haskell production `Main.hs` returns `ExactInputsRejected UnsupportedOperation`.
+The request decoder memo/prune policy and atomic publication controls have native
+component evidence, but this is not a production Ready hit or persistent world.
+The demand-service amendment requires the actual frontend public-module query,
+current world/provenance, exact proof reuse without an unnecessary target, and
+query/check/execute distinctions. A retained exact type proof can legitimately
+answer without invoking the compiler. Changed bindings require a private exact
+successor and atomic Rust visibility after clean outer END. Cold restore must
+retain source-domain facts without replay; repeated unchanged facts must avoid
+full host maps/support/exports, FD enumeration, encoding and full worker hydration.
+Fixed changed dependency/output counts must remain flat as unrelated history
+grows; genuinely demanded dependency growth remains valid. These are open
+qualification obligations; missing measurements are unknown.
+
+Full AABA attribution is separate from minimal timing. The four main request
+service times were 10.077/7.236/8.733/9.269 s, plus tiny check requests of
+8/6/7/8 ms. Inclusive host execute/admit/offer/seal totals were
+38.590/6.080/1.354/0.287 s. Nested worker segment frontend was 15.272 s,
+GHC setup 10.906 s, load 0.573 s, explicit typecheck 0.698 s,
+prepared recovery 0.551 s and encoding 0.006 s. These totals overlap;
+physical service is not GHC-only. Each main target decoded 82 exact-scope
+certificates. Absent transfer stages leave full map/FD/serialize/hydrate counts
+unknown. Raw full trace is complete but bounded runner detail is truncated;
+no paired speedup follows.
 
 Historical **b108** scripted Persona13 measurements include 389 retained input
 references across 13 offers (not 389 distinct graphs), 64 native-item
