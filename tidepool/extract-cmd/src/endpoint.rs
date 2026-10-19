@@ -42,9 +42,14 @@ pub struct CompilerPackageSourceAssociation {
     profile_id: [u8; 32],
     service_epoch: [u8; 32],
     boot_profile_commitment: [u8; 32],
+    launch_configuration_sha256: [u8; 32],
 }
 
 impl CompilerPackageSourceAssociation {
+    pub fn launch_configuration_sha256(&self) -> &[u8; 32] {
+        &self.launch_configuration_sha256
+    }
+
     pub fn source_id(&self) -> &[u8; 32] {
         &self.source_id
     }
