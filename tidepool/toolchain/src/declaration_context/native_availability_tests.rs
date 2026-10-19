@@ -2105,7 +2105,10 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             .keys()
             .chain(right_groups.keys())
             .all(|group| groups.contains(group)));
-        assert_eq!(ambiguous.namespace(), base.namespace());
+        assert_eq!(
+            ambiguous.capture_graph_selection().namespace,
+            base.capture_graph_selection().namespace,
+        );
         assert!(ambiguous.selected_native_groups().is_empty());
         assert!(
             matches!(NativeOriginalRequirement::from_issued_group_custody(entry.descriptor.id, canonical, &ambiguous),
