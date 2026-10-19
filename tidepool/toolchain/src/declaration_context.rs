@@ -16149,25 +16149,37 @@ mod tests {
                 .permits(7),
             "the actual selected Beta fixture has Full group-7 authority"
         );
+        let alpha_original = base.compiler_input_projection().snapshot_roles()[&root]
+            .original()
+            .unwrap();
         let source_roots = base
             .compiler_input_projection()
             .roles()
             .into_iter()
             .map(|role| role.interface())
-            .chain([base.compiler_input_projection().snapshot_roles()[&root]
-                .original()
-                .unwrap()])
+            .chain([alpha_original])
             .collect();
         let birth_basis = base
             .compiler_source_support()
             .select_support_roots(source_roots)
             .unwrap();
-        assert!(birth_basis
-            .artifacts()
-            .capture_graph_selection()
-            .roots
-            .iter()
-            .all(|root| !matches!(root, ArtifactBindingNode::Group(_))));
+        let birth_graph = birth_basis.artifacts().capture_graph_selection();
+        assert!(
+            birth_graph.roots.iter().any(|root| matches!(
+                root,
+                ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == alpha_original && group.original_ordinal == 7
+            )),
+            "the selected Alpha original retains its actual group-7 demand"
+        );
+        assert!(
+            birth_graph.roots.iter().all(|root| !matches!(
+                root,
+                ArtifactBindingNode::Group(group) if group.binding.artifact() == beta_original
+            )),
+            "Empty Beta contributes no executable root: {:?}",
+            birth_graph.roots
+        );
         assert_eq!(
             birth_basis.projection().snapshot_roles()[&beta].original(),
             None
