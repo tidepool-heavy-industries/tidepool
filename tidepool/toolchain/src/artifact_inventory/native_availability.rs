@@ -744,6 +744,7 @@ impl NativeOfferCustody {
             admission_roots: lease.admission_roots.clone(),
             selection: Arc::clone(&lease.selection),
             payloads: lease.payloads.clone(),
+            acquired_owner_counts: lease.acquired_owner_counts.clone(),
             inventory: lease.inventory.clone(),
             materialization_sources: Default::default(),
             materialization: MaterializationSource {
@@ -1245,14 +1246,21 @@ impl IssuedNativeOffer {
             custody_selection.custody_roots = custody_selection.roots.clone();
             custody_selection.roots.clear();
             custody_selection.namespace.clear();
-            let payloads = artifact_ids(&nodes)
-                .into_iter()
-                .map(|id| (id, Arc::clone(&source.payloads[&id])))
-                .collect();
+            let mut payloads = Default::default();
+            let mut acquired_owner_counts = Default::default();
+            for id in artifact_ids(&nodes) {
+                ViewLease::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    id,
+                    Arc::clone(&source.payloads[&id]),
+                );
+            }
             let lease = Arc::new(ViewLease {
                 admission_roots: Default::default(),
                 selection: Arc::new(custody_selection),
                 payloads,
+                acquired_owner_counts,
                 inventory: source.inventory.clone(),
                 materialization_sources: source.materialization_sources.clone(),
                 materialization: source.materialization.clone(),

@@ -1167,7 +1167,6 @@ pub(crate) struct RequestCompilerInputs {
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: CompilerArtifactMetadata,
     native_selection: NativeInputSelection,
-    declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
 }
 
@@ -2363,7 +2362,6 @@ impl ProtectedScaffoldRequirements {
     ) -> Result<RequestCompilerInputs, CompileError> {
         #[cfg(test)]
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
-        let declaration_semantic_sha256 = context.semantic_sha256();
         let support = context
             .compiler_source_support()
             .close_request(private, self)?;
@@ -2381,7 +2379,6 @@ impl ProtectedScaffoldRequirements {
             source_support: Arc::new(support),
             metadata,
             native_selection,
-            declaration_semantic_sha256,
             original_sources: Default::default(),
         })
     }
@@ -9747,7 +9744,7 @@ impl ExactDeclarationContext {
     ) -> Result<ExactCompilationRequest, CompileError> {
         let baseline = scaffold.compiler_inputs(self, None)?;
 
-        let (authorization, private) = authorize(baseline.declaration_semantic_sha256)?;
+        let (authorization, private) = authorize(self.semantic_sha256())?;
         let inputs = match private.as_ref() {
             Some(private) => scaffold.compiler_inputs(self, Some(private))?,
             None => baseline,
@@ -10019,7 +10016,7 @@ impl ExactDeclarationContext {
         } = native_transport;
         let metadata = &transport_metadata;
         let compiler_metadata = &inputs.metadata;
-        let semantic_sha256 = inputs.declaration_semantic_sha256;
+        let semantic_sha256 = self.semantic_sha256();
         let admitted_empty = authorization.is_some()
             && self.owner.facts.producer == [0; 32]
             && metadata.entries.is_empty()
@@ -15794,6 +15791,61 @@ mod tests {
             }
             check_native_selection_reference(&inputs, &RequestNativeAvailability(Arc::new(rows)));
         }
+    }
+
+    #[test]
+    fn semantic_input_admission_defers_encoding_until_physical_request() {
+        use std::sync::atomic::Ordering;
+        let (context, producer) = metadata_fixture();
+        let scaffold = ProtectedScaffoldRequirements::default();
+        for _ in 0..3 {
+            scaffold.compiler_inputs(&context, None).unwrap();
+        }
+        assert!(context.owner.observations.get().is_none());
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 0);
+
+        let directory = tempfile::tempdir().unwrap();
+        let physical = context
+            .prepare_compilation_authorizing(directory.path(), &producer, |digest| {
+                assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+                Ok(text(hex(&digest)))
+            })
+            .unwrap();
+        assert_eq!(physical.semantic_sha256, context.semantic_sha256());
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+
+        let changed = Arc::new(context.as_ref().clone().rebuild(|facts| {
+            facts.lexical = facts
+                .lexical
+                .replace(vec![
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Value"),
+                        imports: vec![identity("fixture", "Alpha")],
+                    },
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Alpha"),
+                        imports: vec![],
+                    },
+                ])
+                .unwrap();
+        }));
+        changed.normalize().unwrap();
+        let continued = physical
+            .program_admission()
+            .in_program_context(changed.clone())
+            .unwrap();
+        assert!(Arc::ptr_eq(&continued.context().owner, &changed.owner));
+        assert!(changed.owner.observations.get().is_none());
+        assert_eq!(changed.owner.semantic_issuances.load(Ordering::Relaxed), 0);
+
+        let next = changed
+            .prepare_compilation_authorizing(&directory.path().join("next"), &producer, |digest| {
+                assert_ne!(digest, physical.semantic_sha256);
+                Ok(text(hex(&digest)))
+            })
+            .unwrap();
+        assert_eq!(next.semantic_sha256, changed.semantic_sha256());
+        assert_eq!(changed.owner.semantic_issuances.load(Ordering::Relaxed), 1);
     }
 
     #[test]
