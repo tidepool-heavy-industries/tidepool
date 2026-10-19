@@ -2014,6 +2014,7 @@ fn package_native_catalog_fixture(
         &crate::toolchain::AdmittedCompilerDeployment {
             producer_identity: fixture.authority.producer_identity,
             consumed_worker_identity: fixture.authority.consumed_worker_identity,
+            source: crate::toolchain::AdmittedPackageSource::ObservationOnly,
         },
         &prepared,
         RootPolicy::Fixture,

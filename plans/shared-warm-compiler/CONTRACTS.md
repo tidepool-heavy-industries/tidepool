@@ -267,3 +267,19 @@ be measured and reported.
   an actor-current registry. Lower runtime gates must retain crate dependency
   direction. Absence never grants source-dependent admission. Exact type/schema
   and production fence/stop result remain under implementation review.
+
+- 2026-10-19, C6 public runtime compiler owner: the pre-machine factory keeps its
+  existing preparation ticket and collects its actual clean physical END before
+  final-scope adoption and runtime-owned entry. Unknown/abandoned preparation
+  retains obligations and refuses advancement, without automatic retry. No
+  nested borrowed NotStarted result may masquerade as outer END. The runtime
+  entry requires the existing exact original source lease, validates its own
+  admission epoch independently of recipient placement, and checks Open lazily
+  at actual source work. Hooks only restrict. Retain that lease through immutable
+  source dependencies without ActorGeneration cycles. Recovered owners adopt
+  after actual public-owner epoch transfer; reminted/fallback children adopt
+  only final placement. Initial publication fences the same canonical bootstrap
+  gate before IO, keeps it through visibility/ack and never claims that gate
+  itself. Confirmed success reopens the same gate; proven no-effect may reopen;
+  uncertainty retains it closed until explicit recovery into a new context.
+  This is an approved bounded implementation contract, not native acceptance.

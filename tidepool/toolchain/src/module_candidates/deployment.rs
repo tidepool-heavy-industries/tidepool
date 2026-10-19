@@ -581,8 +581,19 @@ impl DeploymentModulePackage {
         &self,
         deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(), ModulePackageError> {
-        if self.catalog.producer_identity != deployment.producer_identity
-            || self.catalog.consumed_worker_identity != deployment.consumed_worker_identity
+        self.validate_product_provenance(
+            deployment.producer_identity,
+            deployment.consumed_worker_identity,
+        )
+    }
+
+    pub(crate) fn validate_product_provenance(
+        &self,
+        producer_identity: [u8; 32],
+        consumed_worker_identity: [u8; 32],
+    ) -> Result<(), ModulePackageError> {
+        if self.catalog.producer_identity != producer_identity
+            || self.catalog.consumed_worker_identity != consumed_worker_identity
         {
             return Err(ModulePackageError::CompilerMismatch);
         }
@@ -1752,12 +1763,13 @@ mod tests {
             }
             let producer_identity = [3; 32];
             let authority = CompilerDeploymentAuthority {
-                schema: 1,
+                schema: 2,
                 producer_identity,
                 consumed_worker_identity: [4; 32],
                 frontend_path: "/configured/frontend".into(),
                 worker_path: "/configured/worker".into(),
                 ghc_libdir: "/configured/ghc".into(),
+                package_source: crate::toolchain::ConfiguredPackageSource::ObservationOnly,
             };
             let evidence = DependencyEvidence {
                 version: 4,
@@ -1946,6 +1958,7 @@ mod tests {
                 &crate::toolchain::AdmittedCompilerDeployment {
                     producer_identity,
                     consumed_worker_identity: [4; 32],
+                    source: crate::toolchain::AdmittedPackageSource::ObservationOnly,
                 },
                 &prepared,
                 RootPolicy::Fixture,
