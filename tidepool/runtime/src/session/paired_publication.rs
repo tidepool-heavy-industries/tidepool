@@ -835,6 +835,7 @@ impl PersistentSession {
             public_context,
             surface,
         } = captured;
+        self.admit_source_work_in(public.semantic.expected_public.scope)?;
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         Ok(DeclarationPublicationBase {

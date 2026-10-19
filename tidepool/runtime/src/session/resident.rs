@@ -6558,7 +6558,7 @@ where
     }
     pub fn mint_notebook_scope_with_lease(
         &mut self,
-        prerequisite: Option<super::RuntimeSourceAdmission>,
+        prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         self.settle_dropped_custody();
         self.state.mint_notebook_scope_with_lease(prerequisite)
@@ -6573,7 +6573,7 @@ where
     pub fn adopt_initial_notebook_scope_with_source(
         &mut self,
         scope: ScopeId,
-        prerequisite: Option<super::RuntimeSourceAdmission>,
+        prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         self.settle_dropped_custody();
         self.state
@@ -9995,6 +9995,106 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn uncertain_descendant_retains_ancestor_in_its_own_session_after_child_teardown() {
+        let (_original_root, mut original) = startup_session();
+        let (_child_root, mut child_session) = startup_session();
+        let ancestor = original.mint_isolated_scope_with_lease().unwrap();
+        let ancestor_scope = ancestor.scope();
+        let ancestor_weak = Arc::downgrade(&ancestor);
+        let ancestor_binding = source_action(&mut original, &ancestor, |session, report| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "ancestorRetained",
+                8874,
+            );
+            value.scope = ancestor_scope;
+            let id = value.id;
+            session
+                .state
+                .bind_replacing_decls_in(ancestor_scope, vec![value], report)
+                .unwrap();
+            id
+        });
+        let child = child_session
+            .mint_notebook_scope_with_lease(Some(ancestor.clone()))
+            .unwrap();
+        let captured_scope = child_session.state.mint_scope_from_lease(&child).unwrap();
+        let captured = child_session
+            .adopt_initial_notebook_scope(captured_scope)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&child, &captured));
+        assert!(child
+            .source_admission()
+            .same_owner(captured.source_admission()));
+        assert!(Arc::ptr_eq(&child.prerequisites()[0], &ancestor));
+        assert!(Arc::ptr_eq(&captured.prerequisites()[0], &child));
+        let value = source_action(&mut child_session, &child, |session, _| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "descendantRetained",
+                8875,
+            );
+            value.scope = captured_scope;
+            value
+        });
+        child_session
+            .with_source_compiler_transaction(
+                child.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    session
+                        .state
+                        .bind_replacing_decls_in(captured_scope, vec![value], report)
+                        .unwrap();
+                    // Synthetic aggregate uncertainty tests exact lease custody;
+                    // no physical GHC END-loss claim is made by this fixture.
+                    report(crate::CompilerTransactionClose::Unconfirmed(
+                        tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                            tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                            tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                                disconnect: None,
+                            },
+                        ),
+                    ));
+                },
+            )
+            .unwrap();
+        let ancestor_fence = ancestor.source_admission().fence().unwrap();
+        let child_fence = child.source_admission().fence().unwrap();
+        assert_eq!(
+            ancestor_fence.unconfirmed_claims(),
+            1,
+            "one gate claim despite overlapping lease chains"
+        );
+        assert_eq!(
+            child_fence.unconfirmed_claims(),
+            1,
+            "distinct same-gate scopes retain separate custody"
+        );
+        drop((ancestor, captured, child));
+        drop(child_session);
+        let _next = original.mint_isolated_scope_with_lease().unwrap();
+        assert!(
+            ancestor_weak.upgrade().is_some(),
+            "A must be retained by A, after C's entire session is gone"
+        );
+        assert!(original.state.scope_tree().is_live(ancestor_scope));
+        assert!(original.state.bindings().get(ancestor_binding).is_some());
+        original.state.retire_scope(ancestor_scope);
+        assert!(ancestor_weak.upgrade().is_none());
+        assert!(original.state.bindings().get(ancestor_binding).is_none());
+        assert_eq!(
+            ancestor_fence.unconfirmed_claims(),
+            1,
+            "retirement is not END confirmation"
+        );
+        assert_eq!(child_fence.unconfirmed_claims(), 1);
+    }
+
+    #[test]
     fn retiring_foreign_captured_scope_with_same_numeric_id_keeps_original_live() {
         let (_original_root, mut original) = startup_session();
         let (_recipient_root, mut recipient) = startup_session();
@@ -10226,6 +10326,14 @@ mod authored_publication_tests {
         let admission = admitted.into_outcome().action;
         let (_recipient_root, mut recipient) = startup_session();
         let unrelated = recipient.mint_isolated_scope_with_lease().unwrap();
+        let child = recipient
+            .mint_notebook_scope_with_lease(Some(source.clone()))
+            .unwrap();
+        let mut registered = 0;
+        child
+            .with_open_source_admission(|| registered += 1)
+            .unwrap();
+        assert_eq!(registered, 1);
         let observation = ProducerObservation::default();
         let subscriber = tracing_subscriber::registry().with(observation.clone());
         tracing::subscriber::with_default(subscriber, || {
@@ -10301,6 +10409,24 @@ mod authored_publication_tests {
             drop(admission.source_lease().source_admission().admit().expect(
                 "real transfer invalidates the exact issuer even while its raw gate stays open",
             ));
+            assert!(matches!(
+                child.with_open_source_admission(|| registered += 1),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert_eq!(
+                registered, 1,
+                "actual transferred ancestor refuses before early registration"
+            );
+            assert!(matches!(
+                child.admit_source(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert!(
+                recipient
+                    .mint_notebook_scope_with_lease(Some(source.clone()))
+                    .is_err(),
+                "an open raw gate cannot reissue authority from a stale ancestor"
+            );
             let before_exports = recipient.code_export_count();
             let before_table = recipient.state.session_table().clone();
             let before_public = recipient.public_visibility_snapshot_in(unrelated.scope());

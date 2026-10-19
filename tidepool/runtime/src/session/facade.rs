@@ -103,7 +103,7 @@ impl ExactExportSurface {
     pub(super) fn materialize(
         &self,
         view: &SessionCompileView,
-        admit: &dyn Fn() -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError>,
+        admit: &dyn Fn() -> Result<(), super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializedFacade, ExactFacadeError> {
         if view.session() != self.session {
@@ -118,7 +118,7 @@ impl ExactExportSurface {
             includes,
         } = &self.authority
         {
-            let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
+            admit().map_err(super::SessionError::SourceAdmission)?;
             let projection = issue_projection(
                 &baseline.context,
                 &baseline.owner,
@@ -142,7 +142,7 @@ impl ExactExportSurface {
         let source = render_legacy_facade(&identity, self);
         let path = view.session_root().join(identity.relative_hs_path());
         if !std::fs::read(&path).is_ok_and(|existing| existing == source.as_bytes()) {
-            let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
+            admit().map_err(super::SessionError::SourceAdmission)?;
             let parent = path
                 .parent()
                 .ok_or_else(|| ExactFacadeError::InvalidPath(path.clone()))?;
@@ -218,7 +218,7 @@ impl MaterializedFacade {
         selected: &[ExportIdentity],
         includes: &[PathBuf],
         root: &Path,
-        admit: &dyn Fn() -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError>,
+        admit: &dyn Fn() -> Result<(), super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<Self>, ExactFacadeError> {
         let inherited = self
@@ -251,7 +251,7 @@ impl MaterializedFacade {
             roots: vec![owner.clone()],
             lexical: inherited.context().lexical_graph().to_vec(),
         };
-        let _source_claim = admit().map_err(super::SessionError::SourceAdmission)?;
+        admit().map_err(super::SessionError::SourceAdmission)?;
         let projection = issue_projection(
             inherited.context(),
             &owner,
@@ -352,7 +352,7 @@ impl super::PersistentSession {
     fn admit_facade_source(
         &self,
         scope: tidepool_codegen::scope::ScopeId,
-    ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
+    ) -> Result<(), super::SourceAdmissionError> {
         let owner = self
             .source_transaction
             .as_ref()
@@ -361,7 +361,7 @@ impl super::PersistentSession {
             .then(|| self.source_lease_in(scope))
             .transpose()?;
         owner.admit(target)?;
-        Ok(None)
+        Ok(())
     }
 
     pub fn materialize_facade(

@@ -2433,7 +2433,7 @@ where
                         .mint_notebook_scope_with_lease(
                             prerequisite
                                 .as_ref()
-                                .map(|dependency| dependency.runtime_admission().clone()),
+                                .map(|dependency| dependency.runtime_lease().clone()),
                         )
                         .map_err(ResidentError::Session)?;
                     next_context.placement.lexical_scope = retained.scope();
@@ -2446,7 +2446,7 @@ where
                             context.placement.lexical_scope,
                             prerequisite
                                 .as_ref()
-                                .map(|dependency| dependency.runtime_admission().clone()),
+                                .map(|dependency| dependency.runtime_lease().clone()),
                         )
                         .map_err(ResidentError::Session)?
                 };
@@ -7769,7 +7769,7 @@ where
         let authority_digest = authority.authority_digest();
         let reused = self
             .access
-            .with_machine(context.clone(), move |session, context, _| {
+            .with_compiler_machine(context.clone(), move |session, context, _, _| {
                 let Some(prototype) =
                     session.host_binding_prototype(kind.host_binding_type(), authority_digest)
                 else {
@@ -8047,7 +8047,7 @@ where
         let reservation_specification = specification.clone();
         let admission = self
             .access
-            .with_machine(context.clone(), move |session, context, _| {
+            .with_compiler_machine(context.clone(), move |session, context, _, _| {
                 let admitted = match purpose {
                     CellPreparationPurpose::HostCarrier { binding, expected } => session
                         .admit_host_carrier_cell_in(
@@ -9507,7 +9507,7 @@ where
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, _| {
                 let public_scope = context.placement.lexical_scope;
                 if !owner.matches_context(&context) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9819,7 +9819,7 @@ where
                 let next_intent = intent.clone();
                 let baseline = self
                     .access
-                    .with_machine(context.clone(), move |session, _, _| {
+                    .with_compiler_machine(context.clone(), move |session, _, _, _| {
                         match owner.durable() {
                             Some(durable) => {
                                 session.restage_execution_publication(durable.clone(), next_intent)
@@ -22701,9 +22701,7 @@ pub(crate) mod request_tests {
                 None,
             );
             let scope = session
-                .mint_notebook_scope_with_lease(
-                    (kind == 2).then(|| parent.runtime_admission().clone()),
-                )
+                .mint_notebook_scope_with_lease((kind == 2).then(|| parent.runtime_lease().clone()))
                 .unwrap();
             let target = GenerationDependency::new(
                 crate::ActorRef::first(crate::ActorId(871)),
@@ -22787,7 +22785,7 @@ pub(crate) mod request_tests {
                 .any(|name| name == "lazySourceBinding"));
             match &dependency {
                 SourceDependency::Generation(generation) => assert!(matches!(
-                    generation.runtime_admission().admit(),
+                    generation.runtime_lease().admit_source(),
                     Err(GenerationAdmissionError::Unconfirmed { .. })
                 )),
                 SourceDependency::World(world) => assert!(
