@@ -1,5 +1,13 @@
 # Qualification lead assignment
 
+Qualify the [required Rust client migration](../RUST-CLIENT-MIGRATION.md), not
+only a public-module speedup. Review coherent cold issuance independently;
+exercise actual actor lookup, ordinary cells, successors, forks and restoration.
+Measure removed preparation on queries and small appended cells separately,
+including publication. Audit deleted alternate routes and retained runtime proof
+consumers. The exact frozen catalog-backed Persona conflict remains a required
+regression; do not mask it with a bypass or reduced demand in its failing path.
+
 The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
 new cross-area interfaces and sequencing. Keep the concrete source/invariant
 evidence below, but do not implement a duplicate host compiler world or

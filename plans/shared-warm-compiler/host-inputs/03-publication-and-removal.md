@@ -1,5 +1,12 @@
 # 03 — Publish, narrow and release the same issued inputs
 
+Required current work: [Rust client migration](../RUST-CLIENT-MIGRATION.md).
+Ordinary cell preparation, all primary mutation producers and atomic world/
+bindings publication are campaign completion requirements. Coordinate this
+wave's signatures now with service preparation, even while first-query code is
+being integrated. A reusable root around the old all-values producer is not the
+intended migration.
+
 Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
 Rust retains primary notebook selections, execution provenance and atomic
 publication; Haskell owns compiler-derived worlds and invalidation. The

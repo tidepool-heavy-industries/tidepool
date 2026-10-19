@@ -1,5 +1,12 @@
 # Owned compiler inputs
 
+Execute the [required Rust client migration](../RUST-CLIENT-MIGRATION.md): back
+exact world restoration and independently retained binding rows without making
+historical custody current namespace selection. Support incremental successors
+and last-owner release; do not introduce repeated full-world transport, encoding
+or copies behind the new actor client. Continue source/package lifetime work in
+parallel with host and service implementation.
+
 The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
 new cross-area interfaces and sequencing. Keep the concrete source/invariant
 evidence below, but do not implement a duplicate host compiler world or

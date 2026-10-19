@@ -1,5 +1,11 @@
 # Reload retirement
 
+Execute the [required Rust client migration](../RUST-CLIENT-MIGRATION.md): the
+common actor compiler client must enter existing generation/source admission for
+queries and cell preparation. World residency supplies no authority. Wire exact
+successor adoption and restore into the existing publication owner, preserving
+independent actor worlds and the agreed scoped fence/drain semantics.
+
 This area plans changed-source reload as a prepared generation transition with
 explicit retirement of generation-owned executable services. It is a design and
 delivery plan, not implemented or qualified behavior. Source baseline:

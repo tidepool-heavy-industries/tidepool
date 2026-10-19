@@ -1,5 +1,12 @@
 # Warm worker supervisor
 
+Execute the [required Rust client migration](../RUST-CLIENT-MIGRATION.md): own
+the sole compiler-world client/protocol and Haskell demand implementation. Pair
+inspect and prepare-cell/successor contracts with host-inputs now. Logical worlds
+are service-issued; Rust supplies authoritative primary facts, not a reconstructed
+GHC world. Realization IDs remain internal. Query delivery is followed by ordinary
+cell preparation and exact successor/restoration integration in this campaign.
+
 The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
 new cross-area interfaces and sequencing. Keep the concrete source/invariant
 evidence below, but do not implement a duplicate host compiler world or
@@ -13,7 +20,7 @@ A bounded pool of warm GHC processes serves many immutable exact compilation wor
 
 Deliver three waves:
 
-1. [Exact realizations](01-exact-realizations.md): worker-instance-bound acceleration of a host-issued exact root, with source-free acquisition, immutable selected facts and fresh attempts.
+1. [Exact realizations](01-exact-realizations.md): service-issued logical worlds with worker-instance-bound realizations, source-free acquisition of primary facts, immutable selections and fresh attempts; subject to the controlling Rust client migration above.
 2. [Bounded pool](02-bounded-pool.md): use realization locality within the existing resource/worker owner, with fair bounded scheduling, independent interpreter epochs and measured retention budgets.
 3. [Import context experiment](03-import-context-experiment.md): establish whether complete checked-import state can eliminate remaining repeated scope work while preserving ordinary module semantics. Production adoption is conditional on an explicit go/no-go.
 

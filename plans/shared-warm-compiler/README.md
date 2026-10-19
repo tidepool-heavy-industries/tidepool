@@ -19,6 +19,12 @@ Rust supplies primary notebook changes and publishes exact returned products.
 Earlier references to host-issued roots describe authoritative selection facts,
 not a requirement to maintain GHC's derived dependency world in Rust.
 
+The [required Rust client migration](RUST-CLIENT-MIGRATION.md) makes that boundary
+concrete: actors obtain a scoped compiler client from their published world and
+query/prepare through it. Ordinary cells, successor publication and recovery are
+required delivery, not a later optional cache extension. It supersedes any cold
+constructor that merges all retained value support into current source selection.
+
 The [overnight root instructions](OVERNIGHT.md) specify Sol-low coordination,
 Sol medium/high implementation and review, optional Luna helpers, and the
 morning escalation boundary.

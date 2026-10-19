@@ -208,10 +208,12 @@ wave. New convenience API work follows actual demonstrated friction.
 | Package source bridge | Review minimal deployment/process-owned retention. Acquire once per actual service/deployment lifetime, not per query. Do not introduce permanent per-client root accumulation. |
 | Checked import-context experiment | Still conditional. Owning a world does not itself prove raw typechecker environments safely reusable. Measure the remaining frontend floor first. |
 
-The first production migration may reuse the current exact-scope portable format
-for cold restore. Its producer must be cold-only in the new hot route. Retain
-the cold constructor as a real recovery boundary, not an undocumented alternate
-entry that rebuilds everything on ordinary queries.
+The [required Rust client migration](RUST-CLIENT-MIGRATION.md) controls actor
+integration, cold issuance and deletion. Existing exact-scope encoding components
+may serve exact cold restoration, but their old whole-context producer is not
+implicitly reusable: even cold construction must separate published primary
+selection from historical binding custody. Ordinary requests and small
+publications use the scoped world client and actual changes.
 
 ## Package source decision
 
