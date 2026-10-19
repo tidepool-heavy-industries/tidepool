@@ -33,7 +33,8 @@ import Tidepool.TypedSegment.Types
 
 -- GHC owns lexical scope here, before any old binding is hydrated. An empty
 -- global environment leaves unresolved uses as HsUnboundVar, preserving the
--- original qualifier; let/do/lambda/case binders become renamed local Names.
+-- original qualifier. The submitted module value group supplies its own
+-- mutually scoped names; GHC also resolves let/do/lambda/case locals.
 -- Expected missing-global diagnostics are discarded only for this demand
 -- probe. Its syntax is never admitted or typechecked, and the real compiler
 -- still validates the complete submitted program through its normal owner.
@@ -55,17 +56,17 @@ typedSegmentInputOccurrences environment plan source = case rootExpression of
       (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
     rootExpression = case unP Parser.parseModule parser of
       PFailed _ -> Left UnprovedRootAbstraction
-      POk _ parsed -> case
-          [ expression
-          | L _ (ValD _ FunBind {fun_id=identifier,fun_matches=matches}) <- hsmodDecls (unLoc parsed)
-          , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
-          , [L _ match] <- [unLoc (mg_alts matches)]
-          , [] <- [unLoc (m_pats match)]
-          , EmptyLocalBinds _ <- [grhssLocalBinds (m_grhss match)]
-          , [L _ (GRHS _ [] expression)] <- [grhssGRHSs (m_grhss match)]
-          ] of
-        [expression] -> Right expression
-        _ -> Left UnprovedRootAbstraction
+      POk _ parsed ->
+        let declarations = hsmodDecls (unLoc parsed)
+            bindings = [L location binding | L location (ValD _ binding) <- declarations]
+            signatures = [L location signature | L location (SigD _ signature) <- declarations]
+            roots = [() | FunBind {fun_id=identifier} <- map unLoc bindings
+              , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan]
+            local = HsValBinds noAnn (ValBinds NoAnnSortKey bindings signatures)
+        in case roots of
+          [()] -> Right (noLocA (HsLet noAnn local
+            (nlHsVar (mkRdrUnqual (mkVarOcc (typedSegmentPlanRoot plan))))))
+          _ -> Left UnprovedRootAbstraction
     selected :: HsExpr GhcRn -> [String]
     selected (HsUnboundVar _ name)
       | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]

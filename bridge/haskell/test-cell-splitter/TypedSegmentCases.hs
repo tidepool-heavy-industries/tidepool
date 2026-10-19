@@ -98,6 +98,14 @@ typedValueAliasControl libdir root plan prepared = do
       occurrences <- typedSegmentInputOccurrences environment plan (probe expression) >>= either (fail . show) pure
       unless (("x" `elem` occurrences) == expected)
         (fail ("held value demand lost GHC lexical scope: " ++ show (expression,occurrences)))
+  forM_
+    [ (probe "x" ++ "x = (1::Int)\n",False)
+    , (probe "helper" ++ "helper = x\n",True)
+    , (probe "let x = (1::Int) in x" ++ "helper = x\n",True)
+    ] $ \(source,expected) -> do
+      occurrences <- typedSegmentInputOccurrences environment plan source >>= either (fail . show) pure
+      unless (("x" `elem` occurrences) == expected)
+        (fail ("held value demand lost submitted module scope: " ++ show (source,occurrences)))
   (packages,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
     (Session.capturedSessionInterfaceEvidence captured)
   session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure
