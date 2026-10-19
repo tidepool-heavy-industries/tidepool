@@ -674,7 +674,7 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
             );
             assert_eq!(notebook_pages.len(), 2, "{notebook_result:?}");
             assert!(
-                notebook_pages[0].contains("getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found]"),
+                notebook_pages[0].starts_with("getRuntimeInfo\n  [available] getRuntimeInfo ::"),
                 "notebook lookup lost known symbol: {notebook_pages:?}"
             );
             assert_eq!(notebook_pages[1], "True", "{notebook_pages:?}");
