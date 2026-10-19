@@ -14044,12 +14044,62 @@ pub(crate) mod tests {
             .clone();
         assert!(full.is_full());
         assert!(closed.artifacts().selected_native_groups().is_empty());
-        let partial = closed
-            .artifacts()
+        let input_roles = closed
+            .projection()
+            .merge(&CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap())
+            .unwrap();
+        let catalog =
+            crate::artifact_inventory::NativeDependencyCatalog::from_source(&closed).unwrap();
+        let selected_input = input_roles
+            .admit_interfaces_with_native_offers(
+                closed.artifacts(),
+                vec![original.clone()],
+                closed.native_offers(),
+                &catalog,
+            )
+            .unwrap();
+        let input_graph = selected_input.capture_graph_selection();
+        let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+        assert_eq!(
+            input_roles.snapshot_roles()[&original.descriptor.owner].original(),
+            Some(original.descriptor.id)
+        );
+        assert_eq!(
+            input_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical_id),
+            closed
+                .artifacts()
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical_id)
+        );
+        let carriers = full
+            .issued_group_carriers()
+            .unwrap()
+            .into_iter()
+            .filter_map(|(group, carrier)| {
+                (group.binding.artifact() == original.descriptor.id).then_some(carrier)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(carriers.len(), 1);
+        assert_eq!(
+            input_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == original.descriptor.id),
+            carriers.first()
+        );
+        assert!(selected_input.selected_native_groups().is_empty());
+        let partial = selected_input
             .inventory()
             .admit_recovery_selection(
-                &closed.artifacts().inventory().empty_view(),
-                closed.artifacts().entries(),
+                &selected_input,
+                selected_input.entries(),
                 &BTreeSet::from([NativeGroupKey {
                     artifact: original.descriptor.id,
                     original_ordinal: 7,
@@ -14067,23 +14117,15 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(!partial_offer.is_full());
-        let empty = closed
-            .artifacts()
-            .inventory()
-            .admit_shared_with_demand(
-                &closed.artifacts().inventory().empty_view(),
-                closed.artifacts().entries(),
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
+        let empty = selected_input.clone();
         let empty_offer = IssuedNativeOffer::issue(original.descriptor.id, &empty, None).unwrap();
         for (label, view, offer, expected_one, expected_two) in [
-            ("full", closed.artifacts().clone(), full, Some(1), Some(2)),
+            ("full", selected_input, full, Some(1), Some(2)),
             ("partial", partial, partial_offer, None, Some(2)),
             ("empty", empty, empty_offer, None, None),
         ] {
             let availability = RequestNativeAvailability::issue_checked(
-                closed.projection(),
+                &input_roles,
                 &view,
                 std::slice::from_ref(&offer),
             )
@@ -14096,7 +14138,7 @@ pub(crate) mod tests {
                         row.target_original(row.original_owner()).unwrap().descriptor.id,
                         row.original_owner().clone(), row.permits(7), row.permits(9001),
                     )).collect::<Vec<_>>();
-                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, closed.projection().snapshot_roles());
+                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, input_roles.snapshot_roles());
                 });
             assert_eq!(row.permits(7), expected_two.is_some(), "{label}");
             assert_eq!(row.permits(9001), expected_one.is_some(), "{label}");
@@ -14118,13 +14160,12 @@ pub(crate) mod tests {
                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                 )
                 .unwrap();
-            let support =
-                recover_fixture_compiler_support(closed.projection().clone(), view, [offer])
-                    .unwrap()
-                    .retain_normalized_availability(&availability)
-                    .unwrap()
-                    .for_source_owners(&BTreeSet::new())
-                    .unwrap();
+            let support = recover_fixture_compiler_support(input_roles.clone(), view, [offer])
+                .unwrap()
+                .retain_normalized_availability(&availability)
+                .unwrap()
+                .for_source_owners(&BTreeSet::new())
+                .unwrap();
             assert!(support
                 .projection()
                 .roles()
