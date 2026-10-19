@@ -8274,6 +8274,89 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
 }
 
 impl DecodedWorldSourceReceipt<'_> {
+    /// Clamp untrusted completed-source demand to this preparation's cold
+    /// primary issuer. This is not source, group or instance admission.
+    pub(crate) fn demand_primary_inputs(&self) -> Result<DemandNativeInputs, CompileError> {
+        let operation = self.output.validation.inventory.as_ref();
+        let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| compiler_evidence_failure(error.into()))
+        };
+        let cold = self.output.primary_compiler_inputs();
+        let roles = cold.source_support.projection().snapshot_roles();
+        let mut roots = BTreeSet::new();
+        let mut native_roots = BTreeSet::new();
+        let insert = |set: &mut BTreeSet<ExactModuleIdentity>, owner: &ExactModuleIdentity| {
+            if !set.contains(owner) {
+                charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
+                charge(operation.charge(owner.unit.len()))?;
+                charge(operation.charge(owner.module.len()))?;
+                set.insert(owner.clone());
+            }
+            Ok::<_, CompileError>(())
+        };
+        for claim in &self.source.claims {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            if !roles.contains_key(&claim.owner) {
+                return Err(failure("world source claim lacks its primary compiler role"));
+            }
+            insert(&mut roots, &claim.owner)?;
+            insert(&mut native_roots, &claim.owner)?;
+        }
+        let mut excluded = BTreeSet::new();
+        for module in &self.source.evidence.modules {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            let owner = (module.unit.as_str(), module.module.as_str());
+            if !excluded.contains(&owner) {
+                charge(operation.reserve::<((&str, &str), [usize; 4])>(1))?;
+                excluded.insert(owner);
+            }
+        }
+        for row in &self.output.demanded_rows {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            let interface = row.certified_interface().interface();
+            let owner = (interface.unit(), interface.module());
+            if !excluded.contains(&owner) {
+                charge(operation.reserve::<((&str, &str), [usize; 4])>(1))?;
+                excluded.insert(owner);
+            }
+        }
+        for module in &self.source.edges {
+            charge(operation.charge(1))?;
+            for edge in &module.imports {
+                crate::host_work::checkpoint()?;
+                charge(operation.charge(1))?;
+                if edge.boot
+                    || (edge.qualifier != "none"
+                        && edge.qualifier.strip_prefix("this:") != Some(edge.unit.as_str()))
+                    || excluded.contains(&(edge.unit.as_str(), edge.module.as_str()))
+                {
+                    continue;
+                }
+                // A lookup key is temporary owned text, charged separately
+                // from the retained root inserted below.
+                charge(operation.charge(edge.unit.len()))?;
+                charge(operation.charge(edge.module.len()))?;
+                let owner = identity(&edge.unit, &edge.module);
+                if roles.contains_key(&owner) {
+                    insert(&mut roots, &owner)?;
+                }
+            }
+        }
+        let demand = cold.source_support.demanded_compiler_projection(
+            &cold.metadata.retained,
+            &roots,
+            operation,
+        )?;
+        cold.demanded_native_inputs(demand, &native_roots, operation)
+            .map_err(|error| match error {
+                DemandNativeInputsError::Compiler(error) => error,
+                other => failure(format!("world primary native demand refused: {other}")),
+            })
+    }
+
     pub(crate) fn source_path_domain(
         &self,
     ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
