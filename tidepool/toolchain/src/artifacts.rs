@@ -1311,11 +1311,7 @@ impl ModuleCandidateOffer {
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
         let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
-        let directory = Arc::new(
-            tempfile::Builder::new()
-                .prefix("tidepool-compiler-world-")
-                .tempdir()?,
-        );
+        let directory = Arc::new(compiler_scratch_directory()?);
         crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
             primary,
             visible_rows,
