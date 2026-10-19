@@ -1,5 +1,12 @@
 # Host selected inputs — Sol branch supervisor assignment
 
+Execute the [required Rust client migration](../RUST-CLIENT-MIGRATION.md): own
+the published-session compiler facade, lean cold issuance, and ordinary-cell/
+mutation/publication migration. Pair inspect and prepare-cell signatures with
+warm-workers now. All-values support merging is forbidden as the new open-world
+constructor, including on cold acquisition. The query milestone is partial
+delivery; remove superseded reconstruction routes through later owned waves.
+
 The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
 new cross-area interfaces and sequencing. Keep the concrete source/invariant
 evidence below, but do not implement a duplicate host compiler world or

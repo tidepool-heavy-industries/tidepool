@@ -5,6 +5,10 @@ root2486ea4b94/campaign ebb98b3f25; production foundation f088 passed36 controls
 It authorizes implementation, not qualification. Existing supervision grants and
 native admission rules apply. No further routine root approval is required.
 
+The [required Rust client migration](RUST-CLIENT-MIGRATION.md) controls the final
+actor-facing boundary and ordinary-cell successor waves. This document specifies
+the first query milestone, not the campaign's completion scope.
+
 ## One production outcome
 
 The existing actor PublicModule StructuredInfo/StructuredType path borrows its
@@ -36,11 +40,14 @@ the next dependent wave through the existing atomic declaration/value owner.
 
 Warm owns CompilerWorld, CompilerWorldRestoration, PublicModuleQuestion and
 WorldQueryResult in the toolchain service client. Constructors are private to
-actual cold admission/result validation. The cold ModuleCandidateOffer builder
-couples purpose-free checked_value_context -> ExactDeclarationContext::snapshot
--> existing Materializer ContextRoot/blocks with its actual raw row owners,
-primary visibility and captured source domain before any query/scaffold overlay.
-An arbitrary root and unrelated physical request cannot construct open inputs.
+actual cold admission/result validation. The published session owner supplies
+one coherent primary source/scope selection, captured source domain, visibility
+and separately retained exact binding-row references. Cold issuance must not
+call checked_value_context across all retained values or merge their historical
+support into the current namespace. Existing raw row/Materializer ownership may
+be reused without that transformation. Arbitrary independently obtained parts
+cannot construct an admitted world. The paired prepare-cell/successor contract
+must be designed alongside this first query contract.
 Existing Rust instance/prototype/native proofs remain with their actual consumers;
 restoration never upgrades Missing/Unknown to Complete.
 
@@ -48,6 +55,8 @@ The service authenticates those inputs and issues a canonical versioned portable
 restoration product binding selection, captured-domain seal, fixed profile,
 producer compatibility and primary visibility. Use existing content-root/SHA
 ownership for its seal, encoded only on cold acquisition or actual changes.
+Actual changes encode changed nodes with shared authenticated references, not
+a full-world canonical serialization/hash on every publication.
 Its logical identity is independent of request/purpose/scaffold, worker and query.
 A path, root string, request SHA or echoed caller provenance cannot issue it.
 Exact restoration must reproduce the expected logical world.
