@@ -996,12 +996,16 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(result.returncode, 0, result.stderr)
         group = self.rule('exomonad/actor', 'exomonad_actor_unit_tests_all', 'tidepool_rust_test_cases')
         self.assertEqual(group['case_compiler_modes'], {
-            'resident_workbench::request_tests::' + name: 'owned-resident'
-            for name in [
-                'cancelled_lookup_interrupts_its_started_compiler_request_and_recovers',
-                'lookup_batches_qualified_export_facts_in_one_compiler_request',
-                'lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
-            ]
+            **{
+                'resident_workbench::request_tests::' + name: 'owned-resident'
+                for name in [
+                    'cancelled_lookup_interrupts_its_started_compiler_request_and_recovers',
+                    'lookup_batches_qualified_export_facts_in_one_compiler_request',
+                    'lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
+                    'durable_sleep_binding_observes_real_retraction_request_and_clean_end',
+                ]
+            },
+            'resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption': 'owned-resident',
         })
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
