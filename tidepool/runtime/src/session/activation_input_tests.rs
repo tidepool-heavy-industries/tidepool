@@ -3449,6 +3449,9 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
             .expect("pure preview must not transport unrelated original prefix generations")
         {
             turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+            turn::ActivationPreviewCompilation::Opaque => {
+                panic!("an opaque proof cannot execute the custom display")
+            }
             turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
                 panic!("actual custom display remains available")
             }
@@ -3581,6 +3584,9 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::Opaque => panic!(
+            "the genuine ordinary home dictionary must expose its rendered display"
+        ),
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => panic!(
             "the genuine ordinary home dictionary must retain complete original instance evidence"
         ),
@@ -3708,7 +3714,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     // source installer: only its opaque original-A/target-B admission may
     // install a preview.
     let unsealed = resident.admit_turn_code_in(
-        compiled.admission.scope_lease.scope(),
+        compiled.admission().scope_lease.scope(),
         compiled.renderer.compiled.code(),
         TurnInstallationAdmission::Compilation,
     );
@@ -3722,7 +3728,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         "preview code cannot enter the generic source installer"
     );
     assert!(
-        !compiled.admission.is_consumed(),
+        !compiled.admission().is_consumed(),
         "generic-installer refusal must not spend the affine preview admission"
     );
     let before_fault = resident.residency();
@@ -3730,9 +3736,9 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         let incomplete = bundle.omitting_target_image();
         let admission = resident
             .admit_turn_code_in(
-                compiled.admission.scope_lease.scope(),
+                compiled.admission().scope_lease.scope(),
                 compiled.renderer.compiled.code(),
-                TurnInstallationAdmission::ActivationPreview(&compiled.admission),
+                TurnInstallationAdmission::ActivationPreviewFresh(compiled.admission()),
             )
             .unwrap();
         let refused = resident.install_admitted_turn(
@@ -3940,15 +3946,40 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         "parent continuation must really fail after dispatch"
     );
     drop(parent);
-    let turn::ActivationPreviewCompilation::Ready(second) = compile_activation_preview(
-        children[1].1.clone(),
-        &template,
-        512,
-        &fixture.recipe.include,
-    )
-    .unwrap() else {
-        panic!("second package input is renderable")
+    // Two concurrent binders race for the second child's single admission.
+    let (left, right) = std::thread::scope(|scope| {
+        let admission = children[1].1.clone();
+        let cached = &cached;
+        let left = scope.spawn(move || {
+            turn::bind_activation_renderer(
+                admission.clone(),
+                &SharedActivationRenderer::Renderable(cached.clone()),
+            )
+        });
+        let right = scope.spawn(move || {
+            turn::bind_activation_renderer(
+                admission.clone(),
+                &SharedActivationRenderer::Renderable(cached.clone()),
+            )
+        });
+        (left.join().unwrap(), right.join().unwrap())
+    });
+    let (second, refused_binding) = match (left, right) {
+        (
+            Ok(turn::ActivationPreviewCompilation::Ready(second)),
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding },
+            )),
+        )
+        | (
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding },
+            )),
+            Ok(turn::ActivationPreviewCompilation::Ready(second)),
+        ) => (second, binding),
+        _ => panic!("exactly one concurrent binder must win"),
     };
+    assert_eq!(refused_binding, children[1].1.mounted.binding);
     assert!(Arc::ptr_eq(&first.renderer, &second.renderer));
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
@@ -3970,6 +4001,15 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
             serde_json::json!([format!("{}", index + 41), false])
         );
     }
+    assert!(
+        children[0].1.is_consumed() && children[1].1.is_consumed(),
+        "a successful preview install spends its admission"
+    );
+    assert!(matches!(
+        children[0].1.try_bind(),
+        Err(ResidentError::ActivationPreviewRefused { binding })
+            if binding == children[0].1.mounted.binding
+    ));
     // Reuse of immutable renderer code still requires its own unconsumed
     // admission; the spent first-child permission cannot be resealed.
     let refused = turn::bind_activation_renderer(
@@ -3979,10 +4019,9 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
     assert!(
         matches!(
             refused,
-            Err(turn::TurnFailure {
-                error: crate::CompileError::ExtractFailed(detail),
-                ..
-            }) if detail.contains("admission is spent")
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding }
+            )) if binding == children[0].1.mounted.binding
         ),
         "a spent admission cannot bind cached renderer code"
     );
@@ -4289,6 +4328,9 @@ fn execute_mounted_input_preview(
         .expect("prepare preview against actual original compiler authority")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::Opaque => {
+            panic!("complete original display environment must remain renderable")
+        }
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
             panic!("complete original display environment must remain available")
         }
@@ -4470,6 +4512,9 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     );
     match selected {
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {},
+        turn::ActivationPreviewCompilation::Opaque => panic!(
+            "an opaque proof is not authenticated unavailable evidence"
+        ),
         turn::ActivationPreviewCompilation::Ready(compiled) => panic!(
             "original dictionary {} has no native body, but preview returned Ready with {:?} disposition",
             dictionary_owner.owner.module,

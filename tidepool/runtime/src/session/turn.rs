@@ -2661,6 +2661,7 @@ pub fn check_cell(
 /// Result of preparing the original-type display after the live binding commits.
 pub enum ActivationPreviewCompilation {
     Ready(super::CompiledActivationPreview),
+    Opaque,
     OriginalDisplayEvidenceUnavailable,
 }
 
@@ -2668,7 +2669,15 @@ pub enum ActivationPreviewCompilation {
 pub fn bind_activation_renderer(
     admission: Arc<super::RuntimeActivationPreviewAdmission>,
     renderer: &super::SharedActivationRenderer,
-) -> Result<ActivationPreviewCompilation, TurnFailure> {
+) -> Result<ActivationPreviewCompilation, ActivationRendererFailure> {
+    // A spent admission binds no renderer, including one whose original
+    // display evidence is unavailable.
+    if admission.is_consumed() {
+        return Err(super::ResidentError::ActivationPreviewRefused {
+            binding: admission.binding(),
+        }
+        .into());
+    }
     let renderer = match renderer {
         super::SharedActivationRenderer::Renderable(renderer)
         | super::SharedActivationRenderer::Opaque(renderer) => renderer.clone(),
@@ -2679,26 +2688,31 @@ pub fn bind_activation_renderer(
     if !renderer.proof.matches_input(admission.input_interface())
         || renderer.proof.original_context_digest() != admission.original_context_digest()
         || !admission.matches_original_display(&renderer.proof)
-        || admission.is_consumed()
     {
         return Err(CompileError::ExtractFailed(
-            "renderer differs from the mounted original input or its admission is spent".into(),
+            "renderer differs from the mounted original input".into(),
         )
         .into());
     }
+    if renderer.proof.disposition()
+        == tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque
+    {
+        return Ok(ActivationPreviewCompilation::Opaque);
+    }
+    let bound = admission.try_bind()?;
     Ok(ActivationPreviewCompilation::Ready(
-        super::CompiledActivationPreview {
-            admission,
-            renderer,
-        },
+        super::CompiledActivationPreview { bound, renderer },
     ))
 }
 
-/// Preserve frontend language refusal separately from native preparation failure.
+/// Preserve frontend language refusal, admission refusal, and native
+/// preparation failure as separate typed outcomes.
 #[derive(Debug, thiserror::Error)]
 pub enum ActivationRendererFailure {
     #[error(transparent)]
     Frontend(#[from] TurnFailure),
+    #[error(transparent)]
+    Admission(#[from] super::ResidentError),
     #[error(transparent)]
     Native(#[from] super::prepared::PreparedRuntimeError),
 }

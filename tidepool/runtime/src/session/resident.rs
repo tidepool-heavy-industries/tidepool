@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -1326,7 +1326,54 @@ pub struct RuntimeActivationPreviewAdmission {
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     pub(super) image_registry: Arc<ImageRegistry>,
-    consumed: AtomicBool,
+    phase: AtomicU8,
+}
+
+const PREVIEW_FRESH: u8 = 0;
+const PREVIEW_BOUND: u8 = 1;
+const PREVIEW_CONSUMED: u8 = 2;
+
+/// Exclusive right to run one preview admission. Binding claims it exactly
+/// once; execution spends it after the non-consuming admission and lease
+/// checks. The token is deliberately not copyable.
+pub(super) struct BoundActivationPreview {
+    admission: Arc<RuntimeActivationPreviewAdmission>,
+}
+
+impl BoundActivationPreview {
+    pub(super) fn admission(&self) -> &RuntimeActivationPreviewAdmission {
+        &self.admission
+    }
+    /// Spend the bound admission exactly once.
+    pub(super) fn try_consume(&self) -> Result<SpentActivationPreview, ResidentError> {
+        self.admission
+            .phase
+            .compare_exchange(
+                PREVIEW_BOUND,
+                PREVIEW_CONSUMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| ResidentError::ActivationPreviewRefused {
+                binding: self.admission.mounted.binding,
+            })?;
+        Ok(SpentActivationPreview {
+            admission: Arc::clone(&self.admission),
+        })
+    }
+}
+
+/// Proof that the affine admission was spent. The installation seam accepts
+/// preview code through this token, so a spent admission cannot be re-admitted
+/// by presenting its proof again.
+pub(super) struct SpentActivationPreview {
+    admission: Arc<RuntimeActivationPreviewAdmission>,
+}
+
+impl SpentActivationPreview {
+    pub(super) fn admission(&self) -> &RuntimeActivationPreviewAdmission {
+        &self.admission
+    }
 }
 
 impl RuntimeActivationPreviewAdmission {
@@ -1334,7 +1381,27 @@ impl RuntimeActivationPreviewAdmission {
         self.scope_lease.clone()
     }
     pub(super) fn is_consumed(&self) -> bool {
-        self.consumed.load(Ordering::Acquire)
+        self.phase.load(Ordering::Acquire) == PREVIEW_CONSUMED
+    }
+    pub(super) fn binding(&self) -> SessionVarId {
+        self.mounted.binding
+    }
+    /// Claim the sole right to bind this admission. Concurrent binders race on
+    /// this transition; exactly one observes the fresh phase.
+    pub(super) fn try_bind(self: &Arc<Self>) -> Result<BoundActivationPreview, ResidentError> {
+        self.phase
+            .compare_exchange(
+                PREVIEW_FRESH,
+                PREVIEW_BOUND,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| ResidentError::ActivationPreviewRefused {
+                binding: self.mounted.binding,
+            })?;
+        Ok(BoundActivationPreview {
+            admission: Arc::clone(self),
+        })
     }
 
     pub fn view(&self) -> &super::SessionCompileView {
@@ -1395,7 +1462,7 @@ pub enum SharedActivationRenderer {
 
 /// Fresh affine permission to apply retained renderer code to one mounted value.
 pub struct CompiledActivationPreview {
-    pub(super) admission: Arc<RuntimeActivationPreviewAdmission>,
+    pub(super) bound: BoundActivationPreview,
     pub(super) renderer: Arc<CompiledActivationRenderer>,
 }
 
@@ -1404,6 +1471,9 @@ impl CompiledActivationPreview {
         &self,
     ) -> &Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview> {
         &self.renderer.proof
+    }
+    pub(super) fn admission(&self) -> &RuntimeActivationPreviewAdmission {
+        self.bound.admission()
     }
 }
 
@@ -2547,7 +2617,8 @@ enum PreparedExecutionPurpose<'a> {
 
 enum TurnInstallationAdmission<'a> {
     Compilation,
-    ActivationPreview(&'a RuntimeActivationPreviewAdmission),
+    ActivationPreviewFresh(&'a RuntimeActivationPreviewAdmission),
+    ActivationPreviewSpent(&'a SpentActivationPreview),
 }
 
 enum TurnImageAcquisition<'a> {
@@ -6793,6 +6864,27 @@ where
         retirement
     }
 
+    fn validate_activation_preview_code(
+        admission: &RuntimeActivationPreviewAdmission,
+        code: &TurnCode<'_>,
+    ) -> Result<(), ResidentError> {
+        let proof = code
+            .certification()
+            .and_then(|certification| certification.checked_activation_preview())
+            .ok_or(ResidentError::ActivationPreviewRefused {
+                binding: admission.binding(),
+            })?;
+        if !proof.matches_input(admission.input_interface())
+            || proof.original_context_digest() != admission.original_context_digest()
+            || !admission.matches_original_display(proof)
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: admission.binding(),
+            });
+        }
+        Ok(())
+    }
+
     fn admit_turn_code_in<'a>(
         &self,
         scope: ScopeId,
@@ -6813,21 +6905,16 @@ where
                     .into());
                 }
             }
-            TurnInstallationAdmission::ActivationPreview(admission) => {
-                let proof = code
-                    .certification()
-                    .and_then(|certification| certification.checked_activation_preview())
-                    .ok_or(ResidentError::ActivationPreviewRefused {
-                        binding: admission.mounted.binding,
-                    })?;
-                if !proof.matches_input(admission.input_interface())
-                    || proof.original_context_digest() != admission.original_context_digest()
-                    || !admission.matches_original_display(proof)
-                {
+            TurnInstallationAdmission::ActivationPreviewFresh(admission) => {
+                if admission.is_consumed() {
                     return Err(ResidentError::ActivationPreviewRefused {
-                        binding: admission.mounted.binding,
+                        binding: admission.binding(),
                     });
                 }
+                Self::validate_activation_preview_code(admission, &code)?;
+            }
+            TurnInstallationAdmission::ActivationPreviewSpent(spent) => {
+                Self::validate_activation_preview_code(spent.admission(), &code)?;
             }
         }
         let resolved = code
@@ -6987,7 +7074,7 @@ where
             catalog_selection: self.state.catalog_selection().clone(),
             scope_lease,
             image_registry: self.state.certified_image_registry(),
-            consumed: AtomicBool::new(false),
+            phase: AtomicU8::new(PREVIEW_FRESH),
         }))
     }
 
@@ -7016,78 +7103,73 @@ where
     }
 
     /// Run only a sealed pure preview of this exact original committed root.
-    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, original_execution = ?compiled.admission.original_execution_digest(), original_display = ?compiled.admission.original_context_digest(), session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), bundle_target = compiled.renderer.native.target_image_instance(), native_images = ?compiled.renderer.native.image_instances()))]
+    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, original_execution = ?compiled.admission().original_execution_digest(), original_display = ?compiled.admission().original_context_digest(), session = %self.state.lib().session_id(), binding = compiled.admission().mounted.binding.raw(), scope = ?compiled.admission().scope_lease.scope(), bundle_target = compiled.renderer.native.target_image_instance(), native_images = ?compiled.renderer.native.image_instances()))]
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
-        let ActivationRendererNative::Renderable(images) = &compiled.renderer.native else {
+        let CompiledActivationPreview { bound, renderer } = compiled;
+        let ActivationRendererNative::Renderable(images) = &renderer.native else {
             return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
         };
-        let admission = &compiled.admission;
+        let admission = bound.admission();
         let mounted = &admission.mounted;
         self.validate_mounted_activation_input(mounted)?;
         if !Arc::ptr_eq(&admission.owner, self.state.admission_owner())
             || admission.owner_epoch != self.state.admission_owner().epoch()
             || self.state.compile_view_digest_in(mounted.scope) != Some(admission.view_digest)
-            || compiled.renderer.proof.original_context_digest() != mounted.renderer_owner.identity
-            || !admission.matches_original_display(&compiled.renderer.proof)
-            || !compiled.renderer.proof.matches_input(&mounted.interface)
-            || !compiled
-                .renderer
-                .proof
-                .matches_target(&compiled.renderer.compiled.prepared())
-            || compiled
-                .renderer
+            || renderer.proof.original_context_digest() != mounted.renderer_owner.identity
+            || !admission.matches_original_display(&renderer.proof)
+            || !renderer.proof.matches_input(&mounted.interface)
+            || !renderer.proof.matches_target(&renderer.compiled.prepared())
+            || renderer
                 .compiled
                 .certification
                 .as_ref()
                 .is_none_or(|certification| {
                     certification
                         .checked_activation_preview()
-                        .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.renderer.proof))
+                        .is_none_or(|proof| !Arc::ptr_eq(proof, &renderer.proof))
                 })
         {
             return Err(ResidentError::ActivationPreviewRefused {
                 binding: mounted.binding,
             });
         }
-        compiled
-            .renderer
+        renderer
             .proof
-            .validate_table(&compiled.renderer.compiled.table())
+            .validate_table(&renderer.compiled.table())
             .map_err(SessionError::Compile)?;
-        compiled
-            .renderer
+        renderer
             .proof
-            .validate_yield_sites(&compiled.renderer.compiled.asks)
+            .validate_yield_sites(&renderer.compiled.asks)
             .map_err(SessionError::Compile)?;
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
-        admission
-            .consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| ResidentError::ActivationPreviewRefused {
-                binding: mounted.binding,
-            })?;
         // Preview provenance retains its current-scope contract. Its executable
         // admission belongs to the separately issued detached scope below.
+        // Binding claimed the admission exactly once; neither provenance
+        // admission nor lease validation spends it.
         let provenance_admission = self.admit_turn_code_in(
             self.run_context.lexical_scope,
-            compiled.renderer.compiled.code(),
-            TurnInstallationAdmission::ActivationPreview(admission),
+            renderer.compiled.code(),
+            TurnInstallationAdmission::ActivationPreviewFresh(admission),
         )?;
         let provenance = self.provenance_for(&provenance_admission)?;
         drop(provenance_admission);
         self.state
             .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
+        // The authoritative spend follows every non-consuming admission and
+        // lease check. A refusal after this point leaves the admission spent;
+        // that is fail-closed and cannot be resealed.
+        let spent = bound.try_consume()?;
         let execution_admission = self.admit_turn_code_in(
             admission.scope_lease.scope(),
-            compiled.renderer.compiled.code(),
-            TurnInstallationAdmission::ActivationPreview(admission),
+            renderer.compiled.code(),
+            TurnInstallationAdmission::ActivationPreviewSpent(&spent),
         )?;
         self.run_prepared_for_purpose(
             execution_admission,

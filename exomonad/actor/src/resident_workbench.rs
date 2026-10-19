@@ -7981,20 +7981,29 @@ where
             let compiled = match specialized {
                 Ok(renderer) => match tidepool_runtime::session::turn::bind_activation_renderer(admission.clone(), &renderer) {
                     Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Ready(compiled)) => compiled,
+                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Opaque) => {
+                        return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
+                    }
                     Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
                         return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable), input_binding, admission));
                     }
-                    Err(failure) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => {
+                        return Err(committed(ResidentActorWorkbenchError::Resident(error)));
+                    }
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => {
+                        return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error }));
+                    }
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => {
+                        return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
+                    }
                 },
                 Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) if matches!(failure.error, CompileError::Diagnostics(_)) => {
                     return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
                 }
                 Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
                 Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error))),
             };
-            if compiled.proof().disposition() == tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque {
-                return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
-            }
                 let preview = match session.run_activation_preview(compiled, settlement) {
                     Ok(
                         ResidentOutcome::Suspended { hole, .. }
