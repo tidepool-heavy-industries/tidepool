@@ -5881,12 +5881,36 @@ where
     where
         ResultValue: Send + 'static,
     {
+        self.with_compiler_machine_for(
+            context,
+            crate::termination::CompilerWorkAdmission::Active,
+            operation,
+        )
+        .await
+    }
+
+    async fn with_compiler_machine_for<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        purpose: crate::termination::CompilerWorkAdmission,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+                &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
         let owner = crate::capabilities::CompilerOwnerScope::current()?
             .with_source_dependency(context.source_dependency());
         self.with_machine(context, move |session, context, source| {
             crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
-                owner.admit_continuation()?,
+                owner.admit_continuation_for(purpose)?,
                 context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
             )?
@@ -9819,17 +9843,22 @@ where
                 let next_intent = intent.clone();
                 let baseline = self
                     .access
-                    .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                        match owner.durable() {
-                            Some(durable) => {
-                                session.restage_execution_publication(durable.clone(), next_intent)
+                    .with_compiler_machine_for(
+                        context.clone(),
+                        crate::termination::CompilerWorkAdmission::Publication,
+                        move |session, _, _, _| {
+                            match owner.durable() {
+                                Some(durable) => session
+                                    .restage_execution_publication(durable.clone(), next_intent),
+                                None => {
+                                    session.restage_ephemeral_execution_publication(next_intent)
+                                }
                             }
-                            None => session.restage_ephemeral_execution_publication(next_intent),
-                        }
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
-                    })
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                        },
+                    )
                     .await
                     .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
                 match baseline {
