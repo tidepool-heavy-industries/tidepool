@@ -183,7 +183,6 @@ pub(crate) struct PreparedValueSourceSupport {
     context: Arc<ExactDeclarationContext>,
     imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     implementations: BTreeMap<ExactModuleIdentity, crate::artifact_inventory::ArtifactKind>,
-    selected: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
 }
 
 impl PreparedValueSourceSupport {
@@ -191,6 +190,13 @@ impl PreparedValueSourceSupport {
         &self.context
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.value_source_support.prepare",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(crate) fn new(
         context: Arc<ExactDeclarationContext>,
         support: &[ExactLexicalNode],
@@ -208,12 +214,10 @@ impl PreparedValueSourceSupport {
         .map(|node| (node.owner, node.imports))
         .collect();
         let implementations = context.artifact_view().retained_source_implementations();
-        let selected = context.compiler_metadata_snapshot()?.entries;
         Ok(Self {
             context,
             imports,
             implementations,
-            selected,
         })
     }
 
@@ -223,7 +227,11 @@ impl PreparedValueSourceSupport {
     ) -> Result<RetainedValueSourceSurface, CompileError> {
         let interface = value.interface();
         let owner = identity(interface.unit(), interface.module());
-        let entry = self.selected.get(&owner).ok_or_else(|| {
+        let selected = self
+            .context
+            .compiler_source_support()
+            .selected_interfaces()?;
+        let entry = selected.get(&owner).ok_or_else(|| {
             failure("produced value interface is absent from its prepared context")
         })?;
         if entry.descriptor.id != value.artifact_id()
@@ -276,15 +284,15 @@ impl PreparedValueSourceSupport {
         )?
         .lexical;
         timing.advance("select_source_entries");
-        let entries = lexical
+        let selected = self
+            .context
+            .compiler_source_support()
+            .selected_interfaces()?;
+        let owners = lexical
             .iter()
-            .filter_map(|node| {
-                self.selected
-                    .get(&node.owner)
-                    .map(|entry| (node.owner.clone(), entry.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if entries.len() != lexical.len() {
+            .filter_map(|node| selected.get(&node.owner).map(|_| &node.owner))
+            .collect::<BTreeSet<_>>();
+        if owners.len() != lexical.len() {
             return Err(failure(
                 "retained source surface lacks its exact artifact owner",
             ));
@@ -2338,6 +2346,7 @@ impl RequestCompilerInputs {
 thread_local! {
     static REQUEST_COMPILER_INPUT_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static NATIVE_TRANSPORT_LOWERINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMPILER_METADATA_SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ProtectedScaffoldRequirements {
@@ -7717,6 +7726,8 @@ impl ExactDeclarationContext {
     pub(crate) fn compiler_metadata_snapshot(
         &self,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
+        #[cfg(test)]
+        COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(count.get() + 1));
         self.owner
             .facts
             .compiler_support
@@ -19757,6 +19768,133 @@ mod tests {
             .any(|entry| entry.owner == identity("fixture", "Hidden")
                 && entry.kind == ArtifactKind::CanonicalModuleInterface));
         assert!(lexical.is_empty());
+    }
+
+    #[test]
+    fn prepared_value_source_support_borrows_selected_rows_and_refuses_dormant_owners() {
+        let certificate = |module: &str, requirements| {
+            let evidence = support_product(module);
+            Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    [2; 32],
+                    identity("fixture", module),
+                    evidence.interface_bytes().to_vec(),
+                    evidence.package_imports_bytes().to_vec(),
+                    requirements,
+                )
+                .unwrap(),
+            )
+        };
+        let source = identity("fixture", "SelectedSource");
+        let value = certificate("ValProduced", vec![source.clone()]);
+        let unowned = certificate("ValUnowned", vec![]);
+        let dormant = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([2; 32], &[support_product("DormantSource")])
+            .unwrap()
+            .extend_program_value_interface(unowned.clone())
+            .unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([2; 32], &[support_product("SelectedSource")])
+            .unwrap()
+            .extend_with_value_interfaces(
+                &[value.clone()],
+                vec![ExactLexicalNode {
+                    owner: source.clone(),
+                    imports: vec![],
+                }],
+            )
+            .unwrap();
+        let support = context
+            .compiler_source_support()
+            .retain_custody(dormant.artifact_view())
+            .unwrap();
+        let context = Arc::new(
+            context
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
+                .unwrap(),
+        );
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        assert!(matches!(
+            metadata.entries[&source].payload,
+            ArtifactPayload::Original(_)
+        ));
+        let selected = context
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap();
+        assert!(matches!(
+            selected.get(&source).unwrap().payload,
+            ArtifactPayload::Canonical(_)
+        ));
+        assert!(selected
+            .get(&identity("fixture", "DormantSource"))
+            .is_none());
+        assert!(selected.get(&identity("fixture", "ValUnowned")).is_none());
+        assert!(context
+            .artifact_view()
+            .artifact_ids()
+            .contains(&unowned.artifact_id()));
+
+        COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(0));
+        let prepared = PreparedValueSourceSupport::new(context.clone(), &[]).unwrap();
+        assert_eq!(COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()), 0);
+        context.compiler_metadata_snapshot().unwrap();
+        assert_eq!(
+            COMPILER_METADATA_SNAPSHOTS.with(|count| count.replace(0)),
+            1,
+            "the observer detects an explicit full metadata projection",
+        );
+        let surface = prepared.retain_output(&value).unwrap();
+        assert_eq!(
+            surface.lexical,
+            vec![ExactLexicalNode {
+                owner: source.clone(),
+                imports: vec![]
+            }]
+        );
+        assert!(
+            surface.compiler_support.projection().snapshot_roles()[&source]
+                .original()
+                .is_some()
+        );
+        assert!(surface
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .get(&identity("fixture", "DormantSource"))
+            .is_none());
+        assert!(prepared
+            .retain_output(&unowned)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("produced value interface is absent from its prepared context"));
+        let wrong_requirements = certificate("ValProduced", vec![]);
+        assert_eq!(wrong_requirements.artifact_id(), value.artifact_id());
+        assert!(prepared
+            .retain_output(&wrong_requirements)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("produced value interface differs from its prepared issuer"));
+
+        let missing = PreparedValueSourceSupport::new(
+            context,
+            &[ExactLexicalNode {
+                owner: identity("fixture", "DormantSource"),
+                imports: vec![],
+            }],
+        )
+        .unwrap();
+        assert!(missing
+            .retain_surface(dormant.artifact_view(), &BTreeSet::new())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("retained source surface lacks its exact artifact owner"));
     }
 
     #[test]
