@@ -810,6 +810,14 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            // The spec is polymorphic; completed preparation owns the exact
+            // admitted specialization, independently of its illustrative aliases.
+            let coverage = host.context.config.workspace_inputs.as_ref().unwrap()
+                .prepared_toolset_coverage().unwrap();
+            assert_eq!(coverage.len(), 1);
+            let base_effects = coverage[0].effective_effects.iter().map(|key| {
+                format!("ActorEffect {}", key.haskell_constructor().unwrap())
+            }).collect::<Vec<_>>();
             let original_generation = host.context.observer
                 .installation(host.context.actor.identity()).await.policy
                 .snapshot_for_request().unwrap().request_generation().unwrap().get();
@@ -827,8 +835,10 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             assert!(docs_at_arrival.contains("EffectCommands"), "{docs_at_arrival}");
             assert!(docs_at_arrival.contains("EffectRuntimeInfo"), "{docs_at_arrival}");
             assert!(docs_at_arrival.contains("currentEffectDocs ::"), "{docs_at_arrival}");
-            assert!(!docs_at_arrival.contains("EffectModelCall"), "{docs_at_arrival}");
-            assert!(!docs_at_arrival.contains("EffectSpawnAgent"), "{docs_at_arrival}");
+            let documented_effects = docs_at_arrival.lines()
+                .filter(|line| line.starts_with("ActorEffect "))
+                .collect::<Vec<_>>();
+            assert_eq!(documented_effects, base_effects, "{docs_at_arrival}");
             assert!(!docs_at_arrival.contains("InvocationContextReadWrite"), "{docs_at_arrival}");
             assert!(!docs_at_arrival.contains("InvocationReload"), "{docs_at_arrival}");
             assert!(docs_at_arrival.contains("Catalogue documentation unavailable."), "{docs_at_arrival}");
@@ -873,7 +883,10 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             let publication_source = include_str!("fixtures/startup_runtime_published.hs")
                 .replace("EXPECTED_INSTALL", &original_identity.spec_install.to_string())
                 .replace("EXPECTED_SOURCE", &format!("{:?}", original_identity.spec_source))
-                .replace("EXPECTED_GENERATION", &original_generation.to_string());
+                .replace("EXPECTED_GENERATION", &original_generation.to_string())
+                .replace("EXPECTED_EFFECTS", &format!(
+                    "[InvocationContextReadWrite, InvocationReload, {}]", base_effects.join(", ")
+                ));
             first.sync_call_named(
                 "runtime-after-publication",
                 "haskell",
