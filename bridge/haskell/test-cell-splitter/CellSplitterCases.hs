@@ -87,6 +87,8 @@ import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
   , encodeEnsureExactInputsOutcomeWithin
+  , WorldPublicModuleRequest(..), WorldQueryMode(..)
+  , StructuredInspection(..), InspectionProvenance(..)
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
   , LookupNameInspection(..), LookupNameMode(..), ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
@@ -991,7 +993,7 @@ checkingSourceRequestRoundTrip = do
       hostedFields = [Input "metadata.hs", Input "type.hs", Input "metadata.hs", HostedLookup hosted, InspectOut "out.cbor"]
   [_, hostedPayload] <- pure (workerArgv hostedFields)
   assertEqual "hosted codec matches independently encoded shared Rust fixture"
-    "545052455130323200010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72" hostedPayload
+    "545052455130323300010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72" hostedPayload
   case workerRequestFromArgv (workerArgv hostedFields) of
     Right (Just request) -> do
       assertEqual "hosted keeps original gapped ordinals and separate reference domain" (Just hosted) (requestHostedLookup request)
@@ -1018,12 +1020,13 @@ checkingSourceRequestRoundTrip = do
     Left _ -> pure ()
     other -> fail ("previous hosted worker version accepted: " ++ show other)
 
-  let resident = ExactInputsRequest "root" (ResidentExactInputs "realized")
+  let world = replicate 64 'a'
+      resident = ExactInputsRequest world (ResidentExactInputs "realized")
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
   assertEqual "source-free request matches independent Rust fixture"
-    "5450524551303232000100000001000000010000003904000000726f6f7400080000007265616c697a6564" exactPayload
-  forM_ [resident, ExactInputsRequest "root" (CompleteExactInputs "/scope.cbor")] $ \inputs ->
+    "54505245513032330001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
+  forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")] $ \inputs ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
         assertEqual "exact acquisition is its own operation" (Right (EnsureExactInputsOperation inputs))
@@ -1050,13 +1053,14 @@ checkingSourceRequestRoundTrip = do
     case workerRequestFromArgv [exactFlag, take end exactPayload] of
       Left _ -> pure ()
       other -> fail ("truncated exact inputs accepted: " ++ show other)
-  let outcomeCases =
-        [ (ExactInputsReady "realized", "TPEXO001\0\8\0\0\0realized")
-        , (ExactInputsNeedsAcquisition "root", "TPEXO001\1\4\0\0\0root")
-        , (ExactInputsRejected UnsupportedOperation, "TPEXO001\2\0")
-        , (ExactInputsRejected InvalidRealization, "TPEXO001\2\1")
-        , (ExactInputsRejected InvalidRoot, "TPEXO001\2\2")
-        , (ExactInputsRejected AcquisitionRejected, "TPEXO001\2\3") ]
+  let framedWorld = "\64\0\0\0" <> BS.replicate 64 97
+      outcomeCases =
+        [ (ExactInputsReady world "realized", "TPEXO002\0" <> framedWorld <> "\8\0\0\0realized")
+        , (ExactInputsNeedsAcquisition world, "TPEXO002\1" <> framedWorld)
+        , (ExactInputsRejected UnsupportedOperation, "TPEXO002\2\0")
+        , (ExactInputsRejected InvalidRealization, "TPEXO002\2\1")
+        , (ExactInputsRejected InvalidRoot, "TPEXO002\2\2")
+        , (ExactInputsRejected AcquisitionRejected, "TPEXO002\2\3") ]
   forM_ outcomeCases $ \(outcome, bytes) ->
     assertEqual "source-free result matches closed independent Rust fixture" (Just bytes)
       (encodeEnsureExactInputsOutcomeWithin (toInteger (BS.length bytes)) outcome)
@@ -1064,16 +1068,41 @@ checkingSourceRequestRoundTrip = do
     forM_ [0 .. toInteger (BS.length bytes) - 1] $ \budget ->
       assertEqual "source-free result charges its complete envelope" Nothing
         (encodeEnsureExactInputsOutcomeWithin budget outcome)
-  assertEqual "UTF-8 framing charges bytes instead of characters" (Just "TPEXO001\0\2\0\0\0\206\187")
-    (encodeEnsureExactInputsOutcomeWithin 15 (ExactInputsReady "λ"))
+  assertEqual "UTF-8 framing charges bytes instead of characters"
+    (Just ("TPEXO002\0" <> framedWorld <> "\2\0\0\0\206\187"))
+    (encodeEnsureExactInputsOutcomeWithin 83 (ExactInputsReady world "λ"))
   assertEqual "UTF-8 expansion cannot exceed the payload budget" Nothing
-    (encodeEnsureExactInputsOutcomeWithin 14 (ExactInputsReady "λ"))
+    (encodeEnsureExactInputsOutcomeWithin 82 (ExactInputsReady world "λ"))
   assertEqual "over-budget reference does not force its complete construction" Nothing
-    (encodeEnsureExactInputsOutcomeWithin 16 (ExactInputsReady
+    (encodeEnsureExactInputsOutcomeWithin 84 (ExactInputsReady world
       (replicate 100000 'x' ++ error "source-free encoder forced beyond its budget")))
-  forM_ [ExactInputsReady "", ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
+  forM_ [ExactInputsReady world "", ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
     assertEqual "source-free outcomes reject invalid opaque transport text" Nothing
       (encodeEnsureExactInputsOutcomeWithin 100 invalid)
+  let query = WorldPublicModuleRequest world "realized" WorldStructuredInfo
+        (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
+          (InspectionProvenance 1 "display-only")) "answer.bin"
+  [_, queryPayload] <- pure (workerArgv [WorldPublicModule query])
+  assertEqual "world public query matches the frozen field 58 byte layout"
+    "5450524551303233000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
+  forM_ [WorldStructuredInfo, WorldStructuredType] $ \mode -> do
+    let selected = query { worldQueryMode = mode }
+    case workerRequestFromArgv (workerArgv [WorldPublicModule selected]) of
+      Right (Just request) -> assertEqual "held-world query is one fresh exclusive operation"
+        (Right (WorldPublicModuleOperation selected)) (admitRequestOperation request)
+      other -> fail ("world query rejected: " ++ show other)
+  forM_ [ Input "missing.hs", Include "ambient", InspectOut "other", EnsureExactInputs resident
+        , WorldPublicModule query ] $ \extra ->
+    forM_ [[WorldPublicModule query,extra],[extra,WorldPublicModule query]] $ \fields ->
+      case workerRequestFromArgv (workerArgv fields) of
+        Left _ -> pure ()
+        other -> fail ("mixed or duplicate held-world query accepted: " ++ show other)
+  forM_ [ query { worldQueryIdentity = "caller-label" }
+        , query { worldQueryInspection = (worldQueryInspection query) { structuredScope = StructuredCurrentScope } }
+        , query { worldQueryRealization = "" }, query { worldQueryOutput = "" } ] $ \invalid ->
+      case workerRequestFromArgv (workerArgv [WorldPublicModule invalid]) of
+        Left _ -> pure ()
+        other -> fail ("invalid world query accepted: " ++ show other)
 
 portableOutputRequestValidation :: IO ()
 portableOutputRequestValidation = do

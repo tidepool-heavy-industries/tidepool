@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
@@ -31,14 +33,20 @@ module Tidepool.ExactScope
   , scopeExecutionNativeOwners
   , scopeAvailableOriginalProducts
   , originalGroupFromProjected, originalGroupFromCandidate
+  , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
+  , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
+  , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
+  , readWorldInputsWithOwner
+  , WorldInputsFailure(..), WorldInputsFailureCause(..)
   ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (Exception, IOException, try, throwIO, evaluate, mask)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVarMasked)
+import Control.Exception (Exception, IOException, try, throwIO, evaluate, mask, catch)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVarMasked, readMVar)
+import Control.Monad.State.Strict (StateT(..), runStateT, get, put, lift)
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -48,6 +56,8 @@ import Data.IORef (IORef, newIORef, readIORef, modifyIORef', writeIORef)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Bits (shiftL)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
@@ -60,9 +70,9 @@ import GHC.Unit.Types (unitString)
 import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
-import System.FilePath (isAbsolute, takeDirectory, (</>))
+import System.FilePath (isAbsolute, normalise, hasTrailingPathSeparator, takeDirectory, splitDirectories, (</>))
 import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), withFileObservations, observeFile, fileObservationTotals)
-import System.IO.Error (isAlreadyExistsError)
+import System.IO.Error (isAlreadyExistsError, isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
@@ -1737,35 +1747,48 @@ validateCanonicalInterfacesUsing _readInput verifiedInput readCertificate produc
   proofs <- forM descriptors $ \(key,descriptor) -> do
     (iface,packages,packageSha) <- maybe (fail "canonical proof has no exact interface") pure
       (Map.lookup key interfaces)
-    certificate <- readCertificate descriptor
-    unless (certificateProducer certificate == producer
-        && certificateOwner certificate == key
-        && certificateInterface certificate == exactSha256 iface
-        && certificatePackages certificate == packageSha
-        && certificateCore certificate == (canonicalCoreSha256 <$> descriptorCore descriptor))
-      (fail "canonical module certificate differs from exact owner or payload")
-    unless (case descriptorPurpose descriptor of
-        CandidateCarrier -> True
-        ScopeInterface role -> role == originRole (certificateOrigin certificate))
-      (fail "canonical module origin differs from its exact interface role")
+    proof <- validateCanonicalRowUsing verifiedInput readCertificate producer
+      (iface,packages,packageSha) descriptor
+    let certificate = canonicalFacts proof
     let requirements = certificateRequirements certificate
     let matchesRequirement (required,seal) = Map.lookup required available == Just seal
     unless (Map.keysSet requirements == Set.fromList (exactRequirements iface)
         && all matchesRequirement (Map.toAscList requirements))
       (fail "canonical module requirements differ from selected exact interfaces")
-    _ <- verifiedInput (exactPath iface) (32 * 1024 * 1024) (certificateInterface certificate)
-    _ <- verifiedInput packages (4 * 1024 * 1024) (certificatePackages certificate)
-    pure (key, CanonicalInterfaceProof
-      { proofCertificatePath = descriptorCertificatePath descriptor
-      , proofCertificateSha256 = descriptorCertificateSha256 descriptor
-      , proofCoreArtifact = descriptorCore descriptor
-      , proofInterfaceInput = (iface,packages,packageSha)
-      , proofNativeInput = Nothing
-      , proofExecutionGraphs = []
-      , proofInputCustody = DescriptorInputs
-      , canonicalFacts = certificate
-      })
+    pure (key,proof)
   pure (Map.fromList proofs)
+
+-- Authenticate one producer-issued row independently of any receiving
+-- selection. Closure selection belongs to the demanding compiler operation;
+-- passive historical custody cannot issue that authority.
+validateCanonicalRowUsing :: VerifiedInputReader
+  -> (CanonicalInterfaceDescriptor -> IO CanonicalModuleCertificate)
+  -> String -> InterfaceRow -> CanonicalInterfaceDescriptor -> IO CanonicalInterfaceProof
+validateCanonicalRowUsing verifiedInput readCertificate producer row@(iface,packages,packageSha) descriptor = do
+  certificate <- readCertificate descriptor
+  unless (certificateProducer certificate == producer
+      && certificateOwner certificate == rowOwner row
+      && certificateInterface certificate == exactSha256 iface
+      && certificatePackages certificate == packageSha
+      && certificateCore certificate == (canonicalCoreSha256 <$> descriptorCore descriptor)
+      && Map.keysSet (certificateRequirements certificate) == Set.fromList (exactRequirements iface))
+    (fail "canonical module certificate differs from exact owner or payload")
+  unless (case descriptorPurpose descriptor of
+      CandidateCarrier -> True
+      ScopeInterface role -> role == originRole (certificateOrigin certificate))
+    (fail "canonical module origin differs from its exact interface role")
+  _ <- verifiedInput (exactPath iface) (32 * 1024 * 1024) (certificateInterface certificate)
+  _ <- verifiedInput packages (4 * 1024 * 1024) (certificatePackages certificate)
+  pure CanonicalInterfaceProof
+    { proofCertificatePath = descriptorCertificatePath descriptor
+    , proofCertificateSha256 = descriptorCertificateSha256 descriptor
+    , proofCoreArtifact = descriptorCore descriptor
+    , proofInterfaceInput = row
+    , proofNativeInput = Nothing
+    , proofExecutionGraphs = []
+    , proofInputCustody = DescriptorInputs
+    , canonicalFacts = certificate
+    }
 
 -- Every encoded item consumes at least one byte. The bounded certificate
 -- payload limits list cardinality without imposing the cache's candidate cap.
@@ -2069,6 +2092,8 @@ validateOwnedInputImages :: OfferedScope -> [(String,FilePath)]
   -> [((String,String),ParsedInterfaceEvidence)] -> [OfferedNativeProduct]
   -> [OriginalInputImage] -> IO ()
 validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graphs evidence census images = do
+  unless (Set.size (Set.fromList [key | OriginalInputImage _ key _ _ <- images]) == length images)
+    (fail "selected exact scope has conflicting original image owners")
   let parts = [(kind,originalInputPath reference,originalInputSha256 reference)
         | OriginalInputImage _ _ _ inputs <- images, (kind,reference) <- inputs]
       expected = [(kind,path,sha) | (iface,packages,packageSha) <- rows
@@ -2101,6 +2126,275 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
     unless (Map.lookup key byOwner == Just supplied)
       (fail "owned original image parts differ from their exact semantic owner")
 
+decodeInterfaceRows :: Decoder s [(InterfaceRow,ParsedInterfaceEvidence)]
+decodeInterfaceRows = bounded 4096 decodeInterfaceRow
+
+decodeInterfaceRow :: Decoder s (InterfaceRow,ParsedInterfaceEvidence)
+decodeInterfaceRow = do
+  array 8
+  unit <- nonempty
+  name <- nonempty
+  path <- absolute
+  sha <- digestField
+  requirements <- bounded 4096 owner
+  packages <- absolute
+  packageSha <- digestField
+  unique "exact requirements" requirements
+  evidenceCount <- decodeListLen
+  evidenceRole <- string
+  evidence <- case (evidenceRole,evidenceCount) of
+    (role,5) | role == "module" || role == "native-declaration" -> do
+      certificatePath <- absolute
+      certificateSha <- canonicalDigest
+      coreToken <- peekTokenType
+      core <- if coreToken == TypeNull then do
+        decodeNull
+        decodeNull
+        pure Nothing
+        else Just <$> (CanonicalCoreArtifact <$> absolute <*> canonicalDigest)
+      pure (ParsedModuleEvidence (CanonicalInterfaceDescriptor certificatePath certificateSha core
+        (ScopeInterface (if role == "module" then SourceOriginalRole else NativeDeclarationRole))))
+    ("join",1) -> pure ParsedJoinEvidence
+    ("value",1) -> pure ParsedValueEvidence
+    _ -> fail "unsupported exact interface evidence role"
+  pure ((ExactIfaceArtifact unit name path sha requirements, packages, packageSha),evidence)
+
+-- Logical world inputs contain only immutable bytes and authenticated facts.
+-- The request interface decoder remains owned by the compiler universe.
+data WorldInputFacts = WorldInputFacts
+  { worldInputsIdentity :: String
+  , worldInputsIdentityBytes :: BS.ByteString
+  , worldInputsProducer :: BS.ByteString
+  , worldInputsProfile :: BS.ByteString
+  , worldInputsSources :: CapturedWorldSources
+  , worldInputsBaseRows :: [ScopeInterfaceInput]
+  , worldInputsVisibleRows :: [ScopeInterfaceInput]
+  , worldInputsCustody :: RequestOriginalInputs
+  , worldInputsPrimaryRoot :: BS.ByteString
+  , worldInputsRuntimeVisibility :: BS.ByteString
+  }
+
+data CapturedWorldSources = CapturedWorldSources
+  { worldSourceOrigin :: BS.ByteString
+  , worldSourceDomainSha256 :: BS.ByteString
+  , worldSourceRoots :: [WorldSourceRoot]
+  }
+
+newtype WorldSourceRoot = WorldSourceRoot { worldSourceFiles :: Map.Map FilePath BS.ByteString }
+
+data WorldInputsFailureCause = WorldInputsUnavailable | WorldInputsCorrupt deriving (Eq,Show)
+data WorldInputsFailure = WorldInputsFailure WorldInputsFailureCause String deriving Show
+instance Exception WorldInputsFailure
+
+data OfferedWorldInputs = OfferedWorldInputs BS.ByteString FilePath BS.ByteString BS.ByteString
+  [OfferedWorldRow] [OfferedWorldRow]
+  InputAcquisition BS.ByteString BS.ByteString [(BS.ByteString,BS.ByteString)]
+
+type OfferedWorldRow = ((InterfaceRow,ParsedInterfaceEvidence),BS.ByteString)
+
+data WorldRestoration = WorldRestoration BS.ByteString BS.ByteString BS.ByteString BS.ByteString
+  BS.ByteString BS.ByteString BS.ByteString
+
+worldCorrupt :: String -> IO a
+worldCorrupt = throwIO . WorldInputsFailure WorldInputsCorrupt
+
+-- The same input owner supplies retained immutable content. Acquisition does
+-- not mutate its decoder or publish a selected HPT from these custody rows.
+readWorldInputsWithOwner :: ExactInputOwner -> FilePath -> IO WorldInputFacts
+readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classify
+  where
+    classify (failure :: IOException) = throwIO (WorldInputsFailure
+      (if isUserError failure then WorldInputsCorrupt else WorldInputsUnavailable) (show failure))
+    acquire = do
+      unless (isAbsolute path) (worldCorrupt "world descriptor path must be absolute")
+      limit <- requestCaptureByteLimit
+      let bound = fromInteger (min limit (toInteger (maxBound :: Int) - 1))
+      ((offered,sourceBytes),envelope) <- captureRequestInputs Nothing $ \readInput -> do
+        bytes <- readInput path bound
+        offered@(OfferedWorldInputs _ sourcePath _ _ _ _ _ _ _ _) <-
+          decodeWorldBytes (decodeWorldInputs (BS.length bytes)) bytes
+        sourceBytes <- readInput sourcePath bound
+        pure (offered,sourceBytes)
+      let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
+      WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility visibleSeal blockSeal <-
+        decodeWorldBytes decodeWorldRestoration restoration
+      sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
+      let canonicalRestoration = toStrictByteString (E.encodeListLen 9 <> text "TPCWREST" <> E.encodeWord 1
+            <> E.encodeBytes expectedPrimary <> E.encodeBytes domainSeal <> E.encodeBytes expectedProducer
+            <> E.encodeBytes expectedProfile <> E.encodeBytes expectedVisibility
+            <> E.encodeBytes visibleSeal <> E.encodeBytes blockSeal)
+      unless (restoration == canonicalRestoration && primary == expectedPrimary && producer == expectedProducer && profile == expectedProfile
+          && visibility == expectedVisibility && worldSourceDomainSha256 sources == domainSeal
+          && SHA.hash (toStrictByteString (E.encodeListLen (fromIntegral (length blocks))
+            <> foldMap (\(cid,body) -> E.encodeListLen 2 <> E.encodeBytes cid <> E.encodeBytes (SHA.hash body)) blocks)) == blockSeal)
+        (worldCorrupt "world restoration differs from captured source, profile, context or blocks")
+      let images = case acquisition of ContinueOwnedOriginals values -> values; FreshFiles -> []
+      when (case acquisition of FreshFiles -> True; _ -> False)
+        (worldCorrupt "world descriptor requires owned original acquisition")
+      rowImages <- mapM (worldRowImage producer images) (baseRows ++ visibleRows)
+      let visibleImages = drop (length baseRows) rowImages
+          rowRefs = E.encodeListLen (fromIntegral (length visibleRows))
+            <> foldMap (\(((row,_),_),image) -> let (unit,name) = rowOwner row in
+              E.encodeListLen 4 <> text unit <> text name <> E.encodeBytes producer <> E.encodeBytes image)
+              (zip visibleRows visibleImages)
+      unless (SHA.hash (toStrictByteString rowRefs) == visibleSeal)
+        (worldCorrupt "visible world rows differ from restoration")
+      RetainedOriginalInputs retained _ _ <- readMVar state
+      let available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
+            emptyCapturedOriginalContent retained
+      originals <- continueRequestInputs available
+        [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
+      receiving <- either worldCorrupt pure (mergeRequestInputs originals [envelope])
+      (rows,custody) <- withCapturedRequestInputTokens receiving $ \readToken -> do
+        let verified artifact cap sha = do
+              token <- readToken artifact cap
+              either worldCorrupt pure (checkArtifactSeal sha token)
+              pure (artifactBytes token)
+        forM (baseRows ++ visibleRows) $ \((row@(iface,packages,packageSha),evidence),_image) -> do
+          _ <- verified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
+          packageBytes <- verified packages (4 * 1024 * 1024) packageSha
+          _ <- either worldCorrupt pure (decodeCapturedPackageImports iface packageBytes)
+          admitted <- case evidence of
+            ParsedModuleEvidence descriptor -> do
+              proof <- validateCanonicalRowUsing verified (readCertificateWith (\artifact cap -> artifactBytes <$> readToken artifact cap))
+                (hexBytes producer) row descriptor
+              forM_ (descriptorCore descriptor) $ \core -> do
+                _ <- verified (canonicalCorePath core) (32 * 1024 * 1024) (canonicalCoreSha256 core)
+                pure ()
+              pure (ModuleInterfaceEvidence proof)
+            ParsedJoinEvidence -> pure LexicalJoinEvidence
+            ParsedValueEvidence -> pure CheckedValueEvidence
+          pure (ScopeInterfaceInput row admitted)
+      let bind (ScopeInterfaceInput row evidence) = ScopeInterfaceInput row $ case evidence of
+            ModuleInterfaceEvidence proof -> ModuleInterfaceEvidence (bindCanonicalProofInputs custody proof)
+            other -> other
+          complete = map bind rows
+      let identity = SHA.hash restoration
+      pure (WorldInputFacts (hexBytes identity) identity producer profile sources
+        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility)
+
+decodeWorldBytes :: (forall s. Decoder s a) -> BS.ByteString -> IO a
+decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict bytes) of
+  Left failure -> worldCorrupt (show failure)
+  Right (remaining,value) | BL.null remaining -> pure value
+  Right _ -> worldCorrupt "world input has trailing bytes"
+
+worldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO BS.ByteString
+worldRowImage producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
+  [seal] -> either worldCorrupt pure (unhexDigest seal)
+  _ -> worldCorrupt "world interface row lacks one exact owned input image"
+  where
+    expected = [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]
+      ++ case evidence of
+        ParsedModuleEvidence descriptor ->
+          [(InputCertificate,descriptorCertificatePath descriptor,descriptorCertificateSha256 descriptor)]
+            ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
+        _ -> []
+    matching = [seal | OriginalInputImage issuer key seal parts <- images
+      , issuer == hexBytes producer, key == rowOwner row, seal == hexBytes expectedImage
+      , all (`elem` [(kind,originalInputPath reference,originalInputSha256 reference) | (kind,reference) <- parts]) expected]
+
+decodeWorldInputs :: Int -> Decoder s OfferedWorldInputs
+decodeWorldInputs payloadBytes = do
+  array 11
+  magic <- string
+  version <- decodeWord
+  unless (magic == "TPCWORLD" && version == 1) (fail "unsupported compiler world descriptor")
+  restoration <- decodeBytes
+  source <- absolute
+  producer <- rawWorldDigest
+  profile <- rawWorldDigest
+  array 2
+  base <- worldRows
+  visible <- worldRows
+  acquisition <- decodeInputAcquisition
+  visibility <- decodeBytes
+  primary <- decodeBytes
+  blocks <- bounded payloadBytes (array 2 >> ((,) <$> decodeBytes <*> decodeBytes))
+  unique "primary context block CIDs" (map fst blocks)
+  unless (not (BS.null primary) && any ((== primary) . fst) blocks)
+    (fail "primary context root block is absent")
+  pure (OfferedWorldInputs restoration source producer profile base visible acquisition visibility primary blocks)
+  where worldRows = bounded payloadBytes (array 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigest))
+
+decodeWorldRestoration :: Decoder s WorldRestoration
+decodeWorldRestoration = do
+  array 9
+  magic <- string
+  version <- decodeWord
+  unless (magic == "TPCWREST" && version == 1) (fail "unsupported compiler world restoration")
+  WorldRestoration <$> decodeBytes <*> rawWorldDigest <*> rawWorldDigest <*> rawWorldDigest
+    <*> decodeBytes <*> rawWorldDigest <*> rawWorldDigest
+
+rawWorldDigest :: Decoder s BS.ByteString
+rawWorldDigest = decodeBytes >>= \bytes -> if BS.length bytes == 32 then pure bytes else fail "invalid world digest"
+
+hexBytes :: BS.ByteString -> String
+hexBytes = concatMap (\byte -> let value = showHex byte "" in replicate (2-length value) '0' ++ value) . BS.unpack
+
+unhexDigest :: String -> Either String BS.ByteString
+unhexDigest value
+  | length value /= 64 || any (\c -> not (c >= '0' && c <= '9' || c >= 'a' && c <= 'f')) value = Left "invalid image content identity"
+  | otherwise = Right (BS.pack (go value))
+  where
+    nibble c | c >= '0' && c <= '9' = fromEnum c - fromEnum '0'
+             | otherwise = fromEnum c - fromEnum 'a' + 10
+    go [] = []
+    go (a:b:rest) = fromIntegral (nibble a * 16 + nibble b) : go rest
+    go _ = []
+
+type WorldSourceParser = StateT BS.ByteString (Either String)
+
+decodeWorldSources :: BS.ByteString -> Either String CapturedWorldSources
+decodeWorldSources bytes = do
+  ((origin,roots),remaining) <- runStateT parse bytes
+  unless (BS.null remaining) (Left "source domain has trailing bytes")
+  pure (CapturedWorldSources origin (SHA.hash bytes) roots)
+  where
+    parse = do
+      magic <- worldTake 8
+      unless (magic == "TPCSRC01") (lift (Left "unsupported captured source domain"))
+      origin <- worldFrame
+      roots <- worldCounted 4 $ do
+        files <- worldCounted 8 $ do
+          pathBytes <- worldFrame
+          path <- either (const (lift (Left "source path is not UTF-8"))) (pure . T.unpack) (TE.decodeUtf8' pathBytes)
+          unless (not (null path) && not (isAbsolute path) && '\0' `notElem` path
+            && normalise path == path && not (hasTrailingPathSeparator path)
+            && all (\part -> not (null part) && part /= "." && part /= "..") (splitDirectories path))
+            (lift (Left "captured source path escapes its root"))
+          body <- worldFrame
+          pure (path,body)
+        unless (and (zipWith (<) (map fst files) (drop 1 (map fst files))))
+          (lift (Left "captured source paths are not strictly sorted"))
+        pure (WorldSourceRoot (Map.fromDistinctAscList files))
+      pure (origin,roots)
+
+worldTake :: Int -> WorldSourceParser BS.ByteString
+worldTake count = do
+  remaining <- get
+  if count < 0 || count > BS.length remaining then lift (Left "truncated captured source domain")
+    else do
+      let (value,rest) = BS.splitAt count remaining
+      put rest
+      pure value
+
+worldWord :: WorldSourceParser Int
+worldWord = do
+  bytes <- worldTake 4
+  let value = sum [toInteger byte `shiftL` (8 * position) | (position,byte) <- zip [0..] (BS.unpack bytes)]
+  if value > toInteger (maxBound :: Int) then lift (Left "source frame exceeds host range") else pure (fromInteger value)
+
+worldFrame :: WorldSourceParser BS.ByteString
+worldFrame = worldWord >>= worldTake
+
+worldCounted :: Int -> WorldSourceParser a -> WorldSourceParser [a]
+worldCounted minimumBytes item = do
+  count <- worldWord
+  remaining <- get
+  when (count > BS.length remaining `div` minimumBytes) (lift (Left "source count exceeds remaining input"))
+  replicateM count item
+
 decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)],
   [OfferedNativeProduct],InputAcquisition)
 decodeScope = do
@@ -2111,34 +2405,7 @@ decodeScope = do
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
-  interfaceRows <- bounded 4096 $ do
-    array 8
-    unit <- nonempty
-    name <- nonempty
-    path <- absolute
-    sha <- digestField
-    requirements <- bounded 4096 owner
-    packages <- absolute
-    packageSha <- digestField
-    unique "exact requirements" requirements
-    evidenceCount <- decodeListLen
-    evidenceRole <- string
-    evidence <- case (evidenceRole,evidenceCount) of
-      (role,5) | role == "module" || role == "native-declaration" -> do
-        certificatePath <- absolute
-        certificateSha <- canonicalDigest
-        coreToken <- peekTokenType
-        core <- if coreToken == TypeNull then do
-          decodeNull
-          decodeNull
-          pure Nothing
-          else Just <$> (CanonicalCoreArtifact <$> absolute <*> canonicalDigest)
-        pure (ParsedModuleEvidence (CanonicalInterfaceDescriptor certificatePath certificateSha core
-          (ScopeInterface (if role == "module" then SourceOriginalRole else NativeDeclarationRole))))
-      ("join",1) -> pure ParsedJoinEvidence
-      ("value",1) -> pure ParsedValueEvidence
-      _ -> fail "unsupported exact interface evidence role"
-    pure ((ExactIfaceArtifact unit name path sha requirements, packages, packageSha),evidence)
+  interfaceRows <- decodeInterfaceRows
   let interfaces = map fst interfaceRows
       interfaceEvidence = [((exactUnit iface,exactModule iface),evidence)
         | ((iface,_,_),evidence) <- interfaceRows]

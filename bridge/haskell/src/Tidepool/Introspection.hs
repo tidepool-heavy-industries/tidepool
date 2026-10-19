@@ -19,6 +19,7 @@ module Tidepool.Introspection
     searchTypeMatches,
     InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc,
     encodeInspectionResults, encodeHostedLookupOutput,
+    inspectPublicModuleExports,
     SelectedMatches(..), SelectedLookupAnswer(..), HostedLookupAnswer(..), HostedOperationIdentity(..),
     HostedLookupOutput(..), HostedDiscoverySelection(..), HostedDiscoveryCandidate(..), HostedFallback(..),
     selectHostedAnswers, CandidateSeed(..), selectFairSeeds, finishHostedKnown,
@@ -949,15 +950,29 @@ inspectStructured rdrEnv mode query = do
   NameSelection _ candidates <- namesInScope rdrEnv (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
   case candidates of
     Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
-    Right (names, visibleNames) -> do
-      things <- fmap catMaybes $ forM names $ \name -> do
-        found <- lookupName name
-        pure ((name,) <$> (found >>= \thing -> if exactThingMatches (structuredNamespace query) thing then Just thing else Nothing))
-      case things of
-        [] -> pure (InspectionStructuredError (StructuredUnknown query))
-        [resolved] -> pure (inspectResolved mode query visibleNames resolved)
-        many -> pure (InspectionStructuredError
-          (StructuredAmbiguous query (map (uncurry identifierRef) many)))
+    Right (names, visibleNames) -> fst <$> inspectStructuredCandidates mode query visibleNames names
+
+-- The service has already resolved the queried module in its held world.
+-- Selection uses that module's public exports; provenance follows the actual
+-- defining Name, which may belong to a reexported module or unit.
+inspectPublicModuleExports :: GhcMonad m => Bool -> StructuredInspection -> [Name]
+  -> m (InspectionResult,Maybe Module)
+inspectPublicModuleExports typeOnly query exports =
+  inspectStructuredCandidates (if typeOnly then StructuredType else StructuredInfo) query visible
+    [name | name <- visible, matchesNameQuery (structuredName query) name
+      && namespaceMatches (structuredNamespace query) name]
+  where visible = nub exports
+
+inspectStructuredCandidates :: GhcMonad m => StructuredMode -> StructuredInspection -> [Name] -> [Name]
+  -> m (InspectionResult,Maybe Module)
+inspectStructuredCandidates mode query visibleNames names = do
+  things <- fmap catMaybes $ forM names $ \name -> do
+    found <- lookupName name
+    pure ((name,) <$> (found >>= \thing -> if exactThingMatches (structuredNamespace query) thing then Just thing else Nothing))
+  pure $ case things of
+    [] -> (InspectionStructuredError (StructuredUnknown query),Nothing)
+    [resolved@(name,_)] -> (inspectResolved mode query visibleNames resolved,nameModule_maybe name)
+    many -> (InspectionStructuredError (StructuredAmbiguous query (map (uncurry identifierRef) many)),Nothing)
 
 -- Selection and attempted-scope evidence are issued by the same search.
 data NameSelection = NameSelection [StructuredNameScope] (Either String ([Name], [Name]))
