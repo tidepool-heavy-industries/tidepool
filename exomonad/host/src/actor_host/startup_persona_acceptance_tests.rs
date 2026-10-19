@@ -857,10 +857,17 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             )
             .await;
             let operation = first.operation("runtime-after-publication");
+            let original_identity = retained.identity.as_ref().unwrap();
+            // Observe typed facts before display: the full tool inventory can
+            // exceed the ordinary page budget before startup evidence appears.
+            let publication_source = include_str!("fixtures/startup_runtime_published.hs")
+                .replace("EXPECTED_INSTALL", &original_identity.spec_install.to_string())
+                .replace("EXPECTED_SOURCE", &format!("{:?}", original_identity.spec_source))
+                .replace("EXPECTED_GENERATION", &original_generation.to_string());
             first.sync_call_named(
                 "runtime-after-publication",
                 "haskell",
-                "Right runtimeFacts <- getRuntimeInfo\ndisplay (show runtimeFacts)\n",
+                &publication_source,
             );
             let after = host
                 .while_operation_succeeds(
@@ -878,12 +885,7 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
                 },
                 &after.settled_output("runtime-after-publication"),
             );
-            assert!(text.contains("InitialContextPublished"), "{text}");
-            assert!(text.contains("Persona.Spec.runtimeSpec"), "{text}");
-            assert!(
-                text.contains(&retained.identity.as_ref().unwrap().spec_source),
-                "{text}"
-            );
+            assert_eq!(text, "True", "expected published identity {original_identity:?} at generation {original_generation}");
             // Change actual selected source, then publish through the existing Reload owner.
             let orientation = host.context.config.workspace.join(".exomonad/Persona/Orientation.hs");
             let original_source = std::fs::read_to_string(&orientation).unwrap();
