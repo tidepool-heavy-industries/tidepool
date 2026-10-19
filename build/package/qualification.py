@@ -1282,7 +1282,7 @@ def release_compiler_service_source(args) -> Path:
             raise ValueError("compiler package release progress belongs to another retirement")
         # Recovery may advance states, never replace the sealed acquisition's
         # root plan, guard, scope or measurement facts.
-        if (any(prior.get(key) != value for key, value in state.items() if key not in ("status", "roots"))
+        if (any(prior.get(key) != value for key, value in state.items() if key not in ("status", "roots", "retained_root_count"))
                 or [(item.get("path"), item.get("store_path")) for item in prior.get("roots", [])]
                 != [(item["path"], item["store_path"]) for item in state["roots"]]):
             raise ValueError("compiler package release progress differs from its sealed acquisition plan")
@@ -1303,10 +1303,6 @@ def release_compiler_service_source(args) -> Path:
             raise ValueError("compiler package root reappeared after release")
         if item["state"] == "registered" and not present:
             raise ValueError("compiler package release cannot confirm exact retained root")
-    if state.get("status") == "package-settled-guard-held":
-        # Only the native pending finalizer may resume after guard removal.
-        _sync_directory(settlement.parent)
-        return settlement
     result = {**state, "status": "releasing", "complete_retirement_sha256": sha256(complete_path)}
     write_private_json(settlement, result)
     try:

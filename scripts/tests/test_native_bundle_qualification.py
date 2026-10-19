@@ -4255,6 +4255,21 @@ class CompilerServicePackageTests(unittest.TestCase):
                     qualification.release_compiler_service_source(release)
                 self.assertTrue(all(Path(item['path']).is_symlink() for item in receipt['roots']))
 
+    def test_settled_phase_cannot_skip_outstanding_package_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            progress = json.loads(release.receipt.read_text())
+            progress.update(status='package-settled-guard-held', retained_root_count=1,
+                            complete_retirement_sha256=qualification.sha256(release.complete_retirement))
+            qualification.write_private_json(release.receipt.parent / 'release.json', progress)
+            settled = qualification.release_compiler_service_source(release)
+            result = json.loads(settled.read_text())
+            self.assertEqual(result['retained_root_count'], 1)
+            for item in result['roots']:
+                self.assertEqual(Path(item['path']).is_symlink(), item['store_path'] == result['provider_guard_store_path'])
+
     def test_guard_cannot_reuse_package_root_recovery_states(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()
