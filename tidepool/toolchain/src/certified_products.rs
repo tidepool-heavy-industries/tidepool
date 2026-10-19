@@ -20267,11 +20267,38 @@ None,
             None,
         )
         .unwrap();
-        assert!(matches!(
-            planned.certified.source_selection.selected_original_closure(&rebound),
-            Err(CertificationError::OriginalClosure(error))
-                if matches!(*error, crate::CompileError::ExtractFailed(_))
-        ));
+        let rebound_result = planned
+            .certified
+            .source_selection
+            .selected_original_closure(&rebound);
+        let rebound_outcome = match &rebound_result {
+            Ok(selected) => format!(
+                "success products={} first_artifact_ids={:?}",
+                selected.products().len(),
+                selected
+                    .products()
+                    .iter()
+                    .take(8)
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                            canonical_producer,
+                            product,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            ),
+            Err(CertificationError::OriginalClosure(inner)) => format!(
+                "OriginalClosure({:?})",
+                std::mem::discriminant(inner.as_ref())
+            ),
+            Err(CertificationError::Mismatch(reason)) => format!("Mismatch({reason})"),
+            Err(other) => format!("other typed error {:?}", std::mem::discriminant(other)),
+        };
+        assert!(
+            matches!(rebound_result, Err(CertificationError::OriginalClosure(error))
+            if matches!(*error, crate::CompileError::ExtractFailed(_))),
+            "raw_rebound_outcome={rebound_outcome}"
+        );
         let view = crate::declaration_context::certified_product_artifact_view(
             canonical_producer,
             &custody,
