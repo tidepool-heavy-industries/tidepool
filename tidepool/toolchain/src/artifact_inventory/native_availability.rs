@@ -802,7 +802,17 @@ impl PartialEq for NativeOfferContribution {
 }
 impl Eq for NativeOfferContribution {}
 
+#[cfg(test)]
+thread_local! {
+    static GROUP_BINDING_SCOPE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl NativeOfferContribution {
+    #[cfg(test)]
+    pub(crate) fn take_group_binding_scope_visits() -> usize {
+        GROUP_BINDING_SCOPE_VISITS.with(|work| work.replace(0))
+    }
+
     pub(crate) fn matches_direct_canonical_binding(
         &self,
         original: ArtifactId,
@@ -818,7 +828,7 @@ impl NativeOfferContribution {
     ) -> Result<crate::declaration_context::NativeContributionSnapshotFacts, CompileError> {
         Ok(
             crate::declaration_context::NativeContributionSnapshotFacts {
-                offer: self.offer.snapshot_facts().identity()?,
+                offer: self.offer.snapshot_identity()?,
                 reachable: self.reachable.clone(),
             },
         )
@@ -837,7 +847,7 @@ impl NativeOfferContribution {
         offer: IssuedNativeOffer,
         facts: &crate::declaration_context::NativeContributionSnapshotFacts,
     ) -> Result<Self, CompileError> {
-        if offer.snapshot_facts().identity()? != facts.offer
+        if offer.snapshot_identity()? != facts.offer
             || !facts
                 .reachable
                 .iter()
@@ -881,6 +891,22 @@ impl NativeOfferContribution {
         self: &Arc<Self>,
         roots: &BTreeSet<NativeGroupBinding>,
     ) -> Result<Arc<Self>, CompileError> {
+        Ok(self.restrict_groups(roots, None)?.0)
+    }
+
+    pub(crate) fn for_groups_with_operation(
+        self: &Arc<Self>,
+        roots: &BTreeSet<NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(Arc<Self>, NativeClosureWork), CompileError> {
+        self.restrict_groups(roots, Some(operation))
+    }
+
+    fn restrict_groups(
+        self: &Arc<Self>,
+        roots: &BTreeSet<NativeGroupBinding>,
+        operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<(Arc<Self>, NativeClosureWork), CompileError> {
         let state = self
             .offer
             .0
@@ -890,60 +916,78 @@ impl NativeOfferContribution {
             .0
             .lock()
             .expect("inventory lock");
-        let reachable = admitted_closure(
+        let (reachable, work) = admitted_closure_with_operation(
             &state,
             roots
                 .iter()
                 .copied()
                 .filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group)))
                 .map(ArtifactBindingNode::Group),
-        );
-        if !reachable.iter().all(|node| self.reachable.contains(node)) {
-            return Err(failure("restricted native contribution exceeds its issuer"));
+            operation,
+        )?;
+        for node in &reachable {
+            if operation.is_some() {
+                crate::host_work::checkpoint()?;
+            }
+            if !self.reachable.contains(node) {
+                return Err(failure("restricted native contribution exceeds its issuer"));
+            }
         }
         drop(state);
         if reachable == self.reachable {
-            return Ok(Arc::clone(self));
+            return Ok((Arc::clone(self), work));
         }
-        let originals = reachable
-            .iter()
-            .filter_map(|node| match node {
-                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
-                _ => None,
-            })
-            .collect();
-        Ok(Arc::new(Self {
+        let mut originals = BTreeSet::new();
+        for node in &reachable {
+            if let ArtifactBindingNode::Group(group) = node {
+                if operation.is_some() {
+                    crate::host_work::checkpoint()?;
+                }
+                if !originals.contains(&group.binding.artifact()) {
+                    if let Some(operation) = operation {
+                        operation
+                            .reserve::<(ArtifactId, [usize; 4])>(1)
+                            .map_err(|error| {
+                                CompileError::CompilerEvidence(Box::new(error.into()))
+                            })?;
+                    }
+                    originals.insert(group.binding.artifact());
+                }
+            }
+        }
+        if let Some(operation) = operation {
+            operation
+                .reserve::<Self>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        let restricted = Arc::new(Self {
             offer: self.offer.clone(),
             reachable,
             originals,
             identity: OnceLock::new(),
-        }))
+        });
+        if let Some(operation) = operation {
+            // A changed contribution's durable identity encodes only this
+            // actual closure. Reserve its node vector and bounded CBOR tuples
+            // before the existing identity encoder allocates either buffer.
+            operation
+                .reserve::<[ArtifactBindingNode; 2]>(restricted.reachable.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            operation
+                .reserve::<[u8; 256]>(restricted.reachable.len().saturating_add(1))
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            crate::host_work::checkpoint()?;
+            restricted.identity()?;
+        }
+        Ok((restricted, work))
     }
 
-    pub(crate) fn offer(&self) -> &IssuedNativeOffer {
-        &self.offer
-    }
-
-    pub(crate) fn originals(&self) -> &BTreeSet<ArtifactId> {
-        &self.originals
-    }
-
-    pub(crate) fn groups(
+    /// Borrow this contribution's exact groups for one original, without
+    /// enumerating the offer's retained selection scopes.
+    pub(crate) fn original_groups(
         &self,
-        key: NativeGroupKey,
+        original: ArtifactId,
     ) -> impl Iterator<Item = NativeGroupBinding> + '_ {
-        self.offer
-            .group_bindings(key)
-            .filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group)))
-    }
-
-    pub(crate) fn permits(&self, key: NativeGroupKey) -> bool {
-        self.offer
-            .group_bindings(key)
-            .any(|group| self.reachable.contains(&ArtifactBindingNode::Group(group)))
-    }
-
-    pub(crate) fn ordinals(&self, original: ArtifactId) -> impl Iterator<Item = u32> + '_ {
         self.reachable
             .range(
                 ArtifactBindingNode::Group(NativeGroupBinding {
@@ -962,10 +1006,39 @@ impl NativeOfferContribution {
             )
             .filter_map(move |node| match node {
                 ArtifactBindingNode::Group(group) if group.binding.artifact() == original => {
-                    Some(group.original_ordinal)
+                    Some(*group)
                 }
                 _ => None,
             })
+    }
+
+    pub(crate) fn contains_group(&self, group: NativeGroupBinding) -> bool {
+        self.reachable.contains(&ArtifactBindingNode::Group(group))
+    }
+
+    pub(crate) fn offer(&self) -> &IssuedNativeOffer {
+        &self.offer
+    }
+
+    pub(crate) fn originals(&self) -> &BTreeSet<ArtifactId> {
+        &self.originals
+    }
+
+    pub(crate) fn groups(
+        &self,
+        key: NativeGroupKey,
+    ) -> impl Iterator<Item = NativeGroupBinding> + '_ {
+        self.original_groups(key.artifact)
+            .filter(move |group| group.original_ordinal == key.original_ordinal)
+    }
+
+    pub(crate) fn permits(&self, key: NativeGroupKey) -> bool {
+        self.groups(key).next().is_some()
+    }
+
+    pub(crate) fn ordinals(&self, original: ArtifactId) -> impl Iterator<Item = u32> + '_ {
+        self.original_groups(original)
+            .map(|group| group.original_ordinal)
     }
 }
 
@@ -1713,6 +1786,8 @@ impl IssuedNativeOffer {
             .scopes
             .keys()
             .filter_map(move |selection| {
+                #[cfg(test)]
+                GROUP_BINDING_SCOPE_VISITS.with(|work| work.set(work.get() + 1));
                 let group = NativeGroupBinding {
                     binding: NativeGroupIssuer {
                         artifact: key.artifact,
