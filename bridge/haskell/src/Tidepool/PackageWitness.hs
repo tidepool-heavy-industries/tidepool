@@ -12,6 +12,7 @@ module Tidepool.PackageWitness
   , captureSupportedPackageProfileWith, supportedPackageProfileIdentity
   , requireObservationPackageEnvironment
   , CompilerPackageBoot, ServicePackageAssociation, readCompilerPackageBoot
+  , compilerPackageBootLibdir
   , validateCompilerPackageBootConfiguration
   , validateCompilerPackageBoot, emitCompilerPackageBootAcknowledgement ) where
 
@@ -46,7 +47,7 @@ import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Unit.Module.ModIface (mi_module, mi_usages, mi_deps)
 import GHC.Unit.Module.Deps (Usage(..), Dependencies(..))
 import Tidepool.FatIface (readExactInterface)
-import Tidepool.ExtractUtil (shaHex)
+import Tidepool.ExtractUtil (shaHex, getLibdir)
 import GHC.Driver.Config.Finder (initFinderOpts)
 import GHC.Driver.Env (HscEnv(..), hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit)
 import GHC.Unit.Env (HomeUnitEnv(..))
@@ -57,7 +58,7 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory (removeFile, canonicalizePath)
-import System.FilePath (isAbsolute, takeDirectory, (</>))
+import System.FilePath (isAbsolute, takeDirectory, splitDirectories, (</>))
 import System.Environment (lookupEnv)
 import System.IO (openBinaryTempFile, hClose, stdout, hFlush)
 import System.Posix.Files (createLink)
@@ -584,7 +585,7 @@ chargeProfile count = do
 -- connecting client or ordinary observation cannot issue this association.
 data CompilerPackageBoot
   = ObservationPackageBoot
-  | RootedPackageBoot BS.ByteString [FilePath] FilePath ServicePackageAssociation
+  | RootedPackageBoot BS.ByteString [FilePath] FilePath FilePath ServicePackageAssociation
 
 data ServicePackageAssociation = ServicePackageAssociation
   BS.ByteString BS.ByteString BS.ByteString BS.ByteString BS.ByteString
@@ -622,9 +623,18 @@ readCompilerPackageBoot = do
         unless (canonical == object && nixStoreObject object)
           (fail "compiler service closure object is not a canonical Nix object")
       SupportedPackageFacts expectedLibdir globalDB paths <- either fail pure (decodeSupportedPackageFacts expected)
-      libdir <- lookupEnv "TIDEPOOL_GHC_LIBDIR" >>= maybe
-        (fail "rooted compiler requires TIDEPOOL_GHC_LIBDIR") canonicalAbsolute
+      declaredLibdir <- lookupEnv "TIDEPOOL_GHC_LIBDIR" >>= maybe
+        (fail "rooted compiler requires TIDEPOOL_GHC_LIBDIR") pure
+      unless (isAbsolute declaredLibdir && coveredBy objects declaredLibdir
+          && all (`notElem` [".",".."]) (splitDirectories declaredLibdir))
+        (fail "declared compiler libdir is outside retained immutable sources")
+      libdir <- canonicalAbsolute declaredLibdir
       unless (libdir == expectedLibdir) (fail "compiler service libdir differs from profile")
+      -- Keep the source alias and immutable target distinct. A mutable /tmp
+      -- symlink to an admitted libdir is not an admitted source path.
+      unless (coveredBy objects (declaredLibdir </> "settings")
+          && coveredBy objects (declaredLibdir </> ".." </> "bin" </> "ghc-iserv"))
+        (fail "declared compiler settings or interpreter source is not retained")
       settings <- canonicalAbsolute (libdir </> "settings")
       interpreter <- canonicalAbsolute (libdir </> ".." </> "bin" </> "ghc-iserv")
       -- Before runGhc reads settings or opens package databases, every declared
@@ -634,14 +644,16 @@ readCompilerPackageBoot = do
         unless (canonical == input && coveredBy objects canonical)
           (fail "compiler service profile input is outside its retained closure")
       let association = ServicePackageAssociation workerBytes epochBytes sourceBytes profileBytes (SHA.hash expected)
-      pure (RootedPackageBoot expected objects globalDB association)
+      pure (RootedPackageBoot expected objects libdir globalDB association)
     _ -> fail "compiler service boot fields must be supplied together"
 
 -- GHC has read the already-covered immutable settings, but has not yet opened
 -- the selected databases through the initial setSessionDynFlags call.
 validateCompilerPackageBootConfiguration :: CompilerPackageBoot -> DynFlags -> IO ()
 validateCompilerPackageBootConfiguration ObservationPackageBoot _ = pure ()
-validateCompilerPackageBootConfiguration (RootedPackageBoot _ objects expectedDB _) flags = do
+validateCompilerPackageBootConfiguration (RootedPackageBoot _ objects _ expectedDB _) flags = do
+  unless (coveredBy objects (globalPackageDatabasePath flags))
+    (fail "configured GHC package database source is not retained")
   actualDB <- canonicalAbsolute (globalPackageDatabasePath flags)
   unless (actualDB == expectedDB && coveredBy objects actualDB)
     (fail "configured GHC package database differs from retained profile")
@@ -649,13 +661,26 @@ validateCompilerPackageBootConfiguration (RootedPackageBoot _ objects expectedDB
 validateCompilerPackageBoot :: CompilerPackageBoot -> FilePath -> HscEnv
   -> IO (Maybe ServicePackageAssociation)
 validateCompilerPackageBoot ObservationPackageBoot _ _ = pure Nothing
-validateCompilerPackageBoot (RootedPackageBoot expected objects _ association) libdir env = do
+validateCompilerPackageBoot (RootedPackageBoot expected objects _ _ association) libdir env = do
+  forM_ (listUnitInfo (hsc_units env)) $ \unit ->
+    forM_ (concat [unitImportDirs unit,unitLibraryDirs unit,unitLibraryDynDirs unit,unitIncludeDirs unit]) $ \source -> do
+      unless (coveredBy objects (ST.unpack source))
+        (fail "fresh GHC package input source is not retained")
+      target <- canonicalAbsolute (ST.unpack source)
+      unless (coveredBy objects target)
+        (fail "fresh GHC package input target is not retained")
   actual <- captureSupportedPackageProfileWith libdir env
   unless (actual == expected) (fail "fresh GHC package facts differ from retained service profile")
   SupportedPackageFacts actualLibdir globalDB paths <- either fail pure (decodeSupportedPackageFacts actual)
   unless (all (coveredBy objects) (actualLibdir:globalDB:paths))
     (fail "fresh GHC package facts escape retained service closure")
   pure (Just association)
+
+-- Reusable boot consumes the validated immutable target, without resolving
+-- the caller's original environment alias for a second time.
+compilerPackageBootLibdir :: CompilerPackageBoot -> IO FilePath
+compilerPackageBootLibdir ObservationPackageBoot = getLibdir
+compilerPackageBootLibdir (RootedPackageBoot _ _ libdir _ _) = pure libdir
 
 emitCompilerPackageBootAcknowledgement :: Maybe ServicePackageAssociation -> IO ()
 emitCompilerPackageBootAcknowledgement Nothing = pure ()
