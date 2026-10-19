@@ -73,7 +73,7 @@ encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
     | otherwise -> Just ("TPEXO001" <> BS.pack [2, rejectionTag cause])
   where
     referenceFrame tag reference
-      | budget < 13 -> Nothing
+      | budget < 13 = Nothing
       | otherwise =
           let limit = min (budget - 13) (toInteger (maxBound :: Word32))
               prefix = LBS.take (fromInteger (limit + 1)) (LTE.encodeUtf8 (LT.pack reference))
