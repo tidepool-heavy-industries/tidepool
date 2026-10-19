@@ -8329,8 +8329,11 @@ impl DecodedWorldSourceReceipt<'_> {
                 crate::host_work::checkpoint()?;
                 charge(operation.charge(1))?;
                 if edge.boot
-                    || (edge.qualifier != "none"
-                        && edge.qualifier.strip_prefix("this:") != Some(edge.unit.as_str()))
+                    || !match &edge.qualifier {
+                        crate::cache::ImportQualifier::Unqualified => true,
+                        crate::cache::ImportQualifier::ThisUnit(unit) => unit == &edge.unit,
+                        crate::cache::ImportQualifier::OtherUnit(_) => false,
+                    }
                     || excluded.contains(&(edge.unit.as_str(), edge.module.as_str()))
                 {
                     continue;
