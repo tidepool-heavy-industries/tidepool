@@ -4304,6 +4304,7 @@ pub(crate) enum ResidentActorBoundary {
     RouteRegistration {
         registration: WatchRegistration,
         entry: RootCustody,
+        execution: crate::request::sources::CallbackExecution,
     },
     RoutePoll(WatchPoll),
     RouteList(ResidentHole),
@@ -10922,6 +10923,7 @@ where
                             Ok(ResidentActorBoundary::RouteRegistration {
                                 registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
                                 entry,
+                                execution: crate::request::sources::CallbackExecution::from_context(context.clone()),
                             })
                         }
                         WatchesReq::ObserveRouteWith(watch_id) => {
@@ -12414,9 +12416,18 @@ where
     pub(crate) async fn run_route_entry(
         &self,
         context: crate::ActorSessionContext,
-        entry: RootCustody,
+        entry: crate::request::routes::RouteEntry,
         watch: crate::WatchId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let (entry, execution) = entry.into_parts();
+        let entry = self
+            .transfer_custody(
+                entry,
+                execution.context.placement.session,
+                context.placement.session,
+                context.placement.resource_scope,
+            )
+            .await?;
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let argument = i64::try_from(watch.0).map_err(|_| {

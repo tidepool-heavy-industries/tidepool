@@ -2667,17 +2667,7 @@ impl RequestRegistry {
         label: String,
         plan: readiness::Plan<ReadinessDependency>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_plan_with_route(owner, label, plan, None)
-    }
-
-    pub(crate) fn register_watch_plan_with_route(
-        &self,
-        owner: ActorRef,
-        label: String,
-        plan: readiness::Plan<ReadinessDependency>,
-        route: Option<routes::WatchRoute>,
-    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_plan_owned(owner, label, plan, route, false)
+        self.register_watch_plan_owned(owner, label, plan, None, false)
     }
 
     pub(crate) fn register_transient_watch(
