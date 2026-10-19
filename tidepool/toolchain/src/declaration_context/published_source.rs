@@ -1482,6 +1482,22 @@ mod tests {
 
     #[test]
     fn published_native_custody_does_not_require_dependency_namespace_originals() {
+        fn receipts_by_artifact<T>(
+            references: &[T],
+            artifact_id: impl Fn(&T) -> ArtifactId,
+        ) -> BTreeMap<ArtifactId, &T> {
+            let indexed = references
+                .iter()
+                .map(|reference| (artifact_id(reference), reference))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                indexed.len(),
+                references.len(),
+                "duplicate artifact receipt"
+            );
+            indexed
+        }
+
         let producer = [2; 32];
         let native = |module: &str, groups, version, requirements| {
             Arc::new(
@@ -2001,13 +2017,23 @@ mod tests {
                         )
                         .unwrap(),
                 );
+                let product_id = |reference: &RecoveryArtifactRef| {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(reference)
+                        .id
+                };
+                let interface_id = |reference: &recovery_artifacts::RecoveryModuleInterfaceRef| {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id
+                };
                 assert_eq!(
-                    serde_json::to_value(&reused_products).unwrap(),
-                    serde_json::to_value(&products).unwrap()
+                    receipts_by_artifact(&reused_products, product_id),
+                    receipts_by_artifact(&products, product_id),
                 );
                 assert_eq!(
-                    serde_json::to_value(&reused_interfaces).unwrap(),
-                    serde_json::to_value(&interfaces).unwrap()
+                    receipts_by_artifact(&reused_interfaces, interface_id),
+                    receipts_by_artifact(&interfaces, interface_id),
                 );
                 for interface in &reused_interfaces {
                     assert!(reused_root
