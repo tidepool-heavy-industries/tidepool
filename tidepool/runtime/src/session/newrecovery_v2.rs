@@ -435,24 +435,22 @@ pub(crate) fn materialize_missing_context_artifacts(
         )
         .map_err(|error| crate::session::SessionError::RecoverySnapshot(Box::new(error)))?;
     introduced.retain(|id| !graph.contains_artifact(*id));
-    let (products, interfaces) = context
-        .materialize_recovery_products_and_interfaces_for_artifacts(artifact_root, &introduced)?;
-    let (joins, values) = context
-        .materialize_joined_and_value_interfaces_for_artifacts(artifact_root, &introduced)?;
-    Ok(products
+    use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
+    Ok(context
+        .materialize_recovery_artifacts(artifact_root, &introduced)?
         .into_iter()
-        .map(RecoveryArtifactClosure::Home)
-        .chain(
-            interfaces
-                .into_iter()
-                .map(RecoveryArtifactClosure::ModuleInterface),
-        )
-        .chain(joins.into_iter().map(RecoveryArtifactClosure::Join))
-        .chain(
-            values
-                .into_iter()
-                .map(RecoveryArtifactClosure::ValueInterface),
-        )
+        .map(|reference| match reference {
+            RecoveryPayloadReference::Original(reference) => {
+                RecoveryArtifactClosure::Home(reference)
+            }
+            RecoveryPayloadReference::Canonical(reference) => {
+                RecoveryArtifactClosure::ModuleInterface(reference)
+            }
+            RecoveryPayloadReference::Join(reference) => RecoveryArtifactClosure::Join(reference),
+            RecoveryPayloadReference::Value(reference) => {
+                RecoveryArtifactClosure::ValueInterface(reference)
+            }
+        })
         .filter(|artifact| !graph.contains_artifact(artifact.artifact_id()))
         .collect())
 }

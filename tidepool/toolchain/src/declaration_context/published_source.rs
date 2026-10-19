@@ -1482,6 +1482,22 @@ mod tests {
 
     #[test]
     fn published_native_custody_does_not_require_dependency_namespace_originals() {
+        fn receipts_by_artifact<T>(
+            references: &[T],
+            artifact_id: impl Fn(&T) -> ArtifactId,
+        ) -> BTreeMap<ArtifactId, &T> {
+            let indexed = references
+                .iter()
+                .map(|reference| (artifact_id(reference), reference))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                indexed.len(),
+                references.len(),
+                "duplicate artifact receipt"
+            );
+            indexed
+        }
+
         let producer = [2; 32];
         let native = |module: &str, groups, version, requirements| {
             Arc::new(
@@ -1913,9 +1929,18 @@ mod tests {
                 // it does not change the frozen publication's namespace or roots.
             }
             let recovery_scratch = tempfile::tempdir().unwrap();
-            let (published_products, published_interfaces) = published
-                .materialize_recovery_products_and_interfaces(recovery_scratch.path())
-                .unwrap();
+            let (published_products, published_interfaces) = partition_native_recovery_references(
+                published
+                    .materialize_recovery_artifacts(
+                        recovery_scratch.path(),
+                        &published
+                            .artifact_view()
+                            .artifact_ids()
+                            .into_iter()
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
             let selection: crate::artifact_inventory::ArtifactGraphSelection =
                 serde_json::from_slice(
                     &serde_json::to_vec(&published.artifact_view().capture_graph_selection())
@@ -1980,16 +2005,35 @@ mod tests {
                     .materialize_module_interfaces(scratch.path())
                     .unwrap();
                 let reused_root = tempfile::tempdir().unwrap();
-                let (reused_products, reused_interfaces) = snapshot
-                    .materialize_recovery_products_and_interfaces(reused_root.path())
-                    .unwrap();
+                let (reused_products, reused_interfaces) = partition_native_recovery_references(
+                    snapshot
+                        .materialize_recovery_artifacts(
+                            reused_root.path(),
+                            &snapshot
+                                .artifact_view()
+                                .artifact_ids()
+                                .into_iter()
+                                .collect(),
+                        )
+                        .unwrap(),
+                );
+                let product_id = |reference: &RecoveryArtifactRef| {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(reference)
+                        .id
+                };
+                let interface_id = |reference: &recovery_artifacts::RecoveryModuleInterfaceRef| {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id
+                };
                 assert_eq!(
-                    serde_json::to_value(&reused_products).unwrap(),
-                    serde_json::to_value(&products).unwrap()
+                    receipts_by_artifact(&reused_products, product_id),
+                    receipts_by_artifact(&products, product_id),
                 );
                 assert_eq!(
-                    serde_json::to_value(&reused_interfaces).unwrap(),
-                    serde_json::to_value(&interfaces).unwrap()
+                    receipts_by_artifact(&reused_interfaces, interface_id),
+                    receipts_by_artifact(&interfaces, interface_id),
                 );
                 for interface in &reused_interfaces {
                     assert!(reused_root

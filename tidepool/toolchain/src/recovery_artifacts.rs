@@ -664,9 +664,22 @@ impl CertifiedValueInterface {
         root: &Path,
         work: &mut RecoveryArtifactWork,
     ) -> Result<RecoveryValueInterfaceRef, RecoveryArtifactError> {
+        with_artifact_work(work, |validation| {
+            self.materialize_with_validation(root, validation, MaterializationMode::Durable)
+        })
+    }
+
+    pub(crate) fn materialize_with_validation(
+        &self,
+        root: &Path,
+        validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
+    ) -> Result<RecoveryValueInterfaceRef, RecoveryArtifactError> {
         Ok(RecoveryValueInterfaceRef {
             artifact_id: self.artifact_id(),
-            interface: self.interface.materialize_with_work(root, work)?,
+            interface: self
+                .interface
+                .materialize_with_validation(root, validation, mode)?,
             requirements: self.requirements.clone(),
         })
     }

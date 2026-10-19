@@ -7611,9 +7611,14 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 "carrier-only acquisition must omit an offer's distinct group scope"
             );
             let scratch = tempfile::tempdir().unwrap();
-            let (products, interfaces) = context
-                .materialize_recovery_products_and_interfaces(scratch.path())
-                .unwrap();
+            let (products, interfaces) = partition_native_recovery_references(
+                context
+                    .materialize_recovery_artifacts(
+                        scratch.path(),
+                        &context.artifact_view().artifact_ids().into_iter().collect(),
+                    )
+                    .unwrap(),
+            );
             let recovered = RecoveredArtifactInventory::capture_bound(
                 scratch.path(),
                 &products,
@@ -7724,9 +7729,14 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     });
     let acquire = |context: &ExactDeclarationContext, path: &Path| {
         std::fs::create_dir_all(path).unwrap();
-        let (products, interfaces) = context
-            .materialize_recovery_products_and_interfaces(path)
-            .unwrap();
+        let (products, interfaces) = partition_native_recovery_references(
+            context
+                .materialize_recovery_artifacts(
+                    path,
+                    &context.artifact_view().artifact_ids().into_iter().collect(),
+                )
+                .unwrap(),
+        );
         let graph = context.snapshot().graph_selection().unwrap();
         RecoveredArtifactInventory::capture_bound(
             path,
@@ -8152,9 +8162,14 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         let receipt = hydrate_context(&store, receipt.root()).unwrap();
                         let path = root.path().join(format!("recovery-{histories}"));
                         std::fs::create_dir_all(&path).unwrap();
-                        let (products, interfaces) = context
-                            .materialize_recovery_products_and_interfaces(&path)
-                            .unwrap();
+                        let (products, interfaces) = partition_native_recovery_references(
+                            context
+                                .materialize_recovery_artifacts(
+                                    &path,
+                                    &context.artifact_view().artifact_ids().into_iter().collect(),
+                                )
+                                .unwrap(),
+                        );
                         let graph = context.snapshot().graph_selection().unwrap();
                         let recovered = RecoveredArtifactInventory::capture_bound(
                             &path,
