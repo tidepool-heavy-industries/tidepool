@@ -194,6 +194,14 @@ update independent oracles and run matched frozen workloads. No periodic polling
 or speculative native successor is scheduled. The final storage analysis still
 waits for all campaign frontiers to settle.
 
+The accepted Rust-client migration extends this gate to ordinary cell preparation,
+actual successor publication and lifecycle/recovery, not only query improvement.
+The matrix and work map now inventory current reconstruction callsites and require
+final migrated/distinct-runtime/unsupported/deleted dispositions. Fixed query and
+appended-cell histories both measure growing unrelated history, including publication.
+Cold first capture may visit primary facts once but cannot merge historical support
+into the current namespace. The frozen native conflict remains independently required.
+
 ## Resources and next events
 
 ROOT's owner-safe retirement materially recovered storage. The installed

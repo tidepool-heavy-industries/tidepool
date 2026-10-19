@@ -287,3 +287,27 @@ when their then-pending qualification status has since advanced):
 - [b108 preparation mapping](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-joined-v2-preparation/WORK-MAP.md), [actual stage table](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-joined-v2-b108-actual/STAGE-TABLE.md).
 - [Entry-carry planning report (18.219/12.013 provenance limit above)](/srv/swarm/evidence/inanna/overnight-release-20261018/postcompiler-entry-carry-proposal.md).
 - [Admission-tail timer review](/srv/swarm/evidence/inanna/overnight-release-20261018/admission-tail-instrumentation-review.md), [four-parcel source review](/srv/swarm/evidence/inanna/overnight-release-20261018/boundary-contract-coverage/admission-tail-review-20261019.json).
+
+## Required actor client migration: callsite dispositions
+
+The accepted Rust-client migration requires ordinary cells, successors and recovery,
+not only a faster query. This inventory is inspected at exact `278cd12c95` (the
+owning production trees match `f088e3e783`). It establishes open migration work;
+none of these rows claims the proposed service client is implemented.
+
+| Consumer | Existing production owner / reconstruction | Required final disposition and evidence |
+| --- | --- | --- |
+| Native and notebook lookup | Actor `resident_workbench::actor_compile_view` / `inspect_actor_batch`; runtime `capture_inspection_inputs`; toolchain `ModuleCandidateOffer::select_inspection_for_with_catalog` extends all retained checked values | Migrate compiler questions through the published-session client. Located exact type proofs may answer without a worker call; retain current logical world and provenance. Exact frozen catalog-backed conflict remains a separate required regression. |
+| Ordinary cells | Runtime `session::admission` captures value interfaces for admission; `session::turn::compile_cell_program_admitted_inner`; toolchain `select_cell_program` builds checked-value context | Migrate preparation through actual authored changes and required references. Measure fixed appended-cell and publication work as unrelated history grows; no cache-initializer or commit-time full reconstruction. |
+| Declaration-only preparation | Same ordered program path, with zero native items and lazy P6 support | Migrate the compiler preparation demand; retain ordered visibility and observed zero native-support construction when enabled. Do not add a mandatory separate expression pre-check. |
+| Renderer specialization | Actor activation-preview preparation; captured original type/instance environment; runtime original execution and dictionary admission | Classify compiler specialization through the common client separately from intentionally distinct runtime certificate, native and machine admission. Removing those authority checks is not migration. |
+| Startup | Actor/source bootstrap and ordinary checked program preparation | Use one published source/profile/binding owner; verify real scaffolded shared-source Persona and exact native dependencies. No historical direct-run substitution for frozen evidence. |
+| Fork and reload | Existing session/publication and generation fence owners; source-context capture | Publish coherent world/bindings per branch or generation after clean END; preserve independent actor worlds and explicit partial/uncertain outcomes. Classify every surviving old compiler front. |
+| Recovery and eviction | Existing durable exact-context materializer/acquisition and session restoration | Version/refuse obsolete authority explicitly; restore the same logical world and captured source absence without live rereads or source/effect replay. Encoding components may remain only with a justified distinct producer. |
+
+Final dispositions must be source-backed: **migrated**, **intentionally distinct
+runtime consumer**, **explicitly unsupported profile**, or **obsolete/deleted**.
+Supported unclassified reconstruction routes remain blockers. Cold first capture
+may visit the primary snapshot once; historical binding support stays separate from
+current compiler selection. The fixed query and appended-cell measurements include
+successor and durable publication work. Query-only success is partial delivery.
