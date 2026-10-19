@@ -609,6 +609,109 @@ mod tests {
     }
 
     #[test]
+    fn typed_initial_publication_retains_external_claim_through_visibility() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        let world = BootstrapWorld::new(Some(parent.clone()));
+        let child = generation(
+            &mut session,
+            NotebookGenerationId::INITIAL,
+            world.prerequisite().clone(),
+        );
+        let mut publication = world.begin_publication(&child).unwrap();
+        let fence = parent.fence().unwrap();
+        assert_eq!(fence.pending_claims(), 1);
+        publication.visible(&child);
+        publication.confirmed();
+        assert_eq!(fence.pending_claims(), 0);
+        assert!(SourceDependency::World(world).claim().is_err());
+        let late_world = BootstrapWorld::new(Some(parent));
+        assert!(late_world.begin_publication(&child).is_err());
+    }
+
+    #[tokio::test]
+    async fn actual_compiler_ticket_retains_uncertainty_at_generation_fence() {
+        let mut session = PersistentSession::new(None, 1024);
+        let dependency = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        let services = crate::capabilities::WorkbenchServices::new();
+        let scope = services
+            .with_compiler_owner(super::super::CompilerCloseOwner::ActorLifecycle(
+                crate::RetainedActorExit::new(),
+            ))
+            .with_source_dependency(&SourceDependency::Generation(dependency.clone()));
+        let ticket = scope.admit_work().unwrap();
+        let fence = dependency.fence().unwrap();
+        assert_eq!(fence.pending_claims(), 1);
+        ticket.run(|close| {
+            close(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                    tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                        disconnect: None,
+                    },
+                ),
+            ))
+        });
+        assert!(matches!(
+            fence.wait_for_claims().await,
+            Err(GenerationAdmissionError::Unconfirmed { .. })
+        ));
+        assert!(fence.reopen().is_err());
+        assert!(scope.admit_work().is_err());
+    }
+
+    #[test]
+    fn source_callback_transfer_keeps_dependency_without_generation_metadata() {
+        let mut session = PersistentSession::new(None, 1024);
+        let dependency = generation(&mut session, NotebookGenerationId::INITIAL, None);
+        let actor = crate::ActorRef::first(crate::ActorId(71));
+        let placement = crate::ActorPlacement {
+            session: tidepool_repr::SessionId(71),
+            resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        };
+        let context = crate::ActorDescriptor::new("source", placement)
+            .with_source_dependency(SourceDependency::Generation(dependency.clone()))
+            .session_context(actor);
+        let from_context =
+            crate::request::sources::CallbackExecution::from_context(context.clone());
+        let execution = crate::request::sources::CallbackExecution {
+            context,
+            snapshot: Some(super::super::ActorRequestSnapshot::SourceCallback(
+                super::super::InstalledToolLease::source_callback_custody(
+                    actor,
+                    crate::CheckpointSourceLayer::default(),
+                    SourceDependency::Generation(dependency.clone()),
+                ),
+            )),
+            scope: None,
+        };
+        let recipient = crate::ActorDescriptor::new("recipient", placement)
+            .admit_independent_world()
+            .session_context(crate::ActorRef::first(crate::ActorId(72)));
+        let transferred = execution.transferred(recipient).unwrap();
+        assert!(transferred
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .generation()
+            .is_none());
+        assert!(transferred
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .same_owner(&dependency));
+        dependency.fence().unwrap();
+        assert!(transferred.admit_activation().is_err());
+        assert!(from_context.admit_activation().is_err());
+        assert!(transferred
+            .activation_context()
+            .source_dependency()
+            .claim()
+            .is_err());
+    }
+
+    #[test]
     fn typed_child_replacement_preserves_external_parent_only() {
         let mut session = PersistentSession::new(None, 1024);
         let parent = generation(&mut session, NotebookGenerationId::INITIAL, None);

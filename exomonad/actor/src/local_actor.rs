@@ -539,11 +539,16 @@ impl KernelContext {
             .resource_admission()
             .await
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
-        let mut reservation = self
-            .directory
-            .reserve_generation_worker(&dependency, self.identity, self.identity.incarnation)
-            .await
-            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let mut reservation = if lifetime == crate::WorkerLifetime::RunOwned {
+            self.directory
+                .reserve_generation_actor(&dependency, self.identity.incarnation)
+                .await
+        } else {
+            self.directory
+                .reserve_generation_worker(&dependency, self.identity, self.identity.incarnation)
+                .await
+        }
+        .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
         reservation.retain_parent_admission(admission);
         Ok(reservation)
     }
