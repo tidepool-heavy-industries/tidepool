@@ -1718,10 +1718,18 @@ impl RequestNativeAvailability {
         })
     }
 
+    /// Borrow already maintained durable row facts without observing or walking
+    /// the acquired rows. Cloning this persistent root is constant work.
+    pub(crate) fn persistent_facts(
+        &self,
+    ) -> &imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts> {
+        &self.1
+    }
+
     pub(crate) fn snapshot_facts(
         &self,
     ) -> Result<imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>, CompileError> {
-        Ok(self.1.clone())
+        Ok(self.persistent_facts().clone())
     }
 
     pub(crate) fn restore(
