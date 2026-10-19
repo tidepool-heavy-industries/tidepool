@@ -13810,6 +13810,21 @@ pub(crate) mod tests {
             }
             // Two actual selected decision owners conflict; broader offer custody alone
             // does not create a second selected choice.
+            let input_b = support
+                .native_offers()
+                .iter()
+                .find(|offer| *offer == &b)
+                .unwrap()
+                .clone();
+            assert_eq!(input_b, b);
+            assert_eq!(
+                input_b.issued_group_carriers().unwrap(),
+                b.issued_group_carriers().unwrap()
+            );
+            assert!(
+                !input_b.same_issuance(&b),
+                "recovery checked the same B proof through its own input issuer"
+            );
             let left_support =
                 issue_fixture_compiler_support(projection.clone(), left.clone()).unwrap();
             let joined = left_support.merge(&support);
@@ -13824,7 +13839,8 @@ pub(crate) mod tests {
                     joined.artifacts().capture_graph_selection().namespace,
                     left_support.artifacts().capture_graph_selection().namespace
                 );
-                assert_retained_offer("joined-current", 6, &joined, &b);
+                assert_eq!(joined.input_decisions(), left_support.input_decisions());
+                assert_retained_offer("joined-current", 6, &joined, &input_b);
             }
             assert_eq!(
                 right
