@@ -9846,6 +9846,22 @@ mod authored_publication_tests {
             } else {
                 original.mint_isolated_scope_with_lease().unwrap()
             };
+            let original_binding = (!shared_gate).then(|| {
+                source_action(&mut original, &source, |session, report| {
+                    let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                        &mut session.state,
+                        "originalRetained",
+                        872,
+                    );
+                    value.scope = source.scope();
+                    let id = value.id;
+                    session
+                        .state
+                        .bind_replacing_decls_in(source.scope(), vec![value], report)
+                        .unwrap();
+                    id
+                })
+            });
             let target = if shared_gate {
                 let scope = recipient.state.mint_scope_from_lease(&source).unwrap();
                 recipient.state.adopt_initial_notebook_scope(scope).unwrap()
@@ -9891,14 +9907,59 @@ mod authored_publication_tests {
             );
             assert!(recipient.state.scope_tree().is_live(target_scope));
             assert!(recipient.state.bindings().get(binding_id).is_some());
-            assert_eq!(
-                source
-                    .source_admission()
-                    .fence()
-                    .unwrap()
-                    .unconfirmed_claims(),
-                1
-            );
+            let source_fence = source.source_admission().fence().unwrap();
+            assert_eq!(source_fence.unconfirmed_claims(), 1);
+            if let Some(original_binding) = original_binding {
+                let original_scope = source.scope();
+                let original_gate = source.source_admission().clone();
+                let original_weak = Arc::downgrade(&source);
+                drop(source);
+                let _original_next = original.mint_isolated_scope_with_lease().unwrap();
+                assert!(
+                    original_weak.upgrade().is_some(),
+                    "original A's own session retains its last public lease through its own reap"
+                );
+                assert!(original.state.scope_tree().is_live(original_scope));
+                assert!(original.state.bindings().get(original_binding).is_some());
+                original.state.retire_scope(original_scope);
+                assert!(original_weak.upgrade().is_none());
+                assert!(original.state.bindings().get(original_binding).is_none());
+                assert!(
+                    target_weak.upgrade().is_some(),
+                    "retiring A does not release B's distinct uncertain custody"
+                );
+                assert!(recipient.state.bindings().get(binding_id).is_some());
+                assert_eq!(
+                    source_fence.unconfirmed_claims(),
+                    1,
+                    "explicit scope retirement does not certify the original END"
+                );
+                assert_eq!(
+                    original_gate.fence().err(),
+                    Some(super::super::SourceAdmissionError::Closed {
+                        scope: original_scope,
+                        phase: super::super::SourceAdmissionPhase::ScopeRetired
+                    })
+                );
+                let target_gate = target_weak.upgrade().unwrap().source_admission().clone();
+                let target_fence = target_gate.fence().unwrap();
+                assert_eq!(
+                    target_fence.unconfirmed_claims(),
+                    1,
+                    "explicit A retirement is not evidence of B END"
+                );
+                assert!(matches!(
+                    target_fence.reopen(),
+                    Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+                ));
+                recipient.state.retire_scope(target_scope);
+                assert!(target_weak.upgrade().is_none());
+                assert!(recipient.state.bindings().get(binding_id).is_none());
+                drop(_next);
+                drop(recipient);
+                assert!(owner_weak.upgrade().is_none());
+                continue;
+            }
             recipient.state.retire_scope(target_scope);
             assert!(
                 target_weak.upgrade().is_none(),
@@ -9931,6 +9992,379 @@ mod authored_publication_tests {
                 "session teardown leaves no metadata self-cycle"
             );
         }
+    }
+
+    #[test]
+    fn retiring_foreign_captured_scope_with_same_numeric_id_keeps_original_live() {
+        let (_original_root, mut original) = startup_session();
+        let (_recipient_root, mut recipient) = startup_session();
+        let source = original.mint_isolated_scope_with_lease().unwrap();
+        let original_binding = source_action(&mut original, &source, |session, report| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "foreignOriginal",
+                873,
+            );
+            value.scope = source.scope();
+            let id = value.id;
+            session
+                .state
+                .bind_replacing_decls_in(source.scope(), vec![value], report)
+                .unwrap();
+            id
+        });
+        // Real capture uses the original source owner while minting recipient
+        // placement; the numeric scope coincidence conveys no authority.
+        let captured = source_action(&mut recipient, &source, |session, _| {
+            let scope = session.state.mint_scope(ScopeId::ROOT).unwrap();
+            session.state.adopt_initial_notebook_scope(scope).unwrap()
+        });
+        assert_eq!(captured.scope(), source.scope());
+        assert!(captured
+            .source_admission()
+            .same_owner(source.source_admission()));
+        let native_roots = original.state.persistent_roots_count();
+        let recipient_binding = source_action(&mut recipient, &source, |session, report| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "foreignRecipient",
+                874,
+            );
+            value.scope = captured.scope();
+            let id = value.id;
+            session
+                .state
+                .bind_replacing_decls_in(captured.scope(), vec![value], report)
+                .unwrap();
+            let fence = source.source_admission().fence().unwrap();
+            assert_eq!(
+                fence.pending_claims(),
+                1,
+                "distinct lexical owners sharing a gate earn only one gate claim"
+            );
+            fence.reopen().unwrap();
+            id
+        });
+        recipient.state.retire_scope(captured.scope());
+        assert!(recipient.state.bindings().get(recipient_binding).is_none());
+        assert!(original.state.bindings().get(original_binding).is_some());
+        assert_eq!(original.state.persistent_roots_count(), native_roots);
+        assert!(source.validate_source_issuer().is_ok());
+        drop(
+            source
+                .source_admission()
+                .admit()
+                .expect("foreign retirement leaves original gate open"),
+        );
+        drop(recipient);
+        assert!(captured.validate_source_issuer().is_err());
+        assert!(source.validate_source_issuer().is_ok());
+        assert!(original.state.scope_tree().is_live(source.scope()));
+        assert!(original.state.bindings().get(original_binding).is_some());
+        assert_eq!(original.state.persistent_roots_count(), native_roots);
+        drop(
+            source
+                .source_admission()
+                .admit()
+                .expect("foreign session teardown leaves original gate open"),
+        );
+    }
+
+    #[test]
+    fn real_owner_transfer_refuses_stale_cell_source_under_unrelated_open_owner() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, PersistentSession,
+            PublicManifestCommit, RecoveryPublicOwner, RecoveryRunAuthority,
+            RecoverySuccessorAuthority, SourceImports, TemplateSelector,
+        };
+        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tracing_subscriber::prelude::*;
+
+        struct Successor {
+            run: Arc<crate::session::recovery_test_fixture::TestRunOwner>,
+            predecessor: RecoveryPublicOwner,
+            successor: RecoveryPublicOwner,
+            session: SessionId,
+            scope: ScopeId,
+        }
+        impl RecoverySuccessorAuthority for Successor {
+            fn validate_successor(
+                &self,
+                root: &Path,
+                predecessor: &RecoveryPublicOwner,
+                successor: &RecoveryPublicOwner,
+                session: SessionId,
+                scope: ScopeId,
+            ) -> std::io::Result<bool> {
+                Ok(self.run.owns_run(root)?
+                    && predecessor == &self.predecessor
+                    && successor == &self.successor
+                    && session == self.session
+                    && scope == self.scope)
+            }
+        }
+        #[derive(Clone, Default)]
+        struct ProducerObservation {
+            preparation: Arc<AtomicUsize>,
+            requests: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ProducerObservation {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attrs.metadata().name() == "cell_program.prepare" {
+                    self.preparation.fetch_add(1, Ordering::SeqCst);
+                }
+                if attrs.metadata().target() == "tidepool_extract_cmd::endpoint"
+                    && attrs.metadata().name() == "compile_request"
+                {
+                    self.requests.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        tidepool_testing::eval_harness::require_extract();
+        let durable = tempfile::tempdir().unwrap();
+        let recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::create(durable.path());
+        let compiler = durable.path().join("compiler");
+        let owner = |incarnation| {
+            RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/source-epoch").unwrap(),
+                incarnation,
+            )
+            .unwrap()
+        };
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let library = |id| {
+            let mut lib = SessionLib::open(id, &compiler, ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+            tidepool_testing::with_settlement(|report| recovery.attach_root(&mut lib, report))
+                .unwrap();
+            lib
+        };
+        {
+            let mut producer = PersistentSession::new(Some(library(SessionId(4503))), 1024 * 1024);
+            let public = producer.mint_isolated_scope();
+            assert!(matches!(
+                producer
+                    .initialize_durable_public_scope(owner(1), public)
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            ));
+        }
+        let mut original = TestSession::unbootstrapped(
+            frunk::HNil,
+            EmptyOutput,
+            1024 * 1024,
+            Some(library(SessionId(4504))),
+        );
+        let source = original.mint_isolated_scope_with_lease().unwrap();
+        let view = original.compile_view_in(source.scope()).unwrap();
+        let imports = view.turn_imports(&SourceImports::new());
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "_ <- pure ()".into(),
+            template_source: resident_cell_check_template(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            ),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let includes = view.include_paths(effects.include_paths());
+        let admitted = original
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &includes,
+                        report,
+                    )
+                    .unwrap();
+                    session
+                        .admit_native_setup_cell_in(
+                            source.scope(),
+                            plan,
+                            Arc::new(specification.clone()),
+                            specification.specification_digest(),
+                            [1; 32],
+                            includes,
+                            None,
+                        )
+                        .unwrap()
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(admitted.close(), crate::CompilerTransactionClose::Clean),
+            "actual parsed setup must settle cleanly: {:?}",
+            admitted.close()
+        );
+        let admission = admitted.into_outcome().action;
+        let (_recipient_root, mut recipient) = startup_session();
+        let unrelated = recipient.mint_isolated_scope_with_lease().unwrap();
+        let observation = ProducerObservation::default();
+        let subscriber = tracing_subscriber::registry().with(observation.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let positive = unrelated
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |transaction, report| {
+                        super::super::turn::prepare_cell_program_admitted(
+                            transaction,
+                            admission.clone(),
+                            report,
+                        )
+                    },
+                )
+                .unwrap();
+            assert!(
+                positive.action().is_ok(),
+                "actual open A cell producer: {:?}",
+                positive.action().as_ref().err()
+            );
+            assert!(
+                matches!(positive.close(), crate::CompilerTransactionClose::Clean),
+                "positive actual GHC producer must settle cleanly: {:?}",
+                positive.close()
+            );
+            assert_eq!(
+                observation.preparation.load(Ordering::SeqCst),
+                1,
+                "positive control enters actual scratch/worker preparation"
+            );
+            assert!(observation.requests.load(Ordering::SeqCst) > 0);
+            drop(positive);
+            let before_preparation = observation.preparation.load(Ordering::SeqCst);
+            let before_requests = observation.requests.load(Ordering::SeqCst);
+            let original_before = original
+                .public_visibility_snapshot_in(source.scope())
+                .unwrap();
+            original
+                .seal_recovery_initialization_scope(source.scope())
+                .unwrap();
+            assert!(matches!(
+                original
+                    .transfer_recovered_public_owner(
+                        &owner(1),
+                        owner(2),
+                        source.scope(),
+                        Arc::new(Successor {
+                            run: recovery.owner.clone(),
+                            predecessor: owner(1),
+                            successor: owner(2),
+                            session: SessionId(4504),
+                            scope: source.scope(),
+                        }),
+                    )
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            ));
+            let transferred = original
+                .public_visibility_snapshot_in(source.scope())
+                .unwrap();
+            assert_eq!(transferred.epoch, original_before.epoch + 1);
+            assert!(original.state.scope_tree().is_live(source.scope()));
+            assert!(matches!(
+                source.validate_source_issuer(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert!(matches!(
+                admission.source_lease().validate_source_issuer(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            drop(admission.source_lease().source_admission().admit().expect(
+                "real transfer invalidates the exact issuer even while its raw gate stays open",
+            ));
+            let before_exports = recipient.code_export_count();
+            let before_table = recipient.state.session_table().clone();
+            let before_public = recipient.public_visibility_snapshot_in(unrelated.scope());
+            let refused = unrelated
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |transaction, report| {
+                        super::super::turn::prepare_cell_program_admitted(
+                            transaction,
+                            admission,
+                            report,
+                        )
+                    },
+                )
+                .unwrap();
+            let failure = refused
+                .action()
+                .as_ref()
+                .err()
+                .expect("real transferred A must refuse under unrelated valid B");
+            assert_eq!(
+                failure.source_admission,
+                Some(super::super::SourceAdmissionError::StaleSourceLease)
+            );
+            assert!(matches!(
+                refused.close(),
+                crate::CompilerTransactionClose::NotStarted
+            ));
+            assert_eq!(
+                observation.preparation.load(Ordering::SeqCst),
+                before_preparation,
+                "stale issuer refuses before scratch producer"
+            );
+            assert_eq!(
+                observation.requests.load(Ordering::SeqCst),
+                before_requests,
+                "stale issuer starts no worker request"
+            );
+            assert_eq!(recipient.code_export_count(), before_exports);
+            assert_eq!(recipient.state.session_table(), &before_table);
+            assert_eq!(
+                recipient.public_visibility_snapshot_in(unrelated.scope()),
+                before_public
+            );
+            assert!(unrelated.validate_source_issuer().is_ok());
+            drop(unrelated.source_admission().admit().unwrap());
+            let entered = std::cell::Cell::new(false);
+            let stale_entry = source.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |_, _| entered.set(true),
+            );
+            assert!(matches!(
+                stale_entry,
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert!(!entered.get());
+        });
     }
 
     fn source_action<T>(
