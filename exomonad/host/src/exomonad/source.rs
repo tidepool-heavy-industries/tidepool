@@ -2178,6 +2178,63 @@ mod tests {
     }
 
     #[test]
+    fn compiler_source_capture_preserves_ordered_different_body_owners() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, _) = workspace_with("module Project.Work where\nwork = 1\n");
+        let authored = project.path().join(".exomonad");
+        let a = b"module Public.Choice where\nvalue :: Int\nvalue = 1\n";
+        let b = b"module Public.Choice where\nvalue :: Bool\nvalue = False\n";
+        for (root, bytes) in [("a", a.as_slice()), ("b", b.as_slice())] {
+            std::fs::create_dir_all(authored.join(root).join("Public")).unwrap();
+            std::fs::write(authored.join(root).join("Public/Choice.hs"), bytes).unwrap();
+        }
+        let mut captures = Vec::new();
+        for order in [["a", "b"], ["b", "a"]] {
+            std::fs::write(
+                authored.join("config.toml"),
+                format!(
+                    "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['{}', '{}']\nmodules = ['Public.Choice']\n",
+                    order[0], order[1]
+                ),
+            )
+            .unwrap();
+            let run = Arc::new(tempfile::tempdir().unwrap());
+            let mut frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+            frozen.catalog_selection =
+                tidepool_toolchain::toolchain::CatalogSelection::Acquired(None);
+            let reload = ExomonadSourceReload::new_owned(
+                frozen,
+                project.path().to_path_buf(),
+                run.path().to_path_buf(),
+                crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+                SourceRootOwner::Temporary(run),
+            )
+            .unwrap();
+            let source = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+            captures.push(source.capture_compiler_sources().unwrap().unwrap());
+        }
+        let ordered_bodies =
+            |sources: &tidepool_toolchain::compiler_world::CapturedCompilerSources| {
+                sources
+                    .roots()
+                    .iter()
+                    .filter_map(|root| root.bodies.get(Path::new("Public/Choice.hs")).cloned())
+                    .collect::<Vec<_>>()
+            };
+        let first = ordered_bodies(&captures[0]);
+        let reordered = ordered_bodies(&captures[1]);
+        assert_eq!(
+            first.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            [a.as_slice(), b.as_slice()]
+        );
+        assert_eq!(
+            reordered.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            [b.as_slice(), a.as_slice()]
+        );
+        assert_ne!(captures[0].seal(), captures[1].seal());
+    }
+
+    #[test]
     fn checkpoint_source_capsule_refuses_foreign_issuer_and_edited_observations() {
         use exomonad_actor::ActorSourceLayers;
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");

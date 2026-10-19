@@ -730,8 +730,9 @@ impl DeploymentModulePackage {
         &self.catalog.source_selection
     }
 
-    /// Restrict filename-based world lookup to the catalog's actual first
-    /// source choices in this captured namespace. This issues no native grant.
+    /// Require catalog targets to be representable in their own declared
+    /// namespace. The captured root order independently selects query sources;
+    /// this check issues neither that selection nor a native grant.
     pub fn validate_captured_source_lookup(
         &self,
         roots: &[PathBuf],
@@ -777,28 +778,28 @@ impl DeploymentModulePackage {
             let relative = PathBuf::from(record.module.replace('.', "/"));
             let ordinary = relative.with_extension("hs");
             let literate = relative.with_extension("lhs");
-            let mut winner = None;
-            for (root, files) in roots.iter().zip(manifests) {
-                let ordinary_exists = files.contains_path(&ordinary);
-                let literate_exists = files.contains_path(&literate);
-                if ordinary_exists && literate_exists {
-                    return Err(ModulePackageError::Format(
-                        "ambiguous catalog source suffix",
-                    ));
-                }
-                if ordinary_exists || literate_exists {
-                    winner = Some(root.join(if ordinary_exists {
-                        &ordinary
-                    } else {
-                        &literate
-                    }));
-                    break;
-                }
-            }
-            if winner.as_deref() != Some(record.source.as_path()) {
+            let Some(root) = catalog_roots.iter().find(|root| {
+                record.source == root.join(&ordinary) || record.source == root.join(&literate)
+            }) else {
                 return Err(ModulePackageError::Format(
-                    "unrepresentable catalog source winner",
+                    "unrepresentable catalog source target",
                 ));
+            };
+            let position = roots.iter().position(|candidate| candidate == root).ok_or(
+                ModulePackageError::Format("captured catalog source root order"),
+            )?;
+            let files = &manifests[position];
+            let ordinary_exists = files.contains_path(&ordinary);
+            let literate_exists = files.contains_path(&literate);
+            if ordinary_exists && literate_exists {
+                return Err(ModulePackageError::Format(
+                    "ambiguous catalog source suffix",
+                ));
+            }
+            if !(ordinary_exists && record.source == root.join(&ordinary)
+                || literate_exists && record.source == root.join(&literate))
+            {
+                return Err(ModulePackageError::Format("missing catalog source target"));
             }
         }
         Ok(())
@@ -1986,7 +1987,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_catalog_lookup_requires_actual_first_source_winner() {
+    fn captured_catalog_lookup_preserves_independent_current_source_selection() {
         fn manifests(roots: &[PathBuf]) -> Vec<crate::cache::SourceRootManifest> {
             roots
                 .iter()
@@ -2018,16 +2019,24 @@ mod tests {
         ));
 
         let shadow = tempfile::tempdir().unwrap();
-        fs::write(shadow.path().join("Library.hs"), "module Library where\n").unwrap();
+        fs::write(
+            shadow.path().join("Library.hs"),
+            "module Library where\nvalue = False\n",
+        )
+        .unwrap();
         let shadowed = std::iter::once(shadow.path().to_owned())
             .chain(roots.iter().cloned())
             .collect::<Vec<_>>();
-        assert!(matches!(
-            package.validate_captured_source_lookup(&shadowed, &manifests(&shadowed)),
-            Err(ModulePackageError::Format(
-                "unrepresentable catalog source winner"
-            ))
-        ));
+        let shadowed_manifests = manifests(&shadowed);
+        package
+            .validate_captured_source_lookup(&shadowed, &shadowed_manifests)
+            .unwrap();
+        let selected_source = shadowed[0].join("Library.hs");
+        assert_ne!(selected_source, package.records[0].source);
+        assert_ne!(
+            fs::read(selected_source).unwrap(),
+            fs::read(&package.records[0].source).unwrap()
+        );
 
         let mut reordered = roots.clone();
         reordered.swap(0, 1);
@@ -2060,7 +2069,7 @@ mod tests {
         assert!(matches!(
             package.validate_captured_source_lookup(&roots, &manifests(&roots)),
             Err(ModulePackageError::Format(
-                "unrepresentable catalog source winner"
+                "unrepresentable catalog source target"
             ))
         ));
     }
