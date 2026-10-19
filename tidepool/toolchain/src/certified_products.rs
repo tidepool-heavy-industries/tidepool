@@ -13729,6 +13729,264 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn completed_request_retained_generation_history_uses_exact_input_permissions() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
+            CompilerInputProjection, ExactArtifactSelection, IssuedNativeOffer,
+            NativeArtifactDemand, NativeGroupKey, NativeOriginalRequirement,
+        };
+        use crate::declaration_context::{
+            issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
+            ExactDeclarationContext, OriginalCompilerInputs, RequestNativeAvailability,
+            RetainedGenerationPolicy,
+        };
+        let producer_bytes = b"request-retained-generations";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let retained = |generation: u64, occurrence: &str| SymbolIdentity {
+            unit: "main".into(),
+            module: format!("Tidepool.Session.Val.G{generation}"),
+            namespace: "value".into(),
+            occurrence: occurrence.into(),
+            record_parent: None,
+        };
+        let generation_one = retained(1, "x");
+        let generation_two = retained(2, "y");
+        let raw = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "RequestRetainedBody",
+                vec![
+                    (
+                        7,
+                        vec![PendingImportOwner::Retained {
+                            identity: generation_two.clone(),
+                            generation: 2,
+                        }],
+                    ),
+                    (
+                        9001,
+                        vec![PendingImportOwner::Retained {
+                            identity: generation_one.clone(),
+                            generation: 1,
+                        }],
+                    ),
+                ],
+                36,
+                &BTreeMap::new(),
+                b"retained request interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let product = recovered_witness_fixtures(&[raw]).remove(0).product;
+        let original =
+            Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
+        let mut interfaces = vec![Arc::new(ArtifactEntry::canonical(
+            product.module_interface().unwrap().clone(),
+        ))];
+        interfaces.extend(
+            [&generation_one, &generation_two]
+                .into_iter()
+                .map(|binder| {
+                    Arc::new(ArtifactEntry::canonical(fixture_module_interface(
+                        producer.sha256(),
+                        &binder.unit,
+                        &binder.module,
+                        BTreeMap::new(),
+                    )))
+                }),
+        );
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), interfaces.clone())
+            .unwrap();
+        let support = issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&interfaces).unwrap(),
+            view,
+        )
+        .unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap(),
+        );
+        let before = context.artifact_view().capture_graph_selection();
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(context.clone())
+            .prepare_compilation(&root.path().join("input"), producer_bytes)
+            .unwrap();
+        let input = request.compiler_inputs();
+        let operation = InventoryOperation::new(Default::default());
+        let mut selection =
+            CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
+        selection
+            .admit_current(
+                product.owner(),
+                ProductOrigin::RetainedCore,
+                product.module_interface().unwrap(),
+                &operation,
+            )
+            .unwrap();
+        let physical = input
+            .artifacts()
+            .inventory()
+            .admit_shared_with_demand(
+                input.artifacts(),
+                vec![original.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let closed =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed)
+                .unwrap();
+        let full = closed
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == original.descriptor.id)
+            .unwrap()
+            .clone();
+        assert!(full.is_full());
+        assert!(closed.artifacts().selected_native_groups().is_empty());
+        let partial = closed
+            .artifacts()
+            .inventory()
+            .admit_recovery_selection(
+                &closed.artifacts().inventory().empty_view(),
+                closed.artifacts().entries(),
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: original.descriptor.id,
+                    original_ordinal: 7,
+                }]),
+            )
+            .unwrap();
+        let partial_offer = IssuedNativeOffer::issue(
+            original.descriptor.id,
+            &partial,
+            Some(
+                NativeOriginalRequirement::from_selected_view(original.descriptor.id, &partial)
+                    .unwrap()
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(!partial_offer.is_full());
+        let empty = closed
+            .artifacts()
+            .inventory()
+            .admit_shared_with_demand(
+                &closed.artifacts().inventory().empty_view(),
+                closed.artifacts().entries(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let empty_offer = IssuedNativeOffer::issue(original.descriptor.id, &empty, None).unwrap();
+        for (label, view, offer, expected_one, expected_two) in [
+            ("full", closed.artifacts().clone(), full, Some(1), Some(2)),
+            ("partial", partial, partial_offer, None, Some(2)),
+            ("empty", empty, empty_offer, None, None),
+        ] {
+            let availability = RequestNativeAvailability::issue_checked(
+                closed.projection(),
+                &view,
+                std::slice::from_ref(&offer),
+            )
+            .unwrap();
+            let row = availability
+                .rows()
+                .find(|row| row.original_owner() == product.owner())
+                .unwrap();
+            assert_eq!(row.permits(7), expected_two.is_some(), "{label}");
+            assert_eq!(row.permits(9001), expected_one.is_some(), "{label}");
+            let mut graph = view.capture_graph_selection();
+            let namespace = graph.namespace.clone();
+            let execution = graph
+                .roots
+                .iter()
+                .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
+                .copied()
+                .collect::<Vec<_>>();
+            graph.roots.retain(|root| !execution.contains(root));
+            graph.custody_roots.extend(execution);
+            graph.custody_roots.sort();
+            graph.custody_roots.dedup();
+            let view = view
+                .select_issued(
+                    namespace.iter().map(|binding| binding.artifact).collect(),
+                    &ExactArtifactSelection::from_recovered_graph_selection(graph),
+                )
+                .unwrap();
+            let support =
+                recover_fixture_compiler_support(closed.projection().clone(), view, [offer])
+                    .unwrap()
+                    .retain_normalized_availability(&availability)
+                    .unwrap()
+                    .for_source_owners(&BTreeSet::new())
+                    .unwrap();
+            assert!(support
+                .projection()
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(support.artifacts().selected_native_groups().is_empty());
+            let private = OriginalCompilerInputs::from_issued_support(&support);
+            let request = ExactCompileContext::new(context.clone())
+                .prepare_compilation_with_private_input(
+                    &root.path().join(label),
+                    producer_bytes,
+                    None,
+                    Some(private),
+                )
+                .unwrap();
+            assert!(request.groups.is_empty(), "{label}");
+            assert!(request
+                .compiler_inputs()
+                .artifacts()
+                .selected_native_groups()
+                .is_empty());
+            for (policy, expected) in [
+                (
+                    RetainedGenerationPolicy::PreserveCertifiedDemand,
+                    [expected_one, expected_two],
+                ),
+                (
+                    RetainedGenerationPolicy::PureActivationPreview,
+                    [None, None],
+                ),
+            ] {
+                let mut command = tidepool_extract_cmd::ExtractCmd::with_bin(
+                    tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(
+                        "unused-fixture-extractor",
+                    ),
+                );
+                command.input("unused-fixture-input.hs");
+                request.apply_to(&mut command, policy).unwrap();
+                let decoded =
+                    tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes()).unwrap();
+                for (identity, expected) in
+                    [&generation_one, &generation_two].into_iter().zip(expected)
+                {
+                    let key = tidepool_extract_cmd::SymbolIdentity {
+                        unit: identity.unit.clone(),
+                        module: identity.module.clone(),
+                        namespace: identity.namespace.clone(),
+                        occurrence: identity.occurrence.clone(),
+                        record_parent: identity.record_parent.clone(),
+                    };
+                    assert_eq!(
+                        decoded.retained_generations().get(&key).copied(),
+                        expected,
+                        "{label}"
+                    );
+                }
+                if matches!(policy, RetainedGenerationPolicy::PureActivationPreview) {
+                    assert!(decoded.retained_generations().is_empty());
+                }
+            }
+            assert_eq!(context.artifact_view().capture_graph_selection(), before);
+        }
+    }
+
+    #[test]
     fn completed_type_output_preserves_baseline_original_permissions() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
