@@ -994,7 +994,7 @@ impl CompilerSourceSupport {
                 offers.push(IssuedNativeOffer::issue(original, &artifacts, proof)?);
             }
         }
-        Self::new(
+        Self::new_with_native_facts(
             projection.clone(),
             artifacts.clone(),
             offers.clone(),
@@ -1003,11 +1003,9 @@ impl CompilerSourceSupport {
                 &artifacts,
                 &offers,
             )?,
+            input_decisions,
+            None,
         )
-        .and_then(|mut support| {
-            support.input_decisions = input_decisions;
-            support.refreshed_native_facts()
-        })
     }
 
     /// Observe issued canonical interfaces while preserving compiler roles and
@@ -1473,22 +1471,22 @@ impl CompilerSourceSupport {
         let offers = selection
             .issued_native_availability()
             .flat_map(|availability| availability.offers().cloned());
-        self.rebuild(
+        let incoming_rows =
+            crate::declaration_context::RequestNativeAvailability::from_issued_rows(
+                selection.issued_native_availability().cloned(),
+            )?;
+        let availability = match self.native_availability.merge(&incoming_rows)? {
+            crate::declaration_context::NativeAvailabilityMerge::Unchanged(rows)
+            | crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => rows,
+        };
+        Self::new_with_native_facts(
             projection,
             artifacts,
             self.native_offers.iter().cloned().chain(offers),
+            availability,
+            decisions,
+            self.native_fact_owner.as_ref(),
         )
-        .and_then(|support| {
-            support.retain_normalized_availability(
-                &crate::declaration_context::RequestNativeAvailability::from_issued_rows(
-                    selection.issued_native_availability().cloned(),
-                )?,
-            )
-        })
-        .and_then(|mut support| {
-            support.input_decisions = decisions;
-            support.refreshed_native_facts()
-        })
     }
 
     pub(crate) fn empty() -> Self {
@@ -1665,11 +1663,14 @@ impl CompilerSourceSupport {
             originals,
             &self.input_decisions,
         )?;
-        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
-            .and_then(|mut support| {
-                support.input_decisions = decisions;
-                support.refreshed_native_facts()
-            })
+        Self::new_with_native_facts(
+            projection,
+            artifacts,
+            self.native_offers.iter().cloned(),
+            self.native_availability.clone(),
+            decisions,
+            self.native_fact_owner.as_ref(),
+        )
     }
 
     #[tracing::instrument(
@@ -1911,23 +1912,21 @@ impl CompilerSourceSupport {
             .cloned();
         let mut projection = self.projection.clone();
         projection.admit_role(endorsement.owner().clone(), role.clone())?;
-        self.rebuild(
+        let mut decisions = self.input_decisions.for_exact_roles(&projection);
+        if let Some(mut fact) = carried {
+            // Only this checked endorsement carries the old role's choice to
+            // the published role. Install it before committing the fact root.
+            fact.role = role.clone();
+            decisions.facts.insert(endorsement.owner().clone(), fact);
+        }
+        Self::new_with_native_facts(
             projection,
             self.artifacts.clone(),
             self.native_offers.iter().cloned(),
+            self.native_availability.clone(),
+            decisions,
+            self.native_fact_owner.as_ref(),
         )
-        .and_then(|mut support| {
-            if let Some(mut fact) = carried {
-                // The endorsement above proves this specific role transition;
-                // generic role replacement cannot carry another role's choice.
-                fact.role = role.clone();
-                support
-                    .input_decisions
-                    .facts
-                    .insert(endorsement.owner().clone(), fact);
-            }
-            support.refreshed_native_facts()
-        })
     }
 
     pub(crate) fn select_support_roots(
@@ -3756,8 +3755,12 @@ mod tests {
                 let request = source.close_request(None, &Default::default()).unwrap();
                 assert_eq!(request.input_decisions, source.input_decisions);
                 let captured = PublicationNativeAuthority::capture(&request).unwrap();
-                let unchanged_work=take_native_fact_work();
-                assert_eq!(unchanged_work,NativeFactWork::default(),"actual unchanged close/capture work: {unchanged_work:?}");
+                let unchanged_work = take_native_fact_work();
+                assert_eq!(
+                    unchanged_work,
+                    NativeFactWork::default(),
+                    "actual unchanged close/capture work: {unchanged_work:?}"
+                );
                 assert!(Arc::ptr_eq(request.native_fact_owner(), &before));
                 assert!(Arc::ptr_eq(captured.facts(), &before));
             }
