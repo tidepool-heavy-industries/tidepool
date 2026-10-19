@@ -4500,6 +4500,10 @@ where
         &self,
         view: &super::SessionCompileView,
     ) -> Result<super::AdmittedInspectionInputs, SessionError> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::InspectionInputCapture,
+            1,
+        );
         let current = self
             .compile_view_in(view.lexical_scope())
             .ok_or(SessionError::DeadScope(view.lexical_scope()))?;

@@ -1632,9 +1632,17 @@ impl PersistentSession {
         &self,
         view: &super::SessionCompileView,
     ) -> Result<Vec<AdmittedValueInterface>, SessionError> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ValueInterfaceCapture,
+            1,
+        );
         view.reachable_values()
             .iter()
             .map(|module| {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::ReachableValueVisit,
+                    1,
+                );
                 let artifact = self
                     .retained_checked_value_artifact(*module)
                     .ok_or(SessionError::MissingRetainedValueInterface(*module))?;

@@ -962,6 +962,10 @@ impl ActorWorkbenchSource {
     }
 
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ActorSourcePrepare,
+            1,
+        );
         WorkbenchCompilation {
             preamble: scope.shadow_preamble(&hide_preamble_exports(
                 &self.preamble,
@@ -13067,6 +13071,10 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    tidepool_toolchain::timing::record_host_work(
+        tidepool_toolchain::timing::HostWorkCounter::ActorCompileViewCapture,
+        1,
+    );
     let session_view = session
         .compile_view_in(context.placement.lexical_scope)
         .ok_or_else(|| {
@@ -13806,6 +13814,10 @@ fn structured_provenance(
     source: &ActorWorkbenchSource,
     scope: tidepool_runtime::session::NameScope,
 ) -> tidepool_runtime::session::ScopeProvenance {
+    tidepool_toolchain::timing::record_host_work(
+        tidepool_toolchain::timing::HostWorkCounter::StructuredProvenance,
+        1,
+    );
     let prepared = source.prepare(compile_view);
     let generation = compile_view.next_value_generation().0;
     let mut fingerprint = blake3::Hasher::new();

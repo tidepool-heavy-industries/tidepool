@@ -279,6 +279,10 @@ impl SessionCompileView {
             "hiding": self.projection.staged_hiding.iter().map(|(module, hidden)| (module.module_name(), items(hidden))).collect::<Vec<_>>(),
             "exact": self.projection.exact_context.as_ref().map(|context| context.semantic_sha256()),
         })).expect("runtime view contains serializable identities");
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::CompileViewDigestInputByte,
+            bytes.len() as u64,
+        );
         (*blake3::hash(&bytes).as_bytes(), bytes.len())
     }
 
@@ -711,7 +715,13 @@ impl SessionCompileView {
     pub fn injected_module_names(&self) -> Vec<String> {
         self.injected_values
             .iter()
-            .map(SessionModule::module_name)
+            .map(|module| {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::PreparedInjectedNameVisit,
+                    1,
+                );
+                module.module_name()
+            })
             .collect()
     }
 
