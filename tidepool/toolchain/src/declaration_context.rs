@@ -22507,15 +22507,29 @@ mod tests {
         let product = support_product_with_interface("fixture", "Support", b"interface".to_vec());
         let owner = product.owner().clone();
         let certification = product.certification_bytes().to_vec();
+        let support = match support_offer(std::slice::from_ref(&product)) {
+            CompilerSupportFixture::Complete(inputs) => inputs.compiler_source_support().clone(),
+            CompilerSupportFixture::RecordedRoles { .. } => unreachable!("closed original output"),
+        };
+        let original = ArtifactEntry::original([2; 32], product.clone())
+            .unwrap()
+            .descriptor
+            .id;
         let context = ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
-            .extend_checked_original_products([2; 32], std::slice::from_ref(&product))
+            .extend_issued_compiler_support(&support)
             .unwrap();
+        assert_eq!(
+            context.compiler_input_projection().snapshot_roles()[&identity("fixture", "Support")]
+                .original(),
+            Some(original)
+        );
+        assert!(context.artifact_view().selected_native_groups().is_empty());
         assert!(context.lexical_graph().is_empty());
         assert_eq!(context.artifact_view().descriptors().len(), 2);
         let repeated = context
             .clone()
-            .extend_checked_original_products([2; 32], std::slice::from_ref(&product))
+            .extend_issued_compiler_support(&support)
             .unwrap();
         assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
         assert_eq!(repeated.artifact_view().inventory().node_count(), 2);
@@ -22526,13 +22540,8 @@ mod tests {
             Vec::new(),
             certification,
         );
-        assert!(context
-            .clone()
-            .extend_checked_original_products([2; 32], &[changed])
-            .is_err());
-        assert!(context
-            .extend_checked_original_products([99; 32], &[product])
-            .is_err());
+        assert!(ArtifactEntry::original([2; 32], changed).is_err());
+        assert!(ArtifactEntry::original([99; 32], product).is_err());
     }
 
     fn execution_entry(
@@ -23127,9 +23136,13 @@ mod tests {
         let second =
             scaffold_native_fixture(producer_sha256, "main", "Tidepool.Internal.Resume", 2);
         assert_eq!(first.module_interface(), second.module_interface());
+        let selected = match support_offer(std::slice::from_ref(&first)) {
+            CompilerSupportFixture::Complete(inputs) => inputs.compiler_source_support().clone(),
+            CompilerSupportFixture::RecordedRoles { .. } => unreachable!("closed original output"),
+        };
         let mut public = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(producer_sha256, &[first])
+            .extend_issued_compiler_support(&selected)
             .unwrap();
         {
             let updated = public
