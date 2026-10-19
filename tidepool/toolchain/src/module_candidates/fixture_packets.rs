@@ -253,9 +253,93 @@ fn admit_fixture_scope(
             crate::certified_products::validate_original_module_interface(product, canonical)
                 .expect("native custody must match its certified canonical module");
         }
-        context = context
-            .extend_checked_original_products(producer_sha, &native)
-            .unwrap();
+        let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
+            producer_sha,
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            &certified.value_interfaces,
+            None,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &certified.source_selection,
+            &physical,
+        )
+        .unwrap();
+        let closed =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap();
+        let requested = native_owners.iter().cloned().collect::<BTreeSet<_>>();
+        let selected = closed.source_support(&requested).unwrap();
+        assert_eq!(
+            selected
+                .projection()
+                .snapshot_roles()
+                .iter()
+                .filter_map(|(owner, role)| role.original().map(|_| owner.clone()))
+                .collect::<BTreeSet<_>>(),
+            requested
+        );
+        for product in &native {
+            let owner = ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            };
+            let original = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                producer_sha,
+                product,
+            );
+            assert_eq!(
+                selected.projection().snapshot_roles()[&owner].original(),
+                Some(original)
+            );
+            assert_eq!(
+                selected.native_availability().snapshot_facts().unwrap()[&original].mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+            let row = selected
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner() == product.owner())
+                .unwrap();
+            for group in crate::certified_products::original_available_groups(product).unwrap() {
+                assert!(row.permits(group.original_ordinal()));
+            }
+        }
+        let selected_ids = native
+            .iter()
+            .map(|product| {
+                crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                    producer_sha,
+                    product,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        for offer in selected
+            .native_offers()
+            .iter()
+            .filter(|offer| selected_ids.contains(&offer.original()))
+        {
+            for group in offer.issued_group_carriers().unwrap().into_keys() {
+                let row = selected
+                    .native_availability()
+                    .rows()
+                    .find(|row| {
+                        row.target_original(row.original_owner())
+                            .unwrap()
+                            .descriptor
+                            .id
+                            == group.binding.artifact()
+                    })
+                    .expect("actual selected output retains each required native child permission");
+                assert!(row.permits(group.original_ordinal));
+            }
+        }
+        assert!(selected.artifacts().selected_native_groups().is_empty());
+        context = context.extend_issued_compiler_support(&selected).unwrap();
+        assert!(context.artifact_view().selected_native_groups().is_empty());
     }
     context
 }
