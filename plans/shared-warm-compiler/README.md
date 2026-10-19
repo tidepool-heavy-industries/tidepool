@@ -1,14 +1,14 @@
 # Shared warm compiler: delivery plan
 
-Status: active implementation campaign. Reviewed host, input-custody and worker
-protocol tranches are integrated and joined verified; see [current status](STATUS.md)
-for exact source and evidence. The demand-service architecture amendment is
-accepted after bounded owner and independent review. Paired inspect/prepareCell contracts are accepted; the first actual service query
-and required ordinary-cell/publication/recovery migration are active. Canonical reload
-source ownership is now integrated with joined schema, lifecycle and notebook checks
-passed. Actual Rooted query tests still refuse cold acquisition; the canonical producer
-and retained-diagnostic repair is under native qualification. No service query or
-speedup is qualified.
+Status: active implementation campaign. Reviewed host, custody, worker and canonical
+reload foundations are integrated; see [current status](STATUS.md). Exact6f9 joined
+ten production/test/Haskell consumers,154 workflow cases, Rust2 and Haskell2 passed.
+Actual Rooted queries executed2: source-domain/reexport/absence history passed;
+the other case passed cold and initial hot queries before a fixture failure.
+Genuine frontend/growing-history controls, required ordinary-cell/publication/recovery
+migration and measured improvement remain unqualified. Paired inspect/prepareCell
+contracts are accepted; new-profile protocol and exact publication-owner repairs
+are actively implementing and compiling. No full Ready lifecycle or speedup is claimed.
 
 
 This directory is the handoff for a Sol supervision tree. Read this file, the

@@ -201,3 +201,20 @@ repaired at38b6 and independently source accepted by Reload; exact disposition:
 program passed;65 evidence hashes reconciled. This is bounded canonical foundation
 acceptance. R1/Form/R2 successors, actual compiler-world query, ordinary cells and
 performance remain independently unqualified.
+
+## Runtime query receiving checkpoint6f9
+
+Full b32→6f9 history independently source accepted, exact world blob319a/current
+frontier retained and Host old d7 duplicate discarded without unique code loss.
+Rooted-only declared resources and counted2 selectors preserved. Review receipt
+SHA2786a856e578a9b2675fc49c0a528a5e1b66684cf3b96bb35b72008b90faee6f;
+supervisor addendum SHAb052a7d455ec8fcc19ce24d03ffacfb71d9922849e7adfe39bcd73b4464ab808.
+An interim overbroad fresh-gate HOLD was withdrawn after direct owning-contract
+verification: passive receipt/cache and pure continuation retain custody; next source
+query still unconditionally admits originalA/targetB. No blanket admission was added.
+
+Exact joined ten-target compile and component controls passed, actual Rooted1PASS1FAIL;
+33 evidence hashes reconciled. The full source-domain case passed; fixture effects
+mismatch stopped first history before growing-history/frontend. SOURCE acceptance
+is not full query/ordinary-cell/force/frozen/performance acceptance. Current source,
+repair owners and terminal limits are in STATUS and campaign/query-join-6f9/TERMINAL.json.

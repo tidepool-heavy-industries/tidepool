@@ -188,10 +188,35 @@ Directory resource hashes and per-report cleanup/diagnostic limits remain explic
 No compiler-world query, ordinary-cell successor, force drain, frozen or performance
 acceptance follows from this checkpoint.
 
-Area evidence remains separate. Hosteea executed2 genuine Rooted bodies, both failed
-first Complete acquisition; process/compiler cleanup confirmed. Old575 startup
-cleanup remains UNKNOWN. Warm45f diagnostic+canonical producer source is accepted,
-six targets compiled1022local actions, and native controls are running; prior missing cold carrier prevents retrospective
-attribution of eea failure. Qualification passed actual quotation/pairing/catalog
-and NativeScope SOURCE boot consumer histories; its current fixture migration has
-remaining failures. Reload route/Form/retirement successors are outside38b6.
+## Joined runtime query checkpoint6f9a5ce876
+
+Full Warm319a plus Host345 histories are integrated. Independent b32→6f9 source
+review and its continuation-admission clarification are retained at
+`owned-inputs/source-lifetime/CAMPAIGN-JOIN-REVIEW-6f9a5c.md`,
+SHA2786a856e578a9b2675fc49c0a528a5e1b66684cf3b96bb35b72008b90faee6f.
+Campaign12699 completed all seven command phases: ten owning consumers passed
+1830local0remote/897.8s;154 workflow cases, Rust canonical producer/FD2 and
+Haskell SourceBoot/response2 passed. Actual Rooted2 executed1PASS1FAIL. The
+complete source-domain/reversed roots/reexport/captured absence/CAS history passed;
+first case cold Info and initial hot Info/Type passed, then unrelated-history
+scaffold failed missing Replies/Watches with Clean close. Growing-history,
+frontend/transfer/fence assertions were unreached. Native result is not full query acceptance.
+
+`campaign/query-join-6f9/TERMINAL.json` binds commands/source/reports;33 report,
+stream, executable and declared-resource hashes were reconciled before edits.
+Both Rooted process/compiler cleanup confirmed; diagnostic summaries truncated and
+directory resource hashes incomplete. Component compiler cleanup not_observed
+remains distinct. Actual Rust compiler and Buck cgroups were observed in build.slice;
+new scope cumulative peak11,001,368,576B does not cover independently scoped clients.
+Campaign14TOTAL/16growth released after terminal observation; idle daemon retained.
+
+Area successors remain separate: Hostdb1 fixes the effects row but its reordered
+frontend fails the real owned-source-capsule precondition; issuer/resolver fixture
+repair is owned, no guard waiver. New-profile945 worker failed missing schema dynamic
+interface before tests; owning Cabal flag repair is accepted for actual recompile.
+Qualification's actual Request-owned native permission and full pairing passed;
+publication graph re-expansion by later offers is confirmed with whole-context
+oracle preserved. Reload's new issuer/service controls passed, but before-ACK
+operational advertisement supersedes its publisher source acceptance until repair.
+Old eea acquisition failure carrier was incomplete and its exact cause remains
+unproven; later successful acquisition does not retrospectively diagnose it.
