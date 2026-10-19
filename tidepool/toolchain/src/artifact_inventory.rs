@@ -13819,6 +13819,13 @@ mod tests {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) {
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
+        let crate::certified_products::PendingImportOwner::Source {
+            original_ordinal: helper_ordinal,
+            ..
+        } = &helper_import
+        else {
+            panic!("recapture helper import must be a source group");
+        };
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let inventory = ArtifactInventory::default();
         let originals = ["RecaptureLeft", "RecaptureRight"].map(|name| {
@@ -13845,6 +13852,37 @@ mod tests {
                 .product;
             Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
         });
+        // Source publication follows certified lexical imports, which are
+        // distinct from the canonical type-dependency requirements.
+        let mut source_imports = interfaces
+            .iter()
+            .filter_map(|entry| {
+                let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                    panic!("recapture interfaces must be canonical");
+                };
+                Some((
+                    entry.descriptor.owner.clone(),
+                    interface
+                        .source_imports()?
+                        .iter()
+                        .filter_map(|edge| {
+                            Some(ExactModuleIdentity {
+                                unit: edge.home_unit.as_ref()?.clone(),
+                                module: edge.module.clone(),
+                            })
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ))
+            })
+            .collect::<BTreeMap<_, Vec<_>>>();
+        if helper.catalog_input_custody().is_none() {
+            // The synthetic helper above is explicitly authored without imports.
+            assert!(source_imports
+                .insert(helper.descriptor.owner.clone(), Vec::new())
+                .is_none());
+        }
         let mut entries = interfaces;
         entries.extend([helper.clone(), originals[0].clone(), originals[1].clone()]);
         let available = inventory
@@ -13869,6 +13907,34 @@ mod tests {
                 )
                 .map(|admitted| admitted.artifacts)
                 .unwrap()
+        });
+        let selected_requirements: [NativeOriginalRequirement; 2] = std::array::from_fn(|index| {
+            let original = originals[index].descriptor.id;
+            let issuer = &issuers[index];
+            let requirement = NativeOriginalRequirement::from_selected_view(original, issuer)
+                .unwrap()
+                .unwrap();
+            let (_, demanded_groups) = issuer
+                .native_requirements_with_group_bindings_from_roots(&[
+                    NativeRequirementRoot::Group {
+                        artifact: original,
+                        original_ordinal: 7,
+                    },
+                ])
+                .unwrap();
+            let carriers = requirement.issued_group_carriers(issuer).unwrap();
+            assert_eq!(
+                carriers.keys().copied().collect::<BTreeSet<_>>(),
+                demanded_groups
+            );
+            for (group, carrier) in carriers {
+                assert!(issuer.binding_dependencies().contains(&(
+                    ArtifactBindingNode::Group(group),
+                    ArtifactBindingNode::Artifact(carrier),
+                    ArtifactDependency::Interface,
+                )));
+            }
+            requirement
         });
         let expected = ExactNativeClosureModel {
             groups: issuers
@@ -13913,44 +13979,76 @@ mod tests {
             "distinct group issuers retain the same exact carrier"
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let publications = issuers
-            .iter()
-            .enumerate()
-            .map(|(index, issuer)| {
+        let helper_lexical = crate::declaration_join::source_lexical_closure(
+            std::slice::from_ref(&helper.descriptor.owner),
+            &source_imports,
+            &[],
+            &available.source_implementation_roles(),
+        )
+        .expect("recapture source graph must retain certified import evidence")
+        .lexical;
+        let issue_context =
+            |index: usize,
+             view: &ArtifactView,
+             helper_lexical: &[crate::declaration_join::ExactLexicalNode]| {
+                let mut lexical = vec![crate::declaration_join::ExactLexicalNode {
+                    owner: originals[index].descriptor.owner.clone(),
+                    imports: vec![helper.descriptor.owner.clone()],
+                }];
+                lexical.extend_from_slice(helper_lexical);
                 ExactDeclarationContext::from_authenticated_execution(
                     producer.sha256(),
-                    issuer,
+                    view,
                     projection.clone(),
-                    vec![
-                        crate::declaration_join::ExactLexicalNode {
-                            owner: originals[index].descriptor.owner.clone(),
-                            imports: vec![helper.descriptor.owner.clone()],
-                        },
-                        crate::declaration_join::ExactLexicalNode {
-                            owner: helper.descriptor.owner.clone(),
-                            imports: vec![],
-                        },
-                    ],
+                    lexical,
                     originals[index].descriptor.owner.clone(),
                     &[
                         originals[index].descriptor.owner.clone(),
                         helper.descriptor.owner.clone(),
                     ],
                 )
-                .unwrap()
-                .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
-                .unwrap()
+            };
+        if helper.catalog_input_custody().is_some() {
+            // A complete interface namespace cannot compensate for missing
+            // source imports when publication selects the lexical closure.
+            let missing_imports = [crate::declaration_join::ExactLexicalNode {
+                owner: helper.descriptor.owner.clone(),
+                imports: vec![],
+            }];
+            let incomplete = issue_context(0, &issuers[0], &missing_imports)
+                .expect("namespace admission precedes source publication")
+                .issue_published_source_original("issuer", "input", &helper.descriptor.owner);
+            assert!(
+                matches!(&incomplete,
+                Err(CompileError::ArtifactInventory(error)) if matches!(&error.failure,
+                    ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
+                    if dependent == &helper.descriptor.owner
+                        && required == &ExactModuleIdentity {
+                            unit: helper.descriptor.owner.unit.clone(),
+                            module: "Tidepool.Inspection.Tree".into(),
+                        })),
+                "incomplete catalog source imports: {incomplete:?}"
+            );
+        }
+        let publications = issuers
+            .iter()
+            .enumerate()
+            .map(|(index, issuer)| {
+                issue_context(index, issuer, &helper_lexical)
+                    .unwrap()
+                    .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
+                    .unwrap()
             })
             .collect::<Vec<_>>();
         for publication in &publications {
-            let imports = [issued_source(&helper, 7)];
+            let imports = [helper_import.clone()];
             let groups = publication
                 .context()
                 .artifact_view()
                 .native_requirements_with_group_bindings_from_roots(&[
                     NativeRequirementRoot::Group {
                         artifact: helper.descriptor.id,
-                        original_ordinal: 7,
+                        original_ordinal: *helper_ordinal,
                     },
                 ])
                 .map(|(_, groups)| groups)
@@ -14072,11 +14170,9 @@ mod tests {
                 .check(&retained)
                 .expect("retention preserves issuing groups");
             assert_eq!(retained.roots(), joined.roots());
-            assert!(helper_groups.iter().all(|group| {
-                retained
-                    .custody_roots()
-                    .contains(&InventoryNodeKey::Group(*group))
-            }));
+            assert!(helper_groups
+                .iter()
+                .all(|group| retained.contains_issued_native_group(*group)));
             let generated = Arc::new(entry("RecaptureScaffold", &[]));
             let scaffold = inventory
                 .admit_shared(&inventory.empty_view(), vec![generated.clone()])
@@ -14122,7 +14218,7 @@ mod tests {
                         )
                         .unwrap();
                 let facts = &request.compiler_inputs().native_original_requirements();
-                assert!(!facts
+                assert!(facts
                     .iter()
                     .any(|fact| fact.original == helper.descriptor.id));
                 for original in &originals {
@@ -14130,13 +14226,32 @@ mod tests {
                         .iter()
                         .any(|fact| fact.original == original.descriptor.id));
                 }
+                let request_group_roots = request
+                    .compiler_inputs()
+                    .artifacts()
+                    .roots()
+                    .iter()
+                    .filter(|root| matches!(root, InventoryNodeKey::Group(_)))
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let issued_group_roots = view
+                    .roots()
+                    .iter()
+                    .filter(|root| matches!(root, InventoryNodeKey::Group(_)))
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(request_group_roots, issued_group_roots);
+                assert!(!request_group_roots.iter().any(|root| matches!(
+                    root,
+                    InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id
+                )));
                 let admitted = view
                     .inventory()
                     .admit_projected_with_native_requirements(
                         view,
                         originals.to_vec(),
                         &projection,
-                        facts,
+                        &selected_requirements,
                     )
                     .unwrap();
                 expected.check(&admitted).unwrap();

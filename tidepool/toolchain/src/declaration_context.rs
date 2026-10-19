@@ -15337,6 +15337,25 @@ mod tests {
         let (context, _) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
         let artifacts = context.materialize_scratch(&directory).unwrap().artifacts;
+        let warm_metadata = context
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        assert_eq!(
+            warm_metadata
+                .entries
+                .iter()
+                .map(|(owner, entry)| (owner.clone(), entry.descriptor.kind))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                (identity("fixture", "Alpha"), ArtifactKind::OriginalModule),
+                (identity("fixture", "Beta"), ArtifactKind::OriginalModule),
+                (identity("fixture", "Joined"), ArtifactKind::LexicalJoin),
+                (identity("fixture", "Value"), ArtifactKind::ValueInterface),
+            ])
+        );
         let before = context
             .owner
             .facts
@@ -15355,7 +15374,14 @@ mod tests {
         // Materialization already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
-        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 10);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
+        let validated_metadata = context
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        assert!(Arc::ptr_eq(&warm_metadata, &validated_metadata));
         assert!(context.validate_artifacts(&artifacts[..3]).is_err());
         let mut duplicate = artifacts.clone();
         duplicate.push(artifacts[0].clone());
@@ -17087,6 +17113,22 @@ mod tests {
         }
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
+        let retained_interface = original
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "HiddenNative")
+            .unwrap()
+            .interface
+            .path
+            .clone();
+        let expected_interface = context
+            .compiler_original_products()
+            .unwrap()
+            .into_iter()
+            .find(|product| product.owner().module == "HiddenNative")
+            .unwrap()
+            .interface_bytes()
+            .to_vec();
         let weak = Arc::downgrade(private_owner);
         let directory = Arc::downgrade(private_owner._directory.as_ref().unwrap());
         let value_entry = context
@@ -17100,6 +17142,30 @@ mod tests {
             ])
             .unwrap();
         let retained = value.retain_custody(context.artifact_view()).unwrap();
+        {
+            let metadata = retained.metadata_snapshot();
+            let graph_digests = metadata
+                .artifacts
+                .values()
+                .filter_map(|entry| {
+                    let ArtifactPayload::Original(product) = &entry.payload else {
+                        return None;
+                    };
+                    product.execution_source().map(|graph| graph.digest())
+                })
+                .collect::<BTreeSet<_>>();
+            private_owner.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                assert!(owner
+                    .rows
+                    .keys()
+                    .all(|id| metadata.artifacts.contains_key(id)));
+                assert!(owner.groups.is_empty());
+                assert!(owner
+                    .graph_paths
+                    .keys()
+                    .all(|digest| graph_digests.contains(digest)));
+            });
+        }
         let lexical = context
             .retain_value_source_surface(&value, &[])
             .unwrap()
@@ -17270,10 +17336,14 @@ mod tests {
         drop(blocked);
         drop(request);
         drop(next);
-        assert!(weak.upgrade().is_none());
         assert!(directory.upgrade().is_some());
+        assert_eq!(
+            std::fs::read(&retained_interface).unwrap(),
+            expected_interface
+        );
         assert!(private_root.is_dir());
         drop(retained);
+        assert!(weak.upgrade().is_none());
         assert!(directory.upgrade().is_none());
         assert!(!private_root.try_exists().unwrap());
     }
@@ -19583,22 +19653,30 @@ mod tests {
                 .unwrap(),
             imports: Arc::new(BTreeMap::new()),
         });
-        let support = &request
+        let selected_support = &request
             .program
             .program_support
             .as_ref()
             .unwrap()
-            .compiler_support
-            .artifacts();
-        let mut actual_owners = support
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| (descriptor.owner, descriptor.kind))
-            .collect::<Vec<_>>();
-        actual_owners.sort();
+            .compiler_support;
+        let support = selected_support.artifacts();
+        let selected_context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(selected_support)
+                .unwrap(),
+        );
+        let selected_inputs = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&selected_context, None)
+            .unwrap();
         assert_eq!(
-            actual_owners,
-            vec![
+            selected_inputs
+                .metadata
+                .entries
+                .iter()
+                .map(|(owner, entry)| (owner.clone(), entry.descriptor.kind))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
                 (
                     identity("fixture", "Hidden"),
                     ArtifactKind::CanonicalModuleInterface
@@ -19607,11 +19685,19 @@ mod tests {
                     identity("fixture", "InstanceRelay"),
                     ArtifactKind::OriginalModule
                 ),
-                (
-                    identity("fixture", "InstanceRelay"),
-                    ArtifactKind::CanonicalModuleInterface
-                ),
-            ]
+            ])
+        );
+        assert!(matches!(
+            selected_inputs.projection().snapshot_roles()[&identity("fixture", "Hidden")],
+            CompilerInputRole::InterfaceOnly { .. }
+        ));
+        assert!(
+            selected_inputs
+                .metadata
+                .retained
+                .selected_native_groups
+                .is_empty(),
+            "retained Hidden bytes and canonical type demand do not select executable groups"
         );
         assert_eq!(
             support
@@ -19621,9 +19707,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![identity("fixture", "InstanceRelay")]
         );
-        assert!(!support
-            .source_implementation_roles()
-            .contains_key(&identity("fixture", "Hidden")));
         assert_eq!(
             entries[&identity("fixture", "InstanceRelay")].requirements,
             vec![identity("fixture", "Hidden")]
@@ -20537,15 +20620,13 @@ mod tests {
             continued.context().semantic_sha256(),
             context.semantic_sha256()
         );
-        assert_eq!(
-            continued
-                .groups()
-                .iter()
-                .filter(|group| group.owner() == &owner)
-                .map(|group| group.group().original_ordinal())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([3, 7])
-        );
+        assert!(continued.groups().is_empty());
+        assert!(continued
+            .compiler_inputs()
+            .metadata
+            .retained
+            .selected_native_groups
+            .is_empty());
         assert_eq!(
             std::fs::read_dir(directory.path())
                 .unwrap()
@@ -20562,9 +20643,14 @@ mod tests {
                 .admit_producer([3; 32])
                 .unwrap(),
         );
+        let refusal = continued
+            .in_program_context(wrong_producer)
+            .err()
+            .expect("another producer must be refused");
         assert!(
-            matches!(continued.in_program_context(wrong_producer), Err(CompileError::ExtractFailed(detail))
-            if detail == "program context has another producer")
+            matches!(&refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: program context has another producer"),
+            "actual_error={refusal:?}"
         );
         assert!(Arc::ptr_eq(&continued.inputs, &inputs));
         assert!(Arc::ptr_eq(&continued.groups, &groups));
@@ -20578,6 +20664,9 @@ mod tests {
             .path()
             .join("later-segment/.exact-compilations/first");
         std::fs::create_dir_all(&output).unwrap();
+        let snapshot = output.join("source.hs");
+        std::fs::copy(receipt.as_array().unwrap()[6].as_text().unwrap(), &snapshot).unwrap();
+        receipt.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
         write_receipt(&output.join("receipt.cbor"), &receipt);
         let segment = continued
             .admit_program_segment(&directory.path().join("later-segment"))
@@ -20591,17 +20680,87 @@ mod tests {
             !segment.source_input_context().interface_owners().is_empty(),
             "a later segment's publication decision must see the preceding declaration"
         );
+        drop(inputs);
+        drop(groups);
         drop(context);
         drop(continued);
+        assert!(segment.receipt_admission().groups().is_empty());
+        let inputs = segment.receipt_admission().compiler_inputs();
+        let entry = inputs
+            .metadata
+            .entries
+            .get(&identity(&owner.unit, &owner.module))
+            .unwrap();
+        let ArtifactPayload::Original(native) = &entry.payload else {
+            panic!("the selected compiler role remains the issued Original");
+        };
+        let imports = [3, 7]
+            .into_iter()
+            .map(|ordinal| {
+                let definitions =
+                    crate::certified_products::original_native_group_definitions(native, ordinal)
+                        .unwrap();
+                let binding = match &definitions.bindings()[0] {
+                    tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                    tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+                };
+                crate::certified_products::PendingImportOwner::Source {
+                    owner: owner.clone(),
+                    original_ordinal: ordinal,
+                    binder: binding.identity.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let validation = PackageInterfaceValidation::default();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        let mut fixed = inputs
+            .artifacts()
+            .inventory()
+            .bind_segment(inputs.artifacts(), vec![], &selection)
+            .unwrap();
+        let before_demand = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        let target = inputs
+            .artifacts()
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                inputs.artifacts(),
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            )
+            .unwrap()
+            .bind_target(None, imports);
+        let resolved = target.resolve().unwrap();
         assert_eq!(
-            segment
-                .receipt_admission()
+            resolved
                 .groups()
                 .iter()
-                .filter(|group| group.owner() == &owner)
-                .count(),
-            2,
-            "the segment retains the exact issued execution witnesses after its producer drops"
+                .map(|group| (group.binding.artifact(), group.original_ordinal))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([(entry.descriptor.id, 3), (entry.descriptor.id, 7)])
+        );
+        assert!(inputs.metadata.retained.selected_native_groups.is_empty());
+        assert!(segment.receipt_admission().groups().is_empty());
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(|count| count.get()),
+            lowerings
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>(),
+            before_demand,
+            "actual native demand must not materialize compiler transport"
         );
     }
 
@@ -20640,6 +20799,12 @@ mod tests {
         std::fs::create_dir_all(&output).unwrap();
         write_receipt(&output.join("receipt.cbor"), &receipt);
         let admit = || continued.admit_program_segment(&directory.path().join("segment"));
+        assert!(matches!(admit(), Err(CompileError::ExtractFailed(detail))
+            if detail == "exact declaration context: compile source snapshot has another owner"));
+        let snapshot = output.join("source.hs");
+        std::fs::copy(receipt.as_array().unwrap()[6].as_text().unwrap(), &snapshot).unwrap();
+        receipt.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
+        write_receipt(&output.join("receipt.cbor"), &receipt);
         admit().expect("the original physical observation is intact");
         let files = physical.input_transport_files();
         assert!(!files.is_empty());
@@ -20648,19 +20813,37 @@ mod tests {
         assert!(files.iter().all(|file| file.metadata().unwrap().len() > 0));
         let manifest = std::fs::read(&physical.manifest).unwrap();
         std::fs::write(&physical.manifest, b"changed manifest").unwrap();
-        assert!(matches!(admit(), Err(CompileError::ExtractFailed(detail))
-            if detail == "scope request changed during compilation"));
-        std::fs::remove_file(&physical.manifest).unwrap();
+        let refusal = admit()
+            .err()
+            .expect("changed physical manifest must be refused");
         assert!(
-            matches!(admit(), Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+            matches!(&refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: scope request changed during compilation"),
+            "actual_error={refusal:?}"
+        );
+        std::fs::remove_file(&physical.manifest).unwrap();
+        let refusal = admit()
+            .err()
+            .expect("missing physical manifest must be refused");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead { path, failure: crate::certified_products::EvidenceReadFailure::Io { operation: crate::certified_products::EvidenceReadOperation::Metadata, error } }
+                if path == &physical.manifest && error.kind() == std::io::ErrorKind::NotFound)),
+            "actual_error={refusal:?}"
         );
         std::fs::write(&physical.manifest, &manifest).unwrap();
         let permissions = std::fs::metadata(&physical.manifest).unwrap().permissions();
         std::fs::set_permissions(&physical.manifest, std::fs::Permissions::from_mode(0)).unwrap();
         let inaccessible = admit();
         std::fs::set_permissions(&physical.manifest, permissions).unwrap();
+        let refusal = inaccessible
+            .err()
+            .expect("inaccessible physical manifest must be refused");
         assert!(
-            matches!(inaccessible, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead { path, failure: crate::certified_products::EvidenceReadFailure::Io { operation: crate::certified_products::EvidenceReadOperation::Open, error } }
+                if path == &physical.manifest && error.kind() == std::io::ErrorKind::PermissionDenied)),
+            "actual_error={refusal:?}"
         );
         let snapshot = receipt.as_array().unwrap()[6].as_text().unwrap();
         std::fs::write(snapshot, b"changed source snapshot").unwrap();
@@ -20669,6 +20852,7 @@ mod tests {
 
     #[test]
     fn prepare_compilation_materializes_and_checks_new_original() {
+        use std::os::unix::fs::FileExt;
         let producer = b"program-transport-fixture";
         let producer_sha256 =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
@@ -20740,11 +20924,38 @@ mod tests {
             .context()
             .validate_artifacts(&effective.artifacts)
             .unwrap();
-        std::fs::write(&effective.artifacts[0].interface.path, b"tampered").unwrap();
+        let mut forged = effective.artifacts.clone();
+        forged[0].interface.sha256 = sha256(b"another interface");
+        assert!(matches!(effective.context().validate_artifacts(&forged),
+            Err(CompileError::ExtractFailed(detail)) if detail == "exact declaration context: interface differs from owned bytes"));
+        let owned = effective
+            .materialization
+            .as_ref()
+            .unwrap()
+            .selected_rows(&effective.transport_metadata);
+        let slice = &owned.values().next().unwrap().owned_inputs
+            [&original_inputs::OriginalInputKind::Interface];
+        let file = slice.compiler_file_lease();
         assert!(effective
+            .input_transport_files()
+            .iter()
+            .any(|held| Arc::ptr_eq(held, &file)));
+        let read_owned = || {
+            let mut bytes = vec![0; usize::try_from(slice.len()).unwrap()];
+            file.read_exact_at(&mut bytes, slice.offset()).unwrap();
+            bytes
+        };
+        assert_eq!(read_owned(), b"interface");
+        std::fs::write(&effective.artifacts[0].interface.path, b"tampered").unwrap();
+        assert_eq!(read_owned(), b"interface");
+        assert_eq!(
+            sha256(&read_owned()),
+            effective.artifacts[0].interface.sha256
+        );
+        effective
             .context()
             .validate_artifacts(&effective.artifacts)
-            .is_err());
+            .expect("owned runtime input bytes are independent of an unconsumed alias");
     }
     #[test]
     fn program_admission_promotes_canonical_owner_without_transport_writes() {
