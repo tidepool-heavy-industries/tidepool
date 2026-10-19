@@ -22,13 +22,15 @@ import GHC.Conc (getNumCapabilities)
 import GHC.Clock (getMonotonicTimeNSec)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
-import Tidepool.ExtractRequest (workerRequestFromArgv, workerArgv, RequestField(..))
+import Tidepool.ExtractRequest
+  ( workerRequestFromArgv, workerArgv, RequestField(..)
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin )
 import Tidepool.GhcPipeline
   ( withResidentCompilerScopes, PipelineSelection(CheckedEnvironment), CompilePurpose(GeneralCompile) )
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
-import Tidepool.WorkerServer (runWorkerLoop)
+import Tidepool.WorkerServer (WorkerResponse(..), runWorkerLoop)
 import Tidepool.RequestCompletion
   ( captureCompletion, flattenCompletion, finishCompletion )
 
@@ -53,6 +55,11 @@ workerChild oneFreeFd scratch = do
   where
     handler _ _ args = captureCompletion $ do
       case args of
+        ["source-free"] -> BSC.hPutStr stdout "captured-control-debug"
+        ["source-free-rejected"] -> pure ()
+        ["source-free-capture-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
+        ["source-free-response-overflow"] -> pure ()
+        ["source-free-capture-failure"] -> removeCaptureFiles scratch
         ["stdout-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
         ["exact-aggregate"] -> do
           BS.hPut stdout (BS.replicate (limit `div` 2) 111)
@@ -66,7 +73,13 @@ workerChild oneFreeFd scratch = do
           throwIO ThreadKilled
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
-      pure []
+      pure $ case args of
+        ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition "selected-root")
+        ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
+        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady "realization")
+        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (repeat 'x'))
+        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady "realization")
+        _ -> DiagnosticResponse []
 
 check :: FilePath -> IO ()
 check scratch = do
@@ -82,6 +95,24 @@ check scratch = do
       hFlush input
       ack <- exact output 1
       unless (ack == BS.singleton 1) (fail "missing transaction acknowledgement")
+      forRequest input output "source-free" $ \code out err ->
+        unless (code == 0
+            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsNeedsAcquisition "selected-root")
+            && err == "captured-control-debug")
+          (fail "typed source-free result did not use the machine channel")
+      forRequest input output "source-free-capture-overflow" $ \code out _ ->
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out
+            && not (BSC.isInfixOf "TPEXO" out))
+          (fail "capture overflow exposed an unconfirmed Ready result")
+      forRequest input output "source-free-response-overflow" $ \code out err ->
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out
+            && BS.length out < 1024 && BS.null err)
+          (fail "typed response encoding did not stop at the aggregate payload budget")
+      forRequest input output "source-free-rejected" $ \code out err ->
+        unless (code == 0
+            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsRejected AcquisitionRejected)
+            && BS.null err)
+          (fail "typed acquisition refusal was confused with transport failure")
       forRequest input output "stdout-overflow" $ \code out err -> do
         unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.length err < 1024)
           (fail "oversized stdout did not produce bounded infrastructure failure")
@@ -167,6 +198,32 @@ checkPartialAcquisition scratch = do
       unless (status == ExitSuccess) (fail "worker failed after partial acquisition recovery")
       leftovers <- listDirectory scratch
       unless (null leftovers) (fail ("partial acquisition retained tempfiles: " ++ show leftovers))
+
+checkSourceFreeCleanup :: FilePath -> IO ()
+checkSourceFreeCleanup scratch = do
+  executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
+    (fail "missing declared worker-response child executable") pure
+  bracket (createProcess (proc executable ["--worker", scratch])
+      { std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit })
+    (\(_, _, _, child) -> terminateProcess child >> void (waitForProcess child)) $
+    \(inputHandle, outputHandle, _, child) -> do
+      input <- maybe (fail "missing source-free worker stdin pipe") pure inputHandle
+      output <- maybe (fail "missing source-free worker stdout pipe") pure outputHandle
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ack <- exact output 1
+      unless (ack == BS.singleton 1) (fail "missing source-free transaction acknowledgement")
+      forRequest input output "source-free-capture-failure" $ \code out _ ->
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out
+            && not (BSC.isInfixOf "TPEXO" out))
+          (fail "capture cleanup failure exposed an unconfirmed Ready result")
+      hClose input
+      terminal <- timeout 10000000 (waitForProcess child)
+      case terminal of
+        Just (ExitFailure _) -> pure ()
+        _ -> fail "unsafe source-free cleanup did not retire the worker"
+      leftovers <- listDirectory scratch
+      unless (null leftovers) (fail ("source-free capture retained tempfiles: " ++ show leftovers))
 
 catchThreadKilled :: AsyncException -> IO ()
 catchThreadKilled ThreadKilled = pure ()
@@ -276,7 +333,7 @@ compilerClusterChild scratch = do
         restoredCapabilities <- getNumCapabilities
         unless (restoredCapabilities == originalCapabilities)
           (fail "bound compiler did not restore its admitted capabilities")
-        pure completed
+        pure (fmap DiagnosticResponse completed)
 
 removeCaptureFiles :: FilePath -> IO ()
 removeCaptureFiles captures = do

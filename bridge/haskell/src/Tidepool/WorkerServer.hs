@@ -2,7 +2,7 @@
 
 -- | Framed request completion. Rust owns processes, deadlines and retirement;
 -- this owner retains the protocol channels independently of redirected globals.
-module Tidepool.WorkerServer (RequestHandler, runWorkerLoop, runDirectRequest) where
+module Tidepool.WorkerServer (WorkerResponse(..), RequestHandler, runWorkerLoop, runDirectRequest) where
 
 import Control.Exception (SomeException, mask, throwIO, try)
 import Control.Monad (replicateM, unless)
@@ -22,11 +22,16 @@ import System.IO
   ( Handle, IOMode(ReadMode), hClose, hFileSize, hFlush, openTempFile
   , openBinaryFile, stderr, stdin, stdout )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), ReportOutcome(..), renderDiagsJson)
+import Tidepool.ExtractRequest (EnsureExactInputsOutcome, encodeEnsureExactInputsOutcomeWithin)
 import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics (CaptureAssessment(..), renderCompletion)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 
-type RequestHandler = PhaseSink -> FilePath -> [String] -> IO (Completion [Diag])
+data WorkerResponse
+  = DiagnosticResponse [Diag]
+  | ExactInputsResponse EnsureExactInputsOutcome
+
+type RequestHandler = PhaseSink -> FilePath -> [String] -> IO (Completion WorkerResponse)
 
 data OutputChannels = OutputChannels Handle Handle
 
@@ -86,7 +91,7 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
 
 -- Direct CLI shares capture, release assessment and terminal rendering with the
 -- framed owner. Main's callback includes its outer compiler-scope release.
-runDirectRequest :: (PhaseSink -> IO (Completion [Diag])) -> IO ExitCode
+runDirectRequest :: (PhaseSink -> IO (Completion WorkerResponse)) -> IO ExitCode
 runDirectRequest action = withOutputChannels $ \channels@(OutputChannels out err) -> do
   (completed, captured) <- captureOutput channels (action (phaseSink channels))
   (code, machine, human) <- renderCaptured channels completed captured
@@ -143,7 +148,7 @@ encodeResponse code out err =
 decodeText :: BS.ByteString -> String
 decodeText = T.unpack . TE.decodeUtf8With TEE.lenientDecode
 
-captureOutput :: OutputChannels -> IO (Completion [Diag]) -> IO (Completion [Diag], CaptureOutcome)
+captureOutput :: OutputChannels -> IO (Completion WorkerResponse) -> IO (Completion WorkerResponse, CaptureOutcome)
 captureOutput channels action = mask $ \restore -> do
   opened <- try $ do
     directory <- getTemporaryDirectory
@@ -200,7 +205,7 @@ restoreOutput (OutputChannels out err) = attemptReleases
   , (OutputRestore, hDuplicateTo out stdout), (OutputRestore, hDuplicateTo err stderr)
   ]
 
-renderCaptured :: OutputChannels -> Completion [Diag] -> CaptureOutcome -> IO (ExitCode, BS.ByteString, BS.ByteString)
+renderCaptured :: OutputChannels -> Completion WorkerResponse -> CaptureOutcome -> IO (ExitCode, BS.ByteString, BS.ByteString)
 renderCaptured channels completed captured = do
   case completionAsync completed of
     Just failure -> throwIO failure
@@ -215,8 +220,14 @@ renderCaptured channels completed captured = do
         _ -> (BS.empty, BS.empty)
       remaining = maxResponsePayloadBytes
         - toInteger (BS.length capturedOut) - toInteger (BS.length capturedErr)
-  (code, machine, human) <- renderCompletion completed assessment
-  case boundedUtf8 remaining machine of
+  (code, diagnostics, human) <- renderCompletion (fmap responseDiagnostics completed) assessment
+  -- Only the typed successful body supplies a control response. Capture and
+  -- release failures retain their diagnostics and can never expose Ready.
+  let machine = case (code, completionResult completed) of
+        (ExitSuccess, BodySucceeded (ExactInputsResponse outcome)) ->
+          encodeEnsureExactInputsOutcomeWithin remaining outcome
+        _ -> boundedUtf8 remaining diagnostics
+  case machine of
     Just out -> case boundedUtf8 (remaining - toInteger (BS.length out)) human of
       Just debug -> pure (code, out, capturedOut <> capturedErr <> debug)
       Nothing -> budgetFailure
@@ -225,6 +236,10 @@ renderCaptured channels completed captured = do
     budgetFailure = pure (ExitFailure 1, TE.encodeUtf8 (T.pack (renderDiagsJson ReportWorkerFailure
       [Diag Nothing DiagError ("compiler response diagnostics exceed "
         ++ show maxResponsePayloadBytes ++ " bytes")] ++ "\n")), BS.empty)
+
+responseDiagnostics :: WorkerResponse -> [Diag]
+responseDiagnostics (DiagnosticResponse diagnostics) = diagnostics
+responseDiagnostics (ExactInputsResponse _) = []
 
 -- Force only the remaining response budget and one growth sentinel while
 -- encoding. Do not concatenate or strictly encode bytes before their check.
