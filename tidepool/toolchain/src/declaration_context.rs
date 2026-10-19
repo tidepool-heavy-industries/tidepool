@@ -463,10 +463,14 @@ pub(crate) struct OriginalCompilerInputs {
 }
 
 impl PartialEq for OriginalCompilerInputs {
-    fn eq(&self,other:&Self)->bool {
+    fn eq(&self, other: &Self) -> bool {
         // The immutable encoding base affects changed-node work, not input
         // authority or semantics. Actual carried facts remain compared here.
-        self.demand==other.demand&&self.projection==other.projection&&self.artifacts==other.artifacts&&self.native_offers==other.native_offers&&self.native_availability==other.native_availability
+        self.demand == other.demand
+            && self.projection == other.projection
+            && self.artifacts == other.artifacts
+            && self.native_offers == other.native_offers
+            && self.native_availability == other.native_availability
     }
 }
 impl Eq for OriginalCompilerInputs {}
@@ -530,7 +534,11 @@ impl IssuedOriginalOutput {
 }
 
 impl OriginalCompilerInputs {
-    pub(crate) fn native_fact_base(&self)->Option<&Arc<crate::exact_context::PublicationNativeFacts>> { self.native_fact_base.as_ref() }
+    pub(crate) fn native_fact_base(
+        &self,
+    ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
+        self.native_fact_base.as_ref()
+    }
     pub(crate) fn native_availability(&self) -> &RequestNativeAvailability {
         &self.native_availability
     }
@@ -672,7 +680,7 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
-                native_fact_base:Some(Arc::clone(source.native_fact_owner())),
+                native_fact_base: Some(Arc::clone(source.native_fact_owner())),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -698,7 +706,7 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
-            native_fact_base:Some(Arc::clone(source.native_fact_owner())),
+            native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -757,7 +765,7 @@ impl OriginalCompilerInputs {
         source: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Self {
         Self {
-            native_fact_base:Some(Arc::clone(source.native_fact_owner())),
+            native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
@@ -836,7 +844,7 @@ impl OriginalCompilerInputs {
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         timing.finish(true);
         Ok(Self {
-            native_fact_base:selection.native_fact_base().cloned(),
+            native_fact_base: selection.native_fact_base().cloned(),
             native_availability,
             demand: OriginalInputDemand::Issued(continuation.decisions),
             projection,
@@ -932,7 +940,7 @@ impl OriginalCompilerInputs {
             RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, validated)?;
         timing.finish(true);
         Ok(Self {
-            native_fact_base:completed.continuation.selection.native_fact_base().cloned(),
+            native_fact_base: completed.continuation.selection.native_fact_base().cloned(),
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
             projection,
@@ -979,7 +987,7 @@ impl OriginalCompilerInputs {
             }
         };
         Ok(Self {
-            native_fact_base:self.native_fact_base.clone(),
+            native_fact_base: self.native_fact_base.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -1003,7 +1011,10 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
-            native_fact_base:self.native_fact_base.clone().or_else(||other.native_fact_base.clone()),
+            native_fact_base: self
+                .native_fact_base
+                .clone()
+                .or_else(|| other.native_fact_base.clone()),
             native_availability: self
                 .native_availability
                 .merge(&other.native_availability)?
@@ -1266,7 +1277,7 @@ impl NativeContributionSnapshotFacts {
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeAvailabilitySnapshotFacts {
     pub(crate) original: ArtifactId,
-    #[serde(with="crate::exact_context::serde_cached_home_owner")]
+    #[serde(with = "crate::exact_context::serde_cached_home_owner")]
     pub(crate) owner: tidepool_repr::execution_schema::CachedHomeOwner,
     pub(crate) mode: NativeTransportMode,
     #[serde(with = "crate::exact_context::serde_ord_map")]
@@ -15907,12 +15918,19 @@ mod tests {
             restored_birth_row.upgrade().is_some(),
             "the actual restored publication must retain its acquired birth row"
         );
+        // The closed fact constructor must strip the acquired wrapper even
+        // when its input is an actual live published role.
+        let live_role = restored.compiler_input_projection().snapshot_roles()[&root].clone();
+        let recorded_role = live_role.recorded_fact();
+        assert_eq!(recorded_role, live_role);
+        drop(live_role);
         let fact_only_snapshot = restored.snapshot();
         drop(restored);
         assert!(
             restored_birth_row.upgrade().is_none(),
             "pure fact roots cannot retain an acquired native row after its context drops"
         );
+        assert!(recorded_role.as_role().is_published_source_original());
         let fact_store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&fact_store);
         writer
@@ -16044,6 +16062,26 @@ mod tests {
             "publication policy commits exact born availability mode"
         );
         assert_ne!(full_role, partial_role);
+        assert_eq!(full_role.original(), partial_role.original());
+        assert_eq!(full_role.interface(), partial_role.interface());
+        for (receiving, foreign_role) in [(&partial, full_role), (&full, partial_role)] {
+            let birth = receiving
+                .context()
+                .compiler_source_support()
+                .publication_birth_support(&root)
+                .unwrap();
+            let endorsement = PublishedOriginalEndorsement::new(root.clone(), foreign_role.clone());
+            assert!(
+                matches!(
+                    birth.publish_original(&endorsement),
+                    Err(CompileError::ArtifactInventory(error))
+                        if matches!(error.failure,
+                            ArtifactInventoryFailure::PublicationNativeDomainMismatch { owner }
+                                if owner == root)
+                ),
+                "equal original/interface IDs and graph cannot substitute a different birth domain"
+            );
+        }
         assert_ne!(
             full.context().semantic_sha256(),
             partial.context().semantic_sha256()
