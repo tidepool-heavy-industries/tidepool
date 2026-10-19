@@ -183,8 +183,14 @@ Synthetic native fixtures cannot faithfully carry the frozen catalog plus issued
 checked-value history; the authorized tracing fallback preserves real issuers.
 No policy edits or new authority factory. Stage roles, exact root/required edges
 and omissions remain explicit. Private `native-constructor-discriminator/PLAN.json`
-records controls/resource proposal; native admission and full frozen rerun remain
-separate pending gates. Parent source review precedes receiving any trace candidate.
+records controls/resource proposal. Exact candidate
+`e00aaedb8310ecf847dc39ebd2bf81fdafb667e5` received independent supervisor and
+campaign full-delta source acceptance, without findings. The reserved child owns
+the approved 12 GiB-memory / 32 GiB-growth native compile/resources/three-control
+lane and its terminal observer, after refreshed accounting. Full bundle and
+exact frozen rerun require a separate fresh 24 GiB admission; the concrete plan
+is `native-constructor-discriminator/FROZEN-REPRO-PLAN.json`. Missing/truncated
+stage facts remain unknown. No first-promotion claim precedes actual execution.
 
 The next demand-service event is campaign/host/warm source owners producing the concrete joined
 query/check/execute consumer and root/campaign resolves the exact frozen native
