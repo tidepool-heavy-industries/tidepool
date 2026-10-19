@@ -190,3 +190,90 @@ rows-owned at this source receipt. Reaching a later assertion would be a new
 observation, not permission to weaken that oracle. Reviewer ran no native jobs.
 Next action is rows' pinned compile/full counted execution and retained artifact,
 count, failure/cleanup report; the joined owner consumes the resulting evidence.
+
+## a178 terminal execution and pre-demand native oracle
+
+Inspected `native-results-a178a9d3.json`, its individual report and complete
+failure tail, and `check-runtime-oracle.log`. Exacta178 production/cfg(test)
+runtime check passed,13 local actions, build
+`adbf469a-0f09-47cd-b456-b927057e9dae`. The full corrected selector executed1,
+passed0, failed1, libtest101/runner1, at the preserved native equality assertion
+now `turn.rs:8717`. The actual lexical root checks passed; checked-target
+compilation/capture still did not run. Report SHA256
+`1b2bd8ea2d76b3885231c57f56176a569dc2a2c3aba2155259b0d07820898e6a`;
+pre-execution runtime executable SHA256
+`e4b22a9bfc8097ff3ee3d14a879ff3049915975fff023bde8bb59c6d6697d045`.
+Failure cache `/tmp/tidepool-libtest-cache-_02eaxl5` remains retained. Process
+cleanup is confirmed; compiler cleanup is explicitly not observed. These are
+separate outcomes. Rows reports all external jobs terminal, source clean.
+
+The failing comparison is empty **selected execution demand** versus21 group
+keys selected by the original issuer. That observation alone cannot establish
+lost native custody. Exact source relationships are:
+
+- `ArtifactView::selected_native_groups` reads `selected_nodes`, the closure of
+  executable/source roots. `capture_graph_selection().native_groups` reads
+  `read_projection.nodes`, the retained closure including custody roots.
+  `binding_dependencies()` exposes exact binding-to-binding edges over that
+  retained closure. These are separate existing public observations.
+- `NativeArtifactDemand::ScopeInterfaces` explicitly retains original bytes and
+  interface authority without an executable target capable of native demand.
+  `CertifiedTargetImports` and `VerifiedTarget` supply later demand from exact
+  certified imports/entry evidence, rather than from the available carrier set.
+- `CertifiedAuthoredDeclaration::publication_compiler_support` and the analogous
+  AcceptedJoin method call `CompilerSourceSupport::for_source_owners`. Hidden
+  authored owners become InterfaceOnly through projection policy, while their
+  exact artifact graph and issued offers remain retained. The compiler support
+  implementation preserves artifact/offer Arcs separately from role changes.
+- `ExactDeclarationContext::extend` merges those supports under the lexical
+  selection. `merge_admitted_compiler_supports` consumes exact role/input
+  decisions. In `merge_compiler_inputs_inner`, an InterfaceOnly role has no
+  `role.original()` and contributes no demanded groups. The merge moves
+  predecessor roots/custody absent from the new execution roots into custody;
+  it does not reinterpret that preserved graph as target demand.
+- Projection issuance creates its interface-only lexical context and publication
+  can reuse that unchanged context. `authored_native_root` locates an exact
+  retained authored original by its certified origin; its own documentation
+  explicitly says a lexical projection grants no native root.
+
+Accordingly the source supports a **stale pre-demand oracle**, not a confirmed
+product-loss finding from the empty selected set. The current report does not
+observe the retained graph or offer contents dynamically at that point, so it
+does not assert that21 exact custody rows were actually present. The correct
+next observation must discriminate those cases before accepting a repair.
+The native assertion predates the assigned base (`0180c89bfeb`); the role/custody
+mechanisms above also predate it. The rows parcel changes physical observations,
+not native root or role construction, and this prefix issues no Val/P6 row.
+This is source evidence, not an executed same-oracle baseline comparison.
+
+### Bounded discriminator and repair direction
+
+Use the existing public observations in the same production test. Capture the
+original issuer's exact `NativeGroupBinding` set for `original_artifact` from
+`capture_graph_selection().native_groups`, require it nonempty, and compare it
+with the corresponding retained set in the public context. Compare exact
+`binding_dependencies` for those group nodes and their original carrier nodes
+to preserve the group-to-carrier, canonical interface and native dependency
+edges. Binding identity includes its issuing scope; an ArtifactId/ordinal-only
+set or group count is insufficient. Keep pre-target selected demand checked
+separately (it may correctly be empty). Missing retained bindings or edges is
+then a product custody finding, not a reason to delete that check.
+
+Existing later checks remain essential: native original group identity in the
+compiled certification (currently around8941), checked target matching,
+edited-source/binder/signature refusal, unchanged context digest and visibility,
+canonical expression capture, hidden-original authored-import refusal, actual
+resident bind/expression completion and replay refusal. They are intact in
+exacta178 and still unexecuted after this earlier failure. Exact binding/edge
+custody checks must supplement those later executable-demand checks; merely
+removing the native comparison is not an accepted repair.
+
+Qualification may discriminate preexisting behavior by applying only the already
+approved lexical-oracle correction to its isolated exact6d3 baseline, retaining
+base OID and patch digest, then running the unchanged native comparison once.
+That is a modified baseline control and must be labelled as such. Reproducing
+the empty-selected failure confirms the old demand expectation dynamically;
+the improved custody/edge oracle and later full workflow still need their own
+execution. No reviewer runtime edit or native job was made. Area owns any
+approved test-only successor; rows remains its implementer, qualification owns
+any baseline action, and exact source review precedes full execution acceptance.
