@@ -452,14 +452,24 @@ enum OriginalInputDemand {
     Issued(crate::artifact_inventory::IssuedInputNativeDecisions),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
+    native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
     native_availability: RequestNativeAvailability,
 }
+
+impl PartialEq for OriginalCompilerInputs {
+    fn eq(&self,other:&Self)->bool {
+        // The immutable encoding base affects changed-node work, not input
+        // authority or semantics. Actual carried facts remain compared here.
+        self.demand==other.demand&&self.projection==other.projection&&self.artifacts==other.artifacts&&self.native_offers==other.native_offers&&self.native_availability==other.native_availability
+    }
+}
+impl Eq for OriginalCompilerInputs {}
 
 fn preserve_native_offers(
     projection: &CompilerInputProjection,
@@ -520,6 +530,7 @@ impl IssuedOriginalOutput {
 }
 
 impl OriginalCompilerInputs {
+    pub(crate) fn native_fact_base(&self)->Option<&Arc<crate::exact_context::PublicationNativeFacts>> { self.native_fact_base.as_ref() }
     pub(crate) fn native_availability(&self) -> &RequestNativeAvailability {
         &self.native_availability
     }
@@ -661,6 +672,7 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
+                native_fact_base:Some(Arc::clone(source.native_fact_owner())),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -686,6 +698,7 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
+            native_fact_base:Some(Arc::clone(source.native_fact_owner())),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -744,6 +757,7 @@ impl OriginalCompilerInputs {
         source: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Self {
         Self {
+            native_fact_base:Some(Arc::clone(source.native_fact_owner())),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
@@ -822,6 +836,7 @@ impl OriginalCompilerInputs {
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         timing.finish(true);
         Ok(Self {
+            native_fact_base:selection.native_fact_base().cloned(),
             native_availability,
             demand: OriginalInputDemand::Issued(continuation.decisions),
             projection,
@@ -917,6 +932,7 @@ impl OriginalCompilerInputs {
             RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, validated)?;
         timing.finish(true);
         Ok(Self {
+            native_fact_base:Some(Arc::clone(completed.continuation.native_fact_owner())),
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
             projection,
@@ -963,6 +979,7 @@ impl OriginalCompilerInputs {
             }
         };
         Ok(Self {
+            native_fact_base:self.native_fact_base.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -986,6 +1003,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
+            native_fact_base:self.native_fact_base.clone().or_else(||other.native_fact_base.clone()),
             native_availability: self
                 .native_availability
                 .merge(&other.native_availability)?

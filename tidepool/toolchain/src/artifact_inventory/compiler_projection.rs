@@ -1404,11 +1404,13 @@ impl CompilerSourceSupport {
     pub(crate) fn close_complete_output(
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
-        Self::new(
+        Self::new_with_native_facts(
             output.role_projection().clone(),
             output.issued_artifacts().clone(),
             output.issued_offers().iter().cloned(),
             output.native_availability().clone(),
+            output.issued_input_decisions().cloned().unwrap_or_default(),
+            output.native_fact_base(),
         )
         .and_then(|support| support.with_additional_decisions(output.issued_input_decisions()))
     }

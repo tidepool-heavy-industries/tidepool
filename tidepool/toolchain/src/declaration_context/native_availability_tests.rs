@@ -2004,6 +2004,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         );
         for chosen in [&left, &right] {
             let private = OriginalCompilerInputs {
+            native_fact_base:None,
                 native_availability: RequestNativeAvailability::issue_checked(
                     &projection,
                     &retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
@@ -2157,6 +2158,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
     let private = OriginalCompilerInputs {
+            native_fact_base:None,
         native_availability: RequestNativeAvailability::issue_checked(
             &projection,
             &retain_native_offers(&b, &offers).unwrap(),
@@ -6612,6 +6614,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let private = OriginalCompilerInputs {
+            native_fact_base:None,
             native_availability: RequestNativeAvailability::issue_checked(
                 &projection,
                 &custody,
