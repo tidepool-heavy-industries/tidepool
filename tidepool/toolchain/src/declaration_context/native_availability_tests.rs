@@ -13,6 +13,28 @@ fn fixture_compiler_support(
     crate::declaration_context::issue_fixture_compiler_support(projection, artifacts).unwrap()
 }
 
+// Checked normalization issues permissions from these exact offers. Recovery
+// authenticates the recorded namespace and custody; raw offers alone grant none.
+fn fixture_support_with_issued_offers(
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+    offers: impl IntoIterator<Item = crate::artifact_inventory::IssuedNativeOffer>,
+) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+    let offers = offers.into_iter().collect::<Vec<_>>();
+    let recovered =
+        recover_fixture_compiler_support(projection, artifacts, offers.iter().cloned())?;
+    let availability = RequestNativeAvailability::issue_checked(
+        recovered.projection(),
+        recovered.artifacts(),
+        &offers,
+    )?;
+    let issued = recovered.retain_normalized_availability(&availability)?;
+    issued
+        .native_availability()
+        .validate_role_coverage(issued.projection())?;
+    Ok(issued)
+}
+
 // Fixture view changes reopen one complete issued packet through production
 // recovery; rows and native decisions cannot be supplied independently.
 fn restore_fixture_support_in_view(
@@ -1225,7 +1247,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             &baseline, selected, supplied,
         )
         .unwrap();
-        let support = recover_fixture_compiler_support(
+        let support = fixture_support_with_issued_offers(
             baseline.clone(),
             selected.retain_custody(&broad).unwrap(),
             offers,
@@ -2030,10 +2052,11 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         )
         .unwrap()
         .unwrap();
-        IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap()
+        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap();
+        (offer, source)
     };
-    let left = issue("OptionalCensusLeft", 103);
-    let right = issue("OptionalCensusRight", 104);
+    let (left, left_source) = issue("OptionalCensusLeft", 103);
+    let (right, right_source) = issue("OptionalCensusRight", 104);
     let left_groups = left.issued_group_carriers().unwrap();
     let right_groups = right.issued_group_carriers().unwrap();
     assert_ne!(
@@ -2052,7 +2075,37 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         } else {
             [left.clone(), right.clone()]
         };
-        let ambiguous = retain_native_offers(&base, &alternatives).unwrap();
+        let opaque_custody = retain_native_offers(&base, &alternatives).unwrap();
+        assert!(opaque_custody
+            .capture_graph_selection()
+            .native_groups
+            .is_empty());
+        assert!(NativeOriginalRequirement::from_issued_group_custody(
+            entry.descriptor.id,
+            canonical,
+            &opaque_custody,
+        )
+        .unwrap()
+        .is_none());
+        let sources = if reverse {
+            [&right_source, &left_source]
+        } else {
+            [&left_source, &right_source]
+        };
+        let ambiguous = sources
+            .into_iter()
+            .try_fold(opaque_custody, |view, source| view.retain_custody(source))
+            .unwrap();
+        let groups = ambiguous
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(left_groups
+            .keys()
+            .chain(right_groups.keys())
+            .all(|group| groups.contains(group)));
+        assert_eq!(ambiguous.namespace(), base.namespace());
         assert!(ambiguous.selected_native_groups().is_empty());
         assert!(
             matches!(NativeOriginalRequirement::from_issued_group_custody(entry.descriptor.id, canonical, &ambiguous),
@@ -2874,9 +2927,16 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .selected_interfaces()
         .unwrap()
         .support_for_owners(vec![entry.descriptor.owner.clone()])
-        .unwrap()
-        .retain_offers([offer.clone(), offer.clone()])
         .unwrap();
+    let interfaces = fixture_support_with_issued_offers(
+        interfaces.projection().clone(),
+        interfaces.artifacts().clone(),
+        [offer.clone(), offer.clone()],
+    )
+    .unwrap();
+    let row = interfaces.native_availability().rows().next().unwrap();
+    assert!(row.permits(7) && row.permits(9001));
+    assert!(matches!(row.mode, NativeTransportMode::Full));
     // Extending value-type visibility uses the same projected admission seam;
     // an existing private body stays custody, never a namespace contribution.
     let extended = interfaces.admit_value_interfaces(&[]).unwrap();
@@ -3949,10 +4009,11 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 assert!(available.offers().any(|available| available == offer));
             }
             let support =
-                recover_fixture_compiler_support(projection.clone(), namespace.clone(), [])
-                    .unwrap()
-                    .retain_offers(selected)
+                fixture_support_with_issued_offers(projection.clone(), namespace.clone(), selected)
                     .unwrap();
+            let row = support.native_availability().rows().next().unwrap();
+            assert!(row.permits(7) && row.permits(9001));
+            assert_eq!(row.offers().len(), 2);
             let context = Arc::new(ExactDeclarationContext::from_facts(
                 DeclarationContextFacts {
                     producer: producer.sha256(),
@@ -6274,10 +6335,19 @@ fn replay_native_transport_history(
             Some(proofs[index].clone()),
         )
         .unwrap();
-        let support = context
-            .compiler_source_support()
-            .retain_offers([offer])
-            .unwrap();
+        let support = fixture_support_with_issued_offers(
+            context.compiler_input_projection().clone(),
+            context.artifact_view().clone(),
+            [offer],
+        )
+        .unwrap();
+        let dependency_row = support
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == entries[0].descriptor.id)
+            .expect("the checked consumer offer issues its exact dependency permission");
+        assert!(dependency_row.permits(if index == 0 || overlap { 7 } else { 9001 }));
+        assert!(!dependency_row.permits(if index == 0 || overlap { 9001 } else { 7 }));
         let context = context
             .as_ref()
             .clone()
@@ -7091,7 +7161,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         for interface_only in [false, true] {
             let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
                 producer: producer.sha256(),
-                compiler_support: recover_fixture_compiler_support(
+                compiler_support: fixture_support_with_issued_offers(
                     if interface_only {
                         projection.interface_only()
                     } else {
@@ -7698,7 +7768,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let full = issued.owner.facts.compiler_support.native_offers()[0].clone();
     let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
     for (index, offer) in [full, empty].into_iter().enumerate() {
-        let support = recover_fixture_compiler_support(
+        let support = fixture_support_with_issued_offers(
             projection.clone(),
             artifacts.clone(),
             [offer.clone()],
@@ -7982,7 +8052,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         } else {
                             offers.push(auxiliary);
                         }
-                        let support = recover_fixture_compiler_support(
+                        let support = fixture_support_with_issued_offers(
                             projection.clone(),
                             selected.clone(),
                             offers,
