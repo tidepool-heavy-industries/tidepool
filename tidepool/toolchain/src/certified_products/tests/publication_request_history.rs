@@ -470,7 +470,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces).unwrap();
                     let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
                     prop_assert!(matches!(completed.role_projection().snapshot_roles()[&output.descriptor.owner],
-                        CompilerInputRole::InterfaceOnly { interface } if interface == canonical.descriptor.id));
+                        CompilerInputRole::InterfaceOnly { interface } if interface == canonical.descriptor.id), "completed retained-core output keeps its actual interface-only role");
                     let output_permission = completed.native_availability().rows()
                         .find(|row| row.original_owner() == product.owner()).unwrap();
                     prop_assert!(output_permission.permits(0));
