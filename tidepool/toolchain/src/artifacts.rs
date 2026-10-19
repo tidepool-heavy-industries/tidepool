@@ -10574,9 +10574,9 @@ mod source_proof_pairing_tests {
             assert!(
                 crate::certified_products::original_available_groups(product)
                     .unwrap()
-                    .all(|group| group.imports().iter().all(|import| !matches!(
+                    .all(|group| group.imports().iter().all(|import| matches!(
                         import,
-                        crate::certified_products::PendingImportOwner::Source { .. }
+                        crate::certified_products::PendingImportOwner::Package { .. }
                     )))
             );
             let inventory = crate::artifact_inventory::ArtifactInventory::default();
