@@ -232,11 +232,13 @@ checkSourceFreeCleanupAt mode scratch = do
           then unless (BSC.isInfixOf "AcquisitionRejected" out)
             (fail "unsafe capture discarded the typed acquisition refusal")
           else pure ()
-      hClose input
+      -- Keep stdin live: EOF would independently terminate a worker that had
+      -- incorrectly continued after its unsafe response cleanup.
       terminal <- timeout 10000000 (waitForProcess child)
       case terminal of
         Just (ExitFailure _) -> pure ()
         _ -> fail "unsafe source-free cleanup did not retire the worker"
+      hClose input
       leftovers <- listDirectory scratch
       unless (null leftovers) (fail ("source-free capture retained tempfiles: " ++ show leftovers))
 
