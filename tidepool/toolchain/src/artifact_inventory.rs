@@ -4385,9 +4385,9 @@ impl ArtifactInventory {
                     if role.original() != Some(key.artifact)
                         || chosen.original_ordinal != *ordinal
                         || !state.contains_node(&InventoryNodeKey::Group(*chosen))
-                        || admitted_closure(&state, [InventoryNodeKey::Group(*chosen)].into_iter())
-                            .iter()
-                            .any(|node| !parent_nodes.contains(node))
+                        // Retained projections are closed under immutable scoped edges.
+                        // The root belongs exactly when its complete closure belongs.
+                        || !parent_nodes.contains(&InventoryNodeKey::Group(*chosen))
                     {
                         return Err(admission_failure(
                             ArtifactInventoryFailure::NativeGroupSelectionConflict {
@@ -10244,6 +10244,7 @@ mod tests {
                 })
                 .unwrap();
             assert_ne!(carrier.selection, consumer_group.binding.selection());
+            super::view_read_properties::check_scoped_projection_closure(&first).unwrap();
             let before = inventory.metrics();
             let examined = inventory
                 .0
@@ -14951,6 +14952,7 @@ mod tests {
                     },
                 };
                 fixture.model.check(&view).map_err(proptest::test_runner::TestCaseError::fail)?;
+                super::view_read_properties::check_scoped_projection_closure(&view)?;
                 let mut expected = selected_roots.clone();
                 loop {
                     let before = expected.len();

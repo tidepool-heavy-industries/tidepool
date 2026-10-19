@@ -472,7 +472,154 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
     result
 }
 
+#[test]
+fn scoped_membership_distinguishes_equal_payload_issuers_and_proof_only_siblings() {
+    let inventory = ArtifactInventory::default();
+    let catalog = Catalog::new(&[0; OWNERS], 1);
+    let native = catalog.entries[OWNERS].clone();
+    let first = inventory
+        .admit(&inventory.empty_view(), vec![native.clone()])
+        .unwrap();
+    let second = inventory
+        .admit(
+            &inventory.empty_view(),
+            vec![native, catalog.entries[0].clone()],
+        )
+        .unwrap();
+    let first_groups = first.capture_graph_selection().native_groups;
+    let second_groups = second.capture_graph_selection().native_groups;
+    assert_eq!(first_groups.len(), 2);
+    assert_eq!(second_groups.len(), 2);
+    for (left, right) in first_groups.iter().zip(&second_groups) {
+        assert_eq!(left.binding.artifact(), right.binding.artifact());
+        assert_eq!(left.original_ordinal, right.original_ordinal);
+        assert_ne!(left.binding.selection(), right.binding.selection());
+    }
+    check_scoped_projection_closure(&first).unwrap();
+    check_scoped_projection_closure(&second).unwrap();
+    let narrowed = second
+        .select_roots(vec![catalog.entries[0].descriptor.id])
+        .unwrap();
+    check_scoped_projection_closure(&narrowed).unwrap();
+    let state = inventory.0.lock().unwrap();
+    let nodes = &first.read_projection(&state).nodes;
+    let narrowed_nodes = &narrowed.read_projection(&state).nodes;
+    let before = state.graph_visits.load(Ordering::Relaxed);
+    for group in &first_groups {
+        assert!(nodes.contains(&InventoryNodeKey::Group(*group)));
+    }
+    for group in &second_groups {
+        let node = InventoryNodeKey::Group(*group);
+        assert!(state.contains_node(&node));
+        assert!(
+            !nodes.contains(&node),
+            "equal payload in a different scope is not selected"
+        );
+        assert!(
+            !narrowed_nodes.contains(&node),
+            "proof-only sibling is not retained"
+        );
+    }
+    assert_eq!(state.graph_visits.load(Ordering::Relaxed), before);
+    // Count the deleted work separately; the fixed-point oracle above does not
+    // depend on this production reference walker.
+    let reference = admitted_closure(
+        &state,
+        first_groups.iter().copied().map(InventoryNodeKey::Group),
+    );
+    assert!(!reference.is_empty());
+    assert_eq!(
+        state.graph_visits.load(Ordering::Relaxed) - before,
+        reference.len() as u64
+    );
+}
+
+// Independent fixed point over immutable proof rows. In particular, neither
+// the production closure walker nor either cached projection constructs this
+// expected set. Scope identity remains part of every node key.
+pub(super) fn check_scoped_projection_closure(view: &ArtifactView) -> Result<(), TestCaseError> {
+    let state = view.inventory().0.lock().unwrap();
+    let mut edges = BTreeMap::<InventoryNodeKey, BTreeSet<InventoryNodeKey>>::new();
+    for scope in state.selection_plans.values() {
+        for node in &scope.proof().nodes {
+            edges.entry(*node).or_default();
+        }
+        for (from, to, _) in &scope.proof().dependencies {
+            edges.entry(*from).or_default().insert(*to);
+        }
+    }
+    let closure = |seeds: BTreeSet<InventoryNodeKey>| {
+        let mut nodes = seeds;
+        loop {
+            let before = nodes.len();
+            let children = edges
+                .iter()
+                .filter(|(from, _)| nodes.contains(from))
+                .flat_map(|(_, children)| children.iter().copied())
+                .collect::<Vec<_>>();
+            nodes.extend(children);
+            if nodes.len() == before {
+                return nodes;
+            }
+        }
+    };
+    let expected = closure(
+        view.lease
+            .selection
+            .roots
+            .keys()
+            .copied()
+            .chain(view.lease.selection.custody_roots.keys().copied())
+            .collect(),
+    );
+    let actual = &view.read_projection(&state).nodes;
+    prop_assert_eq!(
+        actual.iter().copied().collect::<BTreeSet<_>>(),
+        expected.clone()
+    );
+    let before = state.graph_visits.load(Ordering::Relaxed);
+    let mut queries = 0;
+    for node in edges
+        .keys()
+        .filter(|node| matches!(node, InventoryNodeKey::Group(_)))
+    {
+        let reference = closure(BTreeSet::from([*node]));
+        prop_assert_eq!(
+            actual.contains(node),
+            reference.is_subset(&expected),
+            "scoped node {:?}",
+            node
+        );
+        queries += 1;
+    }
+    prop_assert_eq!(
+        state.graph_visits.load(Ordering::Relaxed),
+        before,
+        "membership queries must not traverse the production graph"
+    );
+    // The original state-existence guard is essential: the production walker
+    // skips unknown seeds, so an empty result must not grant an unknown scope.
+    if let Some(InventoryNodeKey::Group(group)) = edges
+        .keys()
+        .find(|node| matches!(node, InventoryNodeKey::Group(_)))
+    {
+        let unknown = InventoryNodeKey::Group(NativeGroupBinding {
+            binding: NativeGroupIssuer {
+                selection: ArtifactSelectionId([0xff; 32]),
+                ..group.binding
+            },
+            ..*group
+        });
+        prop_assert!(!edges.contains_key(&unknown));
+        prop_assert!(!state.contains_node(&unknown));
+        prop_assert!(!actual.contains(&unknown));
+        prop_assert!(queries > 0);
+    }
+    Ok(())
+}
+
 fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
+    check_scoped_projection_closure(view)?;
     let expected = exhaustive_oracle(view);
     let expected_ids = expected
         .entries
