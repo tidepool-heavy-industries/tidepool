@@ -469,6 +469,25 @@ impl CompilerWorldBindings {
         Ok(rows.into_values().collect())
     }
 
+    /// The scope this occurrence table was published for.
+    pub fn scope(&self) -> u64 {
+        self.query_scope
+    }
+
+    /// The visible occurrences and their defining identities, in occurrence
+    /// order. Enumeration answers need nothing else: presentation and row
+    /// availability belong to `info`, which does inspect a target.
+    pub fn names(&self) -> impl Iterator<Item = WorldBindingName> + '_ {
+        self.entries
+            .iter()
+            .map(|(occurrence, fact)| WorldBindingName {
+                occurrence: occurrence.clone(),
+                unit: fact.symbol.unit.clone(),
+                module: fact.symbol.module.clone(),
+                namespace: fact.symbol.namespace.clone(),
+            })
+    }
+
     fn cold_snapshot(
         &self,
         rows: &BTreeMap<String, cid::Cid>,
@@ -499,6 +518,16 @@ impl CompilerWorldBindings {
         }
         Ok(facts)
     }
+}
+
+/// One published occurrence, reduced to the identity an enumeration answer
+/// carries. The defining row stays with its artifact owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldBindingName {
+    pub occurrence: String,
+    pub unit: String,
+    pub module: String,
+    pub namespace: String,
 }
 
 pub struct CompilerWorldOpenInputs {
@@ -557,6 +586,21 @@ impl fmt::Debug for CompilerWorldRestoration {
 impl CompilerWorldRestoration {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.logical_id
+    }
+
+    /// Occurrence identities of the restored binding table. A restored world
+    /// keeps only snapshot facts, not the runtime's checked rows, so this
+    /// yields exactly what enumeration may answer without a compiler call.
+    pub fn binding_names(&self) -> impl Iterator<Item = WorldBindingName> + '_ {
+        self.bindings
+            .facts()
+            .iter()
+            .map(|(occurrence, fact)| WorldBindingName {
+                occurrence: occurrence.clone(),
+                unit: fact.0 .0.clone(),
+                module: fact.0 .1.clone(),
+                namespace: fact.0 .2.clone(),
+            })
     }
 }
 

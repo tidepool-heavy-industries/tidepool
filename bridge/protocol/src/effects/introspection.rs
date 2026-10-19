@@ -53,7 +53,7 @@ pub fn introspection() -> Effect {
                 "ScopeBindings",
                 "introspection_scope_bindings",
                 vec![expected_scope_arg()],
-                HsType::Named("NameList"),
+                HsType::Named("NameRefList"),
             ),
             verb_with(
                 "ModuleExports",
@@ -385,6 +385,16 @@ fn type_defs() -> Vec<TypeDef> {
             ],
             &["Name entries retained from one enumeration, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
         ),
+        record(
+            "NameRefList",
+            vec![
+                field("refs", HsType::list(HsType::Named("IdentifierRef"))),
+                field("refsObserved", HsType::Int),
+                field("refsLimit", HsType::Int),
+                field("refListProvenance", HsType::Named("ScopeProvenance")),
+            ],
+            &["Identifiers bound in one admitted scope, with the complete count observed before admission, the applied limit, and the compile view the answer describes. Presentation and row availability are deliberately absent: enumerating a held world does not compile anything, so `info` is the only source for them."],
+        ),
         closed_sum(
             "FitAvailability",
             &[
@@ -585,7 +595,7 @@ mod tests {
                 "IntrospectionInfoWith :: NameQuery -> Introspection (Either QueryError IdentifierInfo)",
                 "IntrospectionTypeOfWith :: NameQuery -> Introspection (Either QueryError TypeInfo)",
                 "CurrentScopeView :: Introspection (Either QueryError ScopeProvenance)",
-                "ScopeBindings :: Maybe ScopeProvenance -> Introspection (Either QueryError NameList)",
+                "ScopeBindings :: Maybe ScopeProvenance -> Introspection (Either QueryError NameRefList)",
                 "ModuleExports :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError NameList)",
                 "RowFit :: Maybe ScopeProvenance -> IdentifierRef -> Introspection (Either QueryError Fit)",
                 "TypeOfExpression :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError ExpressionType)",
@@ -610,7 +620,7 @@ mod tests {
                 "info :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)",
                 "typeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)",
                 "currentScopeView :: forall effs. Member Introspection effs => Eff effs (Either QueryError ScopeProvenance)",
-                "scopeBindings :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Eff effs (Either QueryError NameList)",
+                "scopeBindings :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Eff effs (Either QueryError NameRefList)",
                 "moduleExports :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError NameList)",
                 "rowFit :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> IdentifierRef -> Eff effs (Either QueryError Fit)",
                 "typeOfExpression :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError ExpressionType)",

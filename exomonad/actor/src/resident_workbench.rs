@@ -35,6 +35,7 @@ mod replacement_input_tests;
 pub(crate) mod compiler_query;
 pub(crate) mod request;
 mod structured_introspection;
+pub(crate) mod world_enumeration;
 pub(crate) mod to_haskell;
 
 use structured_introspection::StructuredIntrospectionAnswer;
@@ -4589,6 +4590,11 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         query: compiler_query::CompilerQuery,
     },
+    /// Enumeration over the admitted world; constructs no inspection request.
+    WorldScopeBindings {
+        continuation: ResidentHole,
+        expected: Option<tidepool_runtime::session::ScopeProvenance>,
+    },
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
     /// The caller's own recent conversation. It carries no actor argument:
@@ -4840,6 +4846,7 @@ impl ResidentActorBoundary {
                 StructuredInspectionKind::Type => "structured type",
             },
             Self::CompilerQuery { query, .. } => query.operation(),
+            Self::WorldScopeBindings { .. } => "scopeBindings",
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
             Self::ToolResultPublication { .. } => "tool semantic result publication",
@@ -10869,14 +10876,12 @@ where
                         crate::generated::introspection::IntrospectionReq::ScopeBindings(
                             expected_scope,
                         ),
-                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                    ) => Ok(ResidentActorBoundary::WorldScopeBindings {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::ScopeBindings {
-                            expected_scope: compiler_query::expected_scope_from_value(
-                                &expected_scope,
-                                session.data_con_table(),
-                            )?,
-                        },
+                        expected: compiler_query::expected_scope_from_value(
+                            &expected_scope,
+                            session.data_con_table(),
+                        )?,
                     }),
                     ResidentRequest::Introspection(
                         crate::generated::introspection::IntrospectionReq::ModuleExports(
@@ -17209,6 +17214,105 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
+        })
+        .await;
+    }
+
+    /// The claim under test is process-level: enumerating the admitted scope
+    /// spawns no extract worker at all. `extract_spawn_count` increments on a
+    /// launch that ran, so the assertion covers a launch whose failure was
+    /// swallowed. The counter is process-wide; run this case focused.
+    #[tokio::test]
+    async fn scope_bindings_reads_the_admitted_world_without_an_extract_worker() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (captured, _owner) = world_query_test_source_files_with_support(
+                &[vec![(
+                    "WorldScope.hs",
+                    "module WorldScope where\nworldA :: Int\nworldA = 7\n",
+                )]],
+                &source.base_include,
+            );
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                source.bind_preparation(preparation_client),
+                None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+            workbench
+                .publish_cell_for_test(
+                    context.clone(),
+                    "let (worldA, worldB) = ((7 :: Int), (8 :: Int))",
+                )
+                .await
+                .unwrap();
+            // Independent oracle: the resident machine's own occurrence table
+            // for this scope. The old `ScopeBrowse` path enumerated the
+            // generated probe module instead, so equality here is the
+            // correctness claim, not just a smoke test.
+            let mut expected = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session.binding_names_in(context.placement.lexical_scope))
+                })
+                .await
+                .unwrap();
+            expected.sort();
+            expected.dedup();
+            let reference = captured
+                .generation_evidence()
+                .expect("the captured source owner carries generation evidence")
+                .reference
+                .clone();
+            // The core claim: enumerating the admitted world is not compiler
+            // work. The process-wide counter increments on a spawn that ran,
+            // whatever its exit status, so a regression cannot hide behind a
+            // swallowed launch error.
+            let spawns_before = tidepool_extract_cmd::extract_spawn_count();
+            let answer = workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    let original = context.source_dependency().source_lease()?;
+                    let admitted = session
+                        .capture_inspection_world_in(
+                            context.placement.lexical_scope,
+                            &reference,
+                            &original,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    assert!(admitted.needs_source_capture());
+                    admitted.scope_bindings().map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "scope enumeration failed: {error}"
+                        ))
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                spawns_before,
+                "scopeBindings must not spawn an extract worker"
+            );
+            let mut enumerated = answer
+                .refs
+                .iter()
+                .map(|reference| reference.name.clone())
+                .collect::<Vec<_>>();
+            enumerated.sort();
+            enumerated.dedup();
+            assert_eq!(enumerated, expected);
+            assert!(answer
+                .refs
+                .iter()
+                .all(|reference| !reference.module.is_empty()));
+            assert_eq!(answer.observed, answer.refs.len());
         })
         .await;
     }
