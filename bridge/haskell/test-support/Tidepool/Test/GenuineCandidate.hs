@@ -7,7 +7,7 @@ module Tidepool.Test.GenuineCandidate
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
-  , writeGenuineExecutionScope, writeGenuineWorldContext
+  , writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -70,7 +70,7 @@ data FixtureDelivery
 data FixtureOutput
   = CandidateManifestOutput BS.ByteString
   | ScopeOutput FilePath
-  | WorldContextOutput BS.ByteString
+  | ScopeContextOutput FilePath BS.ByteString
 
 captureCompilerFixture :: FixtureCompilerInput -> PreparedPipelineResult -> IO CapturedCompilerFixture
 captureCompilerFixture input prepared = do
@@ -117,15 +117,15 @@ writeGenuineExecutionScope nativeOwners lexicalRoots work capture = scopeOutput 
   deliverCapturedFixture capture (FixtureSelection [] nativeOwners nativeOwners lexicalRoots)
     (ScopeDelivery work)
 
--- The parcel is DATA materialized from the same genuine admitted context as
--- scope delivery. Its existing completion owner verifies the exact bytes.
-writeGenuineWorldContext :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO BS.ByteString
-writeGenuineWorldContext nativeOwners lexicalRoots work capture = do
+-- One completion delivers the original scope and its materialized context DATA.
+-- The parcel gains no scope authority; both outputs keep their existing owners.
+writeGenuineExecutionScopeWithContext :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO (FilePath,BS.ByteString)
+writeGenuineExecutionScopeWithContext nativeOwners lexicalRoots work capture = do
   output <- deliverCapturedFixture capture
     (FixtureSelection [] nativeOwners nativeOwners lexicalRoots) (WorldContextDelivery work)
   case output of
-    WorldContextOutput bytes -> pure bytes
-    _ -> fail "fixture delivery omitted its requested context parcel"
+    ScopeContextOutput path bytes -> pure (path,bytes)
+    _ -> fail "fixture delivery omitted its requested scope and context parcel"
 
 writeGenuineCandidateLexicalScope
   :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO FilePath
@@ -188,7 +188,11 @@ writePacket delivery input selection = do
       <> text producer <> names (fixtureLexicalRoots selection) <> optional capture))
   completion <- runPacketProducer OriginalProductsProducer packet
   case delivery of
-    WorldContextDelivery _ -> WorldContextOutput <$> completedPacketOutput completion (packet </> "world-context-blocks.cbor")
+    WorldContextDelivery _ -> do
+      scoped <- readScopeOutput packet completion
+      case scoped of
+        ScopeOutput path -> ScopeContextOutput path <$> completedPacketOutput completion (packet </> "world-context-blocks.cbor")
+        _ -> fail "fixture delivery omitted its requested original scope"
     ScopeDelivery _ -> readScopeOutput packet completion
     CandidateDelivery _ -> CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
 

@@ -85,7 +85,7 @@ import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineWorldContext)
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
@@ -689,8 +689,9 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
         && counterValues "original_inputs.retained_encoded_bytes" fileAgain == [0])
       (fail "file-only fixture claimed owned continuation reuse")
     owner <- newExactInputOwner
-    firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
-    contextParcel <- writeGenuineWorldContext ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+    (fileScope,contextParcel) <- writeGenuineExecutionScopeWithContext
+      ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+    firstPath <- ownedFixtureScope handles fileScope
     semanticWorldBindingControls work firstPath contextParcel
     missingOwnedPartsRefuse firstPath
     capturedProofScope <- readExactScope firstPath >>= either fail pure
