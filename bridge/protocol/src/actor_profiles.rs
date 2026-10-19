@@ -908,9 +908,11 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             .join(", "),
     );
     hs.push_str("]\n\ntype CatalogueToolEffects =\n  '[");
+    // Match ToolEffectKey::ALL independently of registry placement.
     hs.push_str(
-        &effects
+        &actor
             .iter()
+            .chain(invocation.iter())
             .map(|effect| effect.row_entry())
             .collect::<Vec<_>>()
             .join(", "),
