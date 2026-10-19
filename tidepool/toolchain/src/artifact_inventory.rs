@@ -7459,13 +7459,15 @@ impl ArtifactView {
             .map(InventoryNodeKey::Artifact)
             .chain(groups.values().copied().map(InventoryNodeKey::Group))
             .collect::<Vec<_>>();
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self
-            .reads
-            .read_projection
-            .get()
-            .ok_or_else(|| failure("cold compiler binding projection was not captured"))?
-            .nodes;
+        // Membership comes from this owner's acquired bindings and their
+        // retained closure, never from a separately captured cold read
+        // projection. A fresh acquisition must still support demand from its
+        // own roots and custody.
+        let owned = self
+            .lease
+            .selection
+            .retained_nodes()
+            .map_err(|_| failure("acquired compiler bindings lost their exact selection"))?;
         for root in &roots {
             crate::host_work::checkpoint()?;
             budget(operation.charge(1))?;
@@ -7479,15 +7481,37 @@ impl ArtifactView {
                 ));
             }
         }
-        let (nodes, _) =
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let (nodes, closure) =
             admitted_closure_with_operation(&state, roots.iter().copied(), Some(operation))?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputProjectionClosureNode,
+            closure.nodes as u64,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputProjectionClosureEdge,
+            closure.edges as u64,
+        );
         let mut selection = ExactSelectionSnapshot::default();
         let mut pending = Vec::new();
+        let root_nodes = roots.iter().copied().collect::<BTreeSet<_>>();
         for root in &roots {
             budget(operation.reserve::<(InventoryNodeKey, (), [usize; 4])>(1))?;
             selection.roots.insert(*root, ());
             budget(operation.reserve::<ArtifactSelectionId>(1))?;
             pending.push(root.selection());
+        }
+        // Every artifact the demanded closure retains but does not name as an
+        // executable root stays non-executable custody of this view.
+        for node in &nodes {
+            if let InventoryNodeKey::Artifact(binding) = node {
+                if !root_nodes.contains(node) {
+                    budget(operation.reserve::<ArtifactBindingNode>(1))?;
+                    selection
+                        .custody_roots
+                        .insert(ArtifactBindingNode::Artifact(*binding), ());
+                }
+            }
         }
         for (id, binding) in namespace {
             if *id != binding.artifact {
@@ -7573,9 +7597,12 @@ impl ArtifactView {
             materialization_parents: Vec::new(),
             materialization: Mutex::new(BTreeMap::new()),
         };
-        Ok(Self::from_custody(ViewLease::from_issued_draft(
-            draft, introduced,
-        )))
+        // Transfer physical payload and materialization custody for exactly
+        // these demanded nodes, as `select_issued` does for an issued graph.
+        // Cold-only custody is filtered out by the retained closure.
+        let mut retained = Self::from_custody(ViewLease::from_issued_draft(draft, introduced));
+        retained = self.retain_projected_materializations(retained)?;
+        Ok(retained)
     }
 
     /// Reopen an issuer's immutable selection inside subsequently grown custody.
