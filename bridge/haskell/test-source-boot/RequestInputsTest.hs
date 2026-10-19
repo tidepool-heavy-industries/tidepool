@@ -85,7 +85,7 @@ import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineWorldContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
@@ -375,8 +375,8 @@ capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> 
 -- Raw transport mutations enter the actual cold reader using independently
 -- issued canonical rows and their live sealed acquisition. This issues no
 -- rooted boot, compiler world realization, hold, or Ready authority.
-semanticWorldBindingControls :: FilePath -> FilePath -> IO ()
-semanticWorldBindingControls work scopePath = do
+semanticWorldBindingControls :: FilePath -> FilePath -> BS.ByteString -> IO ()
+semanticWorldBindingControls work scopePath contextParcel = do
   (scope,fixture) <- readScopeCodecFixture scopePath
   rows <- case scopeCodecField ScopeCodecInterfaces fixture of
     TList values | length values == 2 -> pure values
@@ -390,18 +390,23 @@ semanticWorldBindingControls work scopePath = do
       [seal] -> TList . (row:) . pure . TBytes <$> rawHex (T.unpack seal)
       _ -> fail "genuine row does not have one exact image"
     _ -> fail "genuine world row shape changed"
-  let blockFixture operation arguments = do
+  let decodeParcel term = case term of
+        TList [TBytes root,TList encoded] | not (null encoded) -> do
+          pairs <- forM encoded $ \entry -> case entry of
+            TList [TBytes cid,TBytes body] -> pure (cid,body)
+            _ -> fail "Materializer block fixture needs exact CID/body pairs"
+          unless (any ((== root) . fst) pairs) (fail "Materializer fixture omitted its root block")
+          pure (root,pairs)
+        _ -> fail "Materializer fixture needs its root and owned blocks"
+      blockFixture operation arguments = do
         path <- issueCodecFixturePacket work (operation ++ ".cbor") (toStrictByteString (encodeTerm
           (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments])))
-        readCodecTerm path >>= \term -> case term of
-          TList [TBytes root,TList encoded] | not (null encoded) -> do
-            pairs <- forM encoded $ \entry -> case entry of
-              TList [TBytes cid,TBytes body] -> pure (cid,body)
-              _ -> fail "Materializer block fixture needs exact CID/body pairs"
-            unless (any ((== root) . fst) pairs) (fail "Materializer fixture omitted its root block")
-            pure (root,pairs)
-          _ -> fail "Materializer fixture needs its root and owned blocks"
-  (primary,blockPairs) <- blockFixture "world-context-blocks" [TBytes producer]
+        readCodecTerm path >>= decodeParcel
+  (primary,blockPairs) <- case deserialiseFromBytes decodeTerm (BL.fromStrict contextParcel) of
+    Right (remaining,value) | BL.null remaining -> decodeParcel value
+    _ -> fail "genuine context parcel is not one complete CBOR value"
+  worldContextCoverage primary blockPairs
+  (emptyPrimary,emptyBlocks) <- blockFixture "world-context-blocks" [TBytes producer]
   (hamtRoot,hamtBlocks) <- blockFixture "world-blocks" []
   worldHamtControls hamtRoot hamtBlocks
   let sources = "TPCSRC01" <> BS.replicate 8 0
@@ -453,6 +458,9 @@ semanticWorldBindingControls work scopePath = do
   original <- readPacket "world-seal-valid" (packet 2 product base visible acquisition)
   unless (worldInputsIdentityBytes original == SHA.hash product)
     (fail "cold world reader changed its exact restoration identity")
+  _ <- readPacket "world-seal-empty-context"
+    (packetFor 2 (restorationFor 2 emptyPrimary emptyBlocks base visible)
+      emptyPrimary emptyBlocks base visible acquisition)
   let rootBody = case lookup primary blockPairs of
         Just value -> value
         Nothing -> error "validated fixture root disappeared"
@@ -551,6 +559,42 @@ semanticWorldBindingControls work scopePath = do
       _ -> fail "genuine producer/image has a malformed SHA"
     rawHex _ = fail "genuine producer/image has an odd SHA length"
 
+-- Check the positive fixture's actual contents independently of the typed
+-- production fold. Empty typed maps cannot prove their key/value decoders.
+worldContextCoverage :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO ()
+worldContextCoverage root blocks = do
+  context <- readBlock root
+  selection <- fieldLink "selection" context >>= readBlock
+  moduleRows <- fieldLink "roles" context >>= hamtRows
+  digestRows <- fieldLink "offers" context >>= hamtRows
+  scopes <- fieldLink "scopes" selection >>= hamtRows
+  bindings <- fieldLink "namespace" selection >>= hamtRows
+  roots <- fieldLink "roots" selection >>= hamtRows
+  custody <- fieldLink "custody_roots" selection >>= hamtRows
+  unless (not (null moduleRows) && not (null digestRows) && not (null scopes)
+      && not (null bindings) && not (null (roots ++ custody)))
+    (fail "genuine context must exercise module/digest/binding-node keys and binding values")
+  putStrLn ("genuine Context HAMT coverage module=" ++ show (length moduleRows)
+    ++ " digest=" ++ show (length digestRows) ++ " scopes=" ++ show (length scopes)
+    ++ " bindings=" ++ show (length bindings) ++ " binding-nodes=" ++ show (length (roots ++ custody)))
+  where
+    readBlock cid = case lookup cid blocks of
+      Nothing -> fail "genuine context coverage omitted a reachable block"
+      Just bytes -> case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+        Right (remaining,value) | BL.null remaining -> pure value
+        _ -> fail "genuine context coverage needs complete CBOR blocks"
+    fieldLink name (TMap fields) = case lookup (TString name) fields of
+      Just value -> link value
+      Nothing -> fail "genuine context coverage omitted a descriptor field"
+    fieldLink _ _ = fail "genuine context coverage needs a descriptor map"
+    link (TTagged 42 (TBytes bytes)) | not (BS.null bytes) && BS.head bytes == 0 = pure (BS.tail bytes)
+    link _ = fail "genuine context coverage needs a tagged CID"
+    hamtRows cid = readBlock cid >>= \node -> case node of
+      TList [TBytes _,TList pointers] -> concat <$> mapM rows pointers
+      _ -> fail "genuine context coverage needs a HAMT node"
+    rows (TList values) = pure values
+    rows tagged = link tagged >>= hamtRows
+
 -- The positive parcel comes from the actual Rust Materializer, and each
 -- negative changes those owned node bytes before issuing a new content address.
 -- These are DATA controls for the production HAMT fold, never rooted worlds.
@@ -646,7 +690,8 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "file-only fixture claimed owned continuation reuse")
     owner <- newExactInputOwner
     firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
-    semanticWorldBindingControls work firstPath
+    contextParcel <- writeGenuineWorldContext ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+    semanticWorldBindingControls work firstPath contextParcel
     missingOwnedPartsRefuse firstPath
     capturedProofScope <- readExactScope firstPath >>= either fail pure
     missingCapturedProofPartsRefuse capturedProofScope

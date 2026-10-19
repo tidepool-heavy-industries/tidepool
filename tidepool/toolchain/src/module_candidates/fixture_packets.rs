@@ -260,6 +260,37 @@ fn admit_fixture_scope(
     context
 }
 
+// Structural data from the same already-issued context used for scope delivery.
+// Materialization preserves its actual typed keys, proof refs and native facts;
+// the parcel itself grants no compiler or execution authority.
+fn materialize_fixture_context(context: &ExactDeclarationContext) -> Vec<u8> {
+    let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+    let mut materializer = crate::exact_context::Materializer::new(&store);
+    let context = materializer
+        .materialize_context(None, &context.snapshot())
+        .unwrap();
+    let staged = materializer.finish().unwrap();
+    let parcel = Value::Array(vec![
+        Value::Bytes(context.root().cid().to_bytes()),
+        Value::Array(
+            staged
+                .blocks()
+                .iter()
+                .map(|(cid, body)| {
+                    Value::Array(vec![
+                        Value::Bytes(cid.to_bytes()),
+                        Value::Bytes(body.to_vec()),
+                    ])
+                })
+                .collect(),
+        ),
+    ]);
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&parcel, &mut encoded).unwrap();
+    assert!(encoded.len() <= MANIFEST_LIMIT, "world context parcel bound");
+    encoded
+}
+
 fn empty_fixture_scope(producer_sha: [u8; 32]) -> ExactDeclarationContext {
     ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
@@ -518,6 +549,13 @@ fn source_boot_candidate_packet_producer() {
         empty_fixture_scope(producer_sha)
     };
     if fields[6].as_bool().expect("fixture scope selection") {
+        let world_context = packet.join("world-context-blocks.cbor");
+        tidepool_atomic_write::write_best_effort(
+            &world_context,
+            &materialize_fixture_context(&context),
+        )
+        .unwrap();
+        outputs.push(world_context);
         // The packet receives custody of the complete issued resource before
         // this adapter exits, and releases it after Haskell consumption.
         let request_root = fresh_fixture_request_root(&packet);

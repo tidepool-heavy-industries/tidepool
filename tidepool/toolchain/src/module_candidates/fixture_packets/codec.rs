@@ -372,30 +372,7 @@ fn source_boot_codec_packet_producer() {
                 .try_into()
                 .expect("context fixture producer length");
             let context = super::empty_fixture_scope(producer);
-            let store = fvm_ipld_blockstore::MemoryBlockstore::new();
-            let mut materializer = crate::exact_context::Materializer::new(&store);
-            let context = materializer
-                .materialize_context(None, &context.snapshot())
-                .unwrap();
-            let staged = materializer.finish().unwrap();
-            let parcel = Value::Array(vec![
-                Value::Bytes(context.root().cid().to_bytes()),
-                Value::Array(
-                    staged
-                        .blocks()
-                        .iter()
-                        .map(|(cid, body)| {
-                            Value::Array(vec![
-                                Value::Bytes(cid.to_bytes()),
-                                Value::Bytes(body.to_vec()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ]);
-            let mut encoded = Vec::new();
-            ciborium::ser::into_writer(&parcel, &mut encoded).unwrap();
-            assert!(encoded.len() <= MANIFEST_LIMIT, "world context parcel bound");
+            let encoded = super::materialize_fixture_context(&context);
             let output = root.join("world-context-blocks.cbor");
             tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
             output
