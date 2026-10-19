@@ -14714,15 +14714,27 @@ pub(crate) mod tests {
                 )
                 .unwrap(),
             );
-            // Full availability comes from the existing explicit offer issuer,
-            // never from the later output's broader artifact custody.
+            // A separately certified selected output supplies full dependency
+            // availability before the dependent output is admitted.
             let private = full.then(|| {
-                OriginalCompilerInputs::issue_candidate_from_context(
-                    &context,
-                    producer,
-                    std::slice::from_ref(dependency),
+                let output_inventory = ArtifactInventory::default();
+                let output_artifacts = output_inventory
+                    .admit_shared_with_demand(
+                        &output_inventory.empty_view(),
+                        vec![entry.clone()],
+                        NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let output_projection =
+                    CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                let output_selection = CertifiedSourceSelection::from_compiler_projection(
+                    &output_projection,
+                    &output_artifacts.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
                 )
-                .unwrap()
+                .unwrap();
+                OriginalCompilerInputs::from_selection(&output_selection, &output_artifacts)
+                    .unwrap()
             });
             let (context, private) = if interface_only {
                 let support = match &private {
