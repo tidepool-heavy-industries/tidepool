@@ -10,11 +10,12 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
 | `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | supervising issuer, admission and publication consumers |
-| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; initial persistent exact selected-row tranche |
-| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | running; independent selected-world census and optional/required-root semantics, then exact-candidate review |
+| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; bounded selected-interface lookup successor, base `9dbc0e18a2e05dfa1e7726af27fd598bc4886f2c` |
+| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | settled after cumulative review; reserved for exact successor review |
 
-Two active descendants granted; no deeper descendants permitted. Starts were
-reported to the campaign owner. No settlements or reallocations yet.
+Two descendant grants retained; no deeper descendants permitted. Starts,
+reviewer settlement/reactivation and repaired candidate review were reported to
+the campaign owner. No grant was transferred outside this area.
 
 `selected_root` owns `compiler_projection.rs` selected-support representation
 and tests. The owned-inputs area owns physical checked-value row borrowing in
@@ -30,7 +31,14 @@ reviewed concrete issuance contract.
   bindings, acquisitions, roles, availability and decisions; no parallel registry.
 - Initial bounded implementation changes `AdmittedCompilerRoles.rows` from a
   `BTreeMap` copied on fresh value append to a persistent map. This alone does
-  not establish incremental admission or publication.
+  not establish incremental admission or publication. Full history
+  `5b74c2f1..14d092fd` is merged in area checkpoint
+  `9dbc0e18a2e05dfa1e7726af27fd598bc4886f2c`, along with lazy P6 commit
+  `85e5f3ced0`. Independent review caught and repaired a test retaining a fork
+  handle during parent removal. Source review accepts the cumulative change;
+  compilation and execution remain pending. Receipts:
+  `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/oracle/cumulative-review-9dbc.txt`
+  and `lazy-seal-and-repair-review.txt` in the same directory.
 - Accepted C2 amendment: campaign `e2bd2611102566085d0c573568d820a50ed62fb3`,
   inspected directly. The selected row's exact binding and admitted payload is
   its home witness: canonical finalization, checked Val certificate or accepted
@@ -68,10 +76,10 @@ This is an in-progress source-backed inventory; unlisted paths remain unqualifie
 
 | Operation | Current issuer / next consumer | Repeated work requiring migration |
 | --- | --- | --- |
-| Fresh value-interface append | `CompilerSourceSupport::admit_value_interfaces` / selected interface queries | selected row map clone; first leaf owns repair |
+| Fresh value-interface append | `CompilerSourceSupport::admit_value_interfaces` / selected interface queries | persistent selected rows implemented and source-reviewed; actual counted clone bound and native controls pending |
 | Retained value input capture | `artifacts::checked_value_context` -> `ExactDeclarationContext::extend_retained_value_artifacts` -> `prepare_compilation` | per-value support merges, lexical union, producer and final normalization |
 | Ordered support admission | `ProgramSourceSupportState::admit_program_support_inner` -> next item request | selected metadata maps, inventory descriptors, lexical graph reconstruction |
-| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | unconditional lexical/import/implementation/selected metadata capture, even declaration-only cells |
+| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | lazy first-value preparation implemented; lexical/import/implementation and selected metadata folds remain for consuming cells; selected metadata deletion successor running |
 | Value publication / capture | `CheckedValueArtifact::capture_output` retains support and templates / next checked-value context | must carry exact completed per-item support; physical row ownership belongs to owned-inputs |
 | Declaration public restaging | `capture_declaration_target` -> `extend_admitted_surface` -> join certification | lexical expansion and root `sort` / `dedup`; stale validation and reservation semantics remain mandatory |
 | Resident declaration commit | `prepare_resident_declaration` -> `commit_prepared_declaration` | coherent existing scope tip already carries `ScopedCompilerContext`; extend this owner rather than actor-current registry |
@@ -93,8 +101,14 @@ the pinned admitted workflow when disk admission is resolved):
 
 ```sh
 swarm-build bash scripts/buck2-configure.sh --tests
+swarm-build bash scripts/buck2-run.sh targets -c remote.enabled=false //tidepool/toolchain:
+swarm-build just build //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary
+swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::value_publication_forks_share_unchanged_selected_rows --expected-count 1
+swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::fresh_value_append_preserves_native_permissions_and_exact_execution_roots --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::private_transport_refuses_selected_dependency_product_and_interface_conflicts --expected-count 1
+swarm-build just test-lib tidepool-runtime --exact session::turn::tests::prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles --expected-count 1
+swarm-build just test-lib tidepool-runtime --exact session::turn::tests::cell_program_host_cancellation_after_end_refuses_sealing_without_new_request --expected-count 1
 ```
 
 Discover exact affected production/test labels through the admitted configured
@@ -103,9 +117,26 @@ executed count exists for campaign changes yet.
 
 ## Next actions
 
-Finish the bounded issuer tranche, independently review its complete base-to-tip
-delta and production consumers, route repairs, then fold full history to the
-area branch. Settle census and exact transition identity before broad P4 or wire
-consumers migrate. Continue dependency-ready 02 and 03 waves only with their
-required reviewed contracts, retaining warm structural costs across request,
-sealing, publication and first next request.
+Waiting for `selected_root` to deliver its exact base `9dbc0e18..candidate`
+successor: remove the full stored selected metadata map in
+`PreparedValueSourceSupport` and query its existing exact admitted rows at
+`retain_output` / `retain_surface`. Reserved methods are the struct and `new`,
+`retain_output`, `retain_surface`, plus instrumentation only in
+`compiler_metadata_snapshot`. Physical materialization symbols remain with the
+owned-inputs area. Test/counter controls must preserve bad Val/unowned output
+refusal, distinct lexical membership, source Original selection and custody.
+An ordinary constructor trace span will support joined zero-construction
+declaration-only / first-value mixed-cell checks; those are not executed yet.
+
+On arrival, area supervisor reviews directly, reactivates `selection_oracle`
+for exact independent review, routes bounded repairs and folds the full history.
+Send source-reviewed checkpoints to the campaign owner. No periodic polling or
+wake loop: when dependency-bound, retain this waiting state and yield. The result
+producer checks recipient state and uses `followup_task` for a completed/idle
+non-root parent, with exact candidate, evidence and next action; `send_message`
+suffices only while the recipient is running.
+
+Broad 01 selected transitions and 02/03 P1/P4/publication migration still need
+the compiled issuing contract, complete negative dependency controls and joined
+production evidence. Preserve remaining warm folds and resource blockers
+explicitly; source review does not make this area integration-ready or qualified.
