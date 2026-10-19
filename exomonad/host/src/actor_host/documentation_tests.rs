@@ -3669,6 +3669,97 @@ fn explicit_display_identity(display: &serde_json::Value) -> (i64, i64, i64) {
 }
 
 #[tokio::test]
+async fn either_text_display_preserves_raw_text_through_retained_expansion() {
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = campaign.root_installation.policy.clone();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    committed(
+            policy.as_ref(),
+            "import qualified Tidepool.Inspection as Inspect\nimport qualified Data.Text as Text",
+        )
+        .await;
+    for (source, expected) in [
+        (
+            "Right (Text.pack \"first\\nsecond\") :: Either Text.Text Text.Text",
+            "Right first\nsecond",
+        ),
+        (
+            "Left (Text.pack \"unavailable\\nretained failure\") :: Either Text.Text Text.Text",
+            "Left unavailable\nretained failure",
+        ),
+    ] {
+        let retained = committed(policy.as_ref(), source).await;
+        let installed = retained["items"][0]["installedBindings"]
+            .as_array()
+            .expect("bare expression issues its retained binding");
+        assert_eq!(installed.len(), 1, "{retained:?}");
+        let binding = installed[0].as_str().expect("issued binding name");
+        assert_eq!(retained["publication"]["status"], "published");
+        assert_eq!(
+            retained["publication"]["bindings"],
+            serde_json::json!([binding])
+        );
+        assert_eq!(retained["items"][0]["output"], format!("[bound {binding}]"));
+        assert!(
+            retained["items"][0]["operations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|operation| operation
+                    .get("display")
+                    .is_none_or(serde_json::Value::is_null)),
+            "retaining a bare expression does not implicitly display it: {retained:?}"
+        );
+        let result = displayed(
+                campaign, policy.as_ref(),
+                &format!("Inspect.display {binding}"),
+            )
+            .await;
+        assert_eq!(explicit_display_output(&result)["text"], expected, "{result:?}");
+    }
+    let first = displayed(campaign, policy.as_ref(), "retainedDisplay <- Inspect.display (Right (Text.pack \"begin\\n\" <> Text.replicate 16000 (Text.pack \"λ\\n\") <> Text.pack \"end\\n\") :: Either Text.Text Text.Text)")
+        .await;
+    let mut current = explicit_display_output(&first).clone();
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let identity = current["identity"].clone();
+    assert!(current["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Right begin\n"));
+    let mut reached_end = false;
+    for _ in 0..16 {
+        assert_eq!(
+            current["identity"], identity,
+            "expansion keeps the actor-issued identity"
+        );
+        assert_eq!(current["unavailable"], false);
+        let text = current["text"].as_str().unwrap();
+        assert!(!text.contains("\\n"), "raw newlines: {text:?}");
+        assert!(text.len() <= 8192, "host byte allowance");
+        if current["expansions"].as_array().unwrap().is_empty() {
+            assert!(text.ends_with("end\n"));
+            reached_end = true;
+            break;
+        }
+        let reply = campaign
+            .drive_actor_output(&store, policy.expand_display_boxed(
+                explicit_display_identity(&current),
+                current["expansions"][0][0].as_i64().unwrap(),
+            ))
+            .await
+            .expect("navigate the issued display without compiling another cell");
+        current = explicit_display_output(&reply).clone();
+    }
+    assert!(
+        reached_end,
+        "all retained text is navigable without rerunning its producer"
+    );
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
+    })).await;
+}
+
+#[tokio::test]
 async fn explicit_display_expands_siblings_without_compilation_or_repeated_effects() {
     use super::command_test_support::backend_request_while_live;
     use super::command_test_support::TestCommands;

@@ -533,19 +533,6 @@ impl ConcurrentResident {
         markers: &[&str],
         layers: Option<exomonad_actor::ActorSourceLayerResolver>,
     ) -> Self {
-        Self::new_configured(bucket, markers, layers, false).await
-    }
-
-    async fn new_for_display(bucket: u32) -> Self {
-        Self::new_configured(bucket, &[], None, true).await
-    }
-
-    async fn new_configured(
-        bucket: u32,
-        markers: &[&str],
-        layers: Option<exomonad_actor::ActorSourceLayerResolver>,
-        with_console: bool,
-    ) -> Self {
         if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -554,7 +541,7 @@ impl ConcurrentResident {
                 .expect("one test tracing subscriber");
         }
         eval_harness::require_extract();
-        let mut declarations = vec![
+        let declarations = vec![
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::context_read_write_decl(),
             tidepool_mcp::agent_session_decl(),
@@ -565,17 +552,10 @@ impl ConcurrentResident {
             tidepool_mcp::fs_read_decl(),
             tidepool_mcp::sleep_decl(),
         ];
-        let mut actor_effects = vec![
+        let actor_effects = vec![
             exomonad_actor::ActorEffectKey::Commands,
             exomonad_actor::ActorEffectKey::Watches,
         ];
-        let console_row = if with_console {
-            declarations.push(tidepool_mcp::console_decl());
-            actor_effects.push(exomonad_actor::ActorEffectKey::Console);
-            ", Console"
-        } else {
-            ""
-        };
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
@@ -587,7 +567,7 @@ impl ConcurrentResident {
             insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
         let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
         let preamble = format!(
-            "{preamble}\ntype ActorEffects = '[AgentSession, ActorLocal Maybe, Commands, Watch.Watches{console_row}]\n"
+            "{preamble}\ntype ActorEffects = '[AgentSession, ActorLocal Maybe, Commands, Watch.Watches]\n"
         );
         let session = support::process_unique_session(bucket);
         let root = tempfile::tempdir().expect("concurrent actor session root");
@@ -867,113 +847,6 @@ fn committed_execution(reply: &serde_json::Value) -> String {
         );
     }
     execution.into()
-}
-
-#[tokio::test]
-async fn resident_either_text_display_expands_the_retained_value() {
-    let fixture = ConcurrentResident::new_for_display(189).await;
-    fixture
-        .read(
-            "display-imports",
-            "import qualified Tidepool.Inspection as Inspect\nimport qualified Data.Text as Text",
-        )
-        .await;
-    let page = |reply: &serde_json::Value| -> serde_json::Value {
-        reply["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|item| item["operations"].as_array().into_iter().flatten())
-            .find_map(|operation| operation.get("display").filter(|value| !value.is_null()))
-            .expect("real display publication")
-            .clone()
-    };
-    for (key, source, expected) in [
-        (
-            "either-notebook",
-            "Right (Text.pack \"first\\nsecond\") :: Either Text.Text Text.Text",
-            "Right first\nsecond",
-        ),
-        (
-            "either-failure",
-            "Left (Text.pack \"unavailable\\nretained failure\") :: Either Text.Text Text.Text",
-            "Left unavailable\nretained failure",
-        ),
-    ] {
-        let retained = fixture.read(key, source).await;
-        let installed = retained["items"][0]["installedBindings"]
-            .as_array()
-            .expect("bare expression issues its retained binding");
-        assert_eq!(installed.len(), 1, "{retained:?}");
-        let binding = installed[0].as_str().expect("issued binding name");
-        assert_eq!(retained["publication"]["status"], "published");
-        assert_eq!(
-            retained["publication"]["bindings"],
-            serde_json::json!([binding])
-        );
-        assert_eq!(retained["items"][0]["output"], format!("[bound {binding}]"));
-        assert!(
-            retained["items"][0]["operations"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .all(|operation| operation
-                    .get("display")
-                    .is_none_or(serde_json::Value::is_null)),
-            "retaining a bare expression does not implicitly display it: {retained:?}"
-        );
-        let displayed = fixture
-            .read(
-                &format!("{key}-display"),
-                &format!("Inspect.display {binding}"),
-            )
-            .await;
-        assert_eq!(page(&displayed)["text"], expected, "{displayed:?}");
-    }
-    let first = fixture
-        .read("retained-display", "retainedDisplay <- Inspect.display (Right (Text.pack \"begin\\n\" <> Text.replicate 16000 (Text.pack \"λ\\n\") <> Text.pack \"end\\n\") :: Either Text.Text Text.Text)")
-        .await;
-    let mut current = page(&first);
-    let identity = current["identity"].clone();
-    assert!(current["text"]
-        .as_str()
-        .unwrap()
-        .starts_with("Right begin\n"));
-    let mut reached_end = false;
-    for _ in 0..16 {
-        assert_eq!(
-            current["identity"], identity,
-            "expansion keeps the actor-issued identity"
-        );
-        assert_eq!(current["unavailable"], false);
-        let text = current["text"].as_str().unwrap();
-        assert!(!text.contains("\\n"), "raw newlines: {text:?}");
-        assert!(text.len() <= 8192, "host byte allowance");
-        if current["expansions"].as_array().unwrap().is_empty() {
-            assert!(text.ends_with("end\n"));
-            reached_end = true;
-            break;
-        }
-        let identity_parts = identity.as_array().unwrap();
-        let reply = fixture
-            .policy
-            .expand_display_boxed(
-                (
-                    identity_parts[0].as_i64().unwrap(),
-                    identity_parts[1].as_i64().unwrap(),
-                    identity_parts[2].as_i64().unwrap(),
-                ),
-                current["expansions"][0][0].as_i64().unwrap(),
-            )
-            .await
-            .expect("navigate the issued display without compiling another cell");
-        current = page(&reply);
-    }
-    assert!(
-        reached_end,
-        "all retained text is navigable without rerunning its producer"
-    );
-    fixture.shutdown(&[]).await;
 }
 
 #[tokio::test]
