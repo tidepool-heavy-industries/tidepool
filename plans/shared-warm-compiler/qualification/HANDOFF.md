@@ -194,14 +194,29 @@ fixture migrations use actual closed outputs and preserve refusal, physical owne
 retained-history and source-policy checks. NativeBinding closure is authenticated,
 not assumed from broad custody.
 
-Latest executed source `62249c33186fe957bcd3212eca7ff5f8863859a6` compiled production
-and cfg(test), then executed8 controls:4 passed,4 failed. The actual Request
-permission matrix is ONE passing test with24 internal states (16accepted,
-8typed refusals). Normalized winner transfer, closed Support and Resume passed.
-Exact raw-rebound inventory refusal, scoped-carrier choice, genuine-new-output
-setup and pairing authored-fallback assertions remain under bounded fixture review.
-The terminal receipt is `native-constructor-discriminator/retry-6224/TERMINAL.json`,
-SHA-256 `2b4e8bcf627dcbbb49f88d76ca5412f5548b2d5077ef60dc5695b44b36817fb8`.
+Latest executed source `8ffc976b7550ac07e9da9c9bd768205babe3d6a5` compiled
+production and cfg(test), then selected/executed five controls: two passed and
+three failed. Both physical custody histories now pass with the authenticated
+Value type closure and only the newly issued C selected Original. Retained-generation
+permission reconstruction fails while finding its dependency row; the publication
+property shrinks to one Demand with a compiler-role mismatch; the real compiled
+Request permission companion does not yet reach its expected typed refusal.
+These exact outcomes remain under issuer/role classification. The earlier main
+pairing negative remains until that companion actually proves missing Input permission.
+Receipt `retry-8ffc/TERMINAL.json` SHA-256
+`8a0bd171b4d52b9f82ebb459c9758846c7264bb7c185ae24635904c79ddfae4d`
+binds the five reports to binary SHA-256
+`068832041300f6f66d7590d2e6da7428c6f235a3928f2ac7d93f243c9f542a5b`.
+Process cleanup is confirmed; compiler cleanup is not observed. GHC diagnostic
+evidence is incomplete; the four compiler-free reports are complete.
+
+Earlier exact `8ed8b1c43f3e6b177ebe36792660e5af2f93ce7e` compiled, then executed
+12 controls: two passed and ten failed. A mistyped graph selector first refused
+with zero execution; the corrected roster is separately retained. The passing
+Request permission matrix is ONE test with 24 internal states (16 accepted,
+8 typed refusals), including independent literal transport assertions. The A→Value
+closed-output fixture also passed. The intermediate `c2ea` test compile failed on
+one assertion-format error with zero executions; `8ffc` adds only its diagnostic.
 No failed assertion is waived by source review.
 
 Earlier exact `ef797f477bb410c7fb98dad9b267cb32d93cfbc4` compiled and ran18 Rust

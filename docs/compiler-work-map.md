@@ -319,7 +319,9 @@ authenticates and carries custody under receiving roles; it does not select ever
 available catalog body as a new Original. Actual selected outputs retain the
 `CertifiedSourceSelection` / `from_selection` issuer and exact historical dependencies.
 This source observation is specific to the qualification probe (latest executed
-62249), whose8 controls passed4 and failed4. The actual frozen428b path remains a
+8ffc), whose five controls passed two physical ownership histories and failed three
+Request-history/compiled-permission assertions. Obsolete test-only strong issuers
+remain until their actual selected-output/Request replacements execute successfully. The actual frozen428b path remains a
 required rerun after integration. No full-map, FD, encoding or hydration work reduction
 is inferred from this role correction; the service and actor migration rows above
 remain open until their actual consumers and counters execute.
