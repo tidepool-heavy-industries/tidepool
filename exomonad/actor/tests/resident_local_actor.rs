@@ -846,6 +846,93 @@ fn committed_execution(reply: &serde_json::Value) -> String {
 }
 
 #[tokio::test]
+async fn resident_either_text_display_expands_the_retained_value() {
+    let fixture = ConcurrentResident::new(189, &[]).await;
+    fixture
+        .read(
+            "display-imports",
+            "import qualified Tidepool.Inspection as Inspect\nimport qualified Data.Text as Text",
+        )
+        .await;
+    let bare = fixture
+        .read(
+            "either-notebook",
+            "Right (Text.pack \"first\\nsecond\") :: Either Text.Text Text.Text",
+        )
+        .await;
+    assert_eq!(
+        bare["items"][0]["output"], "Right first\nsecond",
+        "{bare:?}"
+    );
+    let failed = fixture
+        .read(
+            "either-failure",
+            "Left (Text.pack \"unavailable\\nretained failure\") :: Either Text.Text Text.Text",
+        )
+        .await;
+    assert_eq!(
+        failed["items"][0]["output"], "Left unavailable\nretained failure",
+        "{failed:?}"
+    );
+    let first = fixture
+        .read("retained-display", "retainedDisplay <- Inspect.display (Right (Text.pack \"begin\\n\" <> Text.replicate 16000 (Text.pack \"λ\\n\") <> Text.pack \"end\\n\") :: Either Text.Text Text.Text)")
+        .await;
+    let page = |reply: &serde_json::Value| -> serde_json::Value {
+        reply["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+            .find_map(|operation| operation.get("display").filter(|value| !value.is_null()))
+            .expect("real display publication")
+            .clone()
+    };
+    let mut current = page(&first);
+    let identity = current["identity"].clone();
+    assert!(current["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Right begin\n"));
+    let mut reached_end = false;
+    for _ in 0..16 {
+        assert_eq!(
+            current["identity"], identity,
+            "expansion keeps the actor-issued identity"
+        );
+        assert_eq!(current["unavailable"], false);
+        let text = current["text"].as_str().unwrap();
+        assert!(!text.contains("\\n"), "raw newlines: {text:?}");
+        assert!(text.len() <= 8192, "host byte allowance");
+        if current["expansions"].as_array().unwrap().is_empty() {
+            assert!(text.ends_with("end\n"));
+            reached_end = true;
+            break;
+        }
+        let identity_parts = identity.as_array().unwrap();
+        let reply = fixture
+            .policy
+            .expand_display_boxed(
+                (
+                    identity_parts[0].as_i64().unwrap(),
+                    identity_parts[1].as_i64().unwrap(),
+                    identity_parts[2].as_i64().unwrap(),
+                ),
+                current["expansions"][0][0].as_i64().unwrap(),
+            )
+            .await
+            .expect("navigate the issued display without compiling another cell")
+            .into_json()
+            .expect("display expansion response");
+        current = page(&reply);
+    }
+    assert!(
+        reached_end,
+        "all retained text is navigable without rerunning its producer"
+    );
+    fixture.shutdown(&[]).await;
+}
+
+#[tokio::test]
 async fn resident_same_name_shadowing_follows_completion_order() {
     let markers = ["shadow-0-A", "shadow-0-B", "shadow-1-A", "shadow-1-B"];
     let mut fixture = ConcurrentResident::new(185, &markers).await;

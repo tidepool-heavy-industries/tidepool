@@ -17,9 +17,10 @@ import Control.Exception (evaluate)
 import Control.Monad (unless)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Tidepool.Inspection.Display (Display (displayTree), genericDisplayTree, GDisplay, Rep)
+import Tidepool.Inspection.Display (Display (displayTree, displayView), genericDisplayTree, GDisplay, Rep)
 import GHC.Generics (Generic)
 import Tidepool.Inspection.Tree
+import Tidepool.View.Types (viewTree)
 
 main :: IO ()
 main = runTests tests
@@ -43,6 +44,7 @@ tests = testGroup "display-tree"
   , testCase "wideCompoundValuesBreakOnlyWhenNeeded" wideCompoundValuesBreakOnlyWhenNeeded
   , testCase "textUsesEscapedStringLiterals" textUsesEscapedStringLiterals
   , testCase "topLevelTextKeepsLineBreaks" topLevelTextKeepsLineBreaks
+  , testCase "eitherTextViewsRetainRawPagedContentAndConstructor" eitherTextViewsRetainRawPagedContentAndConstructor
   , testCase "nonAsciiTextIsNotNumericallyEscaped" nonAsciiTextIsNotNumericallyEscaped
   , testCase "controlCharactersAreEscaped" controlCharactersAreEscaped
   , testCase "independentSiblingsKeepTheirKeys" independentSiblingsKeepTheirKeys
@@ -504,3 +506,17 @@ canonicalJsonRetainsStructuralExpansion = do
   assertEqual "JSON has an ordinary structural renderer" False (Text.isInfixOf "<opaque>" complete)
   assertEqual "large JSON keeps resumable detail" False (null (displayStateKeys state))
   assertEqual "the selected page stays bounded" True (Text.length (displayStateText state) <= 64)
+
+-- The same top-level view feeds explicit display and automatic notebook pages.
+eitherTextViewsRetainRawPagedContentAndConstructor :: IO ()
+eitherTextViewsRetainRawPagedContentAndConstructor = do
+  let body = Text.concat (replicate 400 "first\nλ\t\"last\"\n")
+      success = Right body :: Either Text Text
+      failure = Left body :: Either Text Text
+  assertEqual "success retains raw text across expansion boundaries" ("Right " <> body)
+    (renderAll 83 (viewTree (displayView success)))
+  assertEqual "failure retains its constructor and raw text" ("Left " <> body)
+    (renderAll 83 (viewTree (displayView failure)))
+  assertEqual "nested Either still uses structural quoted literals"
+    "[Right \"first\\nsecond\"]"
+    (renderAll 100 (displayTree [Right ("first\nsecond" :: Text) :: Either Text Text]))

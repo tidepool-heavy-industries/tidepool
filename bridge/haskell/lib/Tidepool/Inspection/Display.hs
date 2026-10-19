@@ -190,7 +190,11 @@ instance (Display a) => Display (Maybe a) where
   displayWith budget Nothing = rawText budget "Nothing"
   displayWith budget (Just value) = renderParts budget "Just " "" [\n -> displayWith n value]
 
+-- Top-level results keep their outcome tag while their payload uses its own
+-- presentation. Structural nesting still uses displayTreePrec below.
 instance (Display a, Display b) => Display (Either a b) where
+  displayView (Left value) = Inspection (Concat [TextLeaf "Left ", viewTree (displayView value)])
+  displayView (Right value) = Inspection (Concat [TextLeaf "Right ", viewTree (displayView value)])
   displayTree = displayTreePrec 0
   displayTreePrec precedence (Left value) = application precedence "Left" [displayTreePrec 11 value]
   displayTreePrec precedence (Right value) = application precedence "Right" [displayTreePrec 11 value]
