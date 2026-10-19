@@ -2212,6 +2212,7 @@ worldCorrupt = throwIO . WorldInputsFailure WorldInputsCorrupt
 readWorldInputsWithOwner :: ExactInputOwner -> FilePath -> IO WorldInputFacts
 readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classify
   where
+    text = E.encodeString . T.pack
     classify (failure :: IOException) = throwIO (WorldInputsFailure
       (if isUserError failure then WorldInputsCorrupt else WorldInputsUnavailable) (show failure))
     acquire = do
