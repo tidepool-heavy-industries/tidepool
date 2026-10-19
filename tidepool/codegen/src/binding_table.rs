@@ -97,6 +97,7 @@ pub enum BindingPromotionError {
     MissingSourceDomain,
     UnverifiableSourceSelection,
     LeaseCountExhausted,
+    MutationWitnessExhausted { revision: u64, advances: usize },
 }
 
 /// Exact binding writes and dependency leases checked before a publication
@@ -126,6 +127,13 @@ pub struct PreparedBindingPromotion {
     selection: SourceSelectionView,
     new_promoted: Option<HashSet<SessionVarId>>,
     new_promoted_sources: Option<HashSet<SourceLeaseKey>>,
+}
+
+impl PreparedBindingPromotion {
+    fn revision_advances(&self) -> usize {
+        // Name changes and the installed source selection share one commit.
+        self.names.changes.saturating_add(1)
+    }
 }
 
 pub struct PreparedSourceOwnerOrigin {
@@ -782,6 +790,37 @@ impl BindingTable {
         })
     }
 
+    /// The exact witness after this already-prepared promotion commits. The
+    /// caller retains the same exclusive checkout through publication; this
+    /// performs no binding or dependency enumeration and does not mutate state.
+    pub fn prepared_promotion_scope_witness(
+        &self,
+        tree: &ScopeTree,
+        prepared: &PreparedBindingPromotion,
+    ) -> Result<BindingScopeWitness, BindingPromotionError> {
+        let scope = prepared.plan.target;
+        if scope != prepared.names.scope {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let advances = prepared.revision_advances();
+        let revision = self.revision_after(advances).ok_or(
+            BindingPromotionError::MutationWitnessExhausted {
+                revision: self.revision,
+                advances,
+            },
+        )?;
+        let mut witness = self
+            .scope_witness(tree, scope)
+            .ok_or(BindingPromotionError::UnverifiableSourceSelection)?;
+        let (_, target_revision) = witness
+            .frames
+            .iter_mut()
+            .find(|(owner, _)| *owner == scope)
+            .ok_or(BindingPromotionError::UnverifiableSourceSelection)?;
+        *target_revision = revision;
+        Ok(witness)
+    }
+
     /// Recompute the relevant observation closure and retain exact source
     /// domain choices. Unrelated observation mutations invalidate caches but
     /// cannot change this immutable semantic snapshot.
@@ -934,11 +973,20 @@ impl BindingTable {
     }
 
     fn changed(&mut self, scope: ScopeId) {
-        self.revision = if self.revision == 0 {
-            0
-        } else {
-            self.revision.checked_add(1).unwrap_or(0)
-        };
+        self.changed_by(scope, 1);
+    }
+
+    fn revision_after(&self, advances: usize) -> Option<u64> {
+        (self.revision != 0)
+            .then_some(self.revision)?
+            .checked_add(u64::try_from(advances).ok()?)
+    }
+
+    fn changed_by(&mut self, scope: ScopeId, advances: usize) {
+        if advances == 0 {
+            return;
+        }
+        self.revision = self.revision_after(advances).unwrap_or(0);
         if self.current.contains_key(&scope)
             || self.tips.contains_key(&scope)
             || self.owned.contains_key(&scope)
@@ -2411,6 +2459,13 @@ impl BindingTable {
     }
 
     fn commit_name_changes(&mut self, prepared: PreparedNameChanges) {
+        let scope = prepared.scope;
+        let changes = prepared.changes;
+        self.install_name_changes(prepared);
+        self.changed_by(scope, changes);
+    }
+
+    fn install_name_changes(&mut self, prepared: PreparedNameChanges) {
         let PreparedNameChanges {
             scope,
             writes,
@@ -2419,7 +2474,7 @@ impl BindingTable {
             new_current,
             new_hidden,
             projection,
-            changes,
+            changes: _,
         } = prepared;
         if let Some(new) = new_current {
             self.current.insert(scope, new);
@@ -2451,9 +2506,6 @@ impl BindingTable {
             None => {
                 self.capturable_names.remove(&scope);
             }
-        }
-        for _ in 0..changes {
-            self.changed(scope);
         }
     }
 
@@ -2651,6 +2703,7 @@ impl BindingTable {
     /// The checkout that prepared this promotion must still own the table;
     /// there is no fallible operation after the public durability boundary.
     pub fn commit_exact_binding_promotion(&mut self, prepared: PreparedBindingPromotion) {
+        let revision_advances = prepared.revision_advances();
         let PreparedBindingPromotion {
             plan,
             names,
@@ -2709,8 +2762,8 @@ impl BindingTable {
         if let Some(next_tip) = plan.next_tip {
             self.next_tip = next_tip;
         }
-        self.commit_name_changes(names);
-        self.changed(target);
+        self.install_name_changes(names);
+        self.changed_by(target, revision_advances);
     }
 
     /// Publish an alias of an existing root through the ordinary scoped name

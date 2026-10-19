@@ -744,7 +744,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .begin_durable_private_execution(&child_owner, child)
         .unwrap();
     assert_eq!(
-        child_admission.admitted_public().declaration_tip,
+        child_admission.admitted_public().unwrap().declaration_tip,
         expected.declaration_tip
     );
     drop(child_admission);
@@ -765,6 +765,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .begin_durable_private_execution(&additional_owner, additional_child)
             .unwrap()
             .admitted_public()
+            .unwrap()
             .declaration_tip,
         expected.declaration_tip
     );
@@ -949,7 +950,8 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             consumer
                 .begin_durable_private_execution(&child_owner, child_scope)
                 .unwrap()
-                .admitted_public(),
+                .admitted_public()
+                .unwrap(),
             &child_snapshot
         );
         recovered_scopes.push((child_scope, path));
@@ -1640,6 +1642,7 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
             .begin_durable_private_execution(&child_owner, child)
             .unwrap()
             .admitted_public()
+            .unwrap()
             .epoch,
         1
     );
@@ -1701,6 +1704,7 @@ fn durable_child_commit_error_requires_reopen_without_reinitializing_or_reexecut
             .begin_durable_private_execution(&owner(1), parent)
             .unwrap()
             .admitted_public()
+            .unwrap()
             .epoch,
         1
     );
@@ -1709,6 +1713,7 @@ fn durable_child_commit_error_requires_reopen_without_reinitializing_or_reexecut
             .begin_durable_private_execution(&child_owner, child)
             .unwrap()
             .admitted_public()
+            .unwrap()
             .epoch,
         1
     );

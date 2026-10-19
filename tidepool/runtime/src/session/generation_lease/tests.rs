@@ -443,11 +443,12 @@ fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_stagin
         .unwrap();
     assert_eq!(admission.initial_value_generation(), Generation(501));
     assert_eq!(
-        admission.view().next_value_generation(),
+        admission.view().unwrap().next_value_generation(),
         admission.initial_value_generation()
     );
     let planned_values = admission
         .plan_reservation()
+        .unwrap()
         .unwrap()
         .items()
         .iter()
@@ -625,7 +626,7 @@ fn fenced_run_refuses_value_only_cell_and_private_scope_activation() {
             Vec::new(),
         )
         .unwrap();
-    assert!(accepted.visibility().machine_incarnation.is_some());
+    assert!(accepted.visibility().unwrap().machine_incarnation.is_some());
     assert_eq!(session.lib().generation(), Generation(0));
     let value_generation = session.val_gen();
     let scopes = session.scope_tree().len();
@@ -755,7 +756,7 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
             assert!(matches!(
                 prefix.start(
                     &session,
-                    prefix.admission().visibility().scope,
+                    prefix.admission().lexical_scope(),
                     native.unwrap()
                 ),
                 Err(crate::session::SessionError::RecoveryStore(_))

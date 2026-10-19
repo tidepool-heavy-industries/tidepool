@@ -3259,12 +3259,17 @@ fn prepare_cell_program_admitted_inner(
         )
         .into());
     }
-    let planned = admission.plan_reservation().ok_or_else(|| {
-        CompileError::ExtractFailed(
-            "complete cell compilation requires its parser reservation".into(),
-        )
-    })?;
-    let view = admission.view();
+    let finite_failure =
+        |error: super::SessionError| CompileError::ExtractFailed(error.to_string());
+    let planned = admission
+        .plan_reservation()
+        .map_err(finite_failure)?
+        .ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "complete cell compilation requires its parser reservation".into(),
+            )
+        })?;
+    let view = admission.view().map_err(finite_failure)?;
     let recipe = planned.plan().specification();
     tracing::Span::current().record("cell_bytes", recipe.cell_source.len());
     let mut specification = recipe.as_ref().clone();
@@ -3293,7 +3298,7 @@ fn prepare_cell_program_admitted_inner(
         .cell_template(&template_path)
         .cell_out(&output_path)
         .output_dir(scratch.path())
-        .includes(admission.include_paths())
+        .includes(admission.include_paths().map_err(finite_failure)?)
         .session_root(view.session_root())
         .inject_vals(view.injected_module_names());
     command.session_incarnation(view.session().0.to_string());
@@ -3303,7 +3308,10 @@ fn prepare_cell_program_admitted_inner(
         std::fs::write(&path, source)?;
         command.turn_template(kind, &path);
     }
-    for (identity, generation) in admission.admitted_retained_imports() {
+    for (identity, generation) in admission
+        .admitted_retained_imports()
+        .map_err(finite_failure)?
+    {
         command.retained_generation(extract_identity(identity), *generation);
     }
     drop(setup_span);
@@ -3316,23 +3324,27 @@ fn prepare_cell_program_admitted_inner(
     );
     let offer = ModuleCandidateOffer::select_cell_program_with_catalog(
         &endpoint,
-        admission.include_paths(),
+        admission.include_paths().map_err(finite_failure)?,
         scratch.path(),
         view.exact_compile_context(),
         specification,
         admission
             .interfaces()
+            .map_err(finite_failure)?
             .iter()
             .map(|interface| (interface.module(), interface.bytes_owned().clone()))
             .collect(),
         planned.compiler_specification(),
         &admission
             .interfaces()
+            .map_err(finite_failure)?
             .iter()
             .map(|interface| interface.checked_artifact().clone())
             .collect::<Vec<_>>(),
-        &admission.retained_declaration_projections(),
-        admission.catalog_selection(),
+        &admission
+            .retained_declaration_projections()
+            .map_err(finite_failure)?,
+        admission.catalog_selection().map_err(finite_failure)?,
     )?;
     offer_timing.advance("apply_offer");
     if let Some(root) = offer.checked_value_root() {
@@ -6726,7 +6738,7 @@ mod tests {
                     .unwrap(),
                 crate::session::PublicManifestCommit::Ephemeral
             ));
-            let public = self.execution.admitted_public().scope;
+            let public = self.execution.admitted_public().unwrap().scope;
             let published = self.resident.public_visibility_snapshot_in(public).unwrap();
             assert_eq!(
                 published
@@ -6743,7 +6755,7 @@ mod tests {
         }
 
         fn begin_next_execution(&mut self) {
-            let public = self.execution.admitted_public().scope;
+            let public = self.execution.admitted_public().unwrap().scope;
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
@@ -6798,7 +6810,7 @@ mod tests {
         assert_eq!(cell.checked.items.len(), 4);
         assert_eq!(cell.program.items().len(), 4);
         assert_eq!(fixture.resident.val_gen().0, initial + 3);
-        let reservation = cell.admission.plan_reservation().unwrap();
+        let reservation = cell.admission.plan_reservation().unwrap().unwrap();
         let observations = reservation
             .items()
             .iter()
@@ -6847,7 +6859,7 @@ mod tests {
             Some(CheckedExpressionLift::Effectful)
         );
         fixture.execute(cell);
-        let public = fixture.execution.admitted_public().scope;
+        let public = fixture.execution.admitted_public().unwrap().scope;
         let visible = fixture
             .resident
             .public_visibility_snapshot_in(public)
@@ -7138,7 +7150,7 @@ mod tests {
         let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = state.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
             "qualified RootChoice",
         ]));
@@ -7256,7 +7268,7 @@ mod tests {
         let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = state.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
             "qualified RootChoice",
         ]));
@@ -7354,7 +7366,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             alternate_program.items()[0].checked_item().include_paths(),
-            alternate.include_paths()
+            alternate.include_paths().unwrap()
         );
         assert!(state
             .begin_cell_program(admission.clone(), alternate_program)
@@ -7649,7 +7661,7 @@ mod tests {
         );
         assert_eq!(*open.close(), crate::CompilerTransactionClose::NotStarted);
         drop(open);
-        let public = fixture.execution.admitted_public().scope;
+        let public = fixture.execution.public_scope();
         let private = fixture.execution.private_scope();
         let before_public = fixture
             .resident
@@ -8085,8 +8097,8 @@ mod tests {
         let legitimate = fixture.check("let value = (42 :: Int)", &[], None).unwrap();
         let alternate = fixture.check("let value = (43 :: Int)", &[], None).unwrap();
         assert_ne!(
-            alternate.admission.specification_digest(),
-            legitimate.admission.specification_digest()
+            alternate.admission.specification_digest().unwrap(),
+            legitimate.admission.specification_digest().unwrap()
         );
         assert!(fixture
             .resident
@@ -8110,8 +8122,8 @@ mod tests {
             .check("originalValue = (42 :: Int)", &[], None)
             .unwrap();
         assert_eq!(
-            alternate.admission.specification_digest(),
-            legitimate.admission.specification_digest()
+            alternate.admission.specification_digest().unwrap(),
+            legitimate.admission.specification_digest().unwrap()
         );
         assert_ne!(
             alternate.admission.reserved_generations(),
@@ -8160,7 +8172,7 @@ mod tests {
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&SourceImports::from_specs(["qualified CheckedTiny"]));
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
@@ -8246,7 +8258,7 @@ mod tests {
                 std::fs::write(&support, support_source.replace("41", "42")).unwrap();
             }
             let execution = Arc::new(session.begin_private_execution(public).unwrap());
-            let view = execution.view();
+            let view = execution.view().unwrap();
             let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
                 "qualified CheckedTiny",
             ]));
@@ -8340,7 +8352,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let items = cell.admission.plan_reservation().unwrap().items();
+        let items = cell.admission.plan_reservation().unwrap().unwrap().items();
         assert_eq!(items.len(), 3);
         assert_eq!(
             items[0].kind(),
@@ -8543,7 +8555,7 @@ mod tests {
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
         let expected_prologue = session.next_lib_module().unwrap();
         let expected_declaration =
@@ -8598,6 +8610,7 @@ mod tests {
         assert_eq!(
             admission
                 .plan_reservation()
+                .unwrap()
                 .unwrap()
                 .items()
                 .iter()
@@ -8791,6 +8804,7 @@ mod tests {
         let projected = protected
             .admission()
             .view()
+            .unwrap()
             .clone()
             .with_compile_inputs(&source_inputs)
             .unwrap();
@@ -9449,6 +9463,7 @@ mod tests {
         assert_eq!(
             hidden_admission
                 .plan_reservation()
+                .unwrap()
                 .unwrap()
                 .items()
                 .iter()
@@ -11379,7 +11394,7 @@ mod compiler_packet_replay {
             admission.host_carrier(),
             Some(("job1", HostBindingType::COMMAND_JOB))
         );
-        let view = admission.view();
+        let view = admission.view().unwrap();
         let (checked, program) = tidepool_testing::with_settlement(|settlement| {
             compile_cell_program_admitted(admission.clone(), settlement)
         })

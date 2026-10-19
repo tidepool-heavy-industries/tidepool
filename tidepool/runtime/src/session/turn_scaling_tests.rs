@@ -1374,7 +1374,7 @@ where
         .into_iter()
         .collect();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
-    let view = execution.view();
+    let view = execution.view().unwrap();
     let imports = view.turn_imports(template_imports);
     let template = resident_cell_check_template(preamble, effects.row(), &imports);
     let templates = resident_workbench_templates(preamble, effects.row(), &imports);
