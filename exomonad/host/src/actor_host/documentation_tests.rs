@@ -1453,6 +1453,39 @@ async fn published_reflect_example_preserves_boundary_results() {
         .await;
 }
 
+fn introspection_probe_script() -> &'static str {
+    concat!(
+        "import qualified Tidepool.Introspection as I\n",
+        "queryTag error = case error of\n",
+        "  I.UnknownIdentifier _ -> \"UnknownIdentifier\"\n",
+        "  I.AmbiguousIdentifier _ _ -> \"AmbiguousIdentifier\"\n",
+        "  I.UnknownModule _ -> \"UnknownModule\"\n",
+        "  I.UnsupportedDeclaration _ -> \"UnsupportedDeclaration\"\n",
+        "  I.CompilerUnavailable _ -> \"CompilerUnavailable\"\n",
+        "  I.ScopeChanged _ _ -> \"ScopeChanged\"\n",
+        "  I.ExpressionRejected _ -> \"ExpressionRejected\"\n",
+        "describe detail =\n",
+        "  let resolved = I.inspectedIdentifier detail\n",
+        "      identity = I.identifierModule resolved <> \"|\" <> I.identifierName resolved <> \"|\" <> tshow (I.identifierNamespace resolved)\n",
+        "  in case I.identifierDeclaration detail of\n",
+        "       I.ValueDeclaration expression -> \"value|\" <> identity <> \"|\" <> I.typeCanonical expression\n",
+        "       I.DataDeclaration parameters constructors -> \"data|\" <> identity <> \"|\" <> tshow (length parameters) <> \"|\" <> tshow (length constructors)\n",
+        "       I.NewtypeDeclaration parameters constructor -> \"newtype|\" <> identity <> \"|\" <> tshow (length parameters) <> \"|\" <> I.identifierName (I.constructorRef constructor)\n",
+        "       I.TypeSynonymDeclaration parameters expression -> \"synonym|\" <> identity <> \"|\" <> tshow (length parameters) <> \"|\" <> I.typeCanonical expression\n",
+        "       I.ClassDeclaration parameters superclasses methods -> \"class|\" <> identity <> \"|\" <> tshow (length parameters) <> \"|\" <> tshow (length superclasses) <> \"|\" <> tshow (length methods)\n",
+        "       I.ConstructorDeclaration parent constructor -> \"constructor|\" <> identity <> \"|\" <> I.identifierModule parent <> \"|\" <> I.identifierName parent\n",
+        "       I.RecordSelectorDeclaration parent expression -> \"selector|\" <> identity <> \"|\" <> I.typeCanonical expression\n",
+        "probe label query = do\n",
+        "  result <- I.info query\n",
+        "  case result of\n",
+        "    Left error -> display (label <> \"|refused|\" <> queryTag error)\n",
+        "    Right detail -> display (label <> \"|\" <> describe detail)\n",
+        "probe \"readFile\" (I.NameQuery I.CurrentScope I.ValueName \"readFile\")\n",
+        "probe \"wrongName\" (I.NameQuery I.CurrentScope I.ValueName \"readFilePath\")\n",
+        "probe \"wrongKind\" (I.NameQuery (I.PublicModule \"Tidepool.Introspection\") I.TypeName \"IdentifierInfo\")\n",
+    )
+}
+
 #[tokio::test]
 async fn published_introspection_example_returns_structured_declaration() {
     let campaign = TestCampaign::start().await;
@@ -1460,16 +1493,36 @@ async fn published_introspection_example_returns_structured_declaration() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let retained = displayed(
+
+                // The published fence displays the raw result. Generated
+                // introspection records have no specialized `Display` instance,
+                // so that rendering carries no declaration fields; executing it
+                // proves the published example still runs through the real tool.
+                let published = displayed(
                     campaign,
                     root.as_ref(),
                     PublishedExample::Introspection.source(),
                 )
                 .await;
-                let text = explicit_display_output(&retained)["text"]
-                    .as_str()
-                    .unwrap_or_default();
-                assert!(text.contains("readFile"), "{retained}");
+                assert!(
+                    explicit_display_output(&published)["text"].is_string(),
+                    "{published}"
+                );
+
+                // Project the structured fields explicitly rather than relying
+                // on rendering. The negative controls use spellings containing
+                // `readFile` so an implementation that echoes its query cannot
+                // satisfy the exact outcomes asserted here.
+                let probed = displayed(campaign, root.as_ref(), introspection_probe_script()).await;
+                assert_eq!(
+                    explicit_display_texts(&probed),
+                    vec![
+                        "readFile|value|Tidepool.Effects.Core|readFile|ValueIdentifier|forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)",
+                        "wrongName|refused|UnknownIdentifier",
+                        "wrongKind|data|Tidepool.Effects.Core|IdentifierInfo|TypeIdentifier|0|1",
+                    ],
+                    "{probed}"
+                );
             })
         })
         .await;
