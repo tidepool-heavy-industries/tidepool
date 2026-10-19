@@ -15036,6 +15036,12 @@ where
                     let descriptor = ActorDescriptor::new(label, placement)
                         .with_capabilities(role)
                         .admit_independent_world();
+                    environment
+                        .runner
+                        .adopt_final_source_scope(
+                            descriptor.session_context(reservation.identity()),
+                        )
+                        .await?;
                     let mut behavior = ResidentKernelBehavior::with_boot(
                         descriptor,
                         environment.clone(),
