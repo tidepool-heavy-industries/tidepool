@@ -600,11 +600,28 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
         entries <- browseEntries context True names
         pure (typeIndex, InspectionBrowse "" True
           (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
+      InspectScopeBounded budget -> do
+        -- Stop gathering distinct visible names at the caller's budget. The
+        -- retained subset follows `globalRdrEnvElts` order; the sort below
+        -- orders only those names, so a truncated answer is deterministic but
+        -- not ranked.
+        let names = take budget
+              (nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
+                visibleInspectionName name])
+        entries <- browseEntries context True names
+        pure (typeIndex, InspectionBrowse "" True
+          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
       InspectModule moduleName expanded -> do
-        result <- inspectModule context moduleName expanded
+        result <- inspectModule context moduleName expanded Nothing
+        pure (typeIndex, result : results)
+      InspectModuleBounded moduleName expanded budget -> do
+        result <- inspectModule context moduleName expanded (Just budget)
         pure (typeIndex, result : results)
       InspectTypeSearch query -> do
-        result <- inspectTypeSearch context rdrEnv inspectionProbes query
+        result <- inspectTypeSearch context rdrEnv inspectionProbes Nothing query
+        pure (typeIndex, result : results)
+      InspectTypeSearchBounded query budget -> do
+        result <- inspectTypeSearch context rdrEnv inspectionProbes (Just budget) query
         pure (typeIndex, result : results)
       InspectStructuredInfoOf query -> do
         result <- inspectStructured rdrEnv StructuredInfo query
@@ -614,11 +631,14 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
         pure (typeIndex, result : results)
     missing binder = liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
 
-inspectTypeSearch :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Map.Map String Id -> String -> m InspectionResult
-inspectTypeSearch context rdrEnv inspectionProbes query =
+-- The budget bounds the encoded match list, not the search itself. Matching
+-- every candidate is required for the answer to be complete, so the work stays
+-- proportional to the environment even when the wire list is capped.
+inspectTypeSearch :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Map.Map String Id -> Maybe Int -> String -> m InspectionResult
+inspectTypeSearch context rdrEnv inspectionProbes budget query =
   case Map.lookup binderName inspectionProbes of
     Just identifier ->
-      InspectionTypeMatches query <$> searchTypeMatchesWithContext context rdrEnv
+      (InspectionTypeMatches query . boundedNames budget) <$> searchTypeMatchesWithContext context rdrEnv
         (idName identifier) (idType identifier)
     Nothing -> liftIO (ioError (userError ("inspection module did not expose " ++ binderName)))
   where
@@ -892,8 +912,14 @@ hasExportedParent exported thing = case tyThingParent_maybe thing of
 visibleInspectionName :: Name -> Bool
 visibleInspectionName = not . isPrefixOf "__tidepool_" . occNameString . nameOccName
 
-inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> m InspectionResult
-inspectModule context requested expanded
+-- | Apply an extraction inspection budget. `Nothing` means the caller asked for
+-- the complete enumeration.
+boundedNames :: Maybe Int -> [a] -> [a]
+boundedNames Nothing = id
+boundedNames (Just budget) = take budget
+
+inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> Maybe Int -> m InspectionResult
+inspectModule context requested expanded budget
   | isJust (parseSessionModule requested) = pure (InspectionModuleNotFound requested [])
   | otherwise = handleSourceError
   (\_ -> pure (InspectionModuleNotFound requested [StructuredPublicModule requested]))
@@ -906,7 +932,9 @@ inspectModule context requested expanded
         owner <- findModule (mkModuleName requested) Nothing
         resolvedInfo <- getModuleInfo owner
         pure (owner, maybe [] modInfoExports resolvedInfo)
-    rawEntries <- browseEntries context expanded names
+    -- The budget bounds rendered entries, not the export list itself: the
+    -- first `budget` exports in `modInfoExports` order are rendered.
+    rawEntries <- browseEntries context expanded (boundedNames budget names)
     let entries = nubBy sameDisplay (sortOn entryKey rawEntries)
     pure (InspectionBrowse (moduleNameString (moduleName mdl)) expanded entries)
   where
