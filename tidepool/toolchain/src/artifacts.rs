@@ -768,10 +768,7 @@ impl PreparedCellProgram {
             Some(cell.item(0)?.initial_prefix()?)
         };
         let mut items = Vec::with_capacity(cell.item_count());
-        let value_support = crate::declaration_context::PreparedValueSourceSupport::new(
-            context.clone(),
-            &source_lexical,
-        )?;
+        let mut value_support = None;
         for index in 0..cell.item_count() {
             cancellation.checkpoint()?;
             let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
@@ -786,6 +783,13 @@ impl PreparedCellProgram {
                 });
                 continue;
             }
+            if value_support.is_none() {
+                value_support = Some(crate::declaration_context::PreparedValueSourceSupport::new(
+                    context.clone(),
+                    &source_lexical,
+                )?);
+            }
+            let value_support = value_support.as_ref().expect("native item source support");
             let output = outputs.remove(&index).ok_or_else(|| {
                 CompileError::ExtractFailed("program native target is missing".into())
             })?;
@@ -819,7 +823,7 @@ impl PreparedCellProgram {
                 &source_lexical,
                 checked_cell::CheckedValueCaptureInput::Prepared {
                     produced: &produced_outputs.for_segment(index..index + 1)?,
-                    support: &value_support,
+                    support: value_support,
                 },
             )?;
             let next = completed.append(native.clone())?;
@@ -1489,6 +1493,11 @@ impl ModuleCandidateOffer {
             retained,
             &catalog,
         )
+        .inspect_err(|error| {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "inspection_offer", outcome = "error", %error,
+                "native input construction refused");
+        })
     }
 
     /// Reload compares candidate source for every original in the retained
@@ -1555,12 +1564,22 @@ impl ModuleCandidateOffer {
             ));
         }
         let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_before_value_extension",
+            context
+                .as_ref()
+                .map(|context| context.declarations().compiler_input_projection()),
+        );
         let declarations = checked_value_context(
             context
                 .as_ref()
                 .map(|context| context.declarations().clone()),
             &inputs,
         )?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_after_value_extension",
+            Some(declarations.compiler_input_projection()),
+        );
         let context = compile_context_with_declarations(context, declarations.clone());
         let authorization = checked_search_authorization(
             encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
@@ -1575,6 +1594,10 @@ impl ModuleCandidateOffer {
             catalog,
         )?;
         let private = private_native_availability(&declarations, producer, selected.as_deref())?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_private_fragment",
+            private.as_ref().map(|input| input.role_projection()),
+        );
         Ok(Self {
             selected,
             producer: producer.to_vec(),

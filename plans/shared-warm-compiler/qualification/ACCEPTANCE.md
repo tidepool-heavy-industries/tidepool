@@ -134,3 +134,11 @@ cells, renderer specialization, startup, fork, reload and recovery as migrated,
 intentionally distinct runtime consumption, explicitly unsupported, or obsolete/deleted.
 Unclassified supported reconstruction fronts block migration acceptance. Current map
 entries are source observations and open dispositions, not successful migrations.
+
+The bounded production trace candidate `e00aaedb83` received independent supervisor
+and campaign source acceptance. Production/cfg(test) and declared resources compiled;
+three maintained optional-root, required-conflict and candidate-history controls each
+executed/passed1 (3/3). Their binary/source/report receipts remain separate from the
+unexecuted exact frozen constructor reproduction. No first-promotion finding or repair
+is inferred from these compiler-free component controls. The full frozen lane awaits
+its own resource-release event.

@@ -1,5 +1,12 @@
 # Wave 1: exact worker realizations
 
+Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
+Rust retains primary notebook selections, execution provenance and atomic
+publication; Haskell owns compiler-derived worlds and invalidation. The
+paired owner review must classify mixed structures before moving or deleting
+them. The previous field/path inventory below remains investigative evidence,
+not a requirement to preserve its host-side decomposition.
+
 Status: proposed. Supervisor: [warm workers](README.md). Base: parent integrated contract and implementation revision descended from `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. This wave makes source-free exact input realization reusable; it does not assume cached `TcGblEnv` is safe or eliminate ordinary generated imports.
 
 ## Assignment, inputs and outputs

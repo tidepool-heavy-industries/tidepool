@@ -1,5 +1,10 @@
 # Owned compiler inputs
 
+The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
+new cross-area interfaces and sequencing. Keep the concrete source/invariant
+evidence below, but do not implement a duplicate host compiler world or
+require full input export before the service can answer a warm query.
+
 Plan only. Base: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. This directory assigns future implementation; no product change, build result, deployment or speedup is established by these documents. The supervisor owns this subtree and its integrated acceptance. Follow the [shared contracts](../CONTRACTS.md), root contributor/build rules and nearest subsystem rules at each implementation revision.
 
 The outcome is one owned physical representation of each selected immutable compiler input, reusable by the next actor request and by source-free worker snapshot registration. New outputs use fresh staging. Physical storage supplies the inputs named by the existing logical selection; it never chooses a compiler namespace, optional native roots, availability or executable demand.

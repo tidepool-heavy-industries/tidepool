@@ -187,8 +187,20 @@ records controls/resource proposal. Exact candidate
 `e00aaedb8310ecf847dc39ebd2bf81fdafb667e5` received independent supervisor and
 campaign full-delta source acceptance, without findings. The reserved child owns
 the approved 12 GiB-memory / 32 GiB-growth native compile/resources/three-control
-lane and its terminal observer, after refreshed accounting. Full bundle and
-exact frozen rerun require a separate fresh 24 GiB admission; the concrete plan
+lane through terminal success: production/cfg(test) compilation0 (331.479 s),
+declared resources0 (121.679 s), three adjacent controls selected/executed/passed3.
+Unit binary112007200 B SHA-256
+`400cae1f2d01166346cf6ed457352647a4835dcf0db8757a75f0b76aa9db4e07`;
+`native-constructor-discriminator/NATIVE-RESULT.json` binds actual reports,
+commands and cgroups. Supervisor independently verified all report hashes/counts
+and binary bytes. Process cleanup confirmed; hosted/compiler not observed for
+these compiler-free unit controls; diagnostics complete. Source review and these
+controls do not observe first promotion. Own build-scope peak5712482304 B,
+output growth1995157504 B; retained idle daemon remains globally accounted.
+All small-lane commands settled. Full bundle and
+exact frozen rerun require a separate fresh 24 GiB admission. The released small
+lane has priority reassigned to the host source/digest producer; no full-bundle
+work starts until campaign's concrete heavy-lane release event. The concrete plan
 is `native-constructor-discriminator/FROZEN-REPRO-PLAN.json`. Missing/truncated
 stage facts remain unknown. No first-promotion claim precedes actual execution.
 

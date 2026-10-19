@@ -32,6 +32,37 @@ mod published_source;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 
+// Full-profile diagnostics have an independent output budget. An omitted row
+// or binding makes this observation incomplete, never proof of absence.
+const NATIVE_TRACE_ROWS: usize = 256;
+const NATIVE_TRACE_ROOTS: usize = 512;
+
+pub(crate) fn trace_native_input_roles(
+    stage: &'static str,
+    projection: Option<&CompilerInputProjection>,
+) {
+    if !tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+    {
+        return;
+    }
+    let roles = projection.map(CompilerInputProjection::snapshot_roles);
+    let total = roles.map_or(0, |roles| roles.len());
+    for (owner, role) in roles
+        .into_iter()
+        .flat_map(|roles| roles.iter())
+        .take(NATIVE_TRACE_ROWS)
+    {
+        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+            stage, ?owner, interface = ?role.interface(), original = ?role.original(),
+            published_source = role.is_published_source_original(),
+            "native input role observation");
+    }
+    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+        stage, present = projection.is_some(), total, emitted = total.min(NATIVE_TRACE_ROWS),
+        omitted = total.saturating_sub(NATIVE_TRACE_ROWS), complete = total <= NATIVE_TRACE_ROWS,
+        "native input role observation coverage");
+}
+
 // Count actual cold semantic encodings on this test thread across owner clones.
 // Per-owner counters alone cannot detect a second independently encoded owner.
 #[cfg(test)]
@@ -183,7 +214,6 @@ pub(crate) struct PreparedValueSourceSupport {
     context: Arc<ExactDeclarationContext>,
     imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     implementations: BTreeMap<ExactModuleIdentity, crate::artifact_inventory::ArtifactKind>,
-    selected: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
 }
 
 impl PreparedValueSourceSupport {
@@ -191,6 +221,13 @@ impl PreparedValueSourceSupport {
         &self.context
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.value_source_support.prepare",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(crate) fn new(
         context: Arc<ExactDeclarationContext>,
         support: &[ExactLexicalNode],
@@ -208,12 +245,10 @@ impl PreparedValueSourceSupport {
         .map(|node| (node.owner, node.imports))
         .collect();
         let implementations = context.artifact_view().retained_source_implementations();
-        let selected = context.compiler_metadata_snapshot()?.entries;
         Ok(Self {
             context,
             imports,
             implementations,
-            selected,
         })
     }
 
@@ -223,7 +258,11 @@ impl PreparedValueSourceSupport {
     ) -> Result<RetainedValueSourceSurface, CompileError> {
         let interface = value.interface();
         let owner = identity(interface.unit(), interface.module());
-        let entry = self.selected.get(&owner).ok_or_else(|| {
+        let selected = self
+            .context
+            .compiler_source_support()
+            .selected_interfaces()?;
+        let entry = selected.get(&owner).ok_or_else(|| {
             failure("produced value interface is absent from its prepared context")
         })?;
         if entry.descriptor.id != value.artifact_id()
@@ -276,15 +315,15 @@ impl PreparedValueSourceSupport {
         )?
         .lexical;
         timing.advance("select_source_entries");
-        let entries = lexical
+        let selected = self
+            .context
+            .compiler_source_support()
+            .selected_interfaces()?;
+        let owners = lexical
             .iter()
-            .filter_map(|node| {
-                self.selected
-                    .get(&node.owner)
-                    .map(|entry| (node.owner.clone(), entry.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if entries.len() != lexical.len() {
+            .filter_map(|node| selected.get(&node.owner).map(|_| &node.owner))
+            .collect::<BTreeSet<_>>();
+        if owners.len() != lexical.len() {
             return Err(failure(
                 "retained source surface lacks its exact artifact owner",
             ));
@@ -625,6 +664,10 @@ impl OriginalCompilerInputs {
     pub(crate) fn reuse_selected_authored(
         context: &ExactDeclarationContext,
     ) -> Result<Option<Self>, CompileError> {
+        trace_native_input_roles(
+            "authored_reuse_input",
+            Some(context.compiler_input_projection()),
+        );
         let interfaces = context.owner.facts.compiler_support.selected_interfaces()?;
         let authored = interfaces
             .values()
@@ -685,6 +728,7 @@ impl OriginalCompilerInputs {
                     },
                 )?;
             }
+            trace_native_input_roles("authored_fallback_projection", Some(&projection));
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
@@ -704,6 +748,10 @@ impl OriginalCompilerInputs {
                 .iter()
                 .any(|role| role.original().is_some())
         });
+        trace_native_input_roles(
+            "authored_fallback_result",
+            carried.as_ref().map(|input| &input.projection),
+        );
         if selected.is_empty() {
             return Ok(carried);
         }
@@ -715,10 +763,12 @@ impl OriginalCompilerInputs {
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
         };
-        Ok(Some(match carried {
+        let result = match carried {
             Some(carried) => selected.merge(&carried)?,
             None => selected,
-        }))
+        };
+        trace_native_input_roles("authored_reuse_result", Some(&result.projection));
+        Ok(Some(result))
     }
 
     pub(crate) fn from_candidates(
@@ -735,6 +785,10 @@ impl OriginalCompilerInputs {
         configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
         let mut carried = Self::reuse_selected_authored(context)?;
+        trace_native_input_roles(
+            "candidate_after_authored_reuse",
+            carried.as_ref().map(|input| &input.projection),
+        );
         let metadata = context.compiler_metadata_snapshot()?;
         let mut reused = BTreeSet::new();
         let mut fresh = Vec::new();
@@ -771,6 +825,10 @@ impl OriginalCompilerInputs {
             });
         }
         if fresh.is_empty() {
+            trace_native_input_roles(
+                "candidate_private_composition",
+                carried.as_ref().map(|input| &input.projection),
+            );
             return Ok(carried);
         }
         let configured = Self::issue_complete_native_availability_with_source(
@@ -782,10 +840,13 @@ impl OriginalCompilerInputs {
                 products: &fresh,
             },
         )?;
-        Ok(Some(match carried {
+        trace_native_input_roles("candidate_fresh_fragment", Some(&configured.projection));
+        let result = match carried {
             Some(carried) => carried.merge(&configured)?,
             None => configured,
-        }))
+        };
+        trace_native_input_roles("candidate_private_composition", Some(&result.projection));
+        Ok(Some(result))
     }
 
     #[cfg(test)]
@@ -1009,7 +1070,10 @@ impl OriginalCompilerInputs {
             // offers. Its selected view deliberately need not own their Groups.
             CompleteAvailabilitySource::Request(_) => (Vec::new(), Vec::new()),
         };
+        trace_native_input_roles("native_issuance_baseline", Some(baseline));
+        trace_native_input_roles("native_issuance_fragment", Some(&projection));
         let effective = baseline.merge(&projection)?;
+        trace_native_input_roles("native_issuance_effective_roles", Some(&effective));
         let dependencies = match &source {
             CompleteAvailabilitySource::Candidate { source, .. } => {
                 crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
@@ -1159,7 +1223,6 @@ pub(crate) struct RequestCompilerInputs {
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: CompilerArtifactMetadata,
     native_selection: NativeInputSelection,
-    declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
 }
 
@@ -1599,19 +1662,33 @@ impl RequestNativeAvailability {
         if self.0.is_empty() {
             return Ok(self.clone());
         }
+        let trace = tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG);
         let payloads = artifacts.retained_payloads();
         let mut retained = BTreeSet::new();
         let mut roots_by_contribution = BTreeMap::new();
-        for (id, row) in self.0.iter() {
+        for (index, (id, row)) in self.0.iter().enumerate() {
             let owner = identity(&row.original_owner().unit, &row.original_owner().module);
-            let Some(role) = roles.snapshot_roles().get(&owner) else {
+            let role = roles.snapshot_roles().get(&owner);
+            let observe = |direct: bool| {
+                if trace && index < NATIVE_TRACE_ROWS {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        ?owner, available_original = ?id, available_mode = ?row.mode, canonical = ?row.canonical,
+                        selected_interface = ?role.map(CompilerInputRole::interface),
+                        selected_original = ?role.and_then(CompilerInputRole::original), direct,
+                        "native availability direct root decision");
+                }
+            };
+            let Some(role) = role else {
+                observe(false);
                 continue;
             };
             if role.interface() != row.canonical
                 || role.original().is_some_and(|selected| selected != *id)
             {
+                observe(false);
                 continue;
             }
+            observe(true);
             retained.insert(*id);
             for contribution in row.contributions.iter() {
                 let entry = roots_by_contribution
@@ -1634,8 +1711,32 @@ impl RequestNativeAvailability {
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         > = BTreeMap::new();
-        for (_, (contribution, roots)) in roots_by_contribution {
+        let contribution_count = roots_by_contribution.len();
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                rows = self.0.len(), row_omissions = self.0.len().saturating_sub(NATIVE_TRACE_ROWS),
+                contributions = roots_by_contribution.len(),
+                contribution_omissions = roots_by_contribution.len().saturating_sub(NATIVE_TRACE_ROWS),
+                complete = self.0.len() <= NATIVE_TRACE_ROWS && roots_by_contribution.len() <= NATIVE_TRACE_ROWS,
+                "native availability root observation coverage");
+        }
+        for (index, (identity, (contribution, roots))) in
+            roots_by_contribution.into_iter().enumerate()
+        {
             let restricted = contribution.for_groups(&roots)?;
+            if trace && index < NATIVE_TRACE_ROWS {
+                let observed_roots = roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
+                let members = restricted.originals();
+                let observed_members = members.iter().take(NATIVE_TRACE_ROWS).collect::<Vec<_>>();
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    contribution = ?identity, issuer_original = ?contribution.offer().original(),
+                    roots = ?observed_roots, root_count = roots.len(),
+                    root_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
+                    closure_members = ?observed_members, member_count = members.len(),
+                    member_omissions = members.len().saturating_sub(NATIVE_TRACE_ROWS),
+                    complete = roots.len() <= NATIVE_TRACE_ROOTS && members.len() <= NATIVE_TRACE_ROWS,
+                    "native availability closure from direct roots");
+            }
             for id in restricted.originals() {
                 dependencies
                     .entry(*id)
@@ -1643,7 +1744,15 @@ impl RequestNativeAvailability {
                     .push(Arc::clone(&restricted));
             }
         }
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                contribution_count, emitted = contribution_count.min(NATIVE_TRACE_ROWS),
+                omitted = contribution_count.saturating_sub(NATIVE_TRACE_ROWS),
+                complete = contribution_count <= NATIVE_TRACE_ROWS,
+                "native availability closure observation coverage");
+        }
         let mut rows = BTreeMap::new();
+        let mut historical_observations = 0usize;
         for (id, row) in self.0.iter() {
             let direct = retained.contains(id);
             if !direct && !dependencies.contains_key(id) {
@@ -1694,6 +1803,19 @@ impl RequestNativeAvailability {
                             );
                         }
                     }
+                    if trace {
+                        if historical_observations < NATIVE_TRACE_ROWS {
+                            let observed =
+                                roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
+                            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                                required_original = ?id, issuer_original = ?contribution.offer().original(),
+                                required_groups = ?observed, group_count = roots.len(),
+                                group_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
+                                complete = roots.len() <= NATIVE_TRACE_ROOTS,
+                                "native availability historical dependency permissions");
+                        }
+                        historical_observations += 1;
+                    }
                     if !roots.is_empty() {
                         contributions.push(contribution.for_groups(&roots)?);
                     }
@@ -1712,6 +1834,14 @@ impl RequestNativeAvailability {
                 NativeInputClassification::PrivateInput
             };
             rows.insert(*id, Arc::new(selected));
+        }
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                observations = historical_observations,
+                emitted = historical_observations.min(NATIVE_TRACE_ROWS),
+                omitted = historical_observations.saturating_sub(NATIVE_TRACE_ROWS),
+                complete = historical_observations <= NATIVE_TRACE_ROWS,
+                "native availability historical dependency observation coverage");
         }
         Ok(Self(Arc::new(rows)))
     }
@@ -2338,6 +2468,8 @@ impl RequestCompilerInputs {
 thread_local! {
     static REQUEST_COMPILER_INPUT_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static NATIVE_TRANSPORT_LOWERINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMPILER_METADATA_SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROGRAM_INPUT_GROUP_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ProtectedScaffoldRequirements {
@@ -2353,10 +2485,26 @@ impl ProtectedScaffoldRequirements {
     ) -> Result<RequestCompilerInputs, CompileError> {
         #[cfg(test)]
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
-        let declaration_semantic_sha256 = context.semantic_sha256();
+        trace_native_input_roles(
+            "request_before_private_composition",
+            Some(context.compiler_input_projection()),
+        );
+        trace_native_input_roles(
+            "request_private_fragment",
+            private.map(|input| &input.projection),
+        );
         let support = context
             .compiler_source_support()
-            .close_request(private, self)?;
+            .close_request(private, self)
+            .inspect_err(|error| {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "request_private_composition", outcome = "error", %error,
+                    "native input construction refused");
+            })?;
+        trace_native_input_roles(
+            "request_after_private_composition",
+            Some(support.projection()),
+        );
         let metadata = support
             .projection()
             .project_metadata(support.artifacts().metadata_snapshot())?;
@@ -2371,7 +2519,6 @@ impl ProtectedScaffoldRequirements {
             source_support: Arc::new(support),
             metadata,
             native_selection,
-            declaration_semantic_sha256,
             original_sources: Default::default(),
         })
     }
@@ -3956,13 +4103,20 @@ impl CertifiedInterfaceInputs {
 /// selections without storing a copy of every ancestor in each descendant.
 /// A detached selection shares each row and graph file's issuing directory,
 /// independently of historical materialization metadata.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaterializationKind {
+    Issued,
+    CheckedValueOverlay,
+}
+
 pub(crate) struct RetainedArtifactMaterialization {
+    kind: MaterializationKind,
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
-    rows: BTreeMap<ArtifactId, Arc<RetainedArtifactRow>>,
+    rows: imbl::OrdMap<ArtifactId, Arc<RetainedArtifactRow>>,
     groups: Arc<[PendingCertifiedGroup]>,
-    execution_scope: Option<Value>,
-    graph_paths: BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>,
+    execution_scope: Option<Arc<Value>>,
+    graph_paths: Arc<BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
 }
@@ -3991,7 +4145,12 @@ struct MaterializationCoverage {
 
 impl MaterializationFacts<'_> {
     fn detach(self) -> Arc<RetainedArtifactMaterialization> {
-        Arc::new(RetainedArtifactMaterialization {
+        Arc::new(self.into_owned())
+    }
+
+    fn into_owned(self) -> RetainedArtifactMaterialization {
+        RetainedArtifactMaterialization {
+            kind: MaterializationKind::Issued,
             _directory: None,
             _parents: Vec::new(),
             rows: self
@@ -4001,18 +4160,230 @@ impl MaterializationFacts<'_> {
                 .collect(),
             groups: self.groups.into_iter().cloned().collect::<Vec<_>>().into(),
             execution_scope: None,
-            graph_paths: self
-                .graph_paths
-                .into_iter()
-                .map(|(digest, file)| (digest, Arc::clone(file)))
-                .collect(),
+            graph_paths: Arc::new(
+                self.graph_paths
+                    .into_iter()
+                    .map(|(digest, file)| (digest, Arc::clone(file)))
+                    .collect(),
+            ),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
-        })
+        }
     }
 }
 
+/// A physical promotion belongs to one actual captured output certificate.
+/// Its row cannot be supplied or rebound independently of that issuer.
+#[derive(Debug)]
+pub(crate) struct CheckedValueRowIssuer {
+    certificate: Arc<CertifiedValueInterface>,
+    row: std::sync::Mutex<Option<Arc<RetainedArtifactRow>>>,
+    #[cfg(test)]
+    promotions: std::sync::atomic::AtomicU64,
+}
+
+impl CheckedValueRowIssuer {
+    pub(crate) fn new(certificate: Arc<CertifiedValueInterface>) -> Self {
+        Self {
+            certificate,
+            row: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            promotions: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn promotion_count(&self) -> u64 {
+        self.promotions.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+pub(crate) enum CheckedValueRowSource<'a> {
+    Fresh(&'a CertifiedValueInterface),
+    Produced(&'a CheckedValueRowIssuer),
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHECKED_VALUE_FACT_DETACHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RetainedArtifactMaterialization {
+    #[cfg(test)]
+    pub(crate) fn test_fact_detach_count() -> usize {
+        CHECKED_VALUE_FACT_DETACHES.with(std::cell::Cell::get)
+    }
+
+    /// A complete physical view owns current facts directly. Overlay revisions
+    /// share persistent rows and immutable graph/scope owners, never predecessors.
+    pub(crate) fn overlay_checked_value_leaves(
+        complete: &Arc<Self>,
+        leaves: &[Arc<Self>],
+        metadata: &CompilerArtifactMetadata,
+    ) -> Arc<Self> {
+        if leaves.is_empty() {
+            return complete.clone();
+        }
+        let mut selected_leaf_rows_visited = 0usize;
+        if leaves
+            .iter()
+            .flat_map(|leaf| leaf.rows.iter())
+            .all(|(id, row)| {
+                selected_leaf_rows_visited += 1;
+                complete
+                    .rows
+                    .get(id)
+                    .is_some_and(|old| Arc::ptr_eq(old, row))
+            })
+        {
+            tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_overlay_reuse",
+                selected_leaf_rows_visited, baseline_fact_detaches = 0,
+                "reused unchanged direct physical facts");
+            return complete.clone();
+        }
+        let mut owned = if complete.kind == MaterializationKind::CheckedValueOverlay {
+            Self {
+                kind: MaterializationKind::CheckedValueOverlay,
+                _directory: None,
+                _parents: Vec::new(),
+                rows: complete.rows.clone(),
+                groups: complete.groups.clone(),
+                execution_scope: complete.execution_scope.clone(),
+                graph_paths: complete.graph_paths.clone(),
+                #[cfg(test)]
+                payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+            }
+        } else {
+            // Flatten an issued owner once using the existing exact physical
+            // selection. Replacing its last obsolete row releases that backing.
+            #[cfg(test)]
+            CHECKED_VALUE_FACT_DETACHES.with(|count| count.set(count.get() + 1));
+            let mut owners = vec![complete.clone()];
+            owners.extend(leaves.iter().cloned());
+            let facts = Self::select_custody_facts(
+                &owners,
+                &metadata.retained.artifacts,
+                &metadata.retained.selected_native_groups,
+            )
+            .expect("selected checked value leaves have issued physical facts");
+            let mut owned = facts.into_owned();
+            owned.kind = MaterializationKind::CheckedValueOverlay;
+            owned.execution_scope = complete.execution_scope.clone();
+            owned
+        };
+        let mut changed_rows = 0usize;
+        for leaf in leaves {
+            for (id, row) in &leaf.rows {
+                if owned.rows.get(id).is_none_or(|old| !Arc::ptr_eq(old, row)) {
+                    owned.rows.insert(*id, row.clone());
+                    changed_rows += 1;
+                }
+            }
+        }
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_overlay",
+            initial_fact_detach = complete.kind == MaterializationKind::Issued,
+            changed_rows, current_rows = owned.rows.len(), predecessor_owners = 0,
+            "retained current immutable physical facts");
+        Arc::new(owned)
+    }
+
+    pub(crate) fn issued_value_row(
+        &self,
+        entry: &Arc<ArtifactEntry>,
+    ) -> Option<Arc<RetainedArtifactRow>> {
+        let mut row = None;
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            if let Some(candidate) = owner.rows.get(&entry.descriptor.id) {
+                if let ValueRowCustody::Private(issued) = &candidate.value_custody {
+                    if issued.same_issued_facts(entry) {
+                        row = Some(candidate.clone());
+                    }
+                }
+            }
+        });
+        row
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_ownership_shape(&self) -> (usize, usize) {
+        let mut owners = 0;
+        let mut rows = 0;
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            owners += 1;
+            rows += owner.rows.len();
+        });
+        (owners, rows)
+    }
+
+    /// Issue a value-sized physical leaf on the value's existing support view.
+    /// Descendant requests discover this same cache entry as inherited custody.
+    pub(crate) fn capture_checked_value(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        source: CheckedValueRowSource<'_>,
+    ) -> Result<Arc<RetainedArtifactRow>, CompileError> {
+        let (value, issuer) = match source {
+            CheckedValueRowSource::Fresh(value) => (value, None),
+            CheckedValueRowSource::Produced(issuer) => (issuer.certificate.as_ref(), Some(issuer)),
+        };
+        let owner = identity(value.interface().unit(), value.interface().module());
+        let selected = support.selected_interfaces()?;
+        let entry = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value has no selected row"))?
+            .clone();
+        if entry.descriptor.id != value.artifact_id()
+            || entry.requirements != value.requirements()
+            || !matches!(&entry.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
+        {
+            return Err(failure(
+                "checked value row differs from its issuing certificate",
+            ));
+        }
+        let materialization =
+            support
+                .artifacts()
+                .retain_checked_value_materialization(value, |entry, borrowed| {
+                    let mut issued = issuer.map(|issuer| crate::host_work::lock_with_wait(&issuer.row, || {})).transpose()?;
+                    if let Some(row) = issued.as_ref().and_then(|row| row.as_ref()) {
+                        return Ok(Self::checked_value_leaf(value.artifact_id(), row.clone()));
+                    }
+                    let mut validation = PackageInterfaceValidation::default();
+                    let (row, fresh) = match borrowed {
+                        Some(row) => (row, false),
+                        None => (Arc::new(RetainedArtifactRow::issue_value(entry, &mut validation, ValueRowLocation::Private)?), true),
+                    };
+                    #[cfg(test)]
+                    let work = validation.work();
+                    if let Some(issued) = &mut issued { **issued = Some(row.clone()); }
+                    #[cfg(test)]
+                    if fresh { if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } }
+                    tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_attach", fresh_rows = usize::from(fresh), borrowed_rows = usize::from(!fresh), "attached exact output row custody");
+                    let retained = Self::checked_value_leaf(value.artifact_id(), row);
+                    #[cfg(test)]
+                    let retained = Self { payload_work: work, ..retained };
+                    Ok(retained)
+                })?;
+        let mut rows = BTreeMap::new();
+        materialization.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            rows.extend(owner.rows.iter().map(|(id, row)| (*id, row.clone())));
+        });
+        rows.remove(&value.artifact_id())
+            .ok_or_else(|| failure("issued checked value row is absent"))
+    }
+
+    fn checked_value_leaf(id: ArtifactId, row: Arc<RetainedArtifactRow>) -> Self {
+        Self {
+            kind: MaterializationKind::Issued,
+            _directory: None,
+            _parents: Vec::new(),
+            rows: std::iter::once((id, row)).collect(),
+            groups: Arc::from([]),
+            execution_scope: None,
+            graph_paths: Arc::new(BTreeMap::new()),
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        }
+    }
+
     /// Preserve complete physical owners, discarding only exact issued subsets.
     /// A narrowed residual owns fact handles, never a historical parent graph.
     pub(crate) fn select_custody_inputs(
@@ -4108,7 +4479,7 @@ impl RetainedArtifactMaterialization {
                     excluded = true;
                 }
             }
-            for (id, file) in &owner.graph_paths {
+            for (id, file) in owner.graph_paths.iter() {
                 if selected
                     .graph_paths
                     .get(id)
@@ -4300,13 +4671,20 @@ impl RetainedArtifactMaterialization {
             .map(|entry| entry.descriptor.id)
             .collect::<BTreeSet<_>>();
         let mut rows = BTreeMap::new();
+        let mut owner_visits = 0usize;
+        let mut row_visits = 0usize;
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            owner_visits += 1;
             for (id, row) in &owner.rows {
+                row_visits += 1;
                 if selected.contains(id) {
                     rows.insert(*id, row.as_ref());
                 }
             }
         });
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_selected_rows",
+            owner_visits, row_visits, selected_rows = rows.len(), metadata_entry_visits = metadata.entries.len(),
+            "selected immutable physical rows");
         rows
     }
 
@@ -4381,7 +4759,8 @@ impl RetainedArtifactMaterialization {
     }
 }
 
-struct RetainedArtifactRow {
+pub(crate) struct RetainedArtifactRow {
+    value_custody: ValueRowCustody,
     owned_inputs:
         BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
@@ -4401,7 +4780,131 @@ enum RetainedArtifactPayload {
     },
 }
 
+impl std::fmt::Debug for RetainedArtifactRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetainedArtifactRow")
+            .field("interface", &self.interface)
+            .finish_non_exhaustive()
+    }
+}
+enum ValueRowCustody {
+    Generic,
+    Private(Arc<ArtifactEntry>),
+    #[cfg(test)]
+    Packet,
+}
+
+// Durable fixture packets transfer their whole directory to the caller. A row
+// does not extend that external packet lifetime, so only Private custody may be
+// borrowed into independently retained checked values.
+enum ValueRowLocation {
+    Private,
+    #[cfg(test)]
+    Packet(PathBuf),
+}
+
 impl RetainedArtifactRow {
+    /// Every value interface receives independent physical backing at issuance,
+    /// including values first materialized before final checked capture.
+    fn issue_value(
+        entry: Arc<ArtifactEntry>,
+        validation: &mut PackageInterfaceValidation,
+        location: ValueRowLocation,
+    ) -> Result<Self, CompileError> {
+        if !matches!(
+            &entry.payload,
+            ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+        ) {
+            return Err(failure(
+                "value row factory requires an acquired value interface",
+            ));
+        }
+        let before = validation.work();
+        let owner = entry.descriptor.owner.clone();
+        let (directory, value_custody) = match location {
+            ValueRowLocation::Private => (
+                tempfile::Builder::new()
+                    .prefix("tidepool-checked-value-")
+                    .tempdir()?,
+                ValueRowCustody::Private(entry.clone()),
+            ),
+            #[cfg(test)]
+            ValueRowLocation::Packet(root) => {
+                let mut directory = tempfile::Builder::new()
+                    .prefix("tidepool-checked-value-")
+                    .tempdir_in(root)?;
+                directory.disable_cleanup(true);
+                (directory, ValueRowCustody::Packet)
+            }
+        };
+        let directory = Arc::new(directory);
+        let files = recovery_artifacts::materialize_selected_interface(
+            directory.path(),
+            &owner,
+            entry.clone(),
+            entry.descriptor.producer_sha256,
+            validation,
+        )
+        .map_err(materialization_failure)?;
+        let payloads = original_inputs::entry_payloads(&entry);
+        let length = payloads
+            .iter()
+            .try_fold(0u64, |total, (_, bytes)| {
+                total.checked_add(bytes.len() as u64)
+            })
+            .ok_or_else(|| failure("checked value row size overflow"))?;
+        let mut builder =
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(length).map_err(failure)?;
+        let pending = payloads
+            .into_iter()
+            .map(|(kind, bytes)| Ok((kind, builder.append(bytes).map_err(failure)?)))
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let arena = builder.finish().map_err(failure)?;
+        let owned_inputs = pending
+            .into_iter()
+            .map(|(kind, pending)| Ok((kind, arena.issue_slice(pending).map_err(failure)?)))
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let row = RetainedArtifactRow {
+            value_custody,
+            owned_inputs,
+            interface: ExactIfaceArtifact {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                path: directory.path().join(files.interface_path),
+                sha256: hex(&files.skinny_iface_sha256),
+                requirements: entry
+                    .requirements
+                    .iter()
+                    .map(|owner| (owner.unit.clone(), owner.module.clone()))
+                    .collect(),
+            },
+            interface_evidence: scope_interface_evidence(&entry, directory.path(), validation)?,
+            _directory: directory,
+            payload: RetainedArtifactPayload::InterfaceOnly,
+            canonical_custody: None,
+        };
+        let after = validation.work();
+        let work = recovery_artifacts::RecoveryArtifactWork {
+            read_bytes: after.read_bytes - before.read_bytes,
+            written_bytes: after.written_bytes - before.written_bytes,
+            hash_bytes: after.hash_bytes - before.hash_bytes,
+            decoded_bytes: after.decoded_bytes - before.decoded_bytes,
+        };
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_issue",
+                        fresh_rows = 1, arena_bytes = arena.len(),
+                        promoted_bytes = work.written_bytes, promotion_read_bytes = work.read_bytes,
+                        promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
+        Ok(row)
+    }
+
+    pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice {
+        &self.owned_inputs[&original_inputs::OriginalInputKind::Interface]
+    }
+
+    pub(crate) fn checked_value_interface(&self) -> &ExactIfaceArtifact {
+        &self.interface
+    }
+
     fn original_input_parts(
         &self,
         entry: &ArtifactEntry,
@@ -4786,19 +5289,55 @@ impl ExactRequestInputs {
         })
     }
 
-    /// Check a program's semantic input growth independently of compiler transport.
-    fn in_program_context(
-        &self,
-        context: Arc<ExactDeclarationContext>,
-        private: Option<OriginalCompilerInputs>,
+    fn check_program_context(
+        context: &ExactDeclarationContext,
         producer_sha256: [u8; 32],
-    ) -> Result<Arc<Self>, CompileError> {
+    ) -> Result<(), CompileError> {
+        crate::host_work::checkpoint()?;
         if context.toolchain_identity_sha256() != producer_sha256
             && !(context.toolchain_identity_sha256() == [0; 32]
                 && context.artifact_view().is_empty())
         {
             return Err(failure("program context has another producer"));
         }
+        Ok(())
+    }
+
+    fn in_program_context(
+        self: &Arc<Self>,
+        context: Arc<ExactDeclarationContext>,
+        producer_sha256: [u8; 32],
+    ) -> Result<Arc<Self>, CompileError> {
+        Self::check_program_context(&context, producer_sha256)?;
+        // Private inputs and the scaffold stay with this exact input owner.
+        // A structural match cannot prove an unchanged declaration selection.
+        if Arc::ptr_eq(&self.context.owner, &context.owner) {
+            return Ok(Arc::clone(self));
+        }
+        self.admit_program_context(
+            context,
+            self.private_compiler_input.clone(),
+            producer_sha256,
+        )
+    }
+
+    fn with_private_compiler_input(
+        &self,
+        context: Arc<ExactDeclarationContext>,
+        private: OriginalCompilerInputs,
+        producer_sha256: [u8; 32],
+    ) -> Result<Arc<Self>, CompileError> {
+        Self::check_program_context(&context, producer_sha256)?;
+        self.admit_program_context(context, Some(private), producer_sha256)
+    }
+
+    /// Check a program's semantic input growth independently of compiler transport.
+    fn admit_program_context(
+        &self,
+        context: Arc<ExactDeclarationContext>,
+        private: Option<OriginalCompilerInputs>,
+        producer_sha256: [u8; 32],
+    ) -> Result<Arc<Self>, CompileError> {
         // Inventory custody grows by immutable artifact ID; compiler roles
         // follow their selected owner projection. An original product can
         // become available for an already retained canonical interface.
@@ -6097,8 +6636,12 @@ impl ExactCompilationRequest {
         };
         let metadata = &self.transport_metadata;
         let mut files = BTreeMap::new();
-        for row in materialization.selected_rows(metadata).into_values() {
+        let mut slice_visits = 0usize;
+        let selected_rows = materialization.selected_rows(metadata);
+        let selected_row_visits = selected_rows.len();
+        for row in selected_rows.into_values() {
             for slice in row.owned_inputs.values() {
+                slice_visits += 1;
                 let file = slice.compiler_file_lease();
                 files.insert(Arc::as_ptr(&file) as usize, file);
             }
@@ -6114,6 +6657,10 @@ impl ExactCompilationRequest {
                 }
             }
         }
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_input_transport_files",
+            selected_row_visits, slice_visits, graph_path_visits = graph_paths.len(),
+            metadata_entry_visits = metadata.entries.len(), exported_files = files.len(),
+            "enumerated exact immutable input file leases");
         files.into_values().collect()
     }
 
@@ -6562,7 +7109,10 @@ impl ProgramAdmissionContinuation {
         &self,
         context: Arc<ExactDeclarationContext>,
     ) -> Result<Self, CompileError> {
-        self.with_inputs(context, self.inputs.private_compiler_input.clone())
+        let inputs = self
+            .inputs
+            .in_program_context(context, self.physical.producer_sha256)?;
+        self.with_admitted_inputs(inputs)
     }
     pub(crate) fn in_program_context_with_private_input(
         &self,
@@ -6573,16 +7123,14 @@ impl ProgramAdmissionContinuation {
             Some(previous) => previous.merge(input)?,
             None => input.clone(),
         };
-        self.with_inputs(context, Some(private))
+        let inputs = self.inputs.with_private_compiler_input(
+            context,
+            private,
+            self.physical.producer_sha256,
+        )?;
+        self.with_admitted_inputs(inputs)
     }
-    fn with_inputs(
-        &self,
-        context: Arc<ExactDeclarationContext>,
-        private: Option<OriginalCompilerInputs>,
-    ) -> Result<Self, CompileError> {
-        let inputs =
-            self.inputs
-                .in_program_context(context, private, self.physical.producer_sha256)?;
+    fn with_admitted_inputs(&self, inputs: Arc<ExactRequestInputs>) -> Result<Self, CompileError> {
         let baseline = &self.inputs.compiler.metadata;
         let current = &inputs.compiler.metadata;
         if current.entries.iter().any(|(owner, entry)| {
@@ -6603,6 +7151,8 @@ impl ProgramAdmissionContinuation {
             .cloned()
             .collect::<Vec<_>>();
         let available = original_products_by_id(&entries);
+        #[cfg(test)]
+        PROGRAM_INPUT_GROUP_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let additional = certify_selected_owned_products_in_context_with_validation(
             &available,
             &self.groups,
@@ -7717,6 +8267,8 @@ impl ExactDeclarationContext {
     pub(crate) fn compiler_metadata_snapshot(
         &self,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
+        #[cfg(test)]
+        COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(count.get() + 1));
         self.owner
             .facts
             .compiler_support
@@ -9605,7 +10157,12 @@ impl ExactDeclarationContext {
                 // These paths already belong to the packet's scoped directory. Its
                 // owner releases them after the downstream process consumes them.
                 directory.disable_cleanup(true);
-                let result = self.materialize_retained_artifacts(&metadata, parents, directory);
+                let result = self.materialize_retained_artifacts(
+                    &metadata,
+                    parents,
+                    directory,
+                    &RequestInputTransport::DurableFiles,
+                );
                 if result.is_err() {
                     let _ = std::fs::remove_dir_all(cleanup_on_failure);
                 }
@@ -9696,7 +10253,7 @@ impl ExactDeclarationContext {
     ) -> Result<ExactCompilationRequest, CompileError> {
         let baseline = scaffold.compiler_inputs(self, None)?;
 
-        let (authorization, private) = authorize(baseline.declaration_semantic_sha256)?;
+        let (authorization, private) = authorize(self.semantic_sha256())?;
         let inputs = match private.as_ref() {
             Some(private) => scaffold.compiler_inputs(self, Some(private))?,
             None => baseline,
@@ -9718,6 +10275,7 @@ impl ExactDeclarationContext {
         metadata: &CompilerArtifactMetadata,
         parents: Vec<Arc<RetainedArtifactMaterialization>>,
         directory: tempfile::TempDir,
+        transport: &RequestInputTransport,
     ) -> Result<RetainedArtifactMaterialization, CompileError> {
         crate::host_work::checkpoint()?;
         let directory = Arc::new(directory);
@@ -9740,7 +10298,29 @@ impl ExactDeclarationContext {
         .map_err(failure)?;
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
+        let mut validation = PackageInterfaceValidation::default();
         for entry in &new_entries {
+            if matches!(
+                &entry.payload,
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+            ) {
+                rows.insert(
+                    entry.descriptor.id,
+                    RetainedArtifactRow::issue_value(
+                        entry.clone(),
+                        &mut validation,
+                        match transport {
+                            RequestInputTransport::OwnedArena => ValueRowLocation::Private,
+                            #[cfg(test)]
+                            RequestInputTransport::DurableFiles => {
+                                ValueRowLocation::Packet(root.to_path_buf())
+                            }
+                        },
+                    )?,
+                );
+                continue;
+            }
+
             let canonical = match &entry.payload {
                 ArtifactPayload::Canonical(interface) => Some(interface),
                 ArtifactPayload::Original(product) => product.module_interface(),
@@ -9758,12 +10338,21 @@ impl ExactDeclarationContext {
                 );
             }
         }
-        let mut validation = PackageInterfaceValidation::default();
+        let shared_entries = new_entries
+            .iter()
+            .filter(|entry| {
+                !matches!(
+                    &entry.payload,
+                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
         let (materialized, references) = self.materialize_entries_with_validation(
             root,
-            &new_entries,
+            &shared_entries,
             &mut validation,
             MaterializationMode::Scratch,
         )?;
@@ -9792,6 +10381,7 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
+                    value_custody: ValueRowCustody::Generic,
                     owned_inputs: acquired_inputs
                         .remove(&entry.descriptor.id)
                         .unwrap_or_default(),
@@ -9925,6 +10515,7 @@ impl ExactDeclarationContext {
             scope_written_bytes, "completed private artifact ownership");
         crate::host_work::checkpoint()?;
         Ok(RetainedArtifactMaterialization {
+            kind: MaterializationKind::Issued,
             _directory: Some(Arc::clone(&directory)),
             _parents: parents,
             rows: rows
@@ -9932,21 +10523,23 @@ impl ExactDeclarationContext {
                 .map(|(id, row)| (id, Arc::new(row)))
                 .collect(),
             groups: groups.into(),
-            execution_scope,
-            graph_paths: graph_paths
-                .into_iter()
-                .filter(|(digest, _)| !inherited_graphs.contains(digest))
-                .map(|(digest, path)| {
-                    (
-                        digest,
-                        Arc::new(OwnedExecutionGraphFile {
-                            transport: graph_transports[&digest].clone(),
-                            path,
-                            _directory: Arc::clone(&directory),
-                        }),
-                    )
-                })
-                .collect(),
+            execution_scope: execution_scope.map(Arc::new),
+            graph_paths: Arc::new(
+                graph_paths
+                    .into_iter()
+                    .filter(|(digest, _)| !inherited_graphs.contains(digest))
+                    .map(|(digest, path)| {
+                        (
+                            digest,
+                            Arc::new(OwnedExecutionGraphFile {
+                                transport: graph_transports[&digest].clone(),
+                                path,
+                                _directory: Arc::clone(&directory),
+                            }),
+                        )
+                    })
+                    .collect(),
+            ),
             #[cfg(test)]
             payload_work: work,
         })
@@ -9968,7 +10561,7 @@ impl ExactDeclarationContext {
         } = native_transport;
         let metadata = &transport_metadata;
         let compiler_metadata = &inputs.metadata;
-        let semantic_sha256 = inputs.declaration_semantic_sha256;
+        let semantic_sha256 = self.semantic_sha256();
         let admitted_empty = authorization.is_some()
             && self.owner.facts.producer == [0; 32]
             && metadata.entries.is_empty()
@@ -9999,7 +10592,7 @@ impl ExactDeclarationContext {
                 let directory = tempfile::Builder::new()
                     .prefix("tidepool-exact-artifacts-")
                     .tempdir()?;
-                self.materialize_retained_artifacts(metadata, parents, directory)
+                self.materialize_retained_artifacts(metadata, parents, directory, &transport)
             })?;
         let selected_rows = retained.selected_rows(metadata);
         let transported_artifacts = metadata
@@ -15746,6 +16339,61 @@ mod tests {
     }
 
     #[test]
+    fn semantic_input_admission_defers_encoding_until_physical_request() {
+        use std::sync::atomic::Ordering;
+        let (context, producer) = metadata_fixture();
+        let scaffold = ProtectedScaffoldRequirements::default();
+        for _ in 0..3 {
+            scaffold.compiler_inputs(&context, None).unwrap();
+        }
+        assert!(context.owner.observations.get().is_none());
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 0);
+
+        let directory = tempfile::tempdir().unwrap();
+        let physical = context
+            .prepare_compilation_authorizing(directory.path(), &producer, |digest| {
+                assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+                Ok(text(hex(&digest)))
+            })
+            .unwrap();
+        assert_eq!(physical.semantic_sha256, context.semantic_sha256());
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+
+        let changed = Arc::new(context.as_ref().clone().rebuild(|facts| {
+            facts.lexical = facts
+                .lexical
+                .replace(vec![
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Value"),
+                        imports: vec![identity("fixture", "Alpha")],
+                    },
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Alpha"),
+                        imports: vec![],
+                    },
+                ])
+                .unwrap();
+        }));
+        changed.normalize().unwrap();
+        let continued = physical
+            .program_admission()
+            .in_program_context(changed.clone())
+            .unwrap();
+        assert!(Arc::ptr_eq(&continued.context().owner, &changed.owner));
+        assert!(changed.owner.observations.get().is_none());
+        assert_eq!(changed.owner.semantic_issuances.load(Ordering::Relaxed), 0);
+
+        let next = changed
+            .prepare_compilation_authorizing(&directory.path().join("next"), &producer, |digest| {
+                assert_ne!(digest, physical.semantic_sha256);
+                Ok(text(hex(&digest)))
+            })
+            .unwrap();
+        assert_eq!(next.semantic_sha256, changed.semantic_sha256());
+        assert_eq!(changed.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn metadata_authorization_and_preparation_share_one_identity() {
         let (context, producer) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
@@ -15816,6 +16464,49 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_value_row_refuses_independent_equal_payload_facts() {
+        let (context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_compilation(scratch.path(), &producer)
+            .unwrap();
+        let entries = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "Value")))
+            .unwrap();
+        let entry = &entries[&identity("fixture", "Value")];
+        let owner = request.materialization.as_ref().unwrap();
+        let row = owner.issued_value_row(entry).unwrap();
+        let ArtifactPayload::Interface(interface, role) = &entry.payload else {
+            panic!("value interface fixture");
+        };
+        let foreign = Arc::new(ArtifactEntry::interface(
+            interface.clone(),
+            *role,
+            entry.requirements.clone(),
+        ));
+        assert_eq!(foreign.descriptor.id, entry.descriptor.id);
+        assert_eq!(
+            foreign.as_ref(),
+            entry.as_ref(),
+            "equal payload is insufficient"
+        );
+        assert!(!entry.same_issued_facts(&foreign));
+        assert!(owner.issued_value_row(&foreign).is_none());
+        let mut validation = PackageInterfaceValidation::default();
+        let fresh = RetainedArtifactRow::issue_value(
+            foreign.clone(),
+            &mut validation,
+            ValueRowLocation::Private,
+        )
+        .unwrap();
+        assert_ne!(fresh.interface.path, row.interface.path);
+        assert_eq!(fresh.interface.sha256, row.interface.sha256);
+        assert!(validation.work().written_bytes > 0);
+        assert!(owner.issued_value_row(entry).is_some());
+    }
+
+    #[test]
     fn fixture_delivery_transfers_materialization_cleanup_to_packet_owner() {
         let (context, producer) = metadata_fixture();
         let packet = tempfile::tempdir().unwrap();
@@ -15849,6 +16540,20 @@ mod tests {
         assert!(owned_root.starts_with(packet.path()));
         assert!(!paths.is_empty());
         assert!(paths.iter().all(|path| path.starts_with(&owned_root)));
+        let value_entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "Value")))
+            .unwrap();
+        let value_entry = &value_entry[&identity("fixture", "Value")];
+        let owner = request.materialization.as_ref().unwrap();
+        assert!(
+            owner.issued_value_row(value_entry).is_none(),
+            "packet-owned files cannot issue independently retained checked custody"
+        );
+        assert!(matches!(
+            owner.rows[&value_entry.descriptor.id].value_custody,
+            ValueRowCustody::Packet
+        ));
         assert!(context
             .prepare_fixture_compilation(&packet.path().join("second"), &producer)
             .is_err());
@@ -15883,8 +16588,12 @@ mod tests {
                     .artifacts()
                     .retain_materialization(&metadata, |parents| {
                         let directory = tempfile::tempdir().unwrap();
-                        let result = context
-                            .materialize_retained_artifacts(&metadata, parents, directory)?;
+                        let result = context.materialize_retained_artifacts(
+                            &metadata,
+                            parents,
+                            directory,
+                            &RequestInputTransport::OwnedArena,
+                        )?;
                         // The immutable private result has passed its final validation.
                         cancellation.cancel();
                         Ok(result)
@@ -16349,6 +17058,11 @@ mod tests {
         let a_directory = a_owner._directory.as_ref().unwrap();
         let a_directory_weak = Arc::downgrade(a_directory);
         let a_files = private_directory_file_bytes(a_directory.path());
+        let a_row_directories = a_owner
+            .selected_rows(&a.compiler_metadata_snapshot().unwrap())
+            .into_iter()
+            .map(|(id, row)| (id, Arc::downgrade(&row._directory)))
+            .collect::<BTreeMap<_, _>>();
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
             a.owner.facts.producer,
@@ -16400,7 +17114,10 @@ mod tests {
                 [&identity(&artifact.interface.unit, &artifact.interface.module)];
             let inherited = b_rows[&entry.descriptor.id];
             assert_eq!(inherited.artifact(), *artifact);
-            assert!(Arc::ptr_eq(&inherited._directory, a_directory));
+            assert!(Arc::ptr_eq(
+                &inherited._directory,
+                &a_row_directories[&entry.descriptor.id].upgrade().unwrap()
+            ));
         }
         assert_eq!(private_directory_file_bytes(a_directory.path()), a_files);
         let new_file_bytes = private_directory_file_bytes(b_owner.directory().path())
@@ -19760,6 +20477,133 @@ mod tests {
     }
 
     #[test]
+    fn prepared_value_source_support_borrows_selected_rows_and_refuses_dormant_owners() {
+        let certificate = |module: &str, requirements| {
+            let evidence = support_product(module);
+            Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    [2; 32],
+                    identity("fixture", module),
+                    evidence.interface_bytes().to_vec(),
+                    evidence.package_imports_bytes().to_vec(),
+                    requirements,
+                )
+                .unwrap(),
+            )
+        };
+        let source = identity("fixture", "SelectedSource");
+        let value = certificate("ValProduced", vec![source.clone()]);
+        let unowned = certificate("ValUnowned", vec![]);
+        let dormant = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([2; 32], &[support_product("DormantSource")])
+            .unwrap()
+            .extend_program_value_interface(unowned.clone())
+            .unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([2; 32], &[support_product("SelectedSource")])
+            .unwrap()
+            .extend_with_value_interfaces(
+                &[value.clone()],
+                vec![ExactLexicalNode {
+                    owner: source.clone(),
+                    imports: vec![],
+                }],
+            )
+            .unwrap();
+        let support = context
+            .compiler_source_support()
+            .retain_custody(dormant.artifact_view())
+            .unwrap();
+        let context = Arc::new(
+            context
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
+                .unwrap(),
+        );
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        assert!(matches!(
+            metadata.entries[&source].payload,
+            ArtifactPayload::Original(_)
+        ));
+        let selected = context
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap();
+        assert!(matches!(
+            selected.get(&source).unwrap().payload,
+            ArtifactPayload::Canonical(_)
+        ));
+        assert!(selected
+            .get(&identity("fixture", "DormantSource"))
+            .is_none());
+        assert!(selected.get(&identity("fixture", "ValUnowned")).is_none());
+        assert!(context
+            .artifact_view()
+            .artifact_ids()
+            .contains(&unowned.artifact_id()));
+
+        COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(0));
+        let prepared = PreparedValueSourceSupport::new(context.clone(), &[]).unwrap();
+        assert_eq!(COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()), 0);
+        context.compiler_metadata_snapshot().unwrap();
+        assert_eq!(
+            COMPILER_METADATA_SNAPSHOTS.with(|count| count.replace(0)),
+            1,
+            "the observer detects an explicit full metadata projection",
+        );
+        let surface = prepared.retain_output(&value).unwrap();
+        assert_eq!(
+            surface.lexical,
+            vec![ExactLexicalNode {
+                owner: source.clone(),
+                imports: vec![]
+            }]
+        );
+        assert!(
+            surface.compiler_support.projection().snapshot_roles()[&source]
+                .original()
+                .is_some()
+        );
+        assert!(surface
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .get(&identity("fixture", "DormantSource"))
+            .is_none());
+        assert!(prepared
+            .retain_output(&unowned)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("produced value interface is absent from its prepared context"));
+        let wrong_requirements = certificate("ValProduced", vec![]);
+        assert_eq!(wrong_requirements.artifact_id(), value.artifact_id());
+        assert!(prepared
+            .retain_output(&wrong_requirements)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("produced value interface differs from its prepared issuer"));
+
+        let missing = PreparedValueSourceSupport::new(
+            context,
+            &[ExactLexicalNode {
+                owner: identity("fixture", "DormantSource"),
+                imports: vec![],
+            }],
+        )
+        .unwrap();
+        assert!(missing
+            .retain_surface(dormant.artifact_view(), &BTreeSet::new())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("retained source surface lacks its exact artifact owner"));
+    }
+
+    #[test]
     fn retained_value_source_surface_preserves_selected_support_and_refuses_hidden_owners() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(
@@ -20970,6 +21814,198 @@ mod tests {
             .validate_artifacts(&effective.artifacts)
             .expect("owned runtime input bytes are independent of an unconsumed alias");
     }
+    #[test]
+    fn unchanged_program_context_reuses_exact_inputs_and_checks_other_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[support_product("Unchanged")])
+                .unwrap(),
+        );
+        let physical = program_request(directory.path(), context.clone());
+        let baseline = physical.program_admission();
+        REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(0));
+        COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(0));
+        PROGRAM_INPUT_GROUP_VALIDATIONS.with(|count| count.set(0));
+        let same_owner = Arc::new(context.as_ref().clone());
+        let repeated = baseline.in_program_context(same_owner).unwrap();
+        assert!(Arc::ptr_eq(&baseline.inputs, &repeated.inputs));
+        assert!(Arc::ptr_eq(
+            &baseline.inputs.compiler,
+            &repeated.inputs.compiler
+        ));
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            0
+        );
+        assert_eq!(COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()), 0);
+        assert_eq!(
+            PROGRAM_INPUT_GROUP_VALIDATIONS.with(|count| count.replace(0)),
+            1
+        );
+
+        let independent = Arc::new(ExactDeclarationContext::from_facts(
+            context.owner.facts.clone(),
+        ));
+        assert_eq!(independent, context);
+        assert!(!Arc::ptr_eq(&independent.owner, &context.owner));
+        let checked = baseline.in_program_context(independent).unwrap();
+        assert!(!Arc::ptr_eq(&baseline.inputs, &checked.inputs));
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.replace(0)),
+            1
+        );
+        let lexical = context.as_ref().clone().rebuild(|facts| {
+            facts.lexical = facts
+                .lexical
+                .replace(vec![ExactLexicalNode {
+                    owner: identity("fixture", "Unchanged"),
+                    imports: vec![],
+                }])
+                .unwrap();
+        });
+        let checked = baseline.in_program_context(Arc::new(lexical)).unwrap();
+        assert!(!Arc::ptr_eq(&baseline.inputs, &checked.inputs));
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.replace(0)),
+            1
+        );
+
+        let empty_private = OriginalCompilerInputs::issue_candidate_from_support(
+            &crate::artifact_inventory::CompilerSourceSupport::empty(),
+            [2; 32],
+            &[],
+        )
+        .unwrap();
+        let private = baseline
+            .in_program_context_with_private_input(context.clone(), &empty_private)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&baseline.inputs, &private.inputs));
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.replace(0)),
+            1
+        );
+        let another_private = private
+            .in_program_context_with_private_input(context.clone(), &empty_private)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&private.inputs, &another_private.inputs));
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.replace(0)),
+            1
+        );
+
+        let mut wrong_producer = physical.clone();
+        wrong_producer.producer_sha256 = [3; 32];
+        assert!(wrong_producer
+            .program_admission()
+            .in_program_context(context.clone())
+            .is_err());
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            0
+        );
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let cancelled = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || baseline.in_program_context(context),
+        );
+        assert!(cancelled.action.is_err());
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            0
+        );
+    }
+
+    #[test]
+    fn unchanged_program_context_rechecks_mutable_package_interfaces() {
+        use crate::certified_products::{PackageInterfaceWitness, PendingImportOwner};
+        let directory = tempfile::tempdir().unwrap();
+        let package_path = directory.path().join("External.hi");
+        let package_bytes = [0x43];
+        std::fs::write(&package_path, package_bytes).unwrap();
+        let package_sha256 = Sha256::digest(package_bytes).into();
+        let mut binder = tidepool_repr::execution_schema::testing::identity("External", "entry");
+        binder.unit = "external".into();
+        let packages = BTreeMap::from([(
+            ("external".into(), "External".into()),
+            PackageInterfaceWitness {
+                selected_path: package_path.clone(),
+                sha256: package_sha256,
+            },
+        )]);
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_witness_fixture(
+                "Original",
+                Some(PendingImportOwner::Package {
+                    unit: "external".into(),
+                    module: "External".into(),
+                    binder,
+                    interface_digest: package_sha256,
+                }),
+                7,
+                &packages,
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let entry = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let target = entry.descriptor.owner.clone();
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_execution(
+                [2; 32],
+                &view,
+                CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
+                vec![ExactLexicalNode {
+                    owner: target.clone(),
+                    imports: vec![],
+                }],
+                target,
+                &[],
+            )
+            .unwrap(),
+        );
+        let physical = program_request(directory.path(), context.clone());
+        assert!(!physical
+            .compiler_inputs()
+            .metadata
+            .retained
+            .selected_native_groups
+            .is_empty());
+        let continued = physical
+            .program_admission()
+            .in_program_context(context.clone())
+            .unwrap();
+        assert!(continued.groups().iter().any(|group| group.imports().iter().any(|owner| matches!(
+            owner, PendingImportOwner::Package { unit, module, .. } if unit == "external" && module == "External"
+        ))));
+        for missing in [false, true] {
+            if missing {
+                std::fs::remove_file(&package_path).unwrap();
+            } else {
+                std::fs::write(&package_path, b"changed package interface").unwrap();
+            }
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(0));
+            PROGRAM_INPUT_GROUP_VALIDATIONS.with(|count| count.set(0));
+            assert!(continued.in_program_context(context.clone()).is_err());
+            assert_eq!(
+                REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+                0
+            );
+            assert_eq!(PROGRAM_INPUT_GROUP_VALIDATIONS.with(|count| count.get()), 1);
+            std::fs::write(&package_path, package_bytes).unwrap();
+            assert!(continued.in_program_context(context.clone()).is_ok());
+        }
+    }
+
     #[test]
     fn program_admission_promotes_canonical_owner_without_transport_writes() {
         let producer = b"canonical-promotion-fixture";

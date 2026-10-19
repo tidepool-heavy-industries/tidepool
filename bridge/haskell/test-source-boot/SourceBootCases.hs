@@ -641,13 +641,14 @@ exactScopeBinders = withScratch $ \work -> do
       identity value = TList [TString (symbolUnit value), TString (symbolModule value)
         , TString (symbolNamespace value), TString (symbolOccurrence value)
         , maybe TNull TString (symbolRecordParent value)]
-      -- Malformed native rows belong only to refusal tests. The binder
-      -- decoder rejects their duplicate inventory before owner promotion.
+      -- Native selections accept ordinals, so request-supplied binder
+      -- outlines must fail at that field before owner promotion.
       term groups = TList [if index == 6 then
           TList [TList [text "main", text "BinderFixture", sha, sha, sha, text (work </> "original.tpmod")
             , TList [TList [TInt ordinal, TList (map identity values), TList []]
               | (ordinal, values) <- zip [0..] groups]
-            , TList [text (work </> "original.native-cert.cbor"),sha]]]
+            , TList [text (work </> "original.native-cert.cbor"),sha]
+            , TList [text "full-carrier"], text "compiler-original"]]
         else field | (index,field) <- zip [0::Int ..] fields]
       readGroups groups = do
         BS.writeFile path (toStrictByteString (encodeTerm (term groups)))
@@ -662,8 +663,12 @@ exactScopeBinders = withScratch $ \work -> do
           fail "exact original group conversion changed binder identities or group order"
       refused groups = do
         result <- readGroups groups
-        unless (case result of Left reason -> "expected word" `isInfixOf` reason || "expected uint" `isInfixOf` reason || "expected" `isInfixOf` reason; Right _ -> False) $
-          fail "exact scope accepted request-supplied native binder outlines"
+        case result of
+          Left reason -> do
+            putStrLn ("native binder ordinal refusal: " ++ reason)
+            unless ("\"expected word\"" `isInfixOf` reason) $
+              fail ("native binder outline did not reach ordinal refusal: " ++ reason)
+          Right _ -> fail "native binder outline was accepted as native ordinals"
       answer = binder "value" "answer" Nothing
       sameSpelling = [answer, binder "type" "answer" Nothing
         , binder "value" "answer" (Just "RecordA"), binder "value" "answer" (Just "RecordB")]
@@ -680,7 +685,7 @@ exactScopeBinders = withScratch $ \work -> do
   refused [[answer, answer]]
   refused [take 2 sameSpelling, drop 2 sameSpelling ++ [answer]]
   refused [large, [binder "value" "binder1" Nothing]]
-  putStrLn "exact scope binders: 8 checks passed (identity equality, empty/singleton/distinct/6037 inventory, same-group/cross-group/late duplicate)"
+  putStrLn "exact scope binders: 8 checks passed (typed identity/group conversion; request-supplied outlines refused as non-ordinals)"
 
 checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do

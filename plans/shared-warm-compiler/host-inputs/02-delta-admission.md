@@ -1,5 +1,12 @@
 # 02 — Admit only changed inputs and affected conclusions
 
+Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
+Rust retains primary notebook selections, execution provenance and atomic
+publication; Haskell owns compiler-derived worlds and invalidation. The
+paired owner review must classify mixed structures before moving or deleting
+them. The previous field/path inventory below remains investigative evidence,
+not a requirement to preserve its host-side decomposition.
+
 Assigned to a Sol implementation child after [01](01-selected-root.md) is reviewed and folded by the [area supervisor](README.md). Baseline source is `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`; record the actual later base containing 01 and the parent common contract. Current work is plan authoring only.
 
 **Goal.** Remove growing-history folds in checked-value input preparation, ordered program support admission and runtime pre-admission by consuming the issuer-owned exact root and its changes. Reuse immutable authentication without borrowing stale context judgments or current runtime authority. Update the exact prior root with new facts, invalidate only conclusions whose tracked owner queries changed, and keep per-item cursor advance atomic. Prove structural work through the real cell path; do not optimize only an isolated helper.

@@ -1,5 +1,10 @@
 # Warm worker supervisor
 
+The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
+new cross-area interfaces and sequencing. Keep the concrete source/invariant
+evidence below, but do not implement a duplicate host compiler world or
+require full input export before the service can answer a warm query.
+
 Status: proposed implementation campaign; no implementation or performance qualification is implied. Plan source: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. The parent campaign's shared contract owns cross-boundary types and decisions; this subtree specifies the worker realization, pool and frontend work beneath it.
 
 ## Outcome and boundaries

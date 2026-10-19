@@ -4,6 +4,15 @@ Status: accepted implementation contracts; campaign amendments below are owner-r
 These semantic decisions take precedence over a leaf's convenient local shape.
 Change them through the campaign supervisor and notify every affected owner.
 
+The [demand-service amendment](DEMAND-SERVICE.md) refines C2/C3/C5: Rust owns
+primary notebook selections, exact runtime artifacts and publication; Haskell
+owns the derived compiler world. A host-issued root below means an authoritative
+selection/restoration reference, not a second host implementation of GHC's
+dependency graph. Compiler-only invalidation and query preparation belong in
+the compiler service. Existing execution/provenance checks remain with their
+Rust consumer. Do not implement new shared interfaces until the bounded owner
+review of this amendment is resolved by the campaign.
+
 ## C1. Five facts that must remain separate
 
 | Fact | Owner-issued meaning | Does not establish |
@@ -30,7 +39,7 @@ The current repair is `RequestNativeAvailability::for_compiler_roles` in
 `tidepool/toolchain/src/declaration_context.rs`. Preserve its semantics even if
 the implementation disappears. Do not weaken `validate_consumed_native_namespace`.
 
-## C2. The selected input root belongs to runtime publication
+## C2. Runtime publication selects the compiler world
 
 `SelectedInputs` is a conceptual role, not a demand for a new public struct.
 Extend the existing paired declaration/value/source publication owner so it
@@ -258,3 +267,19 @@ be measured and reported.
   an actor-current registry. Lower runtime gates must retain crate dependency
   direction. Absence never grants source-dependent admission. Exact type/schema
   and production fence/stop result remain under implementation review.
+
+- 2026-10-19, C6 public runtime compiler owner: the pre-machine factory keeps its
+  existing preparation ticket and collects its actual clean physical END before
+  final-scope adoption and runtime-owned entry. Unknown/abandoned preparation
+  retains obligations and refuses advancement, without automatic retry. No
+  nested borrowed NotStarted result may masquerade as outer END. The runtime
+  entry requires the existing exact original source lease, validates its own
+  admission epoch independently of recipient placement, and checks Open lazily
+  at actual source work. Hooks only restrict. Retain that lease through immutable
+  source dependencies without ActorGeneration cycles. Recovered owners adopt
+  after actual public-owner epoch transfer; reminted/fallback children adopt
+  only final placement. Initial publication fences the same canonical bootstrap
+  gate before IO, keeps it through visibility/ack and never claims that gate
+  itself. Confirmed success reopens the same gate; proven no-effect may reopen;
+  uncertainty retains it closed until explicit recovery into a new context.
+  This is an approved bounded implementation contract, not native acceptance.
