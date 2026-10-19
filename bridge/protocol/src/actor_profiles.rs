@@ -1077,8 +1077,70 @@ mod tests {
         changed[0].identity.haskell_name = "NotAnEffect";
         assert!(validate(&changed).is_err());
         let mut changed = EFFECTS.to_vec();
-        changed.last_mut().unwrap().default_order = Some(25);
+        changed
+            .iter_mut()
+            .find(|effect| effect.scope == EffectScope::InvocationOnly)
+            .expect("an invocation-only effect")
+            .default_order = Some(defaults(EFFECTS).len());
         assert!(validate(&changed).is_err());
+    }
+
+    #[test]
+    fn generated_haskell_actor_key_preserves_persisted_constructor_tags() {
+        // Existing serialized constructor tags retain their slots; new keys append.
+        let persisted = [
+            "EffectResourceScopes",
+            "EffectReplies",
+            "EffectWatches",
+            "EffectActorContext",
+            "EffectAgentLaunch",
+            "EffectAgentInspection",
+            "EffectAgentControl",
+            "EffectBoundWorktree",
+            "EffectWorktreeRegistry",
+            "EffectWorktreeAllocation",
+            "EffectWorktreeIntegration",
+            "EffectSleep",
+            "EffectCommands",
+            "EffectConsole",
+            "EffectAskUser",
+            "EffectGreen",
+            "EffectNotifications",
+            "EffectJev",
+            "EffectModelCallOpenAI",
+            "EffectModelCallArgon",
+            "EffectModelCallDeepSeek",
+            "EffectForkAgentOpenAI",
+            "EffectForkAgentArgon",
+            "EffectForkAgentDeepSeek",
+            "EffectSpawnAgentOpenAI",
+            "EffectSpawnAgentArgon",
+            "EffectSpawnAgentDeepSeek",
+            "EffectActor",
+            "EffectReflect",
+            "EffectLookup",
+            "EffectRepoEvent",
+            "EffectSource",
+            "EffectJournal",
+            "EffectWeb",
+            "EffectFsRead",
+            "EffectFsWrite",
+        ];
+        let declarations = crate::effects::agent_launch::agent_launch().type_def_texts();
+        let declaration = declarations
+            .iter()
+            .find_map(|declaration| declaration.strip_prefix("data ActorEffectKey = "))
+            .expect("the generated Haskell actor-key sum");
+        let constructors = declaration
+            .split(" deriving ")
+            .next()
+            .unwrap()
+            .split(" | ")
+            .collect::<Vec<_>>();
+        assert!(
+            constructors.starts_with(&persisted),
+            "existing Haskell constructor tags moved: {constructors:?}"
+        );
     }
 
     #[test]
