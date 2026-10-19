@@ -12,7 +12,7 @@ use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspe
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
-use crate::exact_context::{ContextRoot, Materializer, ReachableBlocks};
+use crate::exact_context::{ContextRoot, MaterializedMap, Materializer, ReachableBlocks};
 use crate::CompileError;
 
 /// One closed captured source namespace. The capture owner decides its supported
@@ -349,7 +349,17 @@ struct WorldBindingFact {
 pub struct CompilerWorldBindings {
     query_scope: u64,
     entries: imbl::OrdMap<String, WorldBindingFact>,
+    metadata_bytes: u64,
 }
+
+// The occurrence is the existing SnapshotKey<String>. The row link names the
+// independently materialized exact semantic row plus its original issuer.
+type WorldBindingSnapshotFact = (
+    (String, String, String, String, Option<String>),
+    u64,
+    u64,
+    cid::Cid,
+);
 
 impl CompilerWorldBindings {
     /// Charge borrowed metadata before cloning it. Callers can feed the actual
@@ -406,13 +416,11 @@ impl CompilerWorldBindings {
         Ok(Self {
             query_scope,
             entries,
+            metadata_bytes: allowance - remaining,
         })
     }
 
-    pub(crate) fn cold_parts(
-        &self,
-    ) -> Result<(Vec<Arc<CheckedValueArtifact>>, Arc<[u8]>), CompileError> {
-        use ciborium::value::Value;
+    pub(crate) fn cold_rows(&self) -> Result<Vec<Arc<CheckedValueArtifact>>, CompileError> {
         let mut rows = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
         for entry in self.entries.values() {
             crate::host_work::checkpoint()?;
@@ -431,50 +439,37 @@ impl CompilerWorldBindings {
                 rows.insert(owner, Arc::clone(&entry.row));
             }
         }
-        let mut ordinals = BTreeMap::new();
-        let mut issuers = Vec::with_capacity(rows.len());
-        for (ordinal, (owner, row)) in rows.iter().enumerate() {
-            let ordinal = u32::try_from(ordinal).map_err(|_| source_size_failure())?;
-            ordinals.insert(owner.as_str(), ordinal);
-            let (producer, receipt) = row.world_issuer();
-            issuers.push(world_array(vec![
-                world_text(owner.clone()),
-                world_blob(row.certified_interface().artifact_id().0),
-                world_blob(producer),
-                world_blob(receipt),
-            ]));
+        Ok(rows.into_values().collect())
+    }
+
+    fn cold_snapshot(
+        &self,
+        rows: &BTreeMap<String, cid::Cid>,
+    ) -> Result<imbl::OrdMap<String, WorldBindingSnapshotFact>, CompileError> {
+        let mut facts = imbl::OrdMap::new();
+        for (occurrence, entry) in &self.entries {
+            crate::host_work::checkpoint()?;
+            let row = rows.get(&entry.row.owner().module_name()).ok_or_else(|| {
+                source_failure("current compiler binding lacks its exact materialized row")
+            })?;
+            let symbol = &entry.symbol;
+            facts.insert(
+                occurrence.clone(),
+                (
+                    (
+                        symbol.unit.clone(),
+                        symbol.module.clone(),
+                        symbol.namespace.clone(),
+                        symbol.occurrence.clone(),
+                        symbol.record_parent.clone(),
+                    ),
+                    entry.session_var.raw(),
+                    entry.defining_scope,
+                    *row,
+                ),
+            );
         }
-        let entries = self
-            .entries
-            .iter()
-            .map(|(occurrence, entry)| {
-                let symbol = &entry.symbol;
-                let owner = entry.row.owner().module_name();
-                world_array(vec![
-                    world_text(occurrence.clone()),
-                    world_array(vec![
-                        world_text(symbol.unit.clone()),
-                        world_text(symbol.module.clone()),
-                        world_text(symbol.namespace.clone()),
-                        world_text(symbol.occurrence.clone()),
-                        symbol
-                            .record_parent
-                            .as_ref()
-                            .map_or(Value::Null, |parent| world_text(parent.clone())),
-                    ]),
-                    entry.session_var.raw().into(),
-                    entry.defining_scope.into(),
-                    u64::from(ordinals[owner.as_str()]).into(),
-                ])
-            })
-            .collect();
-        let encoded = world_bytes(&world_array(vec![
-            world_text("TPCWBIND2"),
-            self.query_scope.into(),
-            world_array(entries),
-            world_array(issuers),
-        ]))?;
-        Ok((rows.into_values().collect(), encoded.into()))
+        Ok(facts)
     }
 }
 
@@ -483,9 +478,8 @@ pub struct CompilerWorldOpenInputs {
     primary_root: ContextRoot,
     primary_blocks: ReachableBlocks,
     visible_rows: Vec<Arc<CheckedValueArtifact>>,
-    _bindings: CompilerWorldBindings,
+    bindings: CompilerWorldBindings,
     sources: Arc<CapturedCompilerSources>,
-    visibility: Arc<[u8]>,
     directory: Arc<tempfile::TempDir>,
 }
 
@@ -495,7 +489,6 @@ impl CompilerWorldOpenInputs {
         visible_rows: Vec<Arc<CheckedValueArtifact>>,
         bindings: CompilerWorldBindings,
         sources: Arc<CapturedCompilerSources>,
-        visibility: Arc<[u8]>,
         directory: Arc<tempfile::TempDir>,
     ) -> Result<Self, CompileError> {
         let snapshot = primary_context.snapshot();
@@ -525,9 +518,8 @@ impl CompilerWorldOpenInputs {
             primary_root,
             primary_blocks,
             visible_rows,
-            _bindings: bindings,
+            bindings,
             sources,
-            visibility,
             directory,
         })
     }
@@ -537,6 +529,7 @@ pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
+    bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
@@ -548,6 +541,7 @@ impl fmt::Debug for CompilerWorldRestoration {
         f.debug_struct("CompilerWorldRestoration")
             .field("logical_id", &self.logical_id)
             .field("primary_root", &self.inputs.primary_root)
+            .field("binding_root", self.bindings.root())
             .finish_non_exhaustive()
     }
 }
@@ -1004,7 +998,7 @@ fn world_semantic_row(
 
 impl CompilerWorldOpenInputs {
     fn prepare(
-        self,
+        mut self,
         identity: &tidepool_extract_cmd::CompilerIdentity,
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         use crate::declaration_context::original_inputs::{
@@ -1039,7 +1033,7 @@ impl CompilerWorldOpenInputs {
             })?;
         let envelope_bytes = block_bytes
             .checked_add(self.sources.encoded().len() as u64)
-            .and_then(|n| n.checked_add(self.visibility.len() as u64))
+            .and_then(|n| n.checked_add(self.bindings.metadata_bytes))
             .ok_or_else(source_size_failure)?;
         let mut remaining_raw = capture_allowance()?
             .checked_sub(envelope_bytes)
@@ -1094,6 +1088,8 @@ impl CompilerWorldOpenInputs {
             base_references.push(world_semantic_row(&row, &producer)?);
             base.push(row);
         }
+        let mut binding_materializer = Materializer::new(&self.primary_blocks);
+        let mut binding_rows = BTreeMap::new();
         let mut visible = Vec::with_capacity(self.visible_rows.len());
         let mut references = Vec::with_capacity(self.visible_rows.len());
         for artifact in &self.visible_rows {
@@ -1105,9 +1101,48 @@ impl CompilerWorldOpenInputs {
                     .ok_or_else(source_size_failure)?;
             }
             let (row, _) = rows.row(&entry, parts)?;
-            references.push(world_semantic_row(&row, &producer)?);
+            let semantic = world_semantic_row(&row, &producer)?;
+            let (_, receipt) = artifact.world_issuer();
+            let row_fact = world_array(vec![
+                semantic.clone(),
+                world_blob(artifact.certified_interface().artifact_id().0),
+                world_blob(receipt),
+            ]);
+            let row_root = binding_materializer
+                .materialize_value(&row_fact)
+                .map_err(|error| source_failure(error.to_string()))?;
+            binding_rows.insert(artifact.owner().module_name(), row_root);
+            references.push(semantic);
             visible.push(row);
         }
+        let binding_facts = self.bindings.cold_snapshot(&binding_rows)?;
+        let bindings = binding_materializer
+            .materialize_map(None, &binding_facts)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let staged = binding_materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        self.primary_blocks = self
+            .primary_blocks
+            .replace_roots(
+                &staged,
+                vec![*self.primary_root.cid(), *bindings.root().cid()],
+            )
+            .map_err(|error| source_failure(error.to_string()))?;
+        let work = self.primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
+        let visibility = world_bytes(&world_array(vec![
+            world_text("TPCWBIND3"),
+            self.bindings.query_scope.into(),
+            world_blob(bindings.root().cid().to_bytes()),
+        ]))?;
         let blocks = self
             .primary_blocks
             .blocks()
@@ -1132,7 +1167,7 @@ impl CompilerWorldOpenInputs {
             world_blob(self.sources.seal()),
             world_blob(producer),
             world_blob(profile),
-            world_blob(&self.visibility),
+            world_blob(&visibility),
             world_blob(world_digest(&world_bytes(&world_array(base_references))?)),
             world_blob(world_digest(&world_bytes(&world_array(references))?)),
             world_blob(world_digest(&world_bytes(&world_array(seals))?)),
@@ -1154,7 +1189,7 @@ impl CompilerWorldOpenInputs {
             world_blob(profile),
             world_array(vec![world_array(base), world_array(visible)]),
             acquisition,
-            world_blob(&self.visibility),
+            world_blob(&visibility),
             world_blob(self.primary_root.cid().to_bytes()),
             world_array(blocks),
         ]))?;
@@ -1163,6 +1198,7 @@ impl CompilerWorldOpenInputs {
             logical_id,
             inputs: self,
             product: product.into(),
+            bindings,
             producer,
             profile,
             descriptor,
