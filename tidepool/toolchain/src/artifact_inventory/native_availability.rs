@@ -179,6 +179,23 @@ enum NativeDemandSource<'a> {
     },
 }
 
+impl NativeDemandSource<'_> {
+    /// Both admission stages consume the role issued by their own request;
+    /// custody and native permission do not imply an Original namespace role.
+    fn interface_only_artifact(&self, owner: &ExactModuleIdentity) -> Option<ArtifactId> {
+        match self {
+            Self::Certified(selection) => selection.interface_only_artifact(owner),
+            Self::Catalog {
+                consumed_namespace, ..
+            } => {
+                let selected = consumed_namespace.get(owner)?;
+                matches!(&selected.payload, ArtifactPayload::Canonical(_))
+                    .then_some(selected.descriptor.id)
+            }
+        }
+    }
+}
+
 fn bind_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
@@ -381,23 +398,10 @@ fn bind_input_demand(
                     // as Full in the receiving namespace. A canonical-only role
                     // can use its unchanged exact closure with the same type
                     // bytes. Explicit Original selection still binds its scope.
-                    let historical_interface = match source {
-                        NativeDemandSource::Catalog {
-                            consumed_namespace, ..
-                        } => {
-                            !namespace.contains_key(&key.artifact)
-                                && consumed_namespace.get(&entry.descriptor.owner).is_some_and(
-                                    |selected| {
-                                        selected.descriptor.id == canonical
-                                            && matches!(
-                                                &selected.payload,
-                                                ArtifactPayload::Canonical(_)
-                                            )
-                                    },
-                                )
-                        }
-                        NativeDemandSource::Certified(_) => false,
-                    };
+                    let historical_interface = retained_offer.is_some()
+                        && !namespace.contains_key(&key.artifact)
+                        && source.interface_only_artifact(&entry.descriptor.owner)
+                            == Some(canonical);
                     let matches = namespace
                         .get(&canonical)
                         .is_none_or(|selected| *selected == binding || historical_interface);
@@ -2635,6 +2639,64 @@ mod normalized_dependency_tests {
             drop(state);
             assert_eq!(receiving.capture_graph_selection(), before_receiving);
         }
+        // Carry the same historical offer through an actual compiler request
+        // and bound target. Catalogue admission alone does not cover this later
+        // certified-selection consumer.
+        let hidden_owner = canonical.descriptor.owner.clone();
+        let visible = interfaces
+            .support_for_owners(vec![hidden_owner.clone()])
+            .unwrap()
+            .retain_template_availability(&retained)
+            .unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&visible)
+            .unwrap();
+        let certified_request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(&scratch.path().join("historical-consumer"), producer_bytes)
+            .unwrap();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            certified_request.compiler_inputs(),
+            &certified_request.artifacts().metadata_snapshot(),
+            &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            selection.interface_only_artifact(&hidden_owner),
+            Some(canonical_id)
+        );
+        let mut fixed = inventory
+            .bind_segment(&receiving, vec![], &selection)
+            .unwrap();
+        assert!(!fixed.view.namespace().contains_key(&hidden_id));
+        assert_ne!(
+            fixed.view.namespace()[&canonical_id],
+            parent.namespace()[&canonical_id]
+        );
+        let imports = [PendingImportOwner::Source {
+            owner: products[0].owner().clone(),
+            original_ordinal: 7,
+            binder: tidepool_repr::execution_schema::testing::identity(
+                "NormalizedHidden",
+                "entry_7",
+            ),
+        }];
+        let admitted = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            )
+            .unwrap();
+        assert!(admitted
+            .artifacts
+            .roots()
+            .contains(&InventoryNodeKey::Group(expected_group)));
+        assert!(!admitted.artifacts.namespace().contains_key(&hidden_id));
+        assert_eq!(receiving.capture_graph_selection(), before_receiving);
+
         let empty_source = CompilerSourceSupport::empty();
         for (source, ordinal) in [(&retained, 9), (&empty_source, 7)] {
             let catalog = NativeDependencyCatalog::from_source(source).unwrap();

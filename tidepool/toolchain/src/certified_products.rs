@@ -3010,6 +3010,20 @@ impl CertifiedSourceSelection {
         })
     }
 
+    /// The visible compiler role, independently of native dependency custody.
+    /// Retained Core can carry body permission without selecting an Original.
+    pub(crate) fn interface_only_artifact(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> Option<crate::artifact_inventory::ArtifactId> {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if !self.contains_module(&key) {
+            return None;
+        }
+        let row = self.modules.get(&key)?.compiler_namespace_row();
+        row.original.is_none().then_some(row.interface)
+    }
+
     /// Exact IDs are issued by the compiler namespace, independently of the
     /// broader native product custody retained in an output packet.
     pub(crate) fn artifact_ids_from_entries(
