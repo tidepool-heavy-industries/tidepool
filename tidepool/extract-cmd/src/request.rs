@@ -2818,9 +2818,6 @@ mod tests {
         None
     }
 
-    /// The Rust worker request flag must match the exact Haskell encoder
-    /// literal — a version bump on either side without the other would make
-    /// `decode_worker_argv` reject every request from a compiled worker.
     #[test]
     fn exact_inputs_requests_are_source_free_and_exclusive() {
         let resident = ExactInputsRequest {
@@ -3011,6 +3008,9 @@ mod tests {
         }
     }
 
+    /// The Rust worker request flag must match the exact Haskell encoder
+    /// literal — a version bump on either side without the other would make
+    /// `decode_worker_argv` reject every request from a compiled worker.
     #[test]
     fn worker_request_flag_matches_the_haskell_encoder() {
         let haskell = include_str!("../../../bridge/haskell/src/Tidepool/ExtractRequest.hs");
