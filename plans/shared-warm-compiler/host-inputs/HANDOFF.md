@@ -9,7 +9,7 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
-| `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | source frontier settled; external native admission gate |
+| `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | issuer production/test compile and eight focused controls passed; joined runtime and root/transition work remain |
 | `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | settled; exact `08feadc4..da4be05f` source parcel folded |
 | `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | settled; final cumulative `5b74c2f1..ff2c4577` source acceptance |
 
@@ -37,7 +37,7 @@ reviewed concrete issuance contract.
   `9dbc0e18a2e05dfa1e7726af27fd598bc4886f2c`, along with lazy P6 commit
   `85e5f3ced0`. Independent review caught and repaired a test retaining a fork
   handle during parent removal. Source review accepts the cumulative change;
-  compilation and execution remain pending. Receipts:
+  its focused native gate now passes as recorded below. Receipts:
   `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/oracle/cumulative-review-9dbc.txt`
   and `lazy-seal-and-repair-review.txt` in the same directory.
 - Selected-query successor `9dbc0e18..c31f92ee` is merged in area
@@ -47,7 +47,8 @@ reviewed concrete issuance contract.
   actual source-support owner still carries Original roles and exact edges.
   Independent exact and cumulative source review found no code defect:
   `selected-query-review-c31f.txt` and `cumulative-review-08fe.txt` in the oracle
-  evidence directory above. Compilation/test execution remains 0/0.
+  evidence directory above. The issuer gate below now compiles and executes the
+  selected-query controls.
 - Exact-input reuse successor `08feadc4..da4be05f` is merged in area
   `ff2c4577ca703510806097a69539838c7d18ef9d`. Independent exact and final cumulative
   review found no code findings: `exact-input-review-da4b.txt` and
@@ -93,10 +94,10 @@ This is an in-progress source-backed inventory; unlisted paths remain unqualifie
 
 | Operation | Current issuer / next consumer | Repeated work requiring migration |
 | --- | --- | --- |
-| Fresh value-interface append | `CompilerSourceSupport::admit_value_interfaces` / selected interface queries | persistent selected rows implemented and source-reviewed; actual counted clone bound and native controls pending |
+| Fresh value-interface append | `CompilerSourceSupport::admit_value_interfaces` / selected interface queries | persistent selected rows implemented and source-reviewed; counted clone property and native controls passed; broader append folds remain |
 | Retained value input capture | `artifacts::checked_value_context` -> `ExactDeclarationContext::extend_retained_value_artifacts` -> `prepare_compilation` | per-value support merges, lexical union, producer and final normalization |
 | Ordered support admission | `ProgramSourceSupportState::admit_program_support_inner` -> next item request | selected metadata maps, inventory descriptors, lexical graph reconstruction |
-| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | lazy first-value preparation and selected metadata deletion implemented/source-reviewed; lexical/import/implementation folds remain for consuming cells |
+| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | lazy first-value preparation and selected metadata deletion compile; component borrow/refusal controls passed; real mixed-cell count and lexical/import/implementation folds remain |
 | Value publication / capture | `CheckedValueArtifact::capture_output` retains support and templates / next checked-value context | must carry exact completed per-item support; physical row ownership belongs to owned-inputs |
 | Declaration public restaging | `capture_declaration_target` -> `extend_admitted_surface` -> join certification | lexical expansion and root `sort` / `dedup`; stale validation and reservation semantics remain mandatory |
 | Resident declaration commit | `prepare_resident_declaration` -> `commit_prepared_declaration` | coherent existing scope tip already carries `ScopedCompilerContext`; extend this owner rather than actor-current registry |
@@ -107,13 +108,59 @@ This is an in-progress source-backed inventory; unlisted paths remain unqualifie
 ## Resources and validation
 
 Area and implementation checkouts have independently provisioned bind mounts.
-Observed `/srv/build`: 102 GiB available, with 100 GiB required unreserved.
-`swarm-build --storage-status` exits 2 with `exec: --: invalid option` on the
-installed launcher. No cold 32 GiB build has been admitted; no cache deletion,
-admission bypass or shared daemon restart was attempted.
-Latest implementation observation: 108,249,284,608 bytes available (about
-100.8 GiB); less than 1 GiB remains above the reserve. The host native graph
-is not admitted. Pinned rustfmt and final `git diff --check` completed exit 0.
+ROOT's supported idle-output retirement changed the earlier disk blocker. The
+campaign admitted this host gate with 32 GiB prospective disk growth and a
+24 GiB memory allowance alongside the measured warm and owned lanes. Source
+remained frozen at `b44963267684d48957e48458c92c739979b1b471` (code checkpoint
+`ff2c4577ca703510806097a69539838c7d18ef9d`) through every native action.
+
+The first configure attempt exited 1 because the recorded workspace submodule
+was uninitialized. The exact `ce60f76888c94e9d7229615f27762d02933549b1` commit
+was verified in the local campaign subrepository and initialized using a
+one-command local file-transport exception; tracked source stayed unchanged.
+Configure retry and target discovery both exited 0. No daemon restart, admission
+bypass or cache deletion occurred. The installed `swarm-build --storage-status`
+interface still has the separately observed unsupported-option failure.
+
+Native issuer gate **passed**:
+
+- `swarm-build just build -j1 //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary`, exit 0;
+  build ID `3fba8327-a0f0-4da0-a430-36bdf59c8111`, 1008 local actions, no remote actions.
+  The production library's declared default check emitted metadata; the cfg(test)
+  executable linked successfully.
+- `swarm-build just build -j1 //tidepool/toolchain:tidepool_toolchain_unit_tests`,
+  exit 0; build ID `52a60ccc-0940-47d3-b41f-431229a628b5`, 22 local actions.
+  This materialized the runner's declared matched Haskell worker and resources.
+- `swarm-build just test-lib tidepool-toolchain` with eight repeated exact
+  selectors, `--expected-count 8 --jobs 1 --output-dir … --retain-artifacts`,
+  exit 0; selected 8, executed 8, passed 8, failed 0. Exact arguments and all
+  per-case reports are retained below. These issuer tests recorded no compiler
+  transactions; cleanup is `not_observed`, not a successful worker cleanup claim.
+
+Evidence directory:
+`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/native-gate-b449`.
+`gate-summary.json` records names, counts, statuses and reports;
+`counted-command.json`, `compile.log`, `resources.log`, `counted.log` preserve
+commands/results. `compiled-artifacts.json` records exact paths and hashes.
+The linked test executable is 110,936,944 bytes, SHA-256
+`a43e5bf7678ce25f6d356985737b10b2e99a623532ba195be219a67aa3920377`.
+
+The eight controls cover exact owner reuse and changed/private/producer/cancel
+checks; mutable package modification/removal refusal; borrowed P6 selection and
+hidden owner refusal; selected-row fork/sharing property; preserved native
+permissions/execution roots; canonical advertisement/historical permissions;
+and private optional replacement versus required dependency conflicts. The
+selected-home negative-dependency census remains a source design and oracle
+recipe, not an implemented or executed model.
+
+Host Buck daemon PID 3873490 belongs to
+`/build.slice/inanna-build-1792399827-3873418.scope`.
+Observed scope peak was 5,929,332,736 bytes; after terminal results its current
+memory was 2,155,368,448 bytes with 46 tasks. Aggregate `build.slice` current was
+21,929,414,656 bytes and `/srv/build` available was 476,640,448,512 bytes.
+All host clients settled; the owned daemon remains warm. No prospective growth
+or peak claim is inferred from free-space movement during concurrent retirement.
+Pinned formatting and final `git diff --check` exited 0.
 
 Required source integration observation ran through the admitted pinned shell:
 `swarm-build bash scripts/dev-shell.sh python3 scripts/integration-status.py --strict --candidate da4be05fbf043ff4b59e7cbb1d0e2941ee26506e`
@@ -124,31 +171,20 @@ at code checkpoint `ff2c4577`, exit 1. This isolated clone has neither local
 freshness claim was made. This is incomplete source-integration evidence,
 separate from native qualification.
 
-Production and test compilation, execution, and performance are **unqualified**.
-Exact pending mandatory controls (run in the implementation checkout through
-the pinned admitted workflow when disk admission is resolved):
+Runtime consumers, real mixed-cell P6 work counts, worker Ready reuse,
+performance and release qualification remain **unqualified**. Remaining focused
+controls include:
 
 ```sh
-swarm-build bash scripts/buck2-configure.sh --tests
-swarm-build bash scripts/buck2-run.sh targets -c remote.enabled=false //tidepool/toolchain:
-swarm-build just build //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary
-swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::value_publication_forks_share_unchanged_selected_rows --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::fresh_value_append_preserves_native_permissions_and_exact_execution_roots --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::prepared_value_source_support_borrows_selected_rows_and_refuses_dormant_owners --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::retained_value_source_surface_preserves_selected_support_and_refuses_hidden_owners --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::unchanged_program_context_reuses_exact_inputs_and_checks_other_owners --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::unchanged_program_context_rechecks_mutable_package_interfaces --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::program_admission_keeps_semantic_growth_and_group_witnesses_without_transport_writes --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::program_admission_promotes_canonical_owner_without_transport_writes --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::private_transport_refuses_selected_dependency_product_and_interface_conflicts --expected-count 1
 swarm-build just test-lib tidepool-runtime --exact session::turn::tests::prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles --expected-count 1
 swarm-build just test-lib tidepool-runtime --exact session::turn::tests::cell_program_host_cancellation_after_end_refuses_sealing_without_new_request --expected-count 1
 ```
 
-Discover exact affected production/test labels through the admitted configured
-entry point before compiling; linking alone is not execution. No artifact or
-executed count exists for campaign changes yet.
+Runtime production/test labels and their measured allowance must be admitted
+before that larger graph starts. The ordinary `exact.value_source_support.prepare`
+span still needs a real declaration-only zero / first mixed-value one control.
 
 ## Next actions
 
@@ -167,7 +203,8 @@ and inherits the exact private/scaffold owner. A context-only
 context-owner identity after producer/cancellation checks. Private arrivals and
 all changed owners still take checked admission. This bypasses repeated compiler
 input construction only; it does not bypass operation-local authority or demand.
-Implementation is source-reviewed and folded at `ff2c4577`; native checks are pending.
+Implementation is source-reviewed and folded at `ff2c4577`; its focused native
+issuer controls passed at `b4496326`.
 
 Independent review caught an unsafe broader shortcut before acceptance:
 `with_inputs` freshly validates actual package-interface paths/digests through
@@ -202,7 +239,9 @@ refresh after each value because it would add a full closure/metadata scan.
 Rows owner instead promotes the exact produced leaf before the existing
 `retain_output` / `source_support` physical projection, and host bindings before
 `select_value_interface`. No compiler-projection helper is needed. Physical
-candidate `3716265d` is owned and reviewed by owned-inputs, not folded here.
+candidate `29d6467c` is owned and reviewed by owned-inputs, not folded here.
+That owner reports production/cfg(test) compilation and six focused controls
+passed; the joined fresh-worker gate remains separately qualification-owned.
 Native-offer/prototype retention remains separately observable; no required
 owner may be erased merely to make a lifetime assertion pass.
 
@@ -210,30 +249,23 @@ An ordinary `exact.value_source_support.prepare` constructor trace span supports
 future zero-construction declaration-only / first-value mixed-cell checks; those
 are not executed yet. On concrete root/transition proposal arrival the area
 retains the exact design and counterexample for campaign/warm/physical owners.
-The current exact-context input-reuse parcel is the last independent constructor
-implementation before the native issuer gate; its exact review and full-history
-fold are complete. Hold the source-support bridge and dependent
-02/P4/03/publication implementation until owning production **and** test consumers
-compile and focused controls execute. Do not accumulate an uncompiled dependent
-regression stack. Parent reports the active warm Haskell lane leaves less than
-1 GiB reserve margin; the host native graph is not admitted.
-No periodic polling or wake loop: when dependency-bound, retain this
-waiting state and yield. The result
-producer checks recipient state and uses `followup_task` for a completed/idle
-non-root parent, with exact candidate, evidence and next action; `send_message`
-suffices only while the recipient is running.
+The exact-context reuse parcel's source review, full-history fold and native
+issuer gate are complete. The campaign was notified of the terminal evidence;
+qualification received the exact reports and limitations. The next boundary is a
+concrete shared decision on checked receiving-baseline private admission,
+operation-local source adoption and final request assembly. The compiled no-change
+parcel does not itself supply that transition, the paired runtime owner, a worker
+Ready issuer, or selected-home invalidation. Broad 02/P4/03/publication migration
+remains held until those typed obligations and joined controls are agreed.
 
-Broad 02/03 P1/P4/publication migration still needs the compiled issuing contract,
-complete negative dependency controls and joined production evidence. Source
-design review may finish; further constructor implementation is held after the
-current input-reuse parcel. Preserve remaining warm folds and resource blockers explicitly;
-source review does not make this area integration-ready or qualified.
+No periodic polling or wake loop: when dependency-bound, retain exact event,
+producer, recipient and continuation, then yield. The producer checks recipient
+state and uses `followup_task` for a completed/idle non-root parent; `send_message`
+suffices while it is running. Every command retains its observer until terminal.
 
-The external event producer is the campaign/qualification owner admitting the
-host production/test graph and executing the exact controls above. On an actual
-admission/terminal result, check the area supervisor's state and use
-`followup_task` if dormant, naming candidate, artifact, command/counts/status,
-evidence and concrete continuation. The area then handles compiler/test failures
-or joins verified issuer evidence before reopening the deferred bridge. Until
-that event there is no approved runnable local implementation or review; retain
-checkouts, scratch registrations, grants and pending commands without polling.
+The campaign owns the next shared transition decision and joined qualification
+admission. On that event the area reactivates the two reserved leaves for the
+bounded issuer implementation plus independent exact-candidate review, or joins
+concrete runtime gate evidence. Preserve checkouts, scratch registrations, grants,
+remaining warm folds and the exact pending commands. This issuer checkpoint is
+not completion of the host-inputs area or campaign.
