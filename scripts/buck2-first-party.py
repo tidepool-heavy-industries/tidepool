@@ -339,6 +339,25 @@ LIBRARY_TEST_FIXTURES = {
     },
 }
 
+# Runtime directory reads that no include_str! or fixture_source reaches.
+# The facade unit test walks the repository skill directory to compare the
+# scaffolded workspace against this source projection, so every file it reads
+# must be declared even though no compiled source names it.
+RUNTIME_SOURCE_PROJECTIONS = {
+    ("exomonad-host", "exomonad_host_unit_tests"): (
+        ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-command/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
+        ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-review/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
+    ),
+}
+
 # Each module is declared behind #[cfg(test)] in prepared_program.rs.
 CODEGEN_TEST_ONLY_SOURCES = {
     "apply_tests.rs", "bytes_tests.rs", "caller_result_tests.rs",
@@ -620,6 +639,8 @@ def source_inputs(package, target, features=(), test_target=False):
     includes = re.compile(r'include(?:_(?:str|bytes))?!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = EXTERNAL_SOURCE_LABELS
+    for repo_relative in RUNTIME_SOURCE_PROJECTIONS.get((package["name"], target["name"]), ()):
+        external[external_labels[repo_relative]] = repo_relative
     while pending:
         source = pending.pop()
         contents = source.read_text()

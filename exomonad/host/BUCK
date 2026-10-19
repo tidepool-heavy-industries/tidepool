@@ -728,6 +728,16 @@ tidepool_rust_isolated_test(
 rust_filegroup(
     name = "exomonad_host_unit_tests_sources",
     mapped_srcs = {
+        "//:actor_skill_exomonad_agent_spec": ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md": ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
+        "//:actor_skill_exomonad_cleanup": ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
+        "//:actor_skill_exomonad_command": ".exomonad/workspace/skills/exomonad-command/SKILL.md",
+        "//:actor_skill_exomonad_define_actors": ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md": ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md": ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
+        "//:actor_skill_exomonad_project_work": ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
+        "//:actor_skill_exomonad_review": ".exomonad/workspace/skills/exomonad-review/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
         "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "//exomonad/examples/persona:authored_prompt_agent_md": "exomonad/examples/persona/.exomonad/prompts/agent.md",
         "//exomonad/examples/persona:authored_prompt_api_guide_md": "exomonad/examples/persona/.exomonad/prompts/api-guide.md",
