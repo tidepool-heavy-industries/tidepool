@@ -871,10 +871,14 @@ impl RetainedSourceGraph {
         if let Some(captured) = captured.as_ref() {
             return Ok(Some(Arc::clone(captured)));
         }
+        let allowance = CapturedCompilerSources::capture_byte_allowance()
+            .map_err(|error| captured_compiler_source_error(&error))?;
+        let mut budget = super::workspace::CapturedSourceReadBudget::new(allowance);
         let mut roots = Vec::with_capacity(self.include_paths.len());
         for (path, expected) in self.include_paths.iter().zip(&self.manifests) {
-            let (files, bodies) = super::workspace::read_captured_source_files(path)
-                .map_err(|error| captured_compiler_source_error(error.as_ref()))?;
+            let (files, bodies) =
+                super::workspace::read_captured_source_files(path, &mut budget)
+                    .map_err(|error| captured_compiler_source_error(error.as_ref()))?;
             let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
                 .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?;
             if !same_source_manifest(&manifest, expected) {

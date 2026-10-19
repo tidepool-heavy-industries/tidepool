@@ -1522,25 +1522,125 @@ pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>
     Ok(files)
 }
 
+/// A capture-local allocation safeguard, shared across every ordered root.
+/// Body bytes and retained record/path storage consume the existing capture
+/// allowance. The factory separately checks exact encoded framing size.
+pub(super) struct CapturedSourceReadBudget {
+    limit: u64,
+    consumed: u64,
+}
+
+impl CapturedSourceReadBudget {
+    pub(super) fn new(limit: u64) -> Self {
+        Self { limit, consumed: 0 }
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<()> {
+        let observed = self.consumed.checked_add(bytes).ok_or_else(|| {
+            format!("captured compiler source collection accounting overflow after {} bytes; allowance is {} bytes", self.consumed, self.limit)
+        })?;
+        if observed > self.limit {
+            return Err(format!(
+                "captured compiler source collection observed {observed} accounted bytes; allowance is {} bytes",
+                self.limit,
+            ).into());
+        }
+        self.consumed = observed;
+        Ok(())
+    }
+}
+
+struct CapturedSourceFileBodies<'a> {
+    bodies: BTreeMap<PathBuf, std::sync::Arc<[u8]>>,
+    budget: &'a mut CapturedSourceReadBudget,
+}
+
+impl CapturedSourceFileBodies<'_> {
+    fn read(&mut self, source: &Path, relative: &Path) -> Result<Vec<u8>> {
+        use std::io::Read;
+        // Charge both retained map keys and their value headers, plus the
+        // 64-byte hex digest, before allocating another retained record. This
+        // bounds record count too; it is not a claim of exact allocator usage.
+        let path_bytes = relative.as_os_str().as_encoded_bytes().len() as u64;
+        let record_bytes = std::mem::size_of::<(PathBuf, String)>() as u64
+            + std::mem::size_of::<(PathBuf, std::sync::Arc<[u8]>)>() as u64
+            + 64;
+        self.budget
+            .charge(path_bytes.saturating_mul(2).saturating_add(record_bytes))?;
+        let mut file = std::fs::File::from(rustix::fs::open(
+            source,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )?);
+        if !file.metadata()?.is_file() {
+            return Err(format!(
+                "captured compiler source is not a regular file: {}",
+                source.display()
+            )
+            .into());
+        }
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        let mut observed_file = false;
+        loop {
+            tidepool_extract_cmd::compiler_host_checkpoint()?;
+            // Read at most one byte beyond the remaining allowance to observe
+            // growth/oversize without allocating or retaining that byte.
+            let capacity = self
+                .budget
+                .limit
+                .saturating_sub(self.budget.consumed)
+                .saturating_add(1)
+                .min(chunk.len() as u64) as usize;
+            let count = file.read(&mut chunk[..capacity])?;
+            if !observed_file {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::ColdSourceFile,
+                    1,
+                );
+                observed_file = true;
+            }
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::ColdSourceByte,
+                count as u64,
+            );
+            self.budget.charge(count as u64)?;
+            tidepool_extract_cmd::compiler_host_checkpoint()?;
+            if count == 0 {
+                return Ok(bytes);
+            }
+            bytes.try_reserve(count)?;
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+    }
+}
+
 /// Read the same captured namespace and bodies in one traversal. The caller
 /// retains the source root owner; these bytes do not select a compiler world.
 pub(super) fn read_captured_source_files(
     source: &Path,
+    budget: &mut CapturedSourceReadBudget,
 ) -> Result<(
     BTreeMap<PathBuf, String>,
     BTreeMap<PathBuf, std::sync::Arc<[u8]>>,
 )> {
     let mut files = BTreeMap::new();
-    let mut bodies = BTreeMap::new();
+    let mut captured = CapturedSourceFileBodies {
+        bodies: BTreeMap::new(),
+        budget,
+    };
     inspect_source_tree(
         source,
         Path::new(""),
         None,
         &mut files,
         false,
-        &mut Some(&mut bodies),
+        &mut Some(&mut captured),
     )?;
-    Ok((files, bodies))
+    Ok((files, captured.bodies))
 }
 
 pub(super) fn is_haskell_source(path: &Path) -> bool {
@@ -1616,7 +1716,7 @@ fn inspect_source_tree(
     destination: Option<&Path>,
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
-    bodies: &mut Option<&mut BTreeMap<PathBuf, std::sync::Arc<[u8]>>>,
+    bodies: &mut Option<&mut CapturedSourceFileBodies<'_>>,
 ) -> Result<()> {
     if bodies.is_some() {
         tidepool_extract_cmd::compiler_host_checkpoint()?;
@@ -1669,23 +1769,17 @@ fn inspect_source_tree(
             if bodies.is_some() {
                 tidepool_extract_cmd::compiler_host_checkpoint()?;
             }
-            let bytes = std::fs::read(entry.path())?;
-            if bodies.is_some() {
-                tidepool_toolchain::timing::record_host_work(
-                    tidepool_toolchain::timing::HostWorkCounter::ColdSourceFile,
-                    1,
-                );
-                tidepool_toolchain::timing::record_host_work(
-                    tidepool_toolchain::timing::HostWorkCounter::ColdSourceByte,
-                    bytes.len() as u64,
-                );
-                tidepool_extract_cmd::compiler_host_checkpoint()?;
-            }
+            let bytes = match bodies.as_mut() {
+                Some(captured) => captured.read(&entry.path(), &path)?,
+                None => std::fs::read(entry.path())?,
+            };
             if let Some(destination) = destination {
                 tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
             }
             if let Some(bodies) = bodies.as_mut() {
-                bodies.insert(path.clone(), std::sync::Arc::from(bytes.as_slice()));
+                bodies
+                    .bodies
+                    .insert(path.clone(), std::sync::Arc::from(bytes.as_slice()));
             }
             files.insert(path, blake3::hash(&bytes).to_hex().to_string());
         }
@@ -1700,6 +1794,60 @@ mod tests {
         reason = "test: launches short-lived git one-shots to build fixture repositories"
     )]
     use super::*;
+
+    #[test]
+    fn compiler_source_reads_bound_oversize_and_shared_root_retention() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("Module.hs"), [b'a'; 16]).unwrap();
+        std::fs::write(second.path().join("Module.hs"), [b'b'; 16]).unwrap();
+        let headers = (std::mem::size_of::<(PathBuf, String)>()
+            + std::mem::size_of::<(PathBuf, std::sync::Arc<[u8]>)>()
+            + 64
+            + 2 * "Module.hs".len()) as u64;
+        let mut budget = CapturedSourceReadBudget::new(2 * headers + 24);
+        let observed = HostWorkObservation::new();
+        let (_, retained) = observed
+            .scope(|| read_captured_source_files(first.path(), &mut budget))
+            .unwrap();
+        assert_eq!(retained[Path::new("Module.hs")].as_ref(), &[b'a'; 16]);
+        let refusal = observed.scope(|| read_captured_source_files(second.path(), &mut budget));
+        assert!(
+            refusal.is_err(),
+            "two roots share one allowance; 32 body bytes cannot fit 24"
+        );
+        assert_eq!(
+            observed.snapshot().get(HostWorkCounter::ColdSourceByte),
+            25,
+            "only the remaining allowance plus one refusal byte is read"
+        );
+        assert_eq!(observed.snapshot().get(HostWorkCounter::ColdSourceFile), 2);
+
+        std::fs::write(second.path().join("Module.hs"), vec![b'x'; 1024 * 1024]).unwrap();
+        let mut small = CapturedSourceReadBudget::new(headers + 3);
+        let observed = HostWorkObservation::new();
+        assert!(observed
+            .scope(|| read_captured_source_files(second.path(), &mut small))
+            .is_err());
+        assert_eq!(
+            observed.snapshot().get(HostWorkCounter::ColdSourceByte),
+            4,
+            "an oversized file must not be read or allocated in full before refusal"
+        );
+
+        std::fs::write(second.path().join("Module.hs"), []).unwrap();
+        let mut no_record = CapturedSourceReadBudget::new(headers - 1);
+        let observed = HostWorkObservation::new();
+        assert!(observed
+            .scope(|| read_captured_source_files(second.path(), &mut no_record))
+            .is_err());
+        assert_eq!(
+            observed.snapshot().get(HostWorkCounter::ColdSourceFile),
+            0,
+            "even empty body records consume path and header allowance before IO"
+        );
+    }
 
     // Workspace tests supply a private selection mirror. Production constructs
     // that mirror only from the toolchain's admitted immutable module package.
