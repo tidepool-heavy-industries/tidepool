@@ -2137,6 +2137,15 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let snapshot = state.snapshot.clone();
+        // Finite planned-item admission has no projection of a held World
+        // reservation. Report the missing per-item successor capability rather
+        // than the generic finite-input refusal, so the seam names what Warm
+        // must issue instead of looking like caller misuse.
+        if prefix.admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: item.index(),
+            });
+        }
         let planned_row = prefix
             .admission
             .plan_reservation()?
@@ -2229,6 +2238,13 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
+        // A World declaration item settles through the same missing per-item
+        // successor capability; the finite planned-row lookup cannot supply it.
+        if prefix.admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: item.index(),
+            });
+        }
         let generation = prefix
             .admission
             .plan_reservation()?
