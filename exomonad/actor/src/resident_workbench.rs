@@ -1918,29 +1918,19 @@ struct ActorPublicationVisibility {
 impl ActorPublicationGuard {
     fn reserve(
         state: Arc<InstalledToolsState>,
-        prepared: &PreparedActorGeneration,
+        expected: ActorRequestSnapshot,
+        target: generation_admission::GenerationDependency,
+        source: &generation_admission::SourceDependency,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<Option<Self>, ResidentActorWorkbenchError> {
-        let target = prepared
-            .installation
-            .source_dependency()
-            .generation()
-            .expect("prepared generation dependency")
-            .clone();
-        let world = match (
-            &prepared.expected,
-            prepared.checkout_context.source_dependency(),
-        ) {
+        let world = match (&expected, source) {
             (
                 ActorRequestSnapshot::Bootstrap(_),
                 generation_admission::SourceDependency::World(world),
             ) => Some(world.begin_publication(&target)?),
             _ => None,
         };
-        let attempt = Arc::new(ActorPublicationAttempt {
-            expected: prepared.expected.clone(),
-            target,
-        });
+        let attempt = Arc::new(ActorPublicationAttempt { expected, target });
         let same = {
             let mut current = state.0.lock();
             let same = match (&*current, &attempt.expected) {
@@ -1972,6 +1962,33 @@ impl ActorPublicationGuard {
             decision,
             settled: false,
         }))
+    }
+
+    fn complete(
+        self,
+        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let no_commit_claim = matches!(
+            self.decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+                | tidepool_runtime::session::PublicationPhase::CancellationRequested
+                | tidepool_runtime::session::PublicationPhase::Terminated
+        );
+        let known_unpublished = no_commit_claim
+            && !matches!(
+                &outcome,
+                Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
+            );
+        if known_unpublished {
+            self.refused();
+        } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
+            if !self.confirmed() {
+                return Ok(ActorGenerationCommit::Unconfirmed(
+                    "publication lost its exact operational selection before settlement".into(),
+                ));
+            }
+        }
+        outcome
     }
 
     fn visibility(&self) -> ActorPublicationVisibility {
@@ -2081,6 +2098,20 @@ impl ActorPublicationVisibility {
 
     fn retain_unconfirmed(&self, candidate: &mut Option<InitialPublicationCandidate>) {
         let mut current = self.state.0.lock();
+        let exact = match &*current {
+            InstalledToolsAvailability::PublicationInProgress(attempt)
+            | InstalledToolsAvailability::PublicationUnavailable(attempt) => {
+                Arc::ptr_eq(attempt, &self.attempt)
+            }
+            InstalledToolsAvailability::Generation(generation)
+            | InstalledToolsAvailability::GenerationUnavailable(generation) => {
+                generation.dependency().same_prepared(&self.attempt.target)
+            }
+            _ => false,
+        };
+        if !exact {
+            return;
+        }
         let previous = match &self.attempt.expected {
             ActorRequestSnapshot::Bootstrap(previous) => Some(previous),
             _ => None,
@@ -2109,15 +2140,24 @@ where
                 "prepared generation belongs to a different machine owner".into(),
             ));
         }
-        let Some(owner) =
-            ActorPublicationGuard::reserve(self.state.clone(), &prepared, publication.clone())?
+        let Some(owner) = ActorPublicationGuard::reserve(
+            self.state.clone(),
+            prepared.expected.clone(),
+            prepared
+                .installation
+                .source_dependency()
+                .generation()
+                .expect("prepared generation dependency")
+                .clone(),
+            prepared.checkout_context.source_dependency(),
+            publication.clone(),
+        )?
         else {
             return Ok(ActorGenerationCommit::Refused(
                 "actor generation changed during reload preparation".into(),
             ));
         };
         let visibility = owner.visibility();
-        let decision = publication.clone();
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
         let completed = self.access.with_machine_wait_mode(prepared.checkout_context.clone(), None, false, move |session, _, _| {
@@ -2218,27 +2258,7 @@ where
             Ok(outcome) => outcome,
             Err(error) => return Err(error),
         };
-        let no_commit_claim = matches!(
-            decision.phase(),
-            tidepool_runtime::session::PublicationPhase::Running
-                | tidepool_runtime::session::PublicationPhase::CancellationRequested
-                | tidepool_runtime::session::PublicationPhase::Terminated
-        );
-        let known_unpublished = no_commit_claim
-            && !matches!(
-                &outcome,
-                Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
-            );
-        if known_unpublished {
-            owner.refused();
-        } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
-            if !owner.confirmed() {
-                return Ok(ActorGenerationCommit::Unconfirmed(
-                    "publication lost its exact operational selection before settlement".into(),
-                ));
-            }
-        }
-        outcome
+        owner.complete(outcome)
     }
 }
 
