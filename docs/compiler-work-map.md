@@ -169,6 +169,27 @@ These controls establish observer sensitivity and roster selection. Current
 native compiler/host execution, work elimination, paired performance and frozen
 release qualification remain pending.
 
+The immutable current baseline is exact `6d3b1745b465b6d0fe14104cb4020ead282f1620`,
+`fast-dev`, workspace `ce60f7`, Harness `1893773e`; it is built, frozen and verified.
+Descriptor SHA-256 `2ec9745698f1a578403e7524397d3fe573d97efdb8cb489457f3ca007775e72e`.
+Its minimal-profile AABA and Persona13 each passed one counted case and exact
+owner-issued workload/frozen timing claims. AABA body wall was 86.094 s:
+38.326 s activation, 14.121/9.983/11.499/11.619 s cells, 0.532 s shutdown,
+5.866 ms installation verification and 7.687 ms unpartitioned remainder.
+Each cell issued two exact matched physical requests; source repetition alone
+establishes neither a worker-world hit nor removed work. Persona13 cohort wall
+was 387.000 s with all 13 phases. Process, hosted and compiler cleanup confirmed
+for both; diagnostic evidence was complete only for AABA. Minimal tracing leaves
+host preparation and serialize/hydrate/GHC/output-admission splits unknown;
+a full-profile AABA attribution capture is separate. These are baseline
+observations, not a candidate comparison or a speedup.
+
+The same frozen baseline's stronger shared-root Persona failed in editable
+workspace fixture setup before host startup: a read-only frozen lock was copied
+with its mode and then overwritten. The exact failure remains retained; a new
+source repair/build/freeze is required. It supplies no compiler defect or passing
+Persona semantic evidence. Candidate frozen release qualification remains open.
+
 Historical **b108** scripted Persona13 measurements include 389 retained input
 references across 13 offers (not 389 distinct graphs), 64 native-item
 continuations (~61.283 s inclusive) and 64 value captures (~34.438 s inclusive).
