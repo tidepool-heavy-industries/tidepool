@@ -8858,7 +8858,7 @@ impl ExactDeclarationContext {
                 .facts
                 .compiler_support
                 .projection()
-                .snapshot_roles()
+                .recorded_roles()
                 .clone(),
             lexical: self.owner.facts.lexical.clone(),
             input_decisions: self

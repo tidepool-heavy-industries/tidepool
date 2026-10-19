@@ -7938,7 +7938,7 @@ impl ArtifactView {
             input_decisions.facts.insert(
                 owner.clone(),
                 compiler_projection::RecordedInputNativeDecision {
-                    role: role.clone(),
+                    role: role.recorded_fact(),
                     groups: chosen,
                 },
             );

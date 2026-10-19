@@ -78,6 +78,7 @@ impl PublicationNativeAuthority {
         let artifacts = artifacts.select_issued(vec![*original], selection)?;
         let prior = CompilerInputProjection {
             roles: facts.roles.clone(),
+            recorded_roles: facts.roles.clone(),
         }
         .bind_publications(&artifacts)?;
         let empty = CompilerSourceSupport::new(prior.clone(), artifacts, [], Default::default())?;
@@ -198,6 +199,19 @@ impl PartialEq for CompilerInputRole {
 impl Eq for CompilerInputRole {}
 
 impl CompilerInputRole {
+    /// Durable facts share the birth descriptor, never its per-view acquisition.
+    pub(super) fn recorded_fact(&self) -> Self {
+        let mut fact = self.clone();
+        if let Self::PublishedSourceOriginal {
+            native_authority, ..
+        } = &mut fact
+        {
+            *native_authority =
+                PublicationNativeAuthority::recorded(Arc::clone(native_authority.facts()));
+        }
+        fact
+    }
+
     pub fn interface(&self) -> ArtifactId {
         match self {
             Self::InterfaceOnly { interface }
@@ -279,6 +293,9 @@ pub(crate) enum CompilerRoleObservation<'a> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompilerInputProjection {
     roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    // Updated only with changed roles. Snapshots borrow this pure fact root;
+    // live roles separately retain their actual acquired publication owners.
+    recorded_roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
 }
 
 /// Matched compiler roles and exact custody selected by their existing issuer.
@@ -367,7 +384,7 @@ impl IssuedInputNativeDecisions {
             result.facts.insert(
                 owner.clone(),
                 RecordedInputNativeDecision {
-                    role: role.clone(),
+                    role: role.recorded_fact(),
                     groups: choices.clone(),
                 },
             );
@@ -727,7 +744,7 @@ impl CompilerSourceSupport {
             crate::exact_context::PublicationNativeFacts::maintain(
                 self.native_fact_owner.as_ref(),
                 crate::exact_context::PublicationNativeMaps {
-                    roles: self.projection.roles.clone(),
+                    roles: self.projection.recorded_roles.clone(),
                     offers: self.native_offer_facts.clone(),
                     native_availability: self.native_availability.persistent_facts().clone(),
                     input_decisions: self.input_decisions.facts.clone(),
@@ -987,7 +1004,7 @@ impl CompilerSourceSupport {
                 input_decisions.facts.insert(
                     owner,
                     RecordedInputNativeDecision {
-                        role: role.clone(),
+                        role: role.recorded_fact(),
                         groups,
                     },
                 );
@@ -1916,7 +1933,7 @@ impl CompilerSourceSupport {
         if let Some(mut fact) = carried {
             // Only this checked endorsement carries the old role's choice to
             // the published role. Install it before committing the fact root.
-            fact.role = role.clone();
+            fact.role = role.recorded_fact();
             decisions.facts.insert(endorsement.owner().clone(), fact);
         }
         Self::new_with_native_facts(
@@ -2278,6 +2295,9 @@ impl CompilerInputProjection {
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
         &self.roles
     }
+    pub(crate) fn recorded_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
+        &self.recorded_roles
+    }
     pub(crate) fn bind_snapshot_roles(
         &mut self,
         roles: &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
@@ -2307,19 +2327,23 @@ impl CompilerInputProjection {
         &self,
         mut select: impl FnMut(&ExactModuleIdentity, &CompilerInputRole) -> Option<CompilerInputRole>,
     ) -> Self {
-        let mut roles = self.roles.clone();
+        let mut projected = self.clone();
         for (owner, previous) in &self.roles {
             match select(owner, previous) {
                 Some(role) if &role == previous => {}
                 Some(role) => {
-                    roles.insert(owner.clone(), role);
+                    projected
+                        .recorded_roles
+                        .insert(owner.clone(), role.recorded_fact());
+                    projected.roles.insert(owner.clone(), role);
                 }
                 None => {
-                    roles.remove(owner);
+                    projected.roles.remove(owner);
+                    projected.recorded_roles.remove(owner);
                 }
             }
         }
-        Self { roles }
+        projected
     }
 
     pub(crate) fn from_issued_entries(
@@ -2433,8 +2457,14 @@ impl CompilerInputProjection {
                 _ => {}
             }
         } else {
-            self.roles.insert(owner, incoming);
+            self.roles.insert(owner.clone(), incoming);
         }
+        let fact = self
+            .roles
+            .get(&owner)
+            .expect("admitted role")
+            .recorded_fact();
+        self.recorded_roles.insert(owner, fact);
         Ok(())
     }
 
