@@ -422,10 +422,7 @@ impl CompilerWorldBindings {
             );
             let owner = entry.row.owner().module_name();
             if let Some(previous) = rows.get(&owner) {
-                if previous.world_issuer() != entry.row.world_issuer()
-                    || previous.certified_interface().artifact_id()
-                        != entry.row.certified_interface().artifact_id()
-                {
+                if !previous.same_world_type_row(&entry.row) {
                     return Err(source_failure(
                         "competing checked rows for one current compiler owner",
                     ));
