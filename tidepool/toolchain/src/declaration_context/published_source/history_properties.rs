@@ -254,9 +254,14 @@ fn restored_graph_roles(
 > {
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
-    let (products, interfaces) = context
-        .materialize_recovery_products_and_interfaces(scratch.path())
-        .unwrap();
+    let (products, interfaces) = partition_native_recovery_references(
+        context
+            .materialize_recovery_artifacts(
+                scratch.path(),
+                &context.artifact_view().artifact_ids().into_iter().collect(),
+            )
+            .unwrap(),
+    );
     let selection: crate::artifact_inventory::ArtifactGraphSelection =
         serde_json::from_slice(&serde_json::to_vec(&view.capture_graph_selection()).unwrap())
             .unwrap();
@@ -822,8 +827,12 @@ proptest! {
             let view = context.artifact_view();
             let graph = view.capture_graph_selection();
             let scratch = tempfile::tempdir().unwrap();
-            let (products, interfaces) = context
-                .materialize_recovery_products_and_interfaces(scratch.path()).unwrap();
+            let (products, interfaces) = partition_native_recovery_references(
+                context.materialize_recovery_artifacts(
+                    scratch.path(),
+                    &context.artifact_view().artifact_ids().into_iter().collect(),
+                ).unwrap(),
+            );
             let inventory = RecoveredArtifactInventory::capture_bound(
                 scratch.path(), &products, &interfaces, &[], &[],
                 &view.descriptors(), &graph.bindings, &view.binding_dependencies(),

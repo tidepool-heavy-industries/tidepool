@@ -8203,42 +8203,6 @@ impl ExactDeclarationContext {
             .collect()
     }
 
-    /// Materialize owned native products once and reuse their exact canonical
-    /// references when publishing the same immutable compiler context.
-    pub fn materialize_recovery_products_and_interfaces(
-        &self,
-        root: &Path,
-    ) -> Result<
-        (
-            Vec<RecoveryArtifactRef>,
-            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
-        ),
-        CompileError,
-    > {
-        let entries = self.owner.facts.compiler_support.artifacts().entries();
-        let entries = entries
-            .into_iter()
-            .filter(|entry| {
-                matches!(
-                    entry.payload,
-                    ArtifactPayload::Original(_) | ArtifactPayload::Canonical(_)
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut products = Vec::new();
-        let mut interfaces = Vec::new();
-        for reference in self.materialize_recovery_entries(root, &entries)? {
-            match reference {
-                RecoveryPayloadReference::Original(reference) => products.push(reference),
-                RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
-                RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
-                    unreachable!()
-                }
-            }
-        }
-        Ok((products, interfaces))
-    }
-
     /// Materialize exactly the requested payloads from this view. The run retains
     /// previously published references; this batch does not issue compiler roles.
     pub fn materialize_recovery_artifacts(
@@ -10697,6 +10661,29 @@ fn compose_lexical_nodes<'a>(
         .into_iter()
         .map(|(owner, imports)| ExactLexicalNode { owner, imports })
         .collect())
+}
+
+// These native-only fixtures export all payload custody in their exact view,
+// independently of selected executable demand. Partitioning grants no roles.
+#[cfg(test)]
+fn partition_native_recovery_references(
+    references: Vec<RecoveryPayloadReference>,
+) -> (
+    Vec<RecoveryArtifactRef>,
+    Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
+) {
+    let mut products = Vec::new();
+    let mut interfaces = Vec::new();
+    for reference in references {
+        match reference {
+            RecoveryPayloadReference::Original(reference) => products.push(reference),
+            RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
+            RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
+                panic!("native-only recovery fixture contains a joined or value interface")
+            }
+        }
+    }
+    (products, interfaces)
 }
 
 #[cfg(test)]

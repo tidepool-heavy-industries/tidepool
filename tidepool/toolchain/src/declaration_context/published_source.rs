@@ -1913,9 +1913,18 @@ mod tests {
                 // it does not change the frozen publication's namespace or roots.
             }
             let recovery_scratch = tempfile::tempdir().unwrap();
-            let (published_products, published_interfaces) = published
-                .materialize_recovery_products_and_interfaces(recovery_scratch.path())
-                .unwrap();
+            let (published_products, published_interfaces) = partition_native_recovery_references(
+                published
+                    .materialize_recovery_artifacts(
+                        recovery_scratch.path(),
+                        &published
+                            .artifact_view()
+                            .artifact_ids()
+                            .into_iter()
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
             let selection: crate::artifact_inventory::ArtifactGraphSelection =
                 serde_json::from_slice(
                     &serde_json::to_vec(&published.artifact_view().capture_graph_selection())
@@ -1980,9 +1989,18 @@ mod tests {
                     .materialize_module_interfaces(scratch.path())
                     .unwrap();
                 let reused_root = tempfile::tempdir().unwrap();
-                let (reused_products, reused_interfaces) = snapshot
-                    .materialize_recovery_products_and_interfaces(reused_root.path())
-                    .unwrap();
+                let (reused_products, reused_interfaces) = partition_native_recovery_references(
+                    snapshot
+                        .materialize_recovery_artifacts(
+                            reused_root.path(),
+                            &snapshot
+                                .artifact_view()
+                                .artifact_ids()
+                                .into_iter()
+                                .collect(),
+                        )
+                        .unwrap(),
+                );
                 assert_eq!(
                     serde_json::to_value(&reused_products).unwrap(),
                     serde_json::to_value(&products).unwrap()
