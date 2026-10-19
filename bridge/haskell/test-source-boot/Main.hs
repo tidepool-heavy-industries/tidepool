@@ -6,6 +6,7 @@ import SourceBootCases
 import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
+import RequestInputsTest (compilerServiceBootBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -19,6 +20,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "completed compiler request histories" completedRequestHistories
+  , testCase "compiler service boot admission boundaries" compilerServiceBootBoundaries
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
   , testCase "closed executor refuses completed cached preparation" completedRequestRelease
   , testCase "owned arena range reads" ownedArenaRangeReads

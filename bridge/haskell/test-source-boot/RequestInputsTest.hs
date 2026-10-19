@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -64,6 +64,7 @@ import Tidepool.GhcPipeline
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
+import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
@@ -86,7 +87,7 @@ import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport
   ( readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
   , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
-import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics, requireUserError)
 
 foreign import ccall unsafe "memfd_create" createArena :: CString -> CUInt -> IO CInt
 foreign import ccall unsafe "fcntl" sealArena :: CInt -> CInt -> CInt -> IO CInt
@@ -931,6 +932,34 @@ fixtureIssuerCountingHistories = withTiming $ withScratch $ \work -> do
 withFixtureEnvironment :: String -> String -> IO a -> IO a
 withFixtureEnvironment name value action = bracket (lookupEnv name)
   (maybe (unsetEnv name) (setEnv name)) (\_ -> setEnv name value >> action)
+
+-- These enter the production pre-GHC admission owner with a deliberately
+-- unreadable profile. Partial boot metadata must refuse before any profile or
+-- compiler input is opened; it cannot silently downgrade to observation.
+compilerServiceBootBoundaries :: IO ()
+compilerServiceBootBoundaries = bracket
+  (traverse (\name -> (name,) <$> lookupEnv name) names)
+  (mapM_ (\(name,value) -> maybe (unsetEnv name) (setEnv name) value)) $ \_ -> do
+    mapM_ unsetEnv names
+    void readCompilerPackageBoot
+    requireObservationPackageEnvironment
+    forM_ [selected | name <- names, selected <- [[name],filter (/= name) names]] $ \selected -> do
+      mapM_ unsetEnv names
+      forM_ selected $ \name -> setEnv name (if name == head names then "/unavailable/compiler-profile" else replicate 64 '0')
+      requireUserError "partial compiler service boot"
+        "compiler service boot fields must be supplied together" readCompilerPackageBoot
+      requireUserError "rooted metadata cannot become an observation"
+        "package profile observation cannot inherit compiler service boot fields"
+        requireObservationPackageEnvironment
+  where
+    names =
+      [ "TIDEPOOL_COMPILER_PACKAGE_PROFILE"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256"
+      , "TIDEPOOL_COMPILER_SERVICE_EPOCH"
+      , "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID"
+      , "TIDEPOOL_COMPILER_WORKER_INSTANCE"
+      ]
 
 data PublicationStep
   = RestorePublicationInputs
