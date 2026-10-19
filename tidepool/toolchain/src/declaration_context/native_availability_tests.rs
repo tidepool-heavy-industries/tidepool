@@ -3526,19 +3526,33 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         let metadata = selected_projection
             .project_metadata(selected.metadata_snapshot())
             .unwrap();
-        let error = NativeInputSelection::receive(
+        let transport = NativeInputSelection::receive(
             selected_projection,
             &metadata,
             &selected,
             joined.native_availability(),
             joined.native_offers(),
         )
-        .err()
-        .expect("explicit source Original cannot accept a competing historical Original");
-        assert!(
-            matches!(&error, CompileError::ExtractFailed(detail) if detail == "artifact inventory: issued native dependency conflicts with request interface"),
-            "actual_error={error:?}"
+        .expect("an explicit Original displaces an unconsumed historical availability root");
+        assert_eq!(
+            transport
+                .availability
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([entries[winner].descriptor.id])
         );
+        assert_eq!(
+            transport.advertised.0.get(&owner),
+            Some(&entries[winner].descriptor.id)
+        );
+        assert!(
+            selected
+                .artifact_ids()
+                .contains(&entries[1 - winner].descriptor.id),
+            "pruning optional availability does not discard historical byte custody"
+        );
+        assert_eq!(joined.native_availability().rows().count(), 2);
     }
 }
 
@@ -4374,6 +4388,69 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         let metadata = projection
             .project_metadata(view.metadata_snapshot())
             .unwrap();
+        let prior_projection = CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap();
+        let prior_offers = entries[..2]
+            .iter()
+            .map(|entry| {
+                let proof =
+                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                        entry.descriptor.id,
+                        &issued,
+                    )
+                    .unwrap()
+                    .unwrap();
+                crate::artifact_inventory::IssuedNativeOffer::issue(
+                    entry.descriptor.id,
+                    &issued,
+                    Some(proof),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let prior =
+            RequestNativeAvailability::issue_checked(&prior_projection, &issued, &prior_offers)
+                .unwrap();
+        let current_projection =
+            CompilerInputProjection::from_issued_entries(&[entries[2].clone()]).unwrap();
+        let current_proof =
+            crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                entries[2].descriptor.id,
+                &current,
+            )
+            .unwrap()
+            .unwrap();
+        let current_offer = crate::artifact_inventory::IssuedNativeOffer::issue(
+            entries[2].descriptor.id,
+            &current,
+            Some(current_proof),
+        )
+        .unwrap();
+        let current_rows = RequestNativeAvailability::issue_checked(
+            &current_projection,
+            &current,
+            std::slice::from_ref(&current_offer),
+        )
+        .unwrap();
+        let normalized = prior.merge(&current_rows).unwrap().into_rows();
+        let filtered = normalized.for_canonical_roles(&projection, &view).unwrap();
+        let required = filtered
+            .rows()
+            .find(|row| row.original.descriptor.id == entries[0].descriptor.id)
+            .expect("the surviving consumer still requires its historical child");
+        assert!(required.permits(7));
+        assert!(!required.permits(9001));
+        let mut offers = prior_offers;
+        offers.push(current_offer);
+        let receive_error =
+            NativeInputSelection::receive(&projection, &metadata, &view, &normalized, &offers)
+                .err()
+                .expect(
+                    "a required historical child cannot bypass an explicit conflicting Original",
+                );
+        assert_eq!(
+            receive_error.to_string(),
+            "extractor contract failure: artifact inventory: issued native dependency conflicts with request interface"
+        );
         let error = NativeInputSelection::issue_checked(
             &projection,
             &metadata,
