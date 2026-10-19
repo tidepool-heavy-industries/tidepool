@@ -302,3 +302,33 @@ be measured and reported.
   Warm owns shared client/wire types, host owns runtime/publication composition;
   inspect is the first joined milestone, not completion. Source implementation,
   native execution, deletion audit and frozen performance remain pending.
+
+- 2026-10-19, actual service world retention: extend the existing optional exact-
+  input retention owner/policy to account for known world sources, immutable raw
+  custody and owned materialization. The aggregate actual retained owners are
+  bounded, rather than multiplying the byte/count thresholds across independent
+  pools. Maintain admission-time sizes and eviction order; no whole-world hash,
+  encoding, filesystem walk or old-row scan on a resident query or every END.
+  Strongly retain the active world through its actual END. An oversized world may
+  serve that operation and become nonresident after confirmed END; this is a
+  residency policy, not refusal of valid work. Eviction makes stale realization
+  handles require acquisition without changing logical source selection. Retire
+  its private table/owners before directory disposal, proving no surviving owner
+  needs that directory. Shared package EPS/NameCache remain service-epoch-owned;
+  eviction does not claim to free them. Failed acquisition brackets unissued
+  materialization; failed cleanup remains observed and owned by worker namespace/
+  quarantine. Existing process retention/rotation still covers derived GHC state.
+  No new CLI, registry or per-client pin set. Independent review and actual
+  oversized/held/evicted-handle/failure controls are required before acceptance.
+
+- 2026-10-19, catalog roles versus current source: eligibility checks that each
+  authenticated catalog target has a conventional module-relative source in its
+  own declared source/include role. It does not assert that catalog source wins
+  the current ordered captured domain. The service selects from that domain and
+  attests the actual selected module/unit/root/path/bytes. Earlier authored A may
+  win over catalog B even with different bodies. Neither equal bytes nor this
+  representability check transfers catalog native/interface authority to A.
+  Partial records, incompatible role ordering and nonconventional/ambiguous
+  targets refuse before source submission. Actual A/B worker receipt and cold
+  recovery controls remain required; source-only frozen eligibility is no proof
+  of execution or compiler authority.
