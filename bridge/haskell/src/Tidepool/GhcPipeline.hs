@@ -5370,7 +5370,7 @@ extractionDynFlags :: DynFlags -> [FilePath] -> DynFlags
 extractionDynFlags dflags includes = canonicalizeDFlags dflags
   { importPaths = importPaths dflags ++ includes
   -- The selected libdir supplies the global database. Producer identity binds
-  -- its path; immutable package-source retention requires deployment authority.
+  -- its path; package reuse requires a retained consumed-source owner.
   -- GHC stores database flags in reverse command-line order. Clearing first
   -- removes both user databases and ambient GHC_PACKAGE_PATH entries before
   -- the initial setSessionDynFlags loads any package interfaces.
