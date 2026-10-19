@@ -125,6 +125,17 @@ select Originals from passive rows or adapt them into an ExactScope. A completed
 item description is not a published runtime successor. Source request builders
 preflight binary framing plus hex expansion against the same daemon receive
 budget before appending bulk fields; the transport still charges actual cwd.
+The matched `TPCWORLD` version 3 carrier retains exactly the frontier of three
+roots in Context, primary-association, occurrence order. Its fixed `TPCWREST`
+version 3 product binds those roots, the captured source seal, canonical producer,
+profile and runtime query scope; transfer order and physical aliases do not
+change logical identity. Each base row must match an acquired primary association,
+and every visible value row must be referenced by the occurrence map. The actual
+Context roles, namespace and scope proofs select an association by exact binding;
+passive row presence and module names cannot reconstruct that selection. Immutable
+decoded primary facts and their known backing/record charges stay with the same
+world/input owner. The receiver preserves private Rust artifact/scope receipts as
+provenance, and grants no native execution or completed value from them.
 `TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
 select compiler Originals or native groups. Cold block admission verifies the
