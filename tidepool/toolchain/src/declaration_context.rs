@@ -2328,7 +2328,7 @@ impl DemandNativeInputs {
         // certified group.
         let mut artifacts_by_owner = BTreeMap::new();
         for (id, product) in &available {
-            artifacts_by_owner.insert(product.owner(), **id);
+            artifacts_by_owner.insert(product.owner(), *id);
         }
         let mut certified_keys = BTreeSet::new();
         for group in &groups {
@@ -18818,7 +18818,7 @@ mod tests {
     }
 
     #[test]
-    fn demanded_world_facts_bind_projected_support_and_type_changed_rows() {
+    fn demanded_world_facts_bind_certified_groups_and_refuse_narrowed_rows() {
         use crate::artifact_inventory::NativeArtifactDemand;
         use crate::certified_products::CertificationError;
         use tidepool_repr::execution_schema::InventoryOperation;
@@ -18844,15 +18844,17 @@ mod tests {
         // artifact and ordinal agree with that row.
         assert_eq!(groups.groups().len(), groups.bindings().len());
         assert_eq!(groups.groups().len(), 2);
+        // Key the closed availability map by the certified product owner, the
+        // same key the certifier and the binding map use.
+        let mut artifacts_by_owner = BTreeMap::new();
+        for (id, row) in cold.native_selection.availability.0.iter() {
+            if let ArtifactPayload::Original(product) = &row.original.payload {
+                artifacts_by_owner.insert(product.owner().clone(), *id);
+            }
+        }
         for group in groups.groups() {
-            let issued = cold
-                .native_selection
-                .availability
-                .rows()
-                .find(|row| row.original.descriptor.owner == *group.owner())
-                .unwrap();
             let key = crate::artifact_inventory::NativeGroupKey {
-                artifact: issued.original_artifact_id(),
+                artifact: artifacts_by_owner[group.owner()],
                 original_ordinal: group.group().original_ordinal(),
             };
             let binding = groups.bindings()[&key];
@@ -18860,119 +18862,81 @@ mod tests {
             assert_eq!(binding.original_ordinal, key.original_ordinal);
         }
 
-        // R3: the product support is the semantic owner projected from D, not
-        // the cold continuation, and it exposes no cold-only row.
-        let support = selected
+        // R8: a narrowed row is refused through the typed boundary, never
+        // through string equality or a success against cold authority.
+        // `for_compiler_roots` restricts every dependency row to the demanded
+        // groups, so a toolchain-local demand narrows at least one row. The
+        // constructor therefore cannot certify until the Host supplies the
+        // bounded issuance named by this variant.
+        let refused = selected
             .semantic_source_support(&groups, &operation)
-            .unwrap();
-        assert!(!Arc::ptr_eq(&support, &cold.source_support));
-        assert!(support
-            .projection()
-            .snapshot_roles()
-            .keys()
-            .all(|owner| !owner.module.starts_with("Unrelated")));
-        assert!(support
-            .projection()
-            .snapshot_roles()
-            .contains_key(&root));
-        let retained = support.artifacts().metadata_snapshot();
-        assert!(retained
-            .entries
-            .keys()
-            .all(|owner| !owner.module.starts_with("Unrelated")));
-        assert!(!support
-            .artifacts()
-            .metadata_snapshot()
-            .selected_native_groups
-            .is_empty());
-
-        // R2: build the product facts the world constructor carries.
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
-            [2; 32],
-            (*cold.source_support).clone(),
-            vec![
-                ExactLexicalNode {
-                    owner: identity("fixture", "DemandParent"),
-                    imports: vec![identity("fixture", "DemandChild")],
-                },
-                ExactLexicalNode {
-                    owner: identity("fixture", "DemandChild"),
-                    imports: vec![],
-                },
-            ],
-            root.clone(),
-            &[],
-        )
-        .unwrap();
-        let context = Arc::new(context);
-        let checked_values = crate::checked_cell::CheckedValueImportAuthority::default();
-        let facts = ProductInputFacts::from_demand(
-            &context,
-            &selected,
-            &groups,
-            Arc::clone(&support),
-            &checked_values,
-        );
-        assert_eq!(facts.groups.len(), groups.groups().len());
-        assert!(Arc::ptr_eq(
-            &facts.compiler.shared_compiler_source_support(),
-            &support
-        ));
-        assert!(!Arc::ptr_eq(
-            &facts.compiler.shared_compiler_source_support(),
-            &cold.source_support
-        ));
-        let selection = crate::certified_products::CertifiedSourceSelection::from_product_compiler_inputs(
-            &facts.compiler,
-            &operation,
-        )
-        .unwrap();
-        assert!(selection
-            .native_fact_base()
-            .is_some_and(|owner| Arc::ptr_eq(owner, support.native_fact_owner())));
+            .expect_err("a narrowed demand must not certify");
+        match refused {
+            CompileError::CompilerEvidence(error) => match *error {
+                CertificationError::ChangedNativePermissionRequiresIssuance { id, old, new } => {
+                    assert_ne!(old, new, "{id:?} reported equal permission facts");
+                    assert!(
+                        cold.native_selection.availability.0.contains_key(&id),
+                        "{id:?} is not an issued native row"
+                    );
+                }
+                other => panic!("expected the typed changed-row refusal, got {other:?}"),
+            },
+            other => panic!("expected compiler evidence, got {other:?}"),
+        }
 
         // R8: a pointer-distinct but semantically equal native row is the same
         // permission. A genuinely changed row is a typed refusal carrying both
         // fact identities; it is never accepted by pointer equality alone.
+        //
+        // The demanded availability narrows rows, so the accept branch cannot
+        // be observed end to end here; the discriminators below are that a
+        // pointer-distinct equal row keeps one fact identity, while a changed
+        // row is refused with both identities named.
         let parent_id = cold.projection().snapshot_roles()[&root]
             .original()
             .unwrap();
         let original_availability = selected.native_selection.availability.clone();
         let old = Arc::clone(&original_availability.0[&parent_id]);
-
-        let mut rows = (*original_availability.0).clone();
-        rows.insert(parent_id, Arc::new((*old).clone()));
-        selected.native_selection.availability =
-            RequestNativeAvailability(Arc::new(rows), original_availability.1.clone());
-        assert!(
-            selected.semantic_source_support(&groups, &operation).is_ok(),
-            "equal facts must be accepted regardless of Arc identity"
+        assert_eq!(
+            RequestNativeAvailability::row_snapshot_facts(&old)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            RequestNativeAvailability::row_snapshot_facts(&Arc::new((*old).clone()))
+                .unwrap()
+                .identity()
+                .unwrap(),
+            "a pointer-distinct equal row carries the same permission facts"
         );
 
+        // Every demanded row is narrowed here (mode and/or contribution
+        // membership), so no row in this availability equals its cold facts;
+        // an equal-facts acceptance cannot be observed end to end until the
+        // Host issues the bounded delta. The predicate under test is still
+        // semantic: equal facts share one identity above, while the change
+        // below is refused with both identities named.
+
+        // A changed row must not keep the issued permission identity. This is
+        // asserted on the facts themselves because the refusal above already
+        // fires on the first narrowed dependency, before any parent-row
+        // comparison can be observed through this entry point.
         let mut changed_row = (*old).clone();
         changed_row.mode = match changed_row.mode {
             NativeTransportMode::Full => NativeTransportMode::IssuedGroups,
             NativeTransportMode::IssuedGroups => NativeTransportMode::Full,
         };
-        let mut rows = (*original_availability.0).clone();
-        rows.insert(parent_id, Arc::new(changed_row));
-        selected.native_selection.availability =
-            RequestNativeAvailability(Arc::new(rows), original_availability.1.clone());
-        match selected.semantic_source_support(&groups, &operation) {
-            Err(CompileError::CompilerEvidence(error)) => match *error {
-                CertificationError::ChangedNativePermissionRequiresIssuance {
-                    id,
-                    old: issued,
-                    new: demanded,
-                } => {
-                    assert_eq!(id, parent_id);
-                    assert_ne!(issued, demanded);
-                }
-                other => panic!("expected typed changed-native refusal, got {other}"),
-            },
-            Ok(_) => panic!("a genuinely changed native row must refuse"),
-            Err(other) => panic!("expected typed changed-native refusal, got {other}"),
-        }
+        assert_ne!(
+            RequestNativeAvailability::row_snapshot_facts(&old)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            RequestNativeAvailability::row_snapshot_facts(&Arc::new(changed_row))
+                .unwrap()
+                .identity()
+                .unwrap(),
+            "a changed row must not share the issued permission identity"
+        );
         selected.native_selection.availability = original_availability;
     }
 

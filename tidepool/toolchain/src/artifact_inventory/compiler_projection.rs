@@ -1124,24 +1124,27 @@ impl CompilerSourceSupport {
                 .native_availability
                 .issued_row(id)
                 .ok_or_else(|| failure("demanded native row has no issued permission"))?;
-            if !Arc::ptr_eq(old, row) && **old != **row {
-                // A pointer-distinct but semantically equal row is the same
-                // permission. A genuinely narrowed or changed row needs its
-                // own bounded issuance; reusing the broader cold leaf would
-                // change authority.
+            if !Arc::ptr_eq(old, row) {
+                // A pointer-distinct row with equal permission facts is the
+                // same permission. Only a genuinely narrowed or changed row
+                // needs its own bounded issuance; reusing the broader cold
+                // leaf would change authority.
                 let facts_id = |row: &Arc<
                     crate::declaration_context::NativeTransportAvailability,
                 >| -> Result<[u8; 32], CompileError> {
                     crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?
                         .identity()
                 };
-                return Err(CompileError::CompilerEvidence(Box::new(
-                    crate::certified_products::CertificationError::ChangedNativePermissionRequiresIssuance {
-                        id,
-                        old: facts_id(old)?,
-                        new: facts_id(row)?,
-                    },
-                )));
+                let (old_facts, new_facts) = (facts_id(old)?, facts_id(row)?);
+                if old_facts != new_facts {
+                    return Err(CompileError::CompilerEvidence(Box::new(
+                        crate::certified_products::CertificationError::ChangedNativePermissionRequiresIssuance {
+                            id,
+                            old: old_facts,
+                            new: new_facts,
+                        },
+                    )));
+                }
             }
             charge(operation.reserve::<(ArtifactId, [usize; 4])>(1))?;
             keys.native_availability.insert(id);

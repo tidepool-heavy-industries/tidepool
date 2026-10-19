@@ -938,6 +938,7 @@ fn recovery_validation_error(
         | CertificationError::OriginalClosure(_)
         | CertificationError::FinalizedInterfaceRequirement { .. }
         | CertificationError::OriginalInterfaceClosure { .. }
+        | CertificationError::ChangedNativePermissionRequiresIssuance { .. }
         | CertificationError::StaleEvidence
         | CertificationError::CandidateEvidence { .. }
         | CertificationError::ExecutionSource(_) => invalid,

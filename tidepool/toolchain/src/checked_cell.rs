@@ -379,7 +379,7 @@ pub(crate) enum WorldItemHostAuthority {
 /// One decoded original binder from a world item's field 10. It retains the
 /// compiler-issued name, stable variable id, module, tier and optional type
 /// identity; it issues no runtime value or execution permission.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WorldItemBinder {
     name: String,
     varid: u64,
