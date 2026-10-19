@@ -5957,7 +5957,14 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                     .iter()
                     .cloned(),
             )
+            .unwrap()
+            .retain_normalized_availability(context.compiler_source_support().native_availability())
             .unwrap();
+            assert_eq!(
+                support.native_availability(),
+                context.compiler_source_support().native_availability(),
+                "recovered graph census must retain the actual selected output permission row"
+            );
             context = context.rebuild(|facts| facts.compiler_support = support);
         }
         context.compiler_metadata_snapshot().unwrap();
