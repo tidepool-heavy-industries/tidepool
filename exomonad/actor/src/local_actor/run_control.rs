@@ -110,6 +110,8 @@ pub enum DirectoryError {
     IdentityConflict { actor: crate::ActorId },
     #[error("directory operation does not own actor {actor:?}")]
     Unauthorized { actor: ActorRef },
+    #[error("actor {actor:?} has an unfinished physical lifetime transition")]
+    LifetimeTransitionPending { actor: ActorRef },
     #[error("actor {actor:?} is already registered by another executor")]
     AlreadyRegistered { actor: ActorRef },
     #[error("resident context differs from actor {actor:?}'s descriptor")]
@@ -246,6 +248,7 @@ pub(super) enum RunFinalizationTargets {
 
 pub(crate) struct ActorReservation {
     cleanup_only: bool,
+    planned_ownership: SpawnOwnership,
     parent_admission: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
     identity: ActorRef,
     lifecycle: crate::kernel::LifecycleHandle,
@@ -254,6 +257,9 @@ pub(crate) struct ActorReservation {
     armed: bool,
 }
 impl ActorReservation {
+    pub(crate) fn planned_ownership(&self) -> SpawnOwnership {
+        self.planned_ownership
+    }
     pub(crate) fn cleanup_only(&self) -> bool {
         self.cleanup_only
     }
@@ -318,7 +324,15 @@ pub(super) enum ReservationStartFailure {
     NotStarted(String),
     Unconfirmed(String),
 }
+#[derive(Clone, Copy)]
+enum ExecutorLink {
+    Pending,
+    Confirmed,
+    Unconfirmed,
+}
 struct ReservationRecord {
+    executor_link: ExecutorLink,
+    planned_ownership: SpawnOwnership,
     phase: ReservationPhase,
     purpose: ReservationPurpose,
     startup: Option<crate::RootStartupIntent>,
@@ -372,6 +386,23 @@ struct RootPreparationRecord {
     dependency: Option<SourceDependency>,
 }
 impl RunState {
+    fn unfinished_link(&self, actor: ActorRef) -> bool {
+        self.reservations.get(&actor).is_some_and(|record| {
+            !matches!(record.executor_link, ExecutorLink::Confirmed)
+                && !matches!(record.phase, ReservationPhase::NotStarted)
+                && !record
+                    .terminal
+                    .cleanup()
+                    .is_some_and(|cleanup| cleanup.is_confirmed())
+        })
+    }
+    fn pending_child_link(&self, parent: ActorRef) -> Option<ActorRef> {
+        self.reservations.iter().find_map(|(actor, record)| {
+            (record.planned_ownership == SpawnOwnership::Supervised(parent)
+                && self.unfinished_link(*actor))
+            .then_some(*actor)
+        })
+    }
     fn start_pending_actor_resources(&mut self) {
         let actors = self
             .actor_resource_retirements
@@ -777,6 +808,10 @@ pub(super) enum RunControlMessage {
         actors: Vec<crate::ActorId>,
         reply: oneshot::Sender<Result<(), DirectoryError>>,
     },
+    ExecutorLinked {
+        actor: ActorRef,
+        executor: ractor::ActorId,
+    },
     Register {
         reservation: ActorRef,
         actor: LocalActorRef,
@@ -827,6 +862,31 @@ fn reserve_actor(
             return;
         }
     }
+    let planned_ownership = match &purpose {
+        ReservationPurpose::Worker { parent } => SpawnOwnership::Supervised(*parent),
+        ReservationPurpose::Replacement { predecessor } => {
+            state.entries[predecessor].spawn_ownership
+        }
+        ReservationPurpose::Root | ReservationPurpose::ExistingInput => SpawnOwnership::Independent,
+    };
+    if let SpawnOwnership::Supervised(parent) = planned_ownership {
+        if !state.entries.contains_key(&parent) {
+            let _ = reply.send(Err(DirectoryError::Unauthorized { actor: parent }));
+            return;
+        }
+    }
+    if let ReservationPurpose::Replacement { predecessor } = &purpose {
+        if state
+            .worker_transfers
+            .values()
+            .any(|transfer| transfer.child == *predecessor)
+        {
+            let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending {
+                actor: *predecessor,
+            }));
+            return;
+        }
+    }
     let actor = loop {
         let id = crate::ActorId(NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed));
         if !state.identities.fenced.contains(&id) && !state.identities.claimed.contains_key(&id) {
@@ -834,7 +894,15 @@ fn reserve_actor(
         }
     };
     state.identities.claimed.insert(actor.id, actor);
-    begin_reservation_after(state, actor, purpose, None, dependency, reply);
+    begin_reservation_after(
+        state,
+        actor,
+        purpose,
+        planned_ownership,
+        None,
+        dependency,
+        reply,
+    );
 }
 
 fn begin_reservation(
@@ -843,12 +911,21 @@ fn begin_reservation(
     purpose: ReservationPurpose,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
-    begin_reservation_after(state, actor, purpose, None, None, reply);
+    begin_reservation_after(
+        state,
+        actor,
+        purpose,
+        SpawnOwnership::Independent,
+        None,
+        None,
+        reply,
+    );
 }
 fn begin_reservation_after(
     state: &mut RunState,
     actor: ActorRef,
     purpose: ReservationPurpose,
+    planned_ownership: SpawnOwnership,
     predecessor: Option<crate::kernel::LifecycleHandle>,
     dependency: Option<SourceDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
@@ -857,6 +934,8 @@ fn begin_reservation_after(
     state.reservations.insert(
         actor,
         ReservationRecord {
+            executor_link: ExecutorLink::Pending,
+            planned_ownership,
             phase: ReservationPhase::Creating,
             purpose,
             startup: None,
@@ -1301,7 +1380,12 @@ impl Actor for RunControl {
                 successor,
                 reply,
             } => {
-                let result = if !state.entries.contains_key(&predecessor)
+                let pending = state
+                    .pending_child_link(predecessor)
+                    .or_else(|| state.pending_child_link(successor));
+                let result = if let Some(actor) = pending {
+                    Err(DirectoryError::LifetimeTransitionPending { actor })
+                } else if !state.entries.contains_key(&predecessor)
                     || !state.entries.contains_key(&successor)
                 {
                     Err(DirectoryError::Unauthorized { actor: successor })
@@ -1431,6 +1515,8 @@ impl Actor for RunControl {
                 let result =
                     if state.phase != RunPhase::Running {
                         Err(DirectoryError::Closed)
+                    } else if state.unfinished_link(identity) {
+                        Err(DirectoryError::LifetimeTransitionPending { actor: identity })
                     } else if state.entries.get(&identity).is_none_or(|entry| {
                         entry.actor.address().get_id() != child.address().get_id()
                     }) || !state.entries.contains_key(&parent)
@@ -1833,6 +1919,7 @@ impl Actor for RunControl {
                                                 record.purpose,
                                                 ReservationPurpose::ExistingInput
                                             ),
+                                        planned_ownership: record.planned_ownership,
                                         parent_admission: None,
                                         identity: actor,
                                         terminal: record.terminal.clone(),
@@ -1959,6 +2046,7 @@ impl Actor for RunControl {
                         state,
                         actor,
                         ReservationPurpose::Root,
+                        SpawnOwnership::Independent,
                         predecessor,
                         None,
                         reply,
@@ -1982,6 +2070,33 @@ impl Actor for RunControl {
                 };
                 let _ = reply.send(result);
             }
+            RunControlMessage::ExecutorLinked { actor, executor } => {
+                if let (Some(record), Some(entry)) = (
+                    state.reservations.get_mut(&actor),
+                    state.entries.get(&actor),
+                ) {
+                    if entry.actor.address().get_id() == executor
+                        && !matches!(record.executor_link, ExecutorLink::Confirmed)
+                    {
+                        let supervisor = entry.actor.address().get_cell().try_get_supervisor();
+                        let matches = match record.planned_ownership {
+                            SpawnOwnership::Independent => supervisor.is_none(),
+                            SpawnOwnership::Supervised(parent) => {
+                                state.entries.get(&parent).is_some_and(|parent| {
+                                    supervisor.is_some_and(|cell| {
+                                        cell.get_id() == parent.actor.address().get_id()
+                                    })
+                                })
+                            }
+                        };
+                        record.executor_link = if matches {
+                            ExecutorLink::Confirmed
+                        } else {
+                            ExecutorLink::Unconfirmed
+                        };
+                    }
+                }
+            }
             RunControlMessage::Register {
                 reservation,
                 actor,
@@ -1994,10 +2109,11 @@ impl Actor for RunControl {
                     Err(DirectoryError::Closed)
                 } else if reservation != identity
                     || state.reservations.get(&reservation).is_none_or(|record| {
-                        !matches!(
-                            record.phase,
-                            ReservationPhase::Ready | ReservationPhase::Registered
-                        )
+                        record.planned_ownership != ownership
+                            || !matches!(
+                                record.phase,
+                                ReservationPhase::Ready | ReservationPhase::Registered
+                            )
                     })
                     || state.identities.claimed.get(&identity.id) != Some(&identity)
                 {
@@ -2764,6 +2880,12 @@ impl RunControlClient {
     ) -> Result<Option<Arc<KernelContext>>, DirectoryError> {
         self.ask(|reply| RunControlMessage::Context { actor, reply })
             .await
+    }
+    pub(crate) fn observe_executor_linked(&self, actor: &LocalActorRef) {
+        let _ = self.owner.send_message(RunControlMessage::ExecutorLinked {
+            actor: actor.identity(),
+            executor: actor.address().get_id(),
+        });
     }
     pub(crate) async fn register_executor(
         &self,

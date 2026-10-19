@@ -24433,6 +24433,7 @@ pub(crate) mod request_tests {
             )
             .await
             .unwrap();
+        directory.observe_executor_linked(&source_actor);
         source_lifecycle.executor_started().await.unwrap();
         let sources = registry
             .attach_sources(
