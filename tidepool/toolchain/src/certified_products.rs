@@ -2781,6 +2781,37 @@ pub(crate) enum NativeGroupCandidates {
     NewProduct(BTreeSet<crate::artifact_inventory::NativeGroupBinding>),
 }
 
+/// Apply the continuation's existing exact choice to already issued candidates.
+/// Availability and an absent candidate never replace that recorded decision.
+pub(crate) fn select_input_native_group_candidates(
+    source: &crate::artifact_inventory::CompilerSourceSupport,
+    key: crate::artifact_inventory::NativeGroupKey,
+    canonical: crate::artifact_inventory::ArtifactId,
+    owner: &CachedHomeOwner,
+    identity: &crate::declaration_join::ExactModuleIdentity,
+    mut candidates: BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+) -> CertResult<BTreeSet<crate::artifact_inventory::NativeGroupBinding>> {
+    use crate::artifact_inventory::InputNativeDecision;
+    let decision = source
+        .checked_native_input_decision(key.artifact, canonical, owner)
+        .map_err(|reason| CertificationError::InputDecision {
+            owner: identity.clone(),
+            reason,
+        })?;
+    if let InputNativeDecision::IssuedChoices(choices) = decision {
+        if let Some(chosen) = choices.get(&key.original_ordinal) {
+            if !candidates.contains(chosen) {
+                return Err(CertificationError::InputDecision {
+                    owner: identity.clone(),
+                    reason: InputDecisionRefusal::UnavailableChosenBinding,
+                });
+            }
+            candidates.retain(|candidate| candidate == chosen);
+        }
+    }
+    Ok(candidates)
+}
+
 /// Distinct authority owners for an exact historical body. Unfinished product
 /// constraints still require their original receiving-view validation.
 pub(crate) enum CertifiedNativeGroupSupport<'a> {
@@ -3413,7 +3444,6 @@ impl CertifiedSourceSelection {
         key: crate::artifact_inventory::NativeGroupKey,
         owner: &CachedHomeOwner,
     ) -> CertResult<NativeGroupCandidates> {
-        use crate::artifact_inventory::InputNativeDecision;
         let own = self
             .native_selections()
             .find(|native| &native.owner == owner);
@@ -3481,23 +3511,9 @@ impl CertifiedSourceSelection {
                         owner: identity.clone(),
                         reason: InputDecisionRefusal::ArtifactIdentityMismatch,
                     })?;
-                let decision = source
-                    .checked_native_input_decision(key.artifact, canonical, owner)
-                    .map_err(|reason| CertificationError::InputDecision {
-                        owner: identity.clone(),
-                        reason,
-                    })?;
-                if let InputNativeDecision::IssuedChoices(choices) = decision {
-                    if let Some(chosen) = choices.get(&key.original_ordinal) {
-                        if !candidates.contains(chosen) {
-                            return Err(CertificationError::InputDecision {
-                                owner: identity,
-                                reason: InputDecisionRefusal::UnavailableChosenBinding,
-                            });
-                        }
-                        candidates = BTreeSet::from([*chosen]);
-                    }
-                }
+                candidates = select_input_native_group_candidates(
+                    source, key, canonical, owner, &identity, candidates,
+                )?;
             }
         }
         Ok(NativeGroupCandidates::IssuedAvailability(candidates))
