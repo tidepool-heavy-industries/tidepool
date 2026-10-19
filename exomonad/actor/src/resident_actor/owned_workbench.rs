@@ -221,7 +221,7 @@ impl ExecutionResourceOwners {
             ));
         }
         if admission.session() != self.public.placement.session
-            || admission.admitted_public().scope != self.public.placement.lexical_scope
+            || admission.public_scope() != self.public.placement.lexical_scope
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "private resources differ from the original publication owner".into(),

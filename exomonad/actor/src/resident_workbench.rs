@@ -9726,7 +9726,10 @@ where
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?,
                 );
-                let admitted_public = admission.admitted_public().clone();
+                let admitted_public = admission
+                    .admitted_public()
+                    .map_err(ResidentError::Session)?
+                    .clone();
                 let private_scope = admission.private_scope();
                 Ok(ExecutionPrivateScope {
                     owner,

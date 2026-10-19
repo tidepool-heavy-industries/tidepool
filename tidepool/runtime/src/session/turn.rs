@@ -6726,7 +6726,7 @@ mod tests {
                     .unwrap(),
                 crate::session::PublicManifestCommit::Ephemeral
             ));
-            let public = self.execution.admitted_public().scope;
+            let public = self.execution.admitted_public().unwrap().scope;
             let published = self.resident.public_visibility_snapshot_in(public).unwrap();
             assert_eq!(
                 published
@@ -6743,7 +6743,7 @@ mod tests {
         }
 
         fn begin_next_execution(&mut self) {
-            let public = self.execution.admitted_public().scope;
+            let public = self.execution.admitted_public().unwrap().scope;
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
@@ -6847,7 +6847,7 @@ mod tests {
             Some(CheckedExpressionLift::Effectful)
         );
         fixture.execute(cell);
-        let public = fixture.execution.admitted_public().scope;
+        let public = fixture.execution.admitted_public().unwrap().scope;
         let visible = fixture
             .resident
             .public_visibility_snapshot_in(public)

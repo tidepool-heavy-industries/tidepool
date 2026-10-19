@@ -540,7 +540,7 @@ impl PersistentSession {
             return Ok(intent.clone());
         }
         let intent = self.freeze_execution_intent_from_snapshot(
-            admission.admitted_public(),
+            admission.admitted_public()?,
             admission.view()?.exact_declaration_context().cloned(),
             admission.private_scope(),
             write_ids,
@@ -2318,7 +2318,10 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), second_public)
             .unwrap();
         let second_private = second.begin_private_execution(second_public).unwrap();
-        assert_eq!(private.admitted_public(), second_private.admitted_public());
+        assert_eq!(
+            private.admitted_public().unwrap(),
+            second_private.admitted_public().unwrap()
+        );
         assert_eq!(
             first.public_visibility_snapshot_in(private.private_scope()),
             second.public_visibility_snapshot_in(second_private.private_scope())
@@ -3360,7 +3363,7 @@ mod tests {
             session
                 .snapshot_declaration_publication(
                     owner.clone(),
-                    base_admission.admitted_public(),
+                    base_admission.admitted_public().unwrap(),
                     base_admission.private_scope(),
                     vec![],
                     vec![],
@@ -3378,7 +3381,7 @@ mod tests {
 
         let a = session.begin_private_execution(public).unwrap();
         let b = session.begin_private_execution(public).unwrap();
-        assert_ne!(a.admitted_public().declaration_tip, Generation(0));
+        assert_ne!(a.admitted_public().unwrap().declaration_tip, Generation(0));
         let a_first = commit_source(
             &mut session,
             a.private_scope(),
@@ -3433,7 +3436,7 @@ mod tests {
             session
                 .snapshot_declaration_publication(
                     owner.clone(),
-                    b.admitted_public(),
+                    b.admitted_public().unwrap(),
                     b.private_scope(),
                     vec![],
                     vec![],
