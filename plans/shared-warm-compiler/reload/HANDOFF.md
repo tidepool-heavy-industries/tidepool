@@ -174,17 +174,17 @@ store refuses; old bootstrap aliases stay permanently closed. Reopening selects
 the actual durable head and issues a new recovered context from its real selected
 references and readiness. No live reconciliation mechanism, fresh gate from an
 old generation integer, or prospective generation bound without readiness is
-part of this repair. The leaf is implementing this settled contract.
+part of this repair. The reviewed source implements this settled contract;
+execution evidence remains pending.
 
 ## Verification admission and pending commands
 
 The area buck-out bind mount is provisioned and was verified; account is
-`inanna`. Observed `/srv/build` available space was 102 GiB with a required
-100 GiB unreserved floor, insufficient for a cold 32 GiB lane. Host memory was
-97 GiB available. No build bypass, cache deletion, broad cleanup or shared
-compiler/daemon restart is authorized. Native test configuration/materialization is deferred. The already-realized
-pinned development shell supports light formatting and Cargo source metadata
-without native compilation or a Buck daemon.
+`inanna`. Root's settled storage cleanup removed the earlier disk blocker;
+the required 100 GiB unreserved floor remains in force. Campaign coordinates
+memory allowance and queued native lanes as recorded below. No build bypass,
+cache deletion, area-owned broad cleanup or shared compiler/daemon restart is
+authorized. Pinned test configuration is materialized and retained.
 
 Pinned rustfmt check and the source generator plus `--check` passed for the
 current area source; `exomonad/actor/BUCK` now declares the directory module.
@@ -200,8 +200,8 @@ all exited 0. The native artifact SHA-256 is
 6,598,656 bytes. The generator build ran four local cold actions; the snapshot
 check ran three local actions. Zero tests executed. Receipt and logs:
 `protocol-generator-receipt.json` in the evidence directory above. The generated
-mirrors are committed, with no hand edits. The joined R1 modules still need
-owning source generation after integration.
+mirrors are committed, with no hand edits. The joined R1 owning source-map check
+also passed after integration (`early-native-source-generation-check.log`).
 
 Own buck-out final allocated bytes were 56,938,496 (initially zero); lowest
 observed global available bytes were 107,887,243,264, above the 100 GiB floor.
