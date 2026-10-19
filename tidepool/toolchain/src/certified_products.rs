@@ -16902,6 +16902,233 @@ pub(crate) mod tests {
         assert_eq!(next.selected_native_groups().len(), 2);
     }
 
+    pub(crate) fn assert_request_private_product_uses_carried_dependency(
+        source: &crate::declaration_context::RequestCompilerInputs,
+        consumer: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+        expected_dependency: crate::artifact_inventory::NativeGroupBinding,
+        producer_bytes: &[u8],
+        root: &Path,
+    ) {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactPayload,
+            CanonicalProducerIdentity, CompilerInputRole, NativeArtifactDemand,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
+            OriginalCompilerInputs,
+        };
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(source.compiler_source_support())
+                .unwrap(),
+        );
+        let request = ExactCompileContext::new(context.clone())
+            .prepare_compilation(&root.join("input"), producer_bytes)
+            .unwrap();
+        let input = request.compiler_inputs();
+        assert_eq!(input.projection(), source.projection());
+        let selected = source.artifacts().selected_native_groups();
+        assert_eq!(input.artifacts().selected_native_groups(), selected);
+        let dependency_id = expected_dependency.binding.artifact();
+        let dependency = input
+            .artifacts()
+            .entries_for_artifacts(&BTreeSet::from([dependency_id]))
+            .unwrap();
+        let [dependency] = dependency.as_slice() else {
+            panic!("one exact input dependency")
+        };
+        let input_row = input.native_availability(dependency_id).unwrap();
+        assert!(input_row.permits(7) && input_row.permits(9001));
+        assert_eq!(
+            input
+                .private_native_availability()
+                .snapshot_facts()
+                .unwrap()[&dependency_id]
+                .mode,
+            NativeTransportMode::Full
+        );
+        let entry = Arc::new(
+            ArtifactEntry::original(
+                CanonicalProducerIdentity::from_producer_bytes(producer_bytes).sha256(),
+                consumer.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(!input
+            .artifacts()
+            .artifact_ids()
+            .contains(&entry.descriptor.id));
+        let operation = InventoryOperation::new(Default::default());
+        let mut selection =
+            CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
+        selection
+            .admit_current(
+                consumer.owner(),
+                ProductOrigin::RetainedCore,
+                consumer.module_interface().unwrap(),
+                &operation,
+            )
+            .unwrap();
+        let physical = input
+            .artifacts()
+            .inventory()
+            .admit_shared_with_demand(
+                input.artifacts(),
+                vec![entry.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let canonical = ArtifactEntry::canonical(consumer.module_interface().unwrap().clone());
+        assert_eq!(
+            completed.role_projection().snapshot_roles()[&entry.descriptor.owner],
+            CompilerInputRole::InterfaceOnly {
+                interface: canonical.descriptor.id
+            }
+        );
+        assert_eq!(
+            completed.issued_artifacts().selected_native_groups(),
+            selected
+        );
+        assert!(selected
+            .iter()
+            .all(|key| key.artifact != entry.descriptor.id));
+        let offer = completed
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == entry.descriptor.id)
+            .unwrap()
+            .clone();
+        assert!(offer.is_full());
+        let proof = offer.proof().unwrap();
+        assert!(
+            proof.issued_groups(completed.issued_artifacts()).is_err(),
+            "carrier-only output does not own the consumer's opaque group proof"
+        );
+        let groups = offer.issued_group_carriers().unwrap();
+        assert!(groups.contains_key(&expected_dependency));
+        assert!(groups
+            .keys()
+            .filter(|group| group.binding.artifact() == dependency_id)
+            .all(|group| group.original_ordinal == 7));
+        let consumer_group = *groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 7
+            })
+            .unwrap();
+        let edges = offer.custody_snapshot().binding_dependencies().unwrap();
+        assert!(edges.contains(&(
+            ArtifactBindingNode::Group(consumer_group),
+            ArtifactBindingNode::Group(expected_dependency),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 7,
+                required_ordinal: 7,
+            }
+        )));
+        assert!(edges.contains(&(
+            ArtifactBindingNode::Group(consumer_group),
+            ArtifactBindingNode::Artifact(groups[&consumer_group]),
+            ArtifactDependency::Interface
+        )));
+        let next = ExactCompileContext::new(context)
+            .prepare_compilation_with_private_input(
+                &root.join("completed"),
+                producer_bytes,
+                None,
+                Some(completed),
+            )
+            .unwrap();
+        assert_eq!(
+            next.compiler_inputs().artifacts().selected_native_groups(),
+            selected
+        );
+        let retained = next
+            .compiler_inputs()
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|retained| retained.same_issuance(&offer))
+            .unwrap();
+        assert_eq!(retained.issued_group_carriers().unwrap(), groups);
+        assert_eq!(
+            next.compiler_inputs()
+                .private_native_availability()
+                .snapshot_facts()
+                .unwrap()[&entry.descriptor.id]
+                .mode,
+            NativeTransportMode::Full
+        );
+        let retained_input = next
+            .compiler_inputs()
+            .native_availability(dependency_id)
+            .unwrap();
+        assert!(
+            retained_input.permits(7) && retained_input.permits(9001),
+            "a new output does not narrow an existing Input Full permission"
+        );
+        assert!(next.context().lexical_graph().is_empty());
+        assert_eq!(
+            next.context().original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::Unknown
+        );
+        // Observe physical row modes with literal writer positions; the opaque
+        // C closure above remains restricted to A7 independently of Input Full.
+        let bytes = std::fs::read(&next.manifest).unwrap();
+        let wire: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let fields = wire.as_array().unwrap();
+        assert_eq!(fields.len(), 11);
+        assert_eq!(fields[0], Value::Text("TPEXACTSCOPE".into()));
+        assert_eq!(fields[1], Value::Text("16".into()));
+        let rows = fields[6]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let [unit, module, _, _, _, _, ordinals, _, mode, _] =
+                    row.as_array().unwrap().as_slice()
+                else {
+                    panic!("native physical row has ten fields")
+                };
+                (
+                    (
+                        unit.as_text().unwrap().to_owned(),
+                        module.as_text().unwrap().to_owned(),
+                    ),
+                    (
+                        ordinals
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|value| u32::try_from(value.as_integer().unwrap()).unwrap())
+                            .collect::<Vec<_>>(),
+                        mode.clone(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let full = Value::Array(vec![Value::Text("full-carrier".into())]);
+        assert_eq!(
+            rows[&(
+                consumer.owner().unit.clone(),
+                consumer.owner().module.clone()
+            )],
+            (Vec::new(), full.clone())
+        );
+        let ArtifactPayload::Original(dependency_product) = &dependency.payload else {
+            unreachable!()
+        };
+        assert_eq!(
+            rows[&(
+                dependency_product.owner().unit.clone(),
+                dependency_product.owner().module.clone()
+            )],
+            (vec![7, 9001], full)
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
     #[test]
     fn current_complete_product_borrows_issued_full_dependency_without_execution_demand() {
         use crate::artifact_inventory::{
@@ -17142,9 +17369,11 @@ pub(crate) mod tests {
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_checked_original_products(producer.sha256(), &[])
+                    .admit_producer(producer.sha256())
                     .unwrap(),
             );
+            assert_eq!(public.toolchain_identity_sha256(), producer.sha256());
+            assert!(public.compiler_input_roles().is_empty());
             let next = ExactCompileContext::new(public)
                 .prepare_compilation_with_private_input(
                     &root.path().join(format!("next-{interface_only}")),
