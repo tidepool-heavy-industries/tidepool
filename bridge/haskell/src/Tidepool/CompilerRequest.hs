@@ -80,7 +80,7 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 data BoundCompilerRequest = BoundCompilerRequest CompilerScope WorkerRequest
   RequestOperation CompilerInputBasis CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
 
-data CompilerInputBasis = ExactScopeBasis (Maybe ExactScope) | HeldWorldBasis (Maybe HeldCompilerWorld)
+data CompilerInputBasis = ExactScopeBasis (Maybe ExactScope) | HeldWorldBasis (Maybe HeldWorldQueryBinding)
 
 boundWorkerRequest :: BoundCompilerRequest -> WorkerRequest
 boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _ _) = args

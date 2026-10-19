@@ -1,21 +1,29 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries) where
+module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
-import Tidepool.RequestCompletion (finishCompletion)
+import Tidepool.RequestCompletion
+  ( finishCompletion, captureCompletion, completionResult, completionFailures
+  , BodyOutcome(..), CleanupStage(..), cleanupStage, cleanupException, withCompletionRelease )
 
-import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throwIO, try)
+import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import System.Timeout (timeout)
 import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
-import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName)
+import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName, getSessionDynFlags)
+import GHC.Driver.Backend (backendGeneratesCode)
+import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynamicFilePragma)
+import GHC.Types.SrcLoc (noLoc)
 import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
-import System.Directory (copyFile, doesFileExist, getPermissions, setPermissions, Permissions(..))
+import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
@@ -26,6 +34,7 @@ import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
+import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
 
 worldRequestBoundaries :: IO ()
@@ -61,12 +70,125 @@ worldRequestBoundaries = do
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
 
+-- These are raw closed-source data/I/O controls, not rooted world issuers.
+-- They enter the same materialization owner used before world publication.
+worldMaterializationBoundaries :: IO ()
+worldMaterializationBoundaries = do
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")
+      ,("Nested/B.hs","module Nested.B where\n")]
+    charged <- materializeWorldSources parent sources Set.empty (pure . worldMaterializationCharge)
+    child <- onlyChild parent
+    bytes <- BS.readFile (parent </> child </> "root-0" </> "A.hs")
+    unless (bytes == "module A where\nanswer = 1\n")
+      (fail "successful world materialization removed or changed its issued files")
+    -- Independent cold-test filesystem oracle, never a production hit scan.
+    measured <- measureBacking (parent </> child)
+    unless (charged == measured) (fail ("world backing issuance charge differs: " ++ show (charged,measured)))
+  withScratch $ \parent -> do
+    -- A file/parent collision deterministically fails after the first copy.
+    sources <- sourceFixture [("A","copied"),("A/B.hs","module A.B where\n")]
+    entered <- newIORef False
+    outcome <- try (materializeWorldSources parent sources Set.empty
+      (const (writeIORef entered True))) :: IO (Either SomeException ())
+    case outcome of
+      Left failure | Just (_ :: IOException) <- fromException failure -> pure ()
+      Left failure -> throwIO failure
+      Right () -> fail "world materializer accepted a file/directory collision"
+    published <- readIORef entered
+    unless (not published) (fail "failed source copy entered world publication")
+    requireEmpty parent
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    outcome <- try (materializeWorldSources parent sources Set.empty
+      (const (throwIO policy))) :: IO (Either SomeException ())
+    requirePolicy outcome
+    requireEmpty parent
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    ready <- newEmptyMVar
+    blocked <- newEmptyMVar
+    done <- newEmptyMVar
+    let action = materializeWorldSources parent sources Set.empty $ \_ -> do
+          putMVar ready ()
+          readMVar blocked
+        retire thread = bounded "world materialization child retirement"
+          (killThread thread >> readMVar done) >> pure ()
+    completed <- withCompletionRelease ExecutorStop
+      (forkFinally action (putMVar done)) retire $ \thread -> captureCompletion $ do
+        bounded "world materialization publication barrier" (readMVar ready)
+        bounded "world materialization cancellation" (killThread thread)
+        result <- bounded "cancelled world materialization completion" (readMVar done)
+        requireCancellation result
+        requireEmpty parent
+    finishCompletion completed
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    recovery <- newIORef Nothing
+    completed <- captureCompletion $ materializeWorldSources parent sources Set.empty $ \_ -> do
+      child <- onlyChild parent
+      let root = parent </> child </> "root-0"
+      permissions <- getPermissions root
+      writeIORef recovery (Just (root,permissions))
+      setPermissions root (permissions {readable=False,writable=False,searchable=False})
+      throwIO policy
+    restore <- readIORef recovery
+    forM_ restore $ \(root,permissions) -> setPermissions root permissions
+    case completionResult completed of
+      BodyFailed failure -> requirePolicy (Left failure)
+      _ -> fail "failed world cleanup lost its original policy refusal"
+    case completionFailures completed of
+      [failure] | cleanupStage failure == CompilerScopeRestore
+        , Just (_ :: IOException) <- fromException (cleanupException failure) -> pure ()
+      _ -> fail "failed world cleanup lost its independent release evidence"
+    _ <- onlyChild parent
+    pure ()
+  where
+    policy = WorldModulePolicyFailure "fixture-source" WorldUncapturedDependency
+    requirePolicy result = case result of
+      Left failure | Just (WorldModulePolicyFailure path reason) <- fromException failure
+        , path == "fixture-source", reason == WorldUncapturedDependency -> pure ()
+      Left failure -> throwIO failure
+      Right () -> fail "unissued world unexpectedly survived policy refusal"
+    requireEmpty parent = do
+      children <- listDirectory parent
+      unless (null children) (fail ("unissued world directory survived failure: " ++ show children))
+    onlyChild parent = do
+      children <- listDirectory parent
+      case children of
+        [child] -> pure child
+        _ -> fail ("expected one owned world directory, got " ++ show children)
+    bounded label action = timeout 5000000 action >>= maybe (fail (label ++ " timed out")) pure
+    measureBacking path = do
+      directory <- doesDirectoryExist path
+      if directory then do
+        children <- listDirectory path
+        charges <- mapM (measureBacking . (path </>)) children
+        pure (sum (map fst charges),1 + sum (map snd charges))
+      else do
+        bytes <- getFileSize path
+        pure (bytes,1)
+    sourceFixture files = either fail pure (decodeWorldSources
+      ("TPCSRC01" <> frame "fixture-generation" <> word32 1 <> word32 (length files)
+        <> foldMap (\(path,body) -> frame path <> frame body) files))
+    frame bytes = word32 (BS.length bytes) <> bytes
+    word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
+
 -- Actual module checking enters the same bound executor and pipeline as the
 -- service query. Refusals must identify the transitive dependency, before
 -- preprocessing/typechecking has an opportunity to execute its options.
 checkedPublicModuleHistories :: IO ()
 checkedPublicModuleHistories = do
   withRequestFixture $ \_ request work -> do
+    runBoundGhc request $ do
+      baseline <- getSessionDynFlags
+      (effective,leftover,_) <- parseDynamicFilePragma baseline [noLoc "-fbyte-code"]
+      liftIO $ unless (null leftover
+          && not (backendGeneratesCode (backend baseline))
+          && not (gopt Opt_ByteCode baseline)
+          && not (backendGeneratesCode (backend effective))
+          && gopt Opt_ByteCode effective)
+        (fail "pinned GHC bytecode pragma no longer separates its generation flag from the checking backend")
     writeTarget work
     checked <- compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing
       (work </> "BoundPreparedA.hs")
@@ -84,6 +206,24 @@ checkedPublicModuleHistories = do
       writeTarget work
       prependDependency work pragma
       refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+  forM_ [("-ddump-parsed -ddump-to-file -dumpdir ",WorldSideOutputs)
+        ,("-fwrite-ide-info -hiedir ",WorldSideOutputs)
+        ,("-hidir ",WorldOutputPolicyChanged)
+        ,("-tmpdir ",WorldOutputPolicyChanged)
+        ,("-ddump-file-prefix ",WorldOutputPolicyChanged)] $ \(flags,reason) ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      let ambient = work </> "ambient-outputs"
+      createDirectory ambient
+      prependDependency work ("{-# OPTIONS_GHC " ++ flags ++ show ambient ++ " #-}")
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" reason
+      outputs <- listDirectory ambient
+      unless (null outputs) (fail ("world module admission wrote untracked outputs: " ++ show outputs))
+  forM_ ["-fwrite-interface","-fwrite-if-simplified-core","-shared"] $ \flag ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      prependDependency work ("{-# OPTIONS_GHC " ++ flag ++ " #-}")
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldOutputPolicyChanged
   forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
     withRequestFixture $ \_ request work -> do
       writeTarget work

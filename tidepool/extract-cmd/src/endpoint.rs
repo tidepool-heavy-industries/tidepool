@@ -1923,6 +1923,39 @@ thread_local! {
     static TRANSACTION_SCOPE: RefCell<Option<TransactionScope>> = const { RefCell::new(None) };
 }
 
+/// A typed artifact response failed validation after the worker accepted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilerResponseRejection {
+    Malformed,
+    ProvenanceMismatch,
+}
+
+/// Keep refusal and cleanup on the transaction that actually produced the
+/// rejected bytes. Its next request is poisoned; END retains all input custody.
+pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError {
+    TRANSACTION_SCOPE.with(|scope| {
+        if let Some(TransactionScope {
+            compiler: ScopedCompiler::Active { transaction, .. },
+            ..
+        }) = scope.borrow_mut().as_mut()
+        {
+            transaction.failed = true;
+        }
+    });
+    SpawnError::indeterminate(
+        "compiler response",
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            match reason {
+                CompilerResponseRejection::Malformed => "malformed accepted compiler response",
+                CompilerResponseRejection::ProvenanceMismatch => {
+                    "accepted compiler response provenance differs"
+                }
+            },
+        ),
+    )
+}
+
 /// Retain an input descriptor through the enclosing compiler transaction's END
 /// acknowledgement. An unconfirmed close carries it with the close evidence.
 /// This grants no artifact authority and never duplicates the descriptor.
