@@ -86,7 +86,7 @@ genrule(
     out = "compiler-service-deployment",
     bash = """set -euo pipefail
 TOOLS=""" + read_root_config("nix", "exomonad_runtime_tools") + """
-OUTPUT="$("$TOOLS/bin/python3" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$PWD/$OUT")"
+OUTPUT=`"$TOOLS/bin/python3" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$PWD/$OUT"`
 "$TOOLS/bin/python3" "$(location :qualification_script)" declare-compiler-service-source \\
   --frontend "$(exe //tidepool/extract-cmd:tidepool-extract)" \\
   --worker "$(exe //bridge/haskell:tidepool_extract_bin)" \\
