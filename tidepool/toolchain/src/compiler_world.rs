@@ -1066,11 +1066,25 @@ fn ensure_world(
         root: root.clone(),
         acquisition: A::Resident(hint),
     });
+    crate::host_work::record_host_work(
+        crate::host_work::HostWorkCounter::WorldEnsureResidentProbe,
+        1,
+    );
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization } if world == root => realization,
+        O::Ready { world, realization } if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
+                1,
+            );
+            realization
+        }
         O::NeedsAcquisition(world) if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureNeedsAcquisition,
+                1,
+            );
             if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
                 &restoration.inputs.directory,
             )) {
@@ -1087,9 +1101,19 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::InputFdExport,
                 restoration.input_files.len() as u64,
             );
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureComplete,
+                1,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
-                O::Ready { world, realization } if world == root => realization,
+                O::Ready { world, realization } if world == root => {
+                    crate::host_work::record_host_work(
+                        crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
+                        1,
+                    );
+                    realization
+                }
                 O::Rejected(reason) => {
                     return Err(source_failure(format!(
                         "compiler refused world acquisition: {reason:?}"
