@@ -2194,7 +2194,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                             artifact: entry.descriptor.id,
                             original_ordinal: ordinal,
                         },
-                        &entry.descriptor.owner,
+                        native.owner(),
                     )
                     .unwrap();
                 let expected = chosen
