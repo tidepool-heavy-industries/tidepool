@@ -625,6 +625,7 @@ impl CertifiedNativeDemandAcquisition {
 /// Consuming exact native support must respect a selected compiler role. An
 /// absent role grants no namespace intent; an incompatible selected role cannot
 /// be bypassed by retaining a historical implementation beside it.
+#[track_caller]
 pub(crate) fn validate_consumed_native_namespace(
     dependency: &ArtifactEntry,
     namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
@@ -644,6 +645,16 @@ pub(crate) fn validate_consumed_native_namespace(
         || (matches!(selected.payload, ArtifactPayload::Original(_))
             && selected.descriptor.id != dependency.descriptor.id)
     {
+        tracing::warn!(
+            target: "tidepool::artifact_inventory::namespace_conflict",
+            owner = ?dependency.descriptor.owner,
+            dependency = ?dependency.descriptor.id,
+            selected = ?selected.descriptor.id,
+            selected_kind = ?selected.descriptor.kind,
+            interfaces_match = canonical == product.module_interface(),
+            caller = %std::panic::Location::caller(),
+            "issued native dependency conflicts with request interface"
+        );
         return Err(failure(
             "issued native dependency conflicts with request interface",
         ));
