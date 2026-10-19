@@ -22,21 +22,24 @@ import Tidepool.Aeson.Value (Value (..), ToJSON (..), object, (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Effects.Core (Reload, ReloadError (..), ReloadOutcome (..), ReloadOptions (..), ReloadPolicy (..), ReloadSurfaceDiff (..), ReloadRefusal (..), ReloadRefusalCategory (..), SourceRevision (..), reloadSourceWith)
 
--- | Optional hosted reload arguments. Omitted values preserve the tool surface.
+-- | Optional hosted reload arguments. Surface consent and service retirement
+-- are independent decisions; omitted values grant neither.
 data ReloadInput = ReloadInput
   { also_check :: [Text]
   , accept_cache_invalidation :: Bool
+  , force :: Bool
   } deriving (Show, Eq, Generic)
 
 instance FromJSON ReloadInput where
   parseJSON = withObject "ReloadInput" $ \o -> ReloadInput
     <$> ((o .:? "also_check") .!= [])
     <*> ((o .:? "accept_cache_invalidation") .!= False)
+    <*> ((o .:? "force") .!= False)
 instance ToJSON ReloadInput
 instance JsonSchema ReloadInput where
   jsonSchema _ = object
     [ "type" .= ("object" :: Text)
-    , "properties" .= object ["also_check" .= jsonSchema (Proxy :: Proxy [Text]), "accept_cache_invalidation" .= jsonSchema (Proxy :: Proxy Bool)]
+    , "properties" .= object ["also_check" .= jsonSchema (Proxy :: Proxy [Text]), "accept_cache_invalidation" .= jsonSchema (Proxy :: Proxy Bool), "force" .= jsonSchema (Proxy :: Proxy Bool)]
     , "additionalProperties" .= False
     ]
 
@@ -49,11 +52,11 @@ instance JsonSchema ReloadError where
 
 -- | Compatible publication. Changed source may still change the prompt prefix.
 reloadSource :: Member Reload effects => [Text] -> Eff effects (Either ReloadError ReloadOutcome)
-reloadSource checks = reloadSourceWith (ReloadOptions checks CompatibleOnly)
+reloadSource checks = reloadSourceWith (ReloadOptions checks CompatibleOnly False)
 
 reloadHandler :: Member Reload effects => ReloadInput -> Eff effects (Either ReloadError ReloadOutcome)
-reloadHandler (ReloadInput checks accept) = reloadSourceWith
-  (ReloadOptions checks (if accept then AcceptCacheInvalidation else CompatibleOnly))
+reloadHandler (ReloadInput checks accept stopServices) = reloadSourceWith
+  (ReloadOptions checks (if accept then AcceptCacheInvalidation else CompatibleOnly) stopServices)
 
 reloadPresenter :: Either ReloadError ReloadOutcome -> Text
 reloadPresenter result = case result of
