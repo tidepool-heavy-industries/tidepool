@@ -13,7 +13,7 @@ use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
-use crate::exact_context::{ContextRoot, Materializer, StagedBlocks};
+use crate::exact_context::{ContextRoot, Materializer, ReachableBlocks};
 use crate::CompileError;
 
 /// One closed captured source namespace. The capture owner decides its supported
@@ -67,7 +67,14 @@ impl CapturedCompilerSources {
             .and_then(|n| n.checked_add(origin.len()))
             .and_then(|n| n.checked_add(4))
             .ok_or_else(source_size_failure)?;
+        let mut ordering_scratch = 0usize;
         for root in &roots {
+            ordering_scratch = ordering_scratch.max(
+                root.bodies
+                    .len()
+                    .checked_mul(std::mem::size_of::<(&PathBuf, &Arc<[u8]>)>())
+                    .ok_or_else(source_size_failure)?,
+            );
             u32::try_from(root.bodies.len()).map_err(|_| source_size_failure())?;
             crate::host_work::checkpoint()?;
             encoded_size = encoded_size
@@ -96,9 +103,12 @@ impl CapturedCompilerSources {
             }
         }
         let allowance = capture_allowance()?;
-        if encoded_size as u64 > allowance {
+        let required = encoded_size
+            .checked_add(ordering_scratch)
+            .ok_or_else(source_size_failure)?;
+        if required as u64 > allowance {
             return Err(source_failure(format!(
-                "captured compiler sources require {encoded_size} bytes; request capture allowance is {allowance} bytes")));
+                "captured compiler sources require {required} bytes including canonical ordering scratch; request capture allowance is {allowance} bytes")));
         }
         for root in &roots {
             let actual = SourceRootManifest::from_file_digests(
@@ -117,7 +127,16 @@ impl CapturedCompilerSources {
         source_count(&mut encoded, roots.len())?;
         for root in &roots {
             source_count(&mut encoded, root.bodies.len())?;
-            for (path, body) in &root.bodies {
+            // PathBuf compares components, while the wire compares the complete
+            // UTF-8 relative path. Preserve root precedence and sort only the
+            // borrowed, already validated cold namespace for canonical transfer.
+            let mut ordered = root.bodies.iter().collect::<Vec<_>>();
+            ordered.sort_unstable_by(|(left, _), (right, _)| {
+                left.as_os_str()
+                    .as_encoded_bytes()
+                    .cmp(right.as_os_str().as_encoded_bytes())
+            });
+            for (path, body) in ordered {
                 crate::host_work::checkpoint()?;
                 source_frame(&mut encoded, relative_source_path(path)?.as_bytes())?;
                 source_frame(&mut encoded, body)?;
@@ -340,7 +359,7 @@ pub struct CompilerWorldRestoration {
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
     primary_root: ContextRoot,
-    primary_blocks: StagedBlocks,
+    primary_blocks: ReachableBlocks,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
@@ -352,7 +371,7 @@ impl fmt::Debug for CompilerWorldRestoration {
         f.debug_struct("CompilerWorldRestoration")
             .field("logical_id", &self.logical_id)
             .field("primary_root", &self.primary_root)
-            .field("primary_block_count", &self.primary_blocks.blocks().len())
+            .field("primary_frontier_work", &self.primary_blocks.work())
             .finish_non_exhaustive()
     }
 }
@@ -491,6 +510,79 @@ mod tests {
             Arc::new(())
         )
         .is_err());
+    }
+
+    #[test]
+    fn captured_source_wire_uses_complete_utf8_path_order() {
+        let bodies: BTreeMap<PathBuf, Arc<[u8]>> = [
+            (
+                "Tidepool/Effects/Core.hs",
+                &b"module Tidepool.Effects.Core where"[..],
+            ),
+            ("Tidepool/Effects.hs", &b"module Tidepool.Effects where"[..]),
+            (
+                "Tidepool/Actor/Source.hs",
+                &b"module Tidepool.Actor.Source where"[..],
+            ),
+            ("Tidepool/Actor.hs", &b"module Tidepool.Actor where"[..]),
+            ("Tidepool/É.hs", &b"module Tidepool.Unicode where"[..]),
+        ]
+        .into_iter()
+        .map(|(path, body)| (PathBuf::from(path), Arc::from(body)))
+        .collect();
+        let root = CapturedCompilerSourceRoot {
+            manifest: SourceRootManifest::from_file_digests(
+                bodies
+                    .iter()
+                    .map(|(path, body)| (path.clone(), blake3::hash(body).to_hex().to_string())),
+            )
+            .unwrap(),
+            bodies,
+        };
+        // This fixture distinguishes component order from the receiving codec's
+        // full-string order, rather than relying on the production sort twice.
+        let captured = CapturedCompilerSources::from_captured_roots(
+            vec![root.clone(), root],
+            Arc::from(&b"owner"[..]),
+            Arc::new(()),
+        )
+        .unwrap();
+        fn count(input: &mut &[u8]) -> usize {
+            let (word, rest) = input.split_at(4);
+            *input = rest;
+            u32::from_le_bytes(word.try_into().unwrap()) as usize
+        }
+        fn frame<'a>(input: &mut &'a [u8]) -> &'a [u8] {
+            let length = count(input);
+            let (value, rest) = input.split_at(length);
+            *input = rest;
+            value
+        }
+        let mut input = &captured.encoded()[8..];
+        assert_eq!(frame(&mut input), b"owner");
+        assert_eq!(count(&mut input), 2);
+        for _ in 0..2 {
+            assert_eq!(count(&mut input), 5);
+            let mut paths = Vec::new();
+            for _ in 0..5 {
+                paths.push(std::str::from_utf8(frame(&mut input)).unwrap());
+                frame(&mut input);
+            }
+            assert_eq!(
+                paths,
+                [
+                    "Tidepool/Actor.hs",
+                    "Tidepool/Actor/Source.hs",
+                    "Tidepool/Effects.hs",
+                    "Tidepool/Effects/Core.hs",
+                    "Tidepool/É.hs"
+                ]
+            );
+            assert!(paths
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()));
+        }
+        assert!(input.is_empty());
     }
 
     #[test]
@@ -829,10 +921,7 @@ impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, StagedBlocks), CompileError> {
-        // Published empty contexts have no producer yet. Bind that identity at
-        // the actual admitted endpoint before issuing any portable root; a
-        // context already issued by another producer must refuse here.
+    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, ReachableBlocks), CompileError> {
         let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
         let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
         let snapshot = primary_context.snapshot();
@@ -841,11 +930,23 @@ impl CompilerWorldOpenInputs {
         let context = materializer
             .materialize_context(None, &snapshot)
             .map_err(|error| source_failure(error.to_string()))?;
-        let root = context.root().clone();
-        let blocks = materializer
+        let primary_root = context.root().clone();
+        let staged = materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
-        Ok((primary_context, root, blocks))
+        let primary_blocks = ReachableBlocks::default()
+            .replace_roots(&staged, vec![*primary_root.cid()])
+            .map_err(|error| source_failure(error.to_string()))?;
+        let work = primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
+        Ok((primary_context, primary_root, primary_blocks))
     }
 
     fn prepare(
@@ -881,7 +982,6 @@ impl CompilerWorldOpenInputs {
         };
         let block_bytes = primary_blocks
             .blocks()
-            .iter()
             .try_fold(0u64, |total, (cid, body)| {
                 total
                     .checked_add(body.len() as u64)
@@ -966,12 +1066,10 @@ impl CompilerWorldOpenInputs {
         }
         let blocks = primary_blocks
             .blocks()
-            .iter()
             .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
             .collect();
         let seals = primary_blocks
             .blocks()
-            .iter()
             .map(|(cid, body)| {
                 world_array(vec![
                     world_blob(cid.to_bytes()),
