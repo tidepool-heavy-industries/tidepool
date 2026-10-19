@@ -6346,6 +6346,7 @@ impl ExactProgramSegmentAdmission {
 /// input selection, physical materialization or authority issuance.
 #[derive(Clone, Copy)]
 pub(crate) struct ProductCompilerInputs<'a> {
+    projection: &'a CompilerInputProjection,
     source_support: &'a Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: &'a CompilerArtifactMetadata,
     native_selection: &'a NativeInputSelection,
@@ -6355,10 +6356,26 @@ pub(crate) struct ProductCompilerInputs<'a> {
 impl<'a> ProductCompilerInputs<'a> {
     pub(crate) fn from_exact(inputs: &'a RequestCompilerInputs) -> Self {
         Self {
+            projection: inputs.source_support.projection(),
             source_support: &inputs.source_support,
             metadata: &inputs.metadata,
             native_selection: &inputs.native_selection,
             original_sources: &inputs.original_sources,
+        }
+    }
+
+    fn from_world(
+        inputs: &'a DemandNativeInputs,
+        original_sources: &'a crate::certified_products::RetainedOriginalSources,
+    ) -> Self {
+        Self {
+            projection: inputs.demand.projection(),
+            metadata: inputs.demand.metadata(),
+            native_selection: &inputs.native_selection,
+            // Continuation custody stays with the cold issuer. Selected roles
+            // and native permissions come only from the closed demand above.
+            source_support: &inputs.cold.source_support,
+            original_sources,
         }
     }
 
@@ -6375,7 +6392,7 @@ impl<'a> ProductCompilerInputs<'a> {
     }
 
     pub(crate) fn projection(&self) -> &'a CompilerInputProjection {
-        self.source_support.projection()
+        self.projection
     }
 
     pub(crate) fn artifacts(&self) -> &'a ArtifactView {
@@ -7841,11 +7858,17 @@ impl ProductInputFacts<'_> {
                 },
             ))
         })?;
-        // Retained proof custody may contain interfaces that this request must
-        // compile freshly. Only selected compiler roles are admitted owners.
-        let admitted_compiler_owners = context.compiler_metadata_snapshot()?.entries;
+        // World membership observes the maintained primary namespace by key;
+        // retained custody and the cold basis do not add selected owners.
+        let world = matches!(&compilation_binding, SourceCompilationBinding::World(_));
+        let admitted_compiler_owners = if world {
+            None
+        } else {
+            Some(context.compiler_metadata_snapshot()?.entries)
+        };
         let mut exact_owners: BTreeSet<_> = admitted_compiler_owners
-            .keys()
+            .iter()
+            .flat_map(|entries| entries.keys())
             .map(|owner| (owner.unit.as_str(), owner.module.as_str()))
             .collect();
         if let Some(planned) = planned {
@@ -7857,19 +7880,28 @@ impl ProductInputFacts<'_> {
             .iter()
             .map(|module| (module.unit.as_str(), module.module.as_str(), module.boot))
             .collect();
-        if source_owners
-            .iter()
-            .any(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
-        {
+        if source_owners.iter().any(|(unit, module, _)| {
+            exact_owners.contains(&(*unit, *module))
+                || (world
+                    && context
+                        .compiler_source_support()
+                        .projection()
+                        .snapshot_roles()
+                        .contains_key(&identity(unit, module)))
+        }) {
             return Err(failure("fresh module replaced an admitted exact owner"));
         }
-        let mut selected: BTreeSet<_> = context
-            .owner
-            .facts
-            .lexical
-            .iter()
-            .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
-            .collect();
+        let mut selected: BTreeSet<_> = if world {
+            BTreeSet::new()
+        } else {
+            context
+                .owner
+                .facts
+                .lexical
+                .iter()
+                .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
+                .collect()
+        };
         let support_entries = self
             .program_support
             .map(|support| support.compiler_support.artifacts().root_entries())
@@ -7893,6 +7925,10 @@ impl ProductInputFacts<'_> {
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
+        let is_selected = |unit: &str, module: &str| {
+            selected.contains(&(unit, module))
+                || (world && context.source_lexical_node(&identity(unit, module)).is_some())
+        };
         let source_selection_roots = edges
             .iter()
             .flat_map(|module| {
@@ -7916,14 +7952,26 @@ impl ProductInputFacts<'_> {
                 .ok_or_else(|| failure("selected originals lack source evidence"))?;
             // Earlier admitted program support carries the same original proof
             // as persisted context. This receipt cannot authorize itself.
-            let source_support = match self.program_support {
-                Some(support) => context
-                    .compiler_source_support()
-                    .merge(&support.compiler_support)?,
-                None => context.compiler_source_support().clone(),
+            let entries = if world {
+                self.compiler
+                    .metadata
+                    .entries
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                let source_support = match self.program_support {
+                    Some(support) => context
+                        .compiler_source_support()
+                        .merge(&support.compiler_support)?,
+                    None => context.compiler_source_support().clone(),
+                };
+                source_support
+                    .selected_interfaces()?
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
             };
-            let selected_interfaces = source_support.selected_interfaces()?;
-            let entries = selected_interfaces.values().cloned().collect::<Vec<_>>();
             let canonical = entries
                 .iter()
                 .filter_map(|entry| canonical_source_interface(entry))
@@ -7945,10 +7993,19 @@ impl ProductInputFacts<'_> {
                     )
                 })
                 .collect();
-            let independent = selected
+            let mut independent: BTreeSet<_> = selected
                 .iter()
                 .map(|(unit, module)| identity(unit, module))
                 .collect();
+            if world {
+                independent.extend(
+                    entries
+                        .iter()
+                        .map(|entry| &entry.descriptor.owner)
+                        .filter(|owner| context.source_lexical_node(owner).is_some())
+                        .cloned(),
+                );
+            }
             let source_less = entries
                 .iter()
                 .filter(|entry| match &entry.payload {
@@ -8044,7 +8101,7 @@ impl ProductInputFacts<'_> {
                     }
                 }
                 if boot
-                    || !(selected.contains(&(unit, name))
+                    || !(is_selected(unit, name)
                         || scaffold_import
                         || selected_originals.contains_key(&identity(unit, name)))
                     || (qualifier != "none" && qualifier != format!("this:{unit}"))
@@ -8054,7 +8111,7 @@ impl ProductInputFacts<'_> {
                         "exact import witness leaves selected lexical graph: source {}:{}, import {unit}:{name}, qualifier {qualifier}, boot {boot}, selected {}",
                         owner.0,
                         owner.1,
-                        selected.contains(&(unit, name)),
+                        is_selected(unit, name),
                     )));
                 }
                 resolved.insert(identity(unit, name));
@@ -9613,6 +9670,10 @@ impl ExactDeclarationContext {
         facts.lexical = snapshot.lexical.clone();
         *self = Self::from_facts(facts);
         Ok(())
+    }
+
+    fn source_lexical_node(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
+        self.owner.facts.lexical.get(owner)
     }
 
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
@@ -25136,6 +25197,30 @@ mod tests {
                 .to_string()
                 .contains("fresh module replaced an admitted exact owner"));
         }
+    }
+
+    #[test]
+    fn world_source_membership_keeps_lexical_roles_distinct_without_snapshotting() {
+        let (context, _) = metadata_fixture();
+        let before = COMPILER_METADATA_SNAPSHOTS.with(|count| count.get());
+        let alpha = identity("fixture", "Alpha");
+        let beta = identity("fixture", "Beta");
+        let absent = identity("fixture", "Absent");
+        let roles = context
+            .compiler_source_support()
+            .projection()
+            .snapshot_roles();
+        assert!(roles.contains_key(&alpha));
+        assert!(roles.contains_key(&beta));
+        assert!(!roles.contains_key(&absent));
+        assert_eq!(context.source_lexical_node(&alpha).unwrap().owner, alpha);
+        assert!(context.source_lexical_node(&beta).is_none());
+        assert!(context.source_lexical_node(&absent).is_none());
+        assert_eq!(
+            COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()),
+            before,
+            "keyed observations must not rebuild compiler metadata",
+        );
     }
 
     #[test]
