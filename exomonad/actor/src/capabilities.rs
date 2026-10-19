@@ -148,7 +148,22 @@ impl CompilerOwnerScope {
     pub(crate) fn admit_continuation(
         &self,
     ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
-        self.services.compiler_admission().admit_work(&self.owner)
+        self.admit_continuation_for(crate::termination::CompilerWorkAdmission::Active)
+    }
+
+    pub(crate) fn admit_continuation_for(
+        &self,
+        purpose: crate::termination::CompilerWorkAdmission,
+    ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
+        match purpose {
+            crate::termination::CompilerWorkAdmission::Active => {
+                self.services.compiler_admission().admit_work(&self.owner)
+            }
+            crate::termination::CompilerWorkAdmission::Publication => self
+                .services
+                .compiler_admission()
+                .admit_publication(&self.owner),
+        }
     }
 
     pub(crate) fn admit_publication(

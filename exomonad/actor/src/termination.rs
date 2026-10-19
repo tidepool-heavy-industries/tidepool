@@ -271,7 +271,7 @@ pub(crate) struct CompilerWorkTicket {
 }
 
 #[derive(Clone, Copy)]
-enum CompilerWorkAdmission {
+pub(crate) enum CompilerWorkAdmission {
     Active,
     Publication,
 }
