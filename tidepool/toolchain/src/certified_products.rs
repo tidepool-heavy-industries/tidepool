@@ -13104,7 +13104,11 @@ pub(crate) mod tests {
                 completed
                     .native_availability()
                     .rows()
-                    .map(|row| row.original.descriptor.id)
+                    .map(|row| row
+                        .target_original(row.original_owner())
+                        .unwrap()
+                        .descriptor
+                        .id)
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([input.descriptor.id, output.descriptor.id])
             );
@@ -13126,7 +13130,12 @@ pub(crate) mod tests {
                 .native_availability(input.descriptor.id)
                 .unwrap();
             assert_eq!(
-                inherited.mode == NativeTransportMode::Full,
+                next.compiler_inputs()
+                    .private_native_availability()
+                    .snapshot_facts()
+                    .unwrap()[&input.descriptor.id]
+                    .mode
+                    == NativeTransportMode::Full,
                 ordinals.len() == 2
             );
             assert_eq!(inherited.permits(7), ordinals.contains(&7));
@@ -13285,7 +13294,7 @@ pub(crate) mod tests {
         let input_row = support
             .native_availability()
             .rows()
-            .find(|row| row.original.descriptor.id == input.descriptor.id)
+            .find(|row| row.original_owner() == dependency.owner())
             .unwrap();
         assert!(
             support
@@ -13294,7 +13303,11 @@ pub(crate) mod tests {
                 .any(|offer| { offer.original() == input.descriptor.id && offer.is_full() }),
             "all cases retain genuine broader Full proof custody"
         );
-        assert_eq!(input_row.mode == NativeTransportMode::Full, grant_full);
+        assert_eq!(
+            support.native_availability().snapshot_facts().unwrap()[&input.descriptor.id].mode
+                == NativeTransportMode::Full,
+            grant_full
+        );
         for ordinal in [7, 9001, 42, 43] {
             assert_eq!(input_row.permits(ordinal), permitted.contains(&ordinal));
         }
@@ -13357,10 +13370,18 @@ pub(crate) mod tests {
             let fresh_row = fragment
                 .native_availability()
                 .rows()
-                .find(|row| row.original.descriptor.id == fresh_id)
+                .find(|row| row.original_owner() == fresh.owner())
                 .unwrap();
-            assert_eq!(fresh_row.mode, NativeTransportMode::Full);
-            let fresh_groups = fresh_row.issued_ordinals();
+            assert_eq!(
+                fragment.native_availability().snapshot_facts().unwrap()[&fresh_id].mode,
+                NativeTransportMode::Full
+            );
+            let fresh_groups = fresh_row
+                .offers()
+                .flat_map(|offer| offer.issued_group_carriers().unwrap().into_keys())
+                .filter(|group| group.binding.artifact() == fresh_id)
+                .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>();
             assert_eq!(fresh_groups, BTreeSet::from([3]));
             assert!(
                 !fragment
@@ -13373,14 +13394,22 @@ pub(crate) mod tests {
             let dependency_row = fragment
                 .native_availability()
                 .rows()
-                .find(|row| row.original.descriptor.id == input.descriptor.id)
+                .find(|row| row.original_owner() == dependency.owner())
                 .unwrap();
-            assert_eq!(dependency_row.mode == NativeTransportMode::Full, grant_full);
+            assert_eq!(
+                fragment.native_availability().snapshot_facts().unwrap()[&input.descriptor.id].mode
+                    == NativeTransportMode::Full,
+                grant_full
+            );
             assert_eq!(
                 fragment
                     .native_availability()
                     .rows()
-                    .map(|row| row.original.descriptor.id)
+                    .map(|row| row
+                        .target_original(row.original_owner())
+                        .unwrap()
+                        .descriptor
+                        .id)
                     .collect::<BTreeSet<_>>(),
                 std::iter::once(fresh_id)
                     .chain(
@@ -15025,9 +15054,7 @@ pub(crate) mod tests {
             CanonicalProducerIdentity, CompilerInputProjection, JoinedInterfaceRole,
             NativeArtifactDemand, NativeGroupKey,
         };
-        use crate::declaration_context::{
-            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
-        };
+        use crate::declaration_context::{ExactCompileContext, OriginalCompilerInputs};
         let producer_bytes = b"physical-new-product-issuance";
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let future_module =
