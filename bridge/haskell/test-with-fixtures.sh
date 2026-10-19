@@ -86,7 +86,13 @@ if path.stat().st_size > 4 << 20:
     raise SystemExit("deployment manifest exceeds metadata bound")
 manifest = json.loads(path.read_text())
 identity = manifest["producer_identity"]
-if manifest["schema"] != 1 or len(identity) != 32 or any(type(value) is not int or not 0 <= value <= 255 for value in identity):
+# This projects finite producer metadata only. The Rust issuer independently
+# validates the configured deployment and actual endpoint; this is no service
+# package-source or worker-boot admission.
+if (manifest["schema"] != 2
+        or manifest.get("package_source", {}).get("kind") not in ("observation-only", "rooted")
+        or len(identity) != 32
+        or any(type(value) is not int or not 0 <= value <= 255 for value in identity)):
     raise SystemExit("invalid declared compiler producer identity")
 print(bytes(identity).hex())
 PYDEPLOY
