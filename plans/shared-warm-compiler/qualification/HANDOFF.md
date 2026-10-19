@@ -5,8 +5,8 @@ Owner `/root/warm_compiler_campaign/qualification`; parent
 `/srv/swarm/checkouts/tidepool-shared-warm-qualification-20261019`, branch
 `feature/shared-warm/qualification`, source contract
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. One allocated independent child,
-`capture_sensitivity`, is completed and reserved after the frozen lookup review;
-no further descendants granted.
+`capture_sensitivity`, is reactivated for the approved production-constructor
+discriminator; no further descendants granted.
 Qualification owns this handoff, `ACCEPTANCE.md` and `docs/compiler-work-map.md`.
 Host-inputs owns selection/home oracles; reload owns coherent reload host tests.
 C2 amendment `e2bd2611102566085d0c573568d820a50ed62fb3` is incorporated.
@@ -175,7 +175,18 @@ remove obsolete alternate authorities/adapters and explicitly version or refuse
 old persisted authority. Preserve immutable baseline, user files and evidence;
 new service qualification must enter the new real production owner.
 
-Waiting event: campaign/host/warm source owners produce the concrete joined
+Current approved successor: exact `278cd12c95b148532af9fc9232a02fff82eedfa7`
+(owning production trees equal `f088e3e7837c72cf0e82aab8e71a2687d767da34`).
+The reserved child owns a bounded opt-in trace discriminator in existing
+inspection/value-extension/authored-fallback/catalog-private constructors.
+Synthetic native fixtures cannot faithfully carry the frozen catalog plus issued
+checked-value history; the authorized tracing fallback preserves real issuers.
+No policy edits or new authority factory. Stage roles, exact root/required edges
+and omissions remain explicit. Private `native-constructor-discriminator/PLAN.json`
+records controls/resource proposal; native admission and full frozen rerun remain
+separate pending gates. Parent source review precedes receiving any trace candidate.
+
+The next demand-service event is campaign/host/warm source owners producing the concrete joined
 query/check/execute consumer and root/campaign resolves the exact frozen native
 counterexample. Reload owns disposition of the three baseline prerequisites.
 Their terminal exact candidate/review/native event reactivates qualification to
