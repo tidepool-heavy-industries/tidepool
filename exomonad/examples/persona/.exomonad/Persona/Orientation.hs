@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Persona.Orientation (renderMemory, renderRuntime, startup, startupWithRuntime) where
+module Persona.Orientation (renderMemory, renderRuntime, renderEffectDocs, renderCurrentEffectDocs, startup, startupWithRuntime) where
 
 import Prelude
 import Control.Monad.Freer (Eff, Member)
@@ -77,6 +77,31 @@ renderRuntime = fmap renderSnapshot <$> E.getRuntimeInfo
       C.InitialContextCancelled _ -> "cancelled"
       C.InitialContextUncertain _ detail -> "recovery required: " <> detail
 
+-- | Pure presentation of selected catalogue facts. The typed snapshot remains
+-- available to callers that want to select or compose a different context.
+renderEffectDocs :: E.EffectDocsSnapshot -> Text
+renderEffectDocs snapshot = T.intercalate "\n\n" $
+  ("Executing effects; install " <> T.pack (show (E.effectDocsInstall snapshot))
+    <> "; source " <> E.effectDocsSource snapshot
+    <> "\nEffect membership does not establish resource grants or credential availability.")
+  : map renderEffect (E.effectDocsEffects snapshot)
+  where
+    renderEffect effect = T.pack (show (E.effectDocumentationIdentity effect)) <> "\n"
+      <> case E.effectDocumentationBody effect of
+        E.EffectDocumentationMissing -> "Catalogue documentation unavailable."
+        E.EffectDocumentationAvailable facts -> T.intercalate "\n" $
+          E.effectDocumentationDescription facts
+          : E.effectDocumentationImports facts
+          <> map renderOperation (E.effectDocumentationOperations facts)
+    renderOperation operation = T.intercalate "\n" $
+      E.effectOperationSignature operation
+      : E.effectOperationContract operation
+      <> E.effectOperationExamples operation
+      <> maybe [] (\source -> ["Source: " <> source]) (E.effectOperationSource operation)
+
+renderCurrentEffectDocs :: Member RuntimeInfo effects => Eff effects (Either RuntimeInfoError Text)
+renderCurrentEffectDocs = fmap renderEffectDocs <$> E.currentEffectDocs
+
 startupWithRuntime :: (Member FsRead effects, Member FsWrite effects, Member RuntimeInfo effects)
   => StartupInput -> Eff effects ContextSeed
 startupWithRuntime input = do
@@ -84,5 +109,12 @@ startupWithRuntime input = do
   observed <- renderRuntime
   case observed of
     Left problem -> error (show problem)
-    Right body -> pure $ memory <> contextSection "runtime at arrival"
-      (Just "getRuntimeInfo; observed during initialization") body
+    Right body -> do
+      docs <- renderCurrentEffectDocs
+      case docs of
+        Left problem -> error (show problem)
+        Right documentation -> pure $ memory
+          <> contextSection "runtime at arrival"
+            (Just "getRuntimeInfo; observed during initialization") body
+          <> contextSection "effects at arrival"
+            (Just "currentEffectDocs; exact executing installation catalogue") documentation

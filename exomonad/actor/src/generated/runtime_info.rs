@@ -32,4 +32,5 @@ pub enum RuntimeInfoError {
 )]
 pub enum RuntimeInfoReq {
     GetRuntimeInfoWith,
+    CurrentEffectDocsWith,
 }

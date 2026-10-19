@@ -152,6 +152,30 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         }
         contents.push_str("];\n");
     }
+    contents.push_str("\npub(crate) fn operation_documentation(type_name: &str) -> Option<Vec<crate::EffectOperationDocumentation>> {\n    Some(match type_name {\n");
+    for effect in effects {
+        contents.push_str(&format!(
+            "        {} => vec![\n",
+            rust_string_literal(effect.name)
+        ));
+        for (verb, signature) in effect.verbs.iter().zip(effect.constructor_signatures()) {
+            if effect.authored_surface.includes_verb(verb.ctor) {
+                contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![], source: None, examples: vec![] }},\n", rust_string_literal(verb.ctor), rust_string_literal(&signature)));
+            }
+        }
+        for helper in effect.helpers.iter().filter(|helper| {
+            !helper.substrate && effect.authored_surface.includes_helper(helper.name)
+        }) {
+            contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: None, examples: vec![] }},\n", rust_string_literal(helper.name), rust_string_literal(&helper.signature(effect)), helper.doc.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", ")));
+        }
+        if effect.name == "Commands" {
+            for operation in crate::effects::commands::companion_operations() {
+                contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: Some({}.into()), examples: vec![{}] }},\n", rust_string_literal(operation.name), rust_string_literal(&operation.signature()), operation.contract.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", "), rust_string_literal(operation.source), operation.examples.iter().map(|example| format!("{}.into()", rust_string_literal(example))).collect::<Vec<_>>().join(", ")));
+            }
+        }
+        contents.push_str("        ],\n");
+    }
+    contents.push_str("        _ => return None,\n    })\n}\n");
     GeneratedFile {
         path: "bridge/mcp/src/generated/mod.rs".to_string(),
         contents,

@@ -17,6 +17,68 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(super) fn current_effect_docs(
+        &self,
+        issued: Option<&ActorRequestSnapshot>,
+        effect_keys: Option<&[exomonad_tool::ToolEffectKey]>,
+    ) -> Result<tidepool_bridge_effects::EffectDocsSnapshot, RuntimeInfoError> {
+        use tidepool_bridge_effects::{
+            EffectDocsSnapshot, EffectDocumentation, EffectDocumentationBody,
+            EffectDocumentationFacts, EffectOperationDocumentation,
+        };
+        let issued = issued.ok_or_else(|| unavailable("execution has no issued installation"))?;
+        let installation = issued.installation();
+        let tools = installation
+            .tools()
+            .ok_or_else(|| unavailable("execution has no installed interpreter row"))?;
+        let effect_keys = effect_keys
+            .ok_or_else(|| unavailable("execution has no issued endpoint or slot effect row"))?;
+        let effects = effect_keys
+            .iter()
+            .map(|key| {
+                let body = match tidepool_mcp::effect_documentation_for(*key) {
+                    None => EffectDocumentationBody::EffectDocumentationMissing,
+                    Some(facts) => EffectDocumentationBody::EffectDocumentationAvailable(
+                        EffectDocumentationFacts {
+                            description: facts.description,
+                            card: facts.prompt_card,
+                            imports: facts.imports,
+                            operations: facts
+                                .operations
+                                .into_iter()
+                                .map(|operation| EffectOperationDocumentation {
+                                    name: operation.name,
+                                    signature: operation.signature,
+                                    contract: operation.contract,
+                                    examples: operation.examples,
+                                    source: operation.source,
+                                })
+                                .collect(),
+                        },
+                    ),
+                };
+                Ok::<_, RuntimeInfoError>(EffectDocumentation {
+                    identity: (*key).try_into().map_err(unavailable)?,
+                    body,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EffectDocsSnapshot {
+            install: i64::try_from(tools.install).map_err(unavailable)?,
+            source: installation
+                .source()
+                .semantic_digest()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            generation: issued
+                .generation()
+                .map(|generation| i64::try_from(generation.id().get()).map_err(unavailable))
+                .transpose()?,
+            effects,
+        })
+    }
+
     pub(super) fn runtime_info(
         &self,
         issued: Option<&ActorRequestSnapshot>,

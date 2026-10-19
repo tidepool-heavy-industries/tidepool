@@ -59,11 +59,11 @@ use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType,
-    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
+    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
+    PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_inspections, run_turn, TurnRequest};
@@ -3960,6 +3960,7 @@ pub(crate) enum ResidentActorBoundary {
     },
     RuntimeInfo {
         continuation: ResidentHole,
+        request: crate::generated::runtime_info::RuntimeInfoReq,
     },
     Source {
         continuation: ResidentHole,
@@ -4218,7 +4219,14 @@ impl ResidentActorBoundary {
             Self::Jev { .. } => "jev",
             Self::Model { .. } => "model call",
             Self::Context { .. } => "context transformation",
-            Self::RuntimeInfo { .. } => "getRuntimeInfo",
+            Self::RuntimeInfo { request, .. } => match request {
+                crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith => {
+                    "getRuntimeInfo"
+                }
+                crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => {
+                    "currentEffectDocs"
+                }
+            },
             Self::Source { request, .. } => source_operation(request),
             Self::Reload { .. } => "reloadSource",
             Self::SpecValidation { .. } => "validateAgentSpec",
@@ -9931,7 +9939,7 @@ where
                         table: session.data_con_table().clone(),
                     }),
                     ResidentRequest::Reload(request) => Ok(ResidentActorBoundary::Reload { continuation: hole, request }),
-                    ResidentRequest::RuntimeInfo(crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith) => Ok(ResidentActorBoundary::RuntimeInfo { continuation: hole }),
+                    ResidentRequest::RuntimeInfo(request) => Ok(ResidentActorBoundary::RuntimeInfo { continuation: hole, request }),
                     ResidentRequest::Source(request) => Ok(ResidentActorBoundary::Source {
                         continuation: hole,
                         request,

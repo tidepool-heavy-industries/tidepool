@@ -18,7 +18,7 @@ import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
-import Tidepool.Effects.Core (ActorEffectKey (..))
+import Tidepool.Effects.Core (ActorEffectKey (..), ToolEffectKey (..))
 import Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)
 import Tidepool.Agent.Reply.Internal (Replies)
 import Tidepool.Agent.Watch.Internal (Watches)
@@ -65,9 +65,6 @@ type CatalogueEffects =
 
 type CatalogueToolEffects =
   '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite, RuntimeInfo, ContextReadWrite, Reload]
-
-data ToolEffectKey = ActorEffect ActorEffectKey | InvocationContextReadWrite | InvocationReload
-  deriving (Eq, Show)
 
 actorEffectName :: ActorEffectKey -> Text
 actorEffectName key = case key of

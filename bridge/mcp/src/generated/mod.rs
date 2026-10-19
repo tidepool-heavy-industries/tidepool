@@ -585,44 +585,6 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ReleasedCheckpoint",
             "CaptureFailed",
             "ProcessRestartUnsupported",
-            "ActorEffectKey",
-            "EffectResourceScopes",
-            "EffectReplies",
-            "EffectWatches",
-            "EffectActorContext",
-            "EffectAgentLaunch",
-            "EffectAgentInspection",
-            "EffectAgentControl",
-            "EffectBoundWorktree",
-            "EffectWorktreeRegistry",
-            "EffectWorktreeAllocation",
-            "EffectWorktreeIntegration",
-            "EffectSleep",
-            "EffectCommands",
-            "EffectConsole",
-            "EffectAskUser",
-            "EffectGreen",
-            "EffectNotifications",
-            "EffectJev",
-            "EffectModelCallOpenAI",
-            "EffectModelCallArgon",
-            "EffectModelCallDeepSeek",
-            "EffectForkAgentOpenAI",
-            "EffectForkAgentArgon",
-            "EffectForkAgentDeepSeek",
-            "EffectSpawnAgentOpenAI",
-            "EffectSpawnAgentArgon",
-            "EffectSpawnAgentDeepSeek",
-            "EffectActor",
-            "EffectReflect",
-            "EffectLookup",
-            "EffectRepoEvent",
-            "EffectSource",
-            "EffectJournal",
-            "EffectWeb",
-            "EffectFsRead",
-            "EffectFsWrite",
-            "EffectRuntimeInfo",
             "SpecValidationError",
             "SpecPreparationFailed",
             "SpecMetadataInvalid",
@@ -1027,7 +989,6 @@ pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
     "Reasoning(..)",
     "WorkerLifetime(..)",
     "CheckpointRefusal(..)",
-    "ActorEffectKey(..)",
     "SpecValidationError(..)",
     "SpecProvenance(..)",
     "SpecProviderValidation(..)",
@@ -1115,3 +1076,190 @@ pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
 
 /// Capability types reimported without constructors into Authored.
 pub(crate) const AUTHORED_ABSTRACT_TYPES: &[&str] = &["WorkspaceHandle"];
+
+pub(crate) fn operation_documentation(type_name: &str) -> Option<Vec<crate::EffectOperationDocumentation>> {
+    Some(match type_name {
+        "Console" => vec![
+            crate::EffectOperationDocumentation { name: "Print".into(), signature: "Print :: Text -> Console ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayViewWith".into(), signature: "DisplayViewWith :: Value -> Console ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayWith".into(), signature: "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplaySelectableWith".into(), signature: "DisplaySelectableWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayExpandWith".into(), signature: "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplaySelectWith".into(), signature: "DisplaySelectWith :: ((Int, Int, Int), Text) -> Console [(Int, Text)]".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayNavigationInputWith".into(), signature: "DisplayNavigationInputWith :: Console ((Int, Int, Int), Maybe Text, Int, Int)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayAllowanceWith".into(), signature: "DisplayAllowanceWith :: Console Int".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "DisplayExpansionInputWith".into(), signature: "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int, Int)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "say".into(), signature: "say :: forall effs. Member Console effs => Text -> Eff effs ()".into(), contract: vec!["Emit a line of console output.".into()], source: None, examples: vec![] },
+        ],
+        "Exec" => vec![
+            crate::EffectOperationDocumentation { name: "Run".into(), signature: "Run :: Text -> Exec (Either ExecError Proc)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RunIn".into(), signature: "RunIn :: Text -> Text -> Exec (Either ExecError Proc)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RunArgv".into(), signature: "RunArgv :: [Text] -> Exec (Either ExecError Proc)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "run".into(), signature: "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)".into(), contract: vec!["Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}".into(), "(use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left".into(), "(ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`".into(), "for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when".into(), "execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,".into(), "and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero".into(), "EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:".into(), "`Right p <- run cmd`.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "runIn".into(), signature: "runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "runArgv".into(), signature: "runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)".into(), contract: vec![], source: None, examples: vec![] },
+        ],
+        "Journal" => vec![
+            crate::EffectOperationDocumentation { name: "RecordStep".into(), signature: "RecordStep :: Text -> Text -> Value -> Journal ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "TraceStep".into(), signature: "TraceStep :: Text -> Text -> Value -> Journal ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "record".into(), signature: "record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()".into(), contract: vec!["Append one durable journal entry. `kind` and `key` are".into(), "caller-chosen labels; `payload` is an opaque JSON value. Flushed".into(), "immediately; append-only — never rewritten or compacted.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "trace".into(), signature: "trace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()".into(), contract: vec!["Append one observability entry to the run's sibling TRACE stream: decision narration and telemetry. `stage` names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); `key` is the branch or unit it concerns; `payload` is an opaque JSON value whose shape may evolve freely. The handler stamps a timestamp on every line, so trace timestamps can be correlated with journal entries.".into()], source: None, examples: vec![] },
+        ],
+        "Web" => vec![
+            crate::EffectOperationDocumentation { name: "WebFetchText".into(), signature: "WebFetchText :: Text -> Web (Either WebError WebText)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WebFollow".into(), signature: "WebFollow :: Text -> Text -> Web (Either WebError Value)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WebSearch".into(), signature: "WebSearch :: Text -> Int -> [Text] -> [Text] -> Web (Either WebError Value)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WebExtract".into(), signature: "WebExtract :: Text -> Web (Either WebError Value)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "webFetchTextRaw".into(), signature: "webFetchTextRaw :: forall effs. Member Web effs => Text -> Eff effs (Either WebError WebText)".into(), contract: vec!["Read exact UTF-8 HTTP(S) text without Tavily extraction. Inspect status, including non-2xx responses. Declared non-UTF-8 charset, invalid UTF-8 and bodies over 16 MiB are explicit failures; no automatic retry.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "webFollowRaw".into(), signature: "webFollowRaw :: forall effs. Member Web effs => Text -> Text -> Eff effs (Either WebError Value)".into(), contract: vec!["Resolve a link against a retrieved URL and extract that page.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "webSearchRaw".into(), signature: "webSearchRaw :: forall effs. Member Web effs => Text -> Int -> [Text] -> [Text] -> Eff effs (Either WebError Value)".into(), contract: vec!["Basic search. Result budget is Tavily's 1–20 API range; domain filters are optional.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "webExtractRaw".into(), signature: "webExtractRaw :: forall effs. Member Web effs => Text -> Eff effs (Either WebError Value)".into(), contract: vec!["Extract complete available Markdown without provider query filtering.".into()], source: None, examples: vec![] },
+        ],
+        "Worktree" => vec![
+            crate::EffectOperationDocumentation { name: "WorktreeCreate".into(), signature: "WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeLookup".into(), signature: "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeGrantWorkspace".into(), signature: "WorktreeGrantWorkspace :: WorktreeId -> Worktree (Either WorktreeError WorkspaceHandle)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeCurrentWorkspace".into(), signature: "WorktreeCurrentWorkspace :: Worktree (Either WorktreeError WorkspaceHandle)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeBound".into(), signature: "WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeList".into(), signature: "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeListMatching".into(), signature: "WorktreeListMatching :: Maybe Bool -> Maybe Text -> Maybe Int -> Worktree (Either WorktreeError [WorktreeSummary])".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeBranchOf".into(), signature: "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeHeadOf".into(), signature: "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeObserveSubmission".into(), signature: "WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "WorktreeTryMerge".into(), signature: "WorktreeTryMerge :: MergeRequest -> Worktree (Either WorktreeError MergeOutcome)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "createWorktree".into(), signature: "createWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)".into(), contract: vec!["Create a managed worktree. `Left (SourceDirty summary)` when the".into(), "source is dirty and the spec did not opt in; case-match the error".into(), "rather than unwrapping if you mean to handle it.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "lookupWorktree".into(), signature: "lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)".into(), contract: vec!["Look a retained worktree up by durable id. Survives restart:".into(), "resolution reads on-disk registry state, not process memory.".into(), "`Left (WorktreeLost i)` when it is registered but gone from disk.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "boundWorktree".into(), signature: "boundWorktree :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError WorktreeHandle)".into(), contract: vec!["Observe the managed worktree bound to the executing actor.".into(), "This is custody lookup, not ambient current-directory inference.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "listWorktrees".into(), signature: "listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])".into(), contract: vec!["Every registered worktree, present or lost. A lost tree is listed".into(), "with `present = False` rather than failing the whole listing.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "worktreeId".into(), signature: "worktreeId :: WorktreeHandle -> WorktreeId".into(), contract: vec!["The durable identity of a managed worktree. Pure: the handle".into(), "already carries its receipt, so this reads no git state.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "tryMerge".into(), signature: "tryMerge :: forall effs. Member Worktree effs => MergeRequest -> Eff effs (Either WorktreeError MergeOutcome)".into(), contract: vec!["Attempt the ordinary merge named by a `MergeRequest`.".into(), "The exact source commit is authoritative; an optional source branch is checked".into(), "for drift. Straight-line history fast-forwards, divergent history creates a".into(), "merge commit, and conflicts return `ManualGitRequired` only after aborting and".into(), "proving the target returned to its starting HEAD and operation state.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "observeSubmission".into(), signature: "observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)".into(), contract: vec!["Observe a candidate checkout through one bounded Worktree operation.".into(), "This reports submitted HEAD, dirty state, and in-progress operation".into(), "together; it does not seal or mutate the checkout.".into()], source: None, examples: vec![] },
+        ],
+        "RepoEvent" => vec![
+            crate::EffectOperationDocumentation { name: "RepoEventSubscribe".into(), signature: "RepoEventSubscribe :: [EventWatch] -> RepoEvent (Either EventError SubscriptionId)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RepoEventDrain".into(), signature: "RepoEventDrain :: SubscriptionId -> RepoEvent (Either EventError [RepositoryEvent])".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RepoEventAwait".into(), signature: "RepoEventAwait :: SubscriptionId -> Int -> RepoEvent (Either EventError [RepositoryEvent])".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "RepoEventUnsubscribe".into(), signature: "RepoEventUnsubscribe :: SubscriptionId -> RepoEvent (Either EventError ())".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "MailboxNew".into(), signature: "MailboxNew :: RepoEvent (Either EventError MailboxId)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "MailboxSend".into(), signature: "MailboxSend :: MailboxId -> Text -> Value -> RepoEvent (Either EventError ())".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "MailboxDrop".into(), signature: "MailboxDrop :: MailboxId -> RepoEvent (Either EventError ())".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "awaitSubscriptionRaw".into(), signature: "awaitSubscriptionRaw :: forall effs. Member RepoEvent effs => SubscriptionId -> Int -> Eff effs (Either EventError [RepositoryEvent])".into(), contract: vec!["Block until `sub` has queued at least one observation, or".into(), "`timeoutMs` elapses (negative blocks with no deadline). An elapsed".into(), "timeout is an EMPTY list — distinguishable from a real batch, never".into(), "an error; poison/source-loss still fail via the `Either`.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "mailboxNew".into(), signature: "mailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError MailboxId)".into(), contract: vec!["Mint a fresh mailbox: an event source only the caller (and whoever".into(), "it hands the id to) can send into.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "mailboxSend".into(), signature: "mailboxSend :: forall effs. Member RepoEvent effs => MailboxId -> Text -> Value -> Eff effs (Either EventError ())".into(), contract: vec!["Send never blocks: append and return. A burst of sends sharing".into(), "`key` coalesces to the LAST payload.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "mailboxDrop".into(), signature: "mailboxDrop :: forall effs. Member RepoEvent effs => MailboxId -> Eff effs (Either EventError ())".into(), contract: vec!["Drop a mailbox. A later send against it is".into(), "`Left (EventUnknownMailbox _)`.".into()], source: None, examples: vec![] },
+        ],
+        "AskUser" => vec![
+        ],
+        "ReadState" => vec![
+            crate::EffectOperationDocumentation { name: "ReadStateWith".into(), signature: "ReadStateWith :: ReadState Value".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "getStateJson".into(), signature: "getStateJson :: forall effs. Member ReadState effs => Eff effs Value".into(), contract: vec![], source: None, examples: vec![] },
+        ],
+        "RecipeCheck" => vec![
+        ],
+        "Green" => vec![
+            crate::EffectOperationDocumentation { name: "AsyncSpawnWith".into(), signature: "AsyncSpawnWith :: Int -> (Int -> Eff bodyEffs ()) -> Green Int".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "AsyncDoneWith".into(), signature: "AsyncDoneWith :: Int -> Green ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "AsyncJoinAnyWith".into(), signature: "AsyncJoinAnyWith :: [Int] -> Green Int".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "AsyncStatusWith".into(), signature: "AsyncStatusWith :: Int -> Green Int".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "AsyncCancelWith".into(), signature: "AsyncCancelWith :: Int -> Green ()".into(), contract: vec![], source: None, examples: vec![] },
+        ],
+        "ResourceScopes" => vec![
+        ],
+        "Actor" => vec![
+        ],
+        "ActorContext" => vec![
+            crate::EffectOperationDocumentation { name: "ActorContextWith".into(), signature: "ActorContextWith :: ActorContext ActorContextInfo".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "actorContext".into(), signature: "actorContext :: forall effs. Member ActorContext effs => Eff effs ActorContextInfo".into(), contract: vec!["Inspect the current actor's exact identity and effective policy.".into()], source: None, examples: vec![] },
+        ],
+        "Introspection" => vec![
+            crate::EffectOperationDocumentation { name: "IntrospectionInfoWith".into(), signature: "IntrospectionInfoWith :: NameQuery -> Introspection (Either QueryError IdentifierInfo)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "IntrospectionTypeOfWith".into(), signature: "IntrospectionTypeOfWith :: NameQuery -> Introspection (Either QueryError TypeInfo)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "info".into(), signature: "info :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)".into(), contract: vec!["Inspect a name and return its structured declaration.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "typeOf".into(), signature: "typeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)".into(), contract: vec!["Inspect a name's canonical type.".into()], source: None, examples: vec![] },
+        ],
+        "Lookup" => vec![
+            crate::EffectOperationDocumentation { name: "LookupRaw".into(), signature: "LookupRaw :: LookupRequest -> Lookup LookupBatch".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "lookupRaw".into(), signature: "lookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch".into(), contract: vec!["Capture structured lookups without presentation or automatic related queries.".into()], source: None, examples: vec![] },
+        ],
+        "ActorKernel" => vec![
+        ],
+        "ActorLocal" => vec![
+        ],
+        "Sleep" => vec![
+            crate::EffectOperationDocumentation { name: "SleepWith".into(), signature: "SleepWith :: Duration -> Sleep ()".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "sleep".into(), signature: "sleep :: forall effs. Member Sleep effs => Duration -> Eff effs ()".into(), contract: vec!["Suspend this evaluation for at least the requested monotonic duration.".into()], source: None, examples: vec![] },
+        ],
+        "AgentControl" => vec![
+        ],
+        "Commands" => vec![
+            crate::EffectOperationDocumentation { name: "argv".into(), signature: "Cmd.argv :: [Text] -> Cmd.Command".into(), contract: vec!["Describe a command with exact argv; execution is explicit.".into()], source: Some("bridge/haskell/lib/Tidepool/Command/Types.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "bashCommand".into(), signature: "Cmd.bashCommand :: Text -> Cmd.Command".into(), contract: vec!["Describe a bash script; execution is explicit.".into()], source: Some("bridge/haskell/lib/Tidepool/Command/Types.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "withMemory".into(), signature: "Cmd.withMemory :: Cmd.Memory -> Cmd.Command -> Cmd.Command".into(), contract: vec!["Set positive weighted admission memory using Cmd.MiB or Cmd.GiB.".into()], source: Some("bridge/haskell/lib/Tidepool/Command/Types.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "inDirectory".into(), signature: "Cmd.inDirectory :: Text -> Cmd.Command -> Cmd.Command".into(), contract: vec!["Set the command working directory.".into()], source: Some("bridge/haskell/lib/Tidepool/Command/Types.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "withEnvironment".into(), signature: "Cmd.withEnvironment :: [(Text, Text)] -> Cmd.Command -> Cmd.Command".into(), contract: vec!["Add environment overrides.".into()], source: Some("bridge/haskell/lib/Tidepool/Command/Types.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "run".into(), signature: "Cmd.run :: forall effs. Member Commands effs => Cmd.Command -> Eff effs Cmd.RunResult".into(), contract: vec!["Start and await completion; retain the result for output and terminal evidence.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec!["do\n  result <- Cmd.run (Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"printf\", \"hello\\n\"]))\n  pure (Cmd.failure result, Cmd.stdout result)".into()] },
+            crate::EffectOperationDocumentation { name: "start".into(), signature: "Cmd.start :: forall effs. Member Commands effs => Cmd.Command -> Eff effs Cmd.Job".into(), contract: vec!["Start once and retain the Job for later observation or cancellation.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "await".into(), signature: "Cmd.await :: forall effs. Member Commands effs => Cmd.Job -> Eff effs Cmd.RunResult".into(), contract: vec!["Await an existing job without starting another execution.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "job".into(), signature: "Cmd.job :: Cmd.RunResult -> Cmd.Job".into(), contract: vec!["Recover the retained job from a completed result.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "stdout".into(), signature: "Cmd.stdout :: Cmd.RunResult -> Either Cmd.OutputIssue Text".into(), contract: vec!["Inspect captured stdout; Left preserves output gaps or incomplete capture.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "failure".into(), signature: "Cmd.failure :: Cmd.RunResult -> Maybe Text".into(), contract: vec!["Inspect terminal failure separately from output decoding.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "readStdout".into(), signature: "Cmd.readStdout :: forall effs. Member Commands effs => Cmd.Job -> Eff effs (Either Cmd.OutputIssue Text)".into(), contract: vec!["Read retained stdout, preserving partial-output issues.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "observe".into(), signature: "Cmd.observe :: forall effs. Member Commands effs => Cmd.Observation -> Cmd.Job -> Eff effs Cmd.CommandStatus".into(), contract: vec!["Observe with a finite wait and output budget; observation does not set job lifetime.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "output".into(), signature: "Cmd.output :: forall effs. Member Commands effs => Cmd.Job -> Eff effs Cmd.OutputPage".into(), contract: vec!["Open retained output with paging continuation.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "pageText".into(), signature: "Cmd.pageText :: Cmd.OutputPage -> Text".into(), contract: vec!["Inspect text on one output page.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "next".into(), signature: "Cmd.next :: forall effs. Member Commands effs => Cmd.OutputPage -> Eff effs Cmd.OutputPage".into(), contract: vec!["Read the next output page.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+            crate::EffectOperationDocumentation { name: "cancel".into(), signature: "Cmd.cancel :: forall effs. Member Commands effs => Cmd.Job -> Eff effs ()".into(), contract: vec!["Request cancellation; inspect subsequent status for terminal and cleanup evidence.".into()], source: Some("bridge/haskell/lib/Tidepool/Command.hs".into()), examples: vec![] },
+        ],
+        "Notifications" => vec![
+        ],
+        "Jev" => vec![
+        ],
+        "AgentInspection" => vec![
+        ],
+        "AgentLaunch" => vec![
+        ],
+        "SpawnAgent" => vec![
+        ],
+        "ForkAgent" => vec![
+        ],
+        "AgentTools" => vec![
+        ],
+        "AgentSession" => vec![
+        ],
+        "Reflect" => vec![
+            crate::EffectOperationDocumentation { name: "ReflectResultWith".into(), signature: "ReflectResultWith :: ResultReference -> Reflect (Either ResultInspectionError Value)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "ReflectWith".into(), signature: "ReflectWith :: Int -> Reflect (Either ReflectError [ConversationTurn])".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "inspectResult".into(), signature: "inspectResult :: forall effs. Member Reflect effs => ResultReference -> Eff effs (Either ResultInspectionError Value)".into(), contract: vec!["Read canonical JSON from this exact retained operation without executing its handler again. Bind the result and select or display it.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "reflect".into(), signature: "reflect :: forall effs. Member Reflect effs => Int -> Eff effs (Either ReflectError [ConversationTurn])".into(), contract: vec!["`reflect n` reads your OWN latest n conversation turns including the active".into(), "turn, oldest first, each carrying recorded messages, tool calls and tool".into(), "results. `turnState` distinguishes progress from missing timestamps; pending".into(), "tool results are never invented. Fewer than n turns returns the ones that exist,".into(), "and `n <= 0` returns none.".into(), "Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`".into(), "means this context has no conversation of its own — no other actor's is".into(), "returned in its place. Bind the result once and reuse it across the".into(), "calls that need it rather than reading it again per call.".into()], source: None, examples: vec![] },
+        ],
+        "Source" => vec![
+            crate::EffectOperationDocumentation { name: "SourceReadModule".into(), signature: "SourceReadModule :: Text -> Source (Either SourceError (Text, Text))".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "SourceStatusWith".into(), signature: "SourceStatusWith :: Source (Either SourceError SourceStatus)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "readSourceModule".into(), signature: "readSourceModule :: forall effs. Member Source effs => Text -> Eff effs (Either SourceError (Text, Text))".into(), contract: vec!["Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "sourceStatus".into(), signature: "sourceStatus :: forall effs. Member Source effs => Eff effs (Either SourceError SourceStatus)".into(), contract: vec!["The revision this request captured, and the revision your".into(), "own source roots hold right now. Compare `revisionIdentity`s to tell whether an".into(), "edit is waiting, and look a module up in `revisionModules` to compare".into(), "one module across the two.".into()], source: None, examples: vec![] },
+        ],
+        "RuntimeInfo" => vec![
+            crate::EffectOperationDocumentation { name: "GetRuntimeInfoWith".into(), signature: "GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "CurrentEffectDocsWith".into(), signature: "CurrentEffectDocsWith :: RuntimeInfo (Either RuntimeInfoError EffectDocsSnapshot)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "getRuntimeInfo".into(), signature: "getRuntimeInfo :: forall effs. Member RuntimeInfo effs => Eff effs (Either RuntimeInfoError RuntimeInfoSnapshot)".into(), contract: vec!["Observe this execution's installed spec and configured inference, plus startup evidence as of the query. Safe during initialContext; no filesystem or memory-policy inference.".into()], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "currentEffectDocs".into(), signature: "currentEffectDocs :: forall effs. Member RuntimeInfo effs => Eff effs (Either RuntimeInfoError EffectDocsSnapshot)".into(), contract: vec!["Observe structured documentation for this execution's exact admitted endpoint or slot effect row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability.".into()], source: None, examples: vec![] },
+        ],
+        "Reload" => vec![
+            crate::EffectOperationDocumentation { name: "ReloadSourceWith".into(), signature: "ReloadSourceWith :: ReloadOptions -> Reload (Either ReloadError ReloadOutcome)".into(), contract: vec![], source: None, examples: vec![] },
+            crate::EffectOperationDocumentation { name: "reloadSourceWith".into(), signature: "reloadSourceWith :: forall effs. Member Reload effs => ReloadOptions -> Eff effs (Either ReloadError ReloadOutcome)".into(), contract: vec!["Capture, validate and atomically publish edited source under the explicit surface policy.".into()], source: None, examples: vec![] },
+        ],
+        "ModelCall" => vec![
+        ],
+        "ContextReadWrite" => vec![
+        ],
+        "BoundWorktree" => vec![
+        ],
+        "WorktreeRegistry" => vec![
+        ],
+        "WorktreeAllocation" => vec![
+        ],
+        "WorktreeIntegration" => vec![
+        ],
+        _ => return None,
+    })
+}

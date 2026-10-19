@@ -66,6 +66,7 @@ bridge/handlers/src/generated/mod.rs
 tidepool/bridge-effects/src/generated/mod.rs
 tidepool/bridge-effects/src/generated/model_control.rs
 bridge/haskell/lib/Tidepool/Internal/ModelControl.hs
+tidepool/bridge-effects/src/generated/nominal_keys.rs
 exomonad/actor/src/generated/nominal_keys.rs
 exomonad/tool/src/generated/effect_keys.rs
 exomonad/tool/src/generated/public_profiles.rs

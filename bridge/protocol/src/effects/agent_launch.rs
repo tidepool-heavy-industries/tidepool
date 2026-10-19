@@ -14,7 +14,11 @@ pub(crate) const MODEL_FAMILY_PARAMS: &[crate::schema::TypeParam] =
 pub fn agent_launch() -> Effect {
     Effect {
         name: "AgentLaunch",
-        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
+        authored_surface: crate::schema::AuthoredSurface::Only {
+            verbs: &[],
+            type_defs: &["ActorEffectKey", "ToolEffectKey"],
+            helpers: &[],
+        },
         handler: "AgentLaunchDecodeHandler",
         handler_module: "agent_launch",
         req_enum: "AgentLaunchReq",
@@ -444,6 +448,7 @@ fn context_types() -> Vec<TypeDef> {
             doc: &["Why an exact hosted context checkpoint cannot be captured or used."],
         },
         crate::actor_profiles::actor_key_definition(),
+        crate::actor_profiles::tool_key_definition(),
     ]
 }
 

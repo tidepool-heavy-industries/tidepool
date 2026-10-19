@@ -303,3 +303,94 @@ mod family_tests {
         assert_ne!(openai.model_permission, argon.model_permission);
     }
 }
+
+/// Structured callable metadata generated from the owning typed schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectOperationDocumentation {
+    pub name: String,
+    pub signature: String,
+    pub contract: Vec<String>,
+    pub source: Option<String>,
+    pub examples: Vec<String>,
+}
+
+/// Documentation facts for a declaration with a structured schema owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectDocumentationFacts {
+    pub description: String,
+    pub prompt_card: Option<String>,
+    pub imports: Vec<String>,
+    pub operations: Vec<EffectOperationDocumentation>,
+}
+
+/// Project known facts from the selected declaration. Operation entries are
+/// available metadata, not an exhaustive claim about callable vocabulary.
+#[must_use]
+pub fn effect_documentation(decl: &EffectDecl) -> EffectDocumentationFacts {
+    EffectDocumentationFacts {
+        description: decl.description.into(),
+        prompt_card: decl.prompt_card.map(Into::into),
+        imports: decl
+            .extra_imports
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
+        operations: crate::generated::operation_documentation(decl.type_name).unwrap_or_default(),
+    }
+}
+
+/// Resolve a nominal selected row key through the existing declaration catalogue.
+#[must_use]
+pub fn effect_documentation_for(
+    key: impl Into<exomonad_tool::ToolEffectKey>,
+) -> Option<EffectDocumentationFacts> {
+    let key = key.into();
+    let identity = key.nominal_identity()?;
+    let mut declaration = crate::all_decls()
+        .into_iter()
+        .find(|decl| decl.type_name == identity.name)?;
+    if let exomonad_tool::ToolEffectKey::Actor(actor) = key {
+        if let Some(permission) = actor.model_permission() {
+            declaration = declaration.for_model_permission(permission);
+        }
+    }
+    Some(effect_documentation(&declaration))
+}
+
+#[cfg(test)]
+mod documentation_tests {
+    #[test]
+    fn nominal_docs_preserve_families_and_curated_surfaces() {
+        use exomonad_tool::{ActorEffectKey, ModelFamily};
+        let openai = ActorEffectKey::ModelCallOpenAI;
+        let deepseek = ActorEffectKey::ModelCallDeepSeek;
+        assert_eq!(
+            openai.model_permission().unwrap().family,
+            ModelFamily::OpenAI
+        );
+        assert_eq!(
+            deepseek.model_permission().unwrap().family,
+            ModelFamily::DeepSeek
+        );
+        assert_ne!(openai.nominal_identity(), deepseek.nominal_identity());
+        assert!(super::effect_documentation_for(openai).is_some());
+        assert!(super::effect_documentation_for(deepseek).is_some());
+        let commands = super::effect_documentation_for(ActorEffectKey::Commands).unwrap();
+        assert!(commands
+            .operations
+            .iter()
+            .any(|operation| operation.name == "run"));
+        assert!(!commands
+            .operations
+            .iter()
+            .any(|operation| operation.name == "CommandStartWith"));
+        let fs = super::effect_documentation_for(ActorEffectKey::FsRead).unwrap();
+        assert!(!fs.description.is_empty());
+        assert!(super::effect_documentation_for(ActorEffectKey::Replies).is_none());
+        assert!(
+            super::effect_documentation_for(exomonad_tool::ToolEffectKey::ContextReadWrite)
+                .is_some()
+        );
+        assert!(super::effect_documentation_for(exomonad_tool::ToolEffectKey::Reload).is_some());
+    }
+}
