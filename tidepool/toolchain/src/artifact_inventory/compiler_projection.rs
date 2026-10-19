@@ -1180,7 +1180,7 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn from_original_output(
-        compiler: &crate::declaration_context::RequestCompilerInputs,
+        compiler: &Self,
         parent: &Self,
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
@@ -1189,7 +1189,6 @@ impl CompilerSourceSupport {
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
         compiler
-            .compiler_source_support()
             .rebuild(
                 projection,
                 output.issued_artifacts().clone(),

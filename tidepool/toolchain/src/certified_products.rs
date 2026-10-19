@@ -2811,6 +2811,16 @@ impl CertifiedSourceSelection {
         inputs: &crate::declaration_context::RequestCompilerInputs,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
+        Self::from_product_compiler_inputs(
+            &crate::declaration_context::ProductCompilerInputs::from_exact(inputs),
+            operation,
+        )
+    }
+
+    pub(crate) fn from_product_compiler_inputs(
+        inputs: &crate::declaration_context::ProductCompilerInputs<'_>,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
         let metadata = &inputs.metadata;
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
@@ -8940,7 +8950,7 @@ pub(crate) fn certify_products_with_validation(
             let inputs = compiler_inputs
                 .as_ref()
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?;
-            CertifiedSourceSelection::from_compiler_inputs(inputs, &validation.inventory)?
+            CertifiedSourceSelection::from_product_compiler_inputs(&inputs, &validation.inventory)?
         }
         None => CertifiedSourceSelection::new_product_ingress(),
     };
