@@ -126,6 +126,50 @@ fn promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocatio
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
     #[test]
+    fn prepared_promotion_witness_matches_committed_history(
+        seeded in any::<bool>(),
+        history in prop::collection::vec((0u8..16, 0u8..16, any::<bool>()), 0..32),
+    ) {
+        let mut tree = ScopeTree::new();
+        let target = tree.mint_child(ScopeId::ROOT).unwrap();
+        let mut table = BindingTable::new();
+        let ancestor = table.bind_in(ScopeId::ROOT, entry("ancestor", 7)).unwrap();
+        table.save_observation(ancestor, &[], 8);
+        if seeded {
+            table.seed_scope(&tree, ScopeId::ROOT, target);
+        }
+        // Every history covers append, shadow, several names, removals and
+        // an empty name delta; the suffix shrinks independently.
+        let prefix = [(1, 0, true), (1, 0, true), (6, 1, true), (0, 0, true), (0, 12, true)];
+        let names = ["name0", "name1", "name2", "ancestor"];
+        for (step, (writes, removals, commit)) in prefix.into_iter().chain(history).enumerate() {
+            let source = tree.mint_isolated();
+            let mut ids = Vec::new();
+            for (slot, name) in names.iter().enumerate() {
+                if writes & (1u8 << slot) != 0 {
+                    ids.push(table.bind_in(source, entry(name, 1000 + (step * 4 + slot) as u64)).unwrap());
+                }
+            }
+            let removals = names.iter().enumerate()
+                .filter(|(slot, _)| removals & (1u8 << *slot) != 0)
+                .map(|(_, name)| (*name).to_owned())
+                .collect::<Vec<_>>();
+            let before = table.scope_witness(&tree, target).unwrap();
+            let token = table.prepare_exact_binding_promotion_in(source, target, &ids).unwrap();
+            let token = table.prepare_binding_publication_removals(token, &removals).unwrap();
+            let predicted = table.prepared_promotion_scope_witness(&tree, &token).unwrap();
+            prop_assert_eq!(table.scope_witness(&tree, target), Some(before.clone()));
+            if commit {
+                without_allocations(|| table.commit_exact_binding_promotion(token));
+                prop_assert_eq!(table.scope_witness(&tree, target), Some(predicted));
+            } else {
+                drop(token);
+                prop_assert_eq!(table.scope_witness(&tree, target), Some(before));
+            }
+        }
+    }
+
+    #[test]
     fn prepared_promotion_histories_match_visible_model(
         history in prop::collection::vec((0u8..4, any::<bool>(), any::<bool>()), 1..48)
     ) {
@@ -158,6 +202,32 @@ proptest! {
             expected.sort_by(|a, b| a.0.cmp(&b.0));
             prop_assert_eq!(visible(&table, &tree, target), expected);
         }
+    }
+}
+
+#[test]
+fn prepared_promotion_witness_refuses_exhaustion_before_mutation() {
+    for revision in [0, u64::MAX - 1] {
+        let mut tree = ScopeTree::new();
+        let source = tree.mint_isolated();
+        let target = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let first = table.bind_in(source, entry("first", 1)).unwrap();
+        let second = table.bind_in(source, entry("second", 2)).unwrap();
+        table.revision = revision;
+        let token = table
+            .prepare_exact_binding_promotion_in(source, target, &[first, second])
+            .unwrap();
+        let before = table.scope_witness(&tree, target);
+        let before_visible = visible(&table, &tree, target);
+        assert!(matches!(
+            table.prepared_promotion_scope_witness(&tree, &token),
+            Err(BindingPromotionError::MutationWitnessExhausted { revision: observed, advances })
+                if observed == revision && advances == token.revision_advances()
+        ));
+        assert_eq!(table.scope_witness(&tree, target), before);
+        assert_eq!(visible(&table, &tree, target), before_visible);
+        assert_eq!(table.revision, revision);
     }
 }
 
