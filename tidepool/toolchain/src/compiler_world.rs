@@ -1938,6 +1938,16 @@ impl WorldCellOutputAdmission {
     pub(crate) fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
         &self.reservation
     }
+
+    pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.reservation.plan().world().restoration.inputs.primary_context
+    }
+
+    pub(crate) fn primary_compiler_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
+        &self.reservation.plan().world().restoration.primary_compiler_inputs
+    }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
     }
