@@ -1,5 +1,12 @@
 # Shared warm compiler: delivery plan
 
+Current user boundary: all existing workers reached **READY_FOR_BACKEND_HANDOFF**.
+Read [TAKEOVER.md](TAKEOVER.md) and [STATUS.md](STATUS.md) before resuming.
+The feature remains incomplete; this explicit natural-boundary backend transition
+supersedes the earlier overnight drain-to-completion instruction for this session.
+No new implementation wave starts until the new backend takes ownership.
+
+
 Status: active, incomplete implementation campaign; see [current status](STATUS.md) and [resumable handoff](HANDOFF.md).
 Integrated bedfe31 passed eight production/test consumers,154 workflow checks and43
 counted tests, including actual service-backed public-module query histories and

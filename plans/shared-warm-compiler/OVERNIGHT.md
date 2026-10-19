@@ -1,5 +1,12 @@
 # Overnight execution: low-effort root, supervised engineering
 
+Current user boundary: all existing workers reached **READY_FOR_BACKEND_HANDOFF**.
+Read [TAKEOVER.md](TAKEOVER.md) and [STATUS.md](STATUS.md) before resuming.
+The feature remains incomplete; this explicit natural-boundary backend transition
+supersedes the earlier overnight drain-to-completion instruction for this session.
+No new implementation wave starts until the new backend takes ownership.
+
+
 This is the root coordinator's short operating brief. The user intends to run
 this coordinator as Sol low with a user-started goal loop. A Sol-high campaign
 supervisor owns engineering strategy and exact-candidate review through the
