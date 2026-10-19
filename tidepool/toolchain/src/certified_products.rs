@@ -13810,6 +13810,21 @@ pub(crate) mod tests {
             }
             // Two actual selected decision owners conflict; broader offer custody alone
             // does not create a second selected choice.
+            let input_b = support
+                .native_offers()
+                .iter()
+                .find(|offer| *offer == &b)
+                .unwrap()
+                .clone();
+            assert_eq!(input_b, b);
+            assert_eq!(
+                input_b.issued_group_carriers().unwrap(),
+                b.issued_group_carriers().unwrap()
+            );
+            assert!(
+                !input_b.same_issuance(&b),
+                "recovery checked the same B proof through its own input issuer"
+            );
             let left_support =
                 issue_fixture_compiler_support(projection.clone(), left.clone()).unwrap();
             let joined = left_support.merge(&support);
@@ -13824,7 +13839,8 @@ pub(crate) mod tests {
                     joined.artifacts().capture_graph_selection().namespace,
                     left_support.artifacts().capture_graph_selection().namespace
                 );
-                assert_retained_offer("joined-current", 6, &joined, &b);
+                assert_eq!(joined.input_decisions(), left_support.input_decisions());
+                assert_retained_offer("joined-current", 6, &joined, &input_b);
             }
             assert_eq!(
                 right
@@ -14044,12 +14060,62 @@ pub(crate) mod tests {
             .clone();
         assert!(full.is_full());
         assert!(closed.artifacts().selected_native_groups().is_empty());
-        let partial = closed
-            .artifacts()
+        let input_roles = closed
+            .projection()
+            .merge(&CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap())
+            .unwrap();
+        let catalog =
+            crate::artifact_inventory::NativeDependencyCatalog::from_source(&closed).unwrap();
+        let selected_input = input_roles
+            .admit_interfaces_with_native_offers(
+                closed.artifacts(),
+                vec![original.clone()],
+                closed.native_offers(),
+                &catalog,
+            )
+            .unwrap();
+        let input_graph = selected_input.capture_graph_selection();
+        let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+        assert_eq!(
+            input_roles.snapshot_roles()[&original.descriptor.owner].original(),
+            Some(original.descriptor.id)
+        );
+        assert_eq!(
+            input_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical_id),
+            closed
+                .artifacts()
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical_id)
+        );
+        let carriers = full
+            .issued_group_carriers()
+            .unwrap()
+            .into_iter()
+            .filter_map(|(group, carrier)| {
+                (group.binding.artifact() == original.descriptor.id).then_some(carrier)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(carriers.len(), 1);
+        assert_eq!(
+            input_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == original.descriptor.id),
+            carriers.first()
+        );
+        assert!(selected_input.selected_native_groups().is_empty());
+        let partial = selected_input
             .inventory()
             .admit_recovery_selection(
-                &closed.artifacts().inventory().empty_view(),
-                closed.artifacts().entries(),
+                &selected_input,
+                selected_input.entries(),
                 &BTreeSet::from([NativeGroupKey {
                     artifact: original.descriptor.id,
                     original_ordinal: 7,
@@ -14067,23 +14133,15 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(!partial_offer.is_full());
-        let empty = closed
-            .artifacts()
-            .inventory()
-            .admit_shared_with_demand(
-                &closed.artifacts().inventory().empty_view(),
-                closed.artifacts().entries(),
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
+        let empty = selected_input.clone();
         let empty_offer = IssuedNativeOffer::issue(original.descriptor.id, &empty, None).unwrap();
         for (label, view, offer, expected_one, expected_two) in [
-            ("full", closed.artifacts().clone(), full, Some(1), Some(2)),
+            ("full", selected_input, full, Some(1), Some(2)),
             ("partial", partial, partial_offer, None, Some(2)),
             ("empty", empty, empty_offer, None, None),
         ] {
             let availability = RequestNativeAvailability::issue_checked(
-                closed.projection(),
+                &input_roles,
                 &view,
                 std::slice::from_ref(&offer),
             )
@@ -14096,7 +14154,7 @@ pub(crate) mod tests {
                         row.target_original(row.original_owner()).unwrap().descriptor.id,
                         row.original_owner().clone(), row.permits(7), row.permits(9001),
                     )).collect::<Vec<_>>();
-                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, closed.projection().snapshot_roles());
+                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, input_roles.snapshot_roles());
                 });
             assert_eq!(row.permits(7), expected_two.is_some(), "{label}");
             assert_eq!(row.permits(9001), expected_one.is_some(), "{label}");
@@ -14118,13 +14176,12 @@ pub(crate) mod tests {
                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                 )
                 .unwrap();
-            let support =
-                recover_fixture_compiler_support(closed.projection().clone(), view, [offer])
-                    .unwrap()
-                    .retain_normalized_availability(&availability)
-                    .unwrap()
-                    .for_source_owners(&BTreeSet::new())
-                    .unwrap();
+            let support = recover_fixture_compiler_support(input_roles.clone(), view, [offer])
+                .unwrap()
+                .retain_normalized_availability(&availability)
+                .unwrap()
+                .for_source_owners(&BTreeSet::new())
+                .unwrap();
             assert!(support
                 .projection()
                 .roles()
@@ -21822,6 +21879,105 @@ None,
             None,
         )
         .unwrap();
+        let raw_entries = rebound.entries();
+        let raw_prior = raw_entries
+            .iter()
+            .filter(|entry| {
+                matches!(&entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Original(product)
+                if product.owner() == prior_module_product.owner())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_prior.len(),
+            1,
+            "raw fixture has one exact prior body owner"
+        );
+        let raw_prior = raw_prior[0];
+        let crate::artifact_inventory::ArtifactPayload::Original(raw_prior_product) =
+            &raw_prior.payload
+        else {
+            unreachable!()
+        };
+        assert_eq!(raw_prior_product.owner(), prior_module_product.owner());
+        assert_eq!(
+            raw_prior_product.module_interface(),
+            prior_module_product.module_interface()
+        );
+        let expected_binder = prior_native
+            .groups
+            .iter()
+            .find(|group| group.group.original_ordinal() == 7)
+            .unwrap()
+            .group
+            .binders()
+            .iter()
+            .find(|binder| binder.occurrence == "ancestor_7")
+            .unwrap();
+        assert!(authenticates_original_native_entry(
+            raw_prior_product,
+            7,
+            expected_binder
+        ));
+        let expected_missing = raw_prior.descriptor.id;
+        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
+            raw_prior_product.module_interface().unwrap().clone(),
+        )
+        .descriptor
+        .id;
+        let raw_current = raw_entries
+            .iter()
+            .filter(|entry| {
+                matches!(&entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Original(product)
+                if product.owner() == planned_product.owner())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(raw_current.len(), 1);
+        let raw_edges = rebound.binding_dependencies();
+        let required_edges = raw_edges.iter().filter(|(source, target, edge)|
+            matches!((source, target, edge), (
+                crate::artifact_inventory::ArtifactBindingNode::Group(source),
+                crate::artifact_inventory::ArtifactBindingNode::Group(target),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 7, required_ordinal: 7 }
+            ) if source.binding.artifact() == raw_current[0].descriptor.id
+                && source.original_ordinal == 7
+                && target.binding.artifact() == expected_missing
+                && target.original_ordinal == 7)).collect::<Vec<_>>();
+        assert_eq!(
+            required_edges.len(),
+            1,
+            "actual raw G7 requires this exact prior group7"
+        );
+        let raw_projection = planned
+            .certified
+            .source_selection
+            .compiler_projection(&rebound)
+            .unwrap();
+        let prior_identity = ExactModuleIdentity {
+            unit: prior_module_product.owner().unit.clone(),
+            module: prior_module_product.owner().module.clone(),
+        };
+        assert_eq!(
+            raw_projection.snapshot_roles()[&prior_identity].original(),
+            Some(expected_missing)
+        );
+        assert_eq!(
+            raw_projection.snapshot_roles()[&prior_identity].interface(),
+            expected_canonical
+        );
+        let earlier = crate::artifact_inventory::ArtifactEntry::original(
+            canonical_producer,
+            prior_module_product.clone(),
+        )
+        .unwrap();
+        assert!(prior_support
+            .artifacts()
+            .artifact_ids()
+            .contains(&earlier.descriptor.id));
+        eprintln!("raw prior certificate: earlier_id={:?} earlier_cert={:?} raw_id={:?} raw_cert={:?} exact_required_edges={required_edges:?}",
+            earlier.descriptor.id, earlier.descriptor.certification_sha256,
+            expected_missing, raw_prior.descriptor.certification_sha256);
         let rebound_result = planned
             .certified
             .source_selection
@@ -21852,15 +22008,6 @@ None,
             Err(CertificationError::Mismatch(reason)) => format!("Mismatch({reason})"),
             Err(other) => format!("other typed error {:?}", std::mem::discriminant(other)),
         };
-        let expected_missing = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
-            canonical_producer,
-            &prior_module_product,
-        );
-        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
-            prior_module_product.module_interface().unwrap().clone(),
-        )
-        .descriptor
-        .id;
         let raw_namespace = rebound.capture_graph_selection().namespace;
         let raw_binding = |id| {
             raw_namespace

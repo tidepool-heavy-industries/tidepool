@@ -389,6 +389,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
         let mut context = original.as_ref().clone();
         let mut outputs = BTreeMap::new();
+        let mut cached_outputs = BTreeSet::new();
         let request_scratch = tempfile::tempdir().unwrap();
         // Every history reaches the causal interaction, even after shrinking:
         // later same-owner body -> compose publication -> durable reconstruction.
@@ -445,7 +446,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     ]).remove(0).product;
                     let output = Arc::new(ArtifactEntry::original(CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(), product.clone()).unwrap());
                     let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
-                    let output_role = CompilerInputProjection::from_issued_entries(&[Arc::new(canonical.clone())]).unwrap().roles();
+
                     let request = ExactCompileContext::new(Arc::new(context.clone()))
                         .prepare_compilation(&request_scratch.path().join(format!("input-{step}")), PRODUCER).unwrap();
                     let operation = InventoryOperation::new(Default::default());
@@ -454,14 +455,20 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     ).unwrap();
                     let existing = request.compiler_inputs().projection().snapshot_roles()
                         .get(&output.descriptor.owner);
-                    let origin = if let Some(existing) = existing {
+                    let emitted_before = outputs.contains_key(&ordinal);
+                    prop_assert_eq!(existing.is_some(), emitted_before);
+                    if let Some(existing) = existing {
                         prop_assert_eq!(existing.interface(), canonical.descriptor.id);
-                        prop_assert!(existing.original().is_none());
+                        prop_assert_eq!(existing.original(), cached_outputs.contains(&ordinal)
+                            .then_some(output.descriptor.id));
                         prop_assert!(request.compiler_inputs().native_availability(output.descriptor.id)
                             .is_some_and(|row| row.permits(0)));
-                        ProductOrigin::Cached
+                    }
+                    let origin = if emitted_before { ProductOrigin::Cached } else { ProductOrigin::RetainedCore };
+                    let expected_output_role = if emitted_before {
+                        CompilerInputRole::ReusableOriginal { interface: canonical.descriptor.id, original: output.descriptor.id }
                     } else {
-                        ProductOrigin::RetainedCore
+                        CompilerInputRole::InterfaceOnly { interface: canonical.descriptor.id }
                     };
                     selection.admit_current(product.owner(), origin,
                         product.module_interface().unwrap(), &operation).unwrap();
@@ -470,10 +477,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces).unwrap();
                     let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
                     let actual_role = &completed.role_projection().snapshot_roles()[&output.descriptor.owner];
-                    prop_assert!(matches!(actual_role,
-                        CompilerInputRole::InterfaceOnly { interface } if *interface == canonical.descriptor.id),
-                        "completed output role: step={} ordinal={} owner={:?} origin={:?} input_role={:?} actual={:?} expected_canonical={:?}",
-                        step, ordinal, output.descriptor.owner, origin, existing, actual_role, canonical.descriptor.id);
+                    prop_assert_eq!(actual_role, &expected_output_role,
+                        "completed output role: step={} ordinal={} owner={:?} origin={:?} input_role={:?}",
+                        step, ordinal, output.descriptor.owner, origin, existing);
                     let output_permission = completed.native_availability().rows()
                         .find(|row| row.original_owner() == product.owner()).unwrap();
                     prop_assert!(output_permission.permits(0));
@@ -504,8 +510,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         original_ordinal: 0,
                         binder: binding.identity.clone(),
                     };
+                    if emitted_before { cached_outputs.insert(ordinal); }
+                    expected_roles.retain(|role| role.interface() != canonical.descriptor.id);
+                    expected_roles.push(expected_output_role);
                     if outputs.insert(ordinal, (output.clone(), output_import, permitted_carriers)).is_none() {
-                        expected_roles.extend(output_role);
                         expected_artifacts.extend([output.descriptor.id, canonical.descriptor.id]);
                     }
                     demanded.insert(ordinal);
