@@ -100,7 +100,7 @@ Next: fresh resource sample, transfer exact committed source to build checkout, 
 supported serial `swarm-build just build -j1 //tidepool/toolchain:tidepool_toolchain
 //tidepool/toolchain:tidepool_toolchain_unit_tests_binary --build-report REPORT`.
 Run exact counted tests with `swarm-build just test-lib tidepool-toolchain --exact
-SELECTOR --expected-count1 --jobs1 --timeout600 --output-dir DIR --retain-artifacts`
+SELECTOR --expected-count 1 --jobs 1 --timeout 600 --output-dir DIR --retain-artifacts`
 (spell flags with separated values). Observer scripts in private receipts preserve the
 actual argument arrays. Final joined roster is the9 history/cost/refusal controls plus
 `exact_context::tests::publication_native_descriptor_refuses_old_version_and_missing_map_roots`,
