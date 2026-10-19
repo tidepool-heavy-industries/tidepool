@@ -366,6 +366,10 @@ impl RuntimeSourceFence {
             settled.await;
         }
     }
+    /// Test-only shortcut for a fence the test itself opened. It skips the
+    /// lease, same-owner check and publication compare that `reopen_with`
+    /// requires, so production code must not reopen through it.
+    #[cfg(test)]
     pub fn reopen(self) -> Result<(), SourceAdmissionError> {
         self.settle(SourceAdmissionPhase::Open)
     }

@@ -958,8 +958,10 @@ impl PersistentSession {
                 .iter()
                 .flat_map(|selected| selected.image().constructor_declarations()),
         )?;
-        let qualified = target.source_plan().is_some();
-        let inherited = if let Some(plan) = target.source_plan() {
+        let plan = target
+            .source_plan()
+            .ok_or(PreparedRuntimeError::MissingSourceDomainPlan)?;
+        let inherited = {
             let current = self
                 .bindings
                 .scope_snapshot(&self.scopes, scope)
@@ -969,43 +971,6 @@ impl PersistentSession {
             }
             // The exact scoped snapshot binds the privately issued selection.
             plan.selection.inherited().clone()
-        } else {
-            #[cfg(not(test))]
-            {
-                return Err(PreparedRuntimeError::SourceScopeAdmission);
-            }
-            #[cfg(test)]
-            {
-                let mut inherited = BTreeMap::new();
-                let mut anchors = HashMap::new();
-                for lease in self
-                    .bindings
-                    .selected_source_instances_in(&self.scopes, scope)
-                {
-                    let group = (lease.owner().clone(), lease.original_ordinal());
-                    if anchors
-                        .insert(group.clone(), lease.instance())
-                        .is_some_and(|old| old != lease.instance())
-                    {
-                        return Err(PreparedRuntimeError::AmbiguousSourceGroup {
-                            owner: group.0,
-                            ordinal: group.1,
-                        });
-                    }
-                    let key = tidepool_codegen::prepared_program::ScopedSourceBinder {
-                        domain: tidepool_codegen::prepared_program::SourceInstanceDomain::single(),
-                        source: lease.binder().clone(),
-                    };
-                    if inherited.insert(key.clone(), lease.clone()).is_some_and(
-                        |old: SourceInstanceLease| {
-                            old.instance() != lease.instance() || old.handle() != lease.handle()
-                        },
-                    ) {
-                        return Err(PreparedRuntimeError::AmbiguousSourceInstance(key.source));
-                    }
-                }
-                inherited
-            }
         };
         let mut exact_external = HashMap::new();
         let retained = std::cell::OnceCell::new();
@@ -1060,19 +1025,14 @@ impl PersistentSession {
             &self.bindings,
         )?;
         let tokens = std::mem::take(&mut staged.leases);
-        let admitted = if qualified {
-            engine
-                .admit_source_instances(
-                    &mut self.bindings,
-                    &self.scopes,
-                    scope,
-                    std::mem::take(&mut staged.domain_leases),
-                )
-                .map_err(|_| tokens.clone())
-        } else {
-            self.bindings
-                .register_source_install_in(&self.scopes, scope, tokens.clone())
-        };
+        let admitted = engine
+            .admit_source_instances(
+                &mut self.bindings,
+                &self.scopes,
+                scope,
+                std::mem::take(&mut staged.domain_leases),
+            )
+            .map_err(|_| tokens.clone());
         match admitted {
             Ok(keys) => {
                 let engine = bootstrap
@@ -5608,7 +5568,12 @@ mod checkpoint_scope_tests {
             .resolve_certification_in(scope, &prepared, &TurnCertification::default())
             .unwrap();
         assert!(resolved.groups.is_empty());
-        let target = CertifiedTargetImage::compile(prepared, &ImageRegistry::new()).unwrap();
+        let target = CertifiedTargetImage::compile_with_plan(
+            prepared,
+            &ImageRegistry::new(),
+            resolved.source_plan.clone(),
+        )
+        .unwrap();
         let (program, keys) = session
             .install_certified_turn_in(
                 scope,
@@ -6496,7 +6461,9 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert_eq!(resolved.target_owners, vec![expected]);
         let registry = ImageRegistry::new();
-        let target = CertifiedTargetImage::compile(prepared.clone(), &registry).unwrap();
+        let target =
+            CertifiedTargetImage::compile_with_plan(prepared.clone(), &registry, resolved.source_plan.clone())
+                .unwrap();
         let (program, keys) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
