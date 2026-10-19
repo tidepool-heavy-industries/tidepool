@@ -221,3 +221,38 @@ both materialization and P6. No extra publication snapshot or compiler-support
 refresh is approved. The row producer owns this bounded repair; next event
 remains the committed exact candidate and source-only review. Native checks are
 still deferred on the measured resource blocker.
+
+## Current source acceptance and native lane
+
+Original-factory repair `efdde8930756507015616e3cb48fdee5593b2416` prepared
+the pinned `--tests` toolchain successfully after disk headroom recovered. Its
+`swarm-build just check tidepool-toolchain tidepool-runtime` terminated exit 3:
+three nested test consumers still lacked the new materialization transport
+argument. The failure log is
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/owned-inputs/rows/check-value-factory.log`.
+No full compile or executed-test pass was claimed.
+
+Successor `49b65c8f8220c0beb3e9b6b4ecdf5fc83654c779` repairs those callers and
+replaces a structural entry-equality reuse fallback with exact issued-facts
+owner identity plus descriptor/requirements. The foreign independently issued
+equal-ID/equal-content row has a maintained refusal control. Independent
+Sol-high cumulative `5b74..49b65` review accepts source only, with no remaining
+confirmed assigned-scope source findings. Production/test compilation and
+executed counts remain separate gates.
+
+The retry is running under row-owner observation, session `14002`, log
+`rows/check-exact-provenance.log` in the evidence directory above. The campaign
+explicitly admitted its 12 GiB memory allowance based on prior observed 7.18 GiB
+scope peak and fresh memory/disk accounting. The already-running actual command
+is the same `just check` recipe without a jobs argument; the campaign approved
+that crossed start, without cancellation or duplication. Future retries use
+the same check-plan labels through the existing pinned Buck entry point with
+`-j1`. No unobserved build is handed off. Rows owns terminal result collection
+and then meaningful counted controls within the admitted graph/resources.
+
+Required real-worker selections include the existing runtime checked-expression
+publication/next-cell history and source-hidden paired-join fresh-worker case,
+in addition to row lifetime/issuer/refusal controls and the mandatory native
+selection regressions. Parent qualification still owns the exact joined actor/
+shared-workspace Persona acceptance. Area product fold/acceptance is pending
+actual native results; no new deployment or performance claim is established.
