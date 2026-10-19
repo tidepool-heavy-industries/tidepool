@@ -5973,12 +5973,43 @@ impl ExactProgramSegmentAdmission {
     }
 }
 
+/// Borrowed issued facts needed by output certification. This view performs no
+/// input selection, physical materialization or authority issuance.
+struct ProductInputFacts<'a> {
+    context: &'a Arc<ExactDeclarationContext>,
+    compiler: &'a RequestCompilerInputs,
+    groups: &'a [PendingCertifiedGroup],
+    source_lexical: &'a [ExactLexicalNode],
+    program_support: Option<&'a ProgramSourceSupport>,
+    scaffold_imports: &'a [GeneratedScaffoldImportAuthority],
+    checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
+    producer: [u8; 32],
+}
+
+impl<'a> ProductInputFacts<'a> {
+    fn from_exact(
+        request: &'a ExactCompilationRequest,
+        inputs: &'a ExactRequestInputs,
+        program: &'a ProgramSourceSupportState,
+        groups: &'a [PendingCertifiedGroup],
+    ) -> Self {
+        Self {
+            context: inputs.context(),
+            compiler: inputs.compiler(),
+            groups,
+            source_lexical: &program.program_source_lexical,
+            program_support: program.program_support.as_ref(),
+            scaffold_imports: &request.generated_scaffold_imports,
+            checked_values: &request.checked_value_imports,
+            producer: request.producer_sha256,
+        }
+    }
+}
+
 pub(crate) struct ExactProductAdmission<'a> {
     request: &'a ExactCompilationRequest,
     source: &'a ExactSourceAdmission,
-    inputs: &'a ExactRequestInputs,
-    program: &'a ProgramSourceSupportState,
-    groups: &'a [PendingCertifiedGroup],
+    facts: ProductInputFacts<'a>,
 }
 
 /// Captured product evidence matched by the exact receipt issuer. The source
@@ -6229,7 +6260,7 @@ impl ExactSourceAdmission {
 
 impl<'a> ExactProductAdmission<'a> {
     pub(crate) fn program_source_lexical(&self) -> &'a [ExactLexicalNode] {
-        &self.program.program_source_lexical
+        self.facts.source_lexical
     }
 
     pub(crate) fn physical_request(&self) -> &'a ExactCompilationRequest {
@@ -6240,13 +6271,13 @@ impl<'a> ExactProductAdmission<'a> {
     }
 
     pub(crate) fn compiler_inputs(&self) -> &'a RequestCompilerInputs {
-        self.inputs.compiler()
+        self.facts.compiler
     }
     pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
-        self.inputs.context()
+        self.facts.context
     }
     pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
-        self.groups
+        self.facts.groups
     }
 
     // Fixture roles are explicit request/support roles plus the authenticated
@@ -6270,7 +6301,7 @@ impl<'a> ExactProductAdmission<'a> {
             .projection()
             .within_view(artifacts)
             .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
-        if let Some(support) = &self.program.program_support {
+        if let Some(support) = self.facts.program_support {
             projection =
                 projection.merge(&support.compiler_support.projection().within_view(artifacts))?;
         }
@@ -6293,7 +6324,8 @@ impl<'a> ExactProductAdmission<'a> {
         inputs: &OriginalCompilerInputs,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let support = crate::artifact_inventory::CompilerSourceSupport::from_original_output(
-            self.inputs,
+            self.facts.compiler,
+            self.facts.context.compiler_source_support(),
             inputs,
         )?;
         let artifacts = support.artifacts();
@@ -6342,7 +6374,7 @@ impl<'a> ExactProductAdmission<'a> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut scaffold = Vec::new();
-        if let Some(support) = &self.program.program_support {
+        if let Some(support) = self.facts.program_support {
             let roots = support
                 .compiler_support
                 .artifacts()
@@ -6378,7 +6410,7 @@ impl<'a> ExactProductAdmission<'a> {
                 }
             }
         }
-        for (index, authority) in self.request.generated_scaffold_imports.iter().enumerate() {
+        for (index, authority) in self.facts.scaffold_imports.iter().enumerate() {
             let graph = authority
                 .original_instance_graph()
                 .into_iter()
@@ -6406,11 +6438,11 @@ impl<'a> ExactProductAdmission<'a> {
                 scaffold.push(node.clone());
             }
         }
-        self.request.checked_value_imports.validate()?;
+        self.facts.checked_values.validate()?;
         let retained_interfaces = projection
             .project_metadata(artifacts.metadata_snapshot())?
             .entries;
-        for (unit, module) in self.request.checked_value_imports.owners() {
+        for (unit, module) in self.facts.checked_values.owners() {
             let owner = identity(unit, module);
             if !exact_roots.contains(&owner) || imports.contains_key(&owner) {
                 continue;
@@ -6418,10 +6450,7 @@ impl<'a> ExactProductAdmission<'a> {
             if let Some(entry) = retained_interfaces.get(&owner) {
                 match &entry.payload {
                     ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
-                        if self
-                            .request
-                            .checked_value_imports
-                            .matches_interface(interface) =>
+                        if self.facts.checked_values.matches_interface(interface) =>
                     {
                         // Compiler-issued thin value interfaces define no
                         // instances. Nominal requirements are not scope edges.
@@ -6472,7 +6501,7 @@ impl<'a> ExactProductAdmission<'a> {
             required.extend(owners.iter().cloned());
         }
         let context = ExactDeclarationContext::from_authenticated_execution_support(
-            self.request.producer_sha256,
+            self.facts.producer,
             support,
             lexical,
             self.source.generated_source_owner()?,
@@ -6499,9 +6528,7 @@ impl ExactCompilationRequest {
         ExactProductAdmission {
             request: self,
             source,
-            inputs: &self.inputs,
-            program: &self.program,
-            groups: &self.groups,
+            facts: ProductInputFacts::from_exact(self, &self.inputs, &self.program, &self.groups),
         }
     }
 
@@ -7192,9 +7219,12 @@ impl<'a> ExactReceiptAdmission<'a> {
         ExactProductAdmission {
             request: self.physical,
             source,
-            inputs: self.inputs,
-            program: self.program,
-            groups: self.groups,
+            facts: ProductInputFacts::from_exact(
+                self.physical,
+                self.inputs,
+                self.program,
+                self.groups,
+            ),
         }
     }
     fn validate_outputs_selected_with_validation(

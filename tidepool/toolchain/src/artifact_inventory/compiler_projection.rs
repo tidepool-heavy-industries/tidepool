@@ -1180,23 +1180,20 @@ impl CompilerSourceSupport {
     }
 
     pub(crate) fn from_original_output(
-        request: &crate::declaration_context::ExactRequestInputs,
+        compiler: &crate::declaration_context::RequestCompilerInputs,
+        parent: &Self,
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
-        let projection = request
-            .compiler()
+        let projection = compiler
             .projection()
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
-        request
-            .compiler()
+        compiler
             .compiler_source_support()
             .rebuild(
                 projection,
                 output.issued_artifacts().clone(),
-                request
-                    .context()
-                    .compiler_source_support()
+                parent
                     .native_offers()
                     .iter()
                     .chain(output.issued_offers())
