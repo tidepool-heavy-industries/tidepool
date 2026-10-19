@@ -17039,6 +17039,19 @@ mod tests {
         drop(private_support);
         captured.normalize().unwrap();
         let captured = Arc::new(captured);
+        let materialized = captured
+            .artifact_view()
+            .retained_materialization(&captured.compiler_metadata_snapshot().unwrap())
+            .unwrap();
+        let mut captured_row = None;
+        if let Some(materialized) = &materialized {
+            materialized.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                if let Some(row) = owner.rows.get(&id) {
+                    captured_row = Some((row.interface.path.clone(), Arc::downgrade(row)));
+                }
+            });
+        }
+        drop(materialized);
         let selected_owner = Arc::downgrade(
             &captured
                 .compiler_metadata_snapshot()
@@ -17060,6 +17073,16 @@ mod tests {
         drop(next);
         drop(descendant);
         drop(ancestor);
+        eprintln!(
+            "detached physical custody: request_file={:?}; late_file={:?}; captured_row={:?}",
+            file.path,
+            late_file.path,
+            captured_row.as_ref().map(|(path, owner)| (
+                path,
+                path.exists(),
+                owner.upgrade().is_some()
+            ))
+        );
         assert!(
             file.path.exists(),
             "detached selection owns its selected file"
@@ -18343,6 +18366,7 @@ mod tests {
     fn metadata_identity_is_path_independent_and_tracks_graph_selection() {
         let (context, _) = metadata_fixture();
         let expected = context.semantic_sha256();
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
         let before = context
             .owner
             .facts
@@ -18358,9 +18382,10 @@ mod tests {
             .artifacts()
             .inventory()
             .metrics();
-        // The first identity query already warmed this immutable view projection.
+        // The first identity query owns the metadata, encoding and digest.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
-        assert_eq!(after.view_queries - before.view_queries, 1);
+        assert_eq!(after.view_queries - before.view_queries, 0);
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
         for _ in 0..2 {
             let directory = tempfile::tempdir().unwrap();
             context.materialize_scratch(&directory).unwrap();

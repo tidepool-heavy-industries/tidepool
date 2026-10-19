@@ -8090,6 +8090,8 @@ mod module_product_tests {
     #[ignore = "requires matched Haskell worker and frontend"]
     #[serial_test::serial]
     fn real_deployment_package_reuses_cohort_and_invalidates_source_shadow() {
+        use sha2::{Digest, Sha256};
+
         let package = crate::toolchain::configured_module_package()
             .unwrap()
             .expect("requires the matched native runtime catalog");
@@ -8174,6 +8176,37 @@ mod module_product_tests {
             |_, _, _| {},
         )
         .unwrap();
+        let source_witness = shadowed.completed_source_evidence.as_ref().unwrap();
+        let shadow_path = shadow.path().join("Tidepool/FilePath.hs");
+        assert!(source_witness.sources.iter().any(|source| {
+            source.path == shadow_path && source.sha256 == format!("{:x}", Sha256::digest(&changed))
+        }));
+        assert!(source_witness.modules.iter().any(|module| {
+            module.unit == "main"
+                && module.module == "Tidepool.FilePath"
+                && module.source == shadow_path
+                && module.product == crate::cache::ProductAvailability::InterfaceOnly
+        }));
+        assert!(shadowed
+            .certified_groups
+            .iter()
+            .all(|group| group.owner().module != "Tidepool.FilePath"));
+        let selected = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            shadowed.source_selection.as_ref().unwrap(),
+            &shadowed.artifact_view,
+        )
+        .unwrap();
+        let roles = selected.role_projection().snapshot_roles();
+        let file_path_role = &roles[&crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: "Tidepool.FilePath".into(),
+        }];
+        assert!(file_path_role.original().is_none());
+        assert!(matches!(
+            &selected.artifacts().metadata_snapshot().artifacts[&file_path_role.interface()]
+                .payload,
+            crate::artifact_inventory::ArtifactPayload::Canonical(_)
+        ));
         for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
             let issued_groups = shadowed
                 .certified_groups
@@ -8198,7 +8231,7 @@ mod module_product_tests {
                 owners.get(module)
             );
         }
-        for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
+        for module in ["Tidepool.Prelude"] {
             assert!(
                 shadowed
                     .certified_groups
@@ -8248,8 +8281,62 @@ mod module_product_tests {
                     && owners.get(&group.owner().module) == Some(group.owner())),
             "an unaffected original owner survives source shadowing"
         );
+
+        let native_shadow = tempfile::tempdir().unwrap();
+        std::fs::create_dir(native_shadow.path().join("Tidepool")).unwrap();
+        let mut native_source = changed;
+        assert!(!std::str::from_utf8(&native_source)
+            .unwrap()
+            .contains("{-# NOINLINE normalise #-}"));
+        native_source.extend_from_slice(b"\n{-# NOINLINE normalise #-}\n");
+        std::fs::write(
+            native_shadow.path().join("Tidepool/FilePath.hs"),
+            native_source,
+        )
+        .unwrap();
+        let mut native_roots = vec![native_shadow.path().to_owned()];
+        native_roots.extend(source_selection.include_roots());
+        let native = crate::artifacts::test_support::compile_targets(
+            include_str!("../tests/fixtures/deployment-module-package/NativeConsumer.hs"),
+            &["result"],
+            &native_roots,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert!(native.certified_groups.iter().any(|group| {
+            group.owner().module == "Tidepool.FilePath" && group.origin() == ProductOrigin::Fresh
+        }));
+        assert!(native.certified_groups.iter().all(|group| {
+            group.owner().module != "Tidepool.FilePath" || group.origin() != ProductOrigin::Cached
+        }));
+        let native_selection = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            native.source_selection.as_ref().unwrap(),
+            &native.artifact_view,
+        )
+        .unwrap();
+        let native_original = native
+            .recovery_products
+            .iter()
+            .find(|product| product.owner().module == "Tidepool.FilePath")
+            .unwrap();
+        let native_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            native_original
+                .module_interface()
+                .unwrap()
+                .producer_sha256(),
+            native_original,
+        );
+        assert_eq!(
+            native_selection.role_projection().snapshot_roles()
+                [&crate::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "Tidepool.FilePath".into(),
+                }]
+                .original(),
+            Some(native_id)
+        );
         eprintln!(
-            "deployment catalog {}: {} packaged modules, {} cached owners; shadowed FilePath and Prelude rebuilt",
+            "deployment catalog {}: {} packaged modules, {} cached owners; shadowed FilePath type evidence, fresh Prelude and demanded FilePath Original",
             package.catalog_identity(),
             cohort.len(),
             cached.len()
