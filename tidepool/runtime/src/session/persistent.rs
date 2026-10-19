@@ -1705,6 +1705,10 @@ impl PersistentSession {
     }
 
     fn build_scoped_compile_view(&self, scope: ScopeId, lib: &SessionLib) -> SessionCompileView {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::CompileViewBuild,
+            1,
+        );
         let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
@@ -4326,6 +4330,36 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .prepared_handle_of(own.value.handle.raw()),
             Some(own.value.handle),
+        );
+    }
+
+    #[test]
+    fn inspection_digest_observation_counts_build_without_capture_entry() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let session = publication_session(&recovery, root.path(), 419);
+        let observation = HostWorkObservation::new();
+        assert!(session.compile_views.lock().is_empty());
+        let digest = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
+        let first = observation.snapshot();
+        assert_eq!(first.get(HostWorkCounter::CompileViewCapture), 0);
+        assert_eq!(first.get(HostWorkCounter::InjectedValueVisit), 0);
+        assert_eq!(first.get(HostWorkCounter::CompileViewBuild), 1);
+        assert!(first.get(HostWorkCounter::CompileViewDigestInputByte) > 0);
+        let repeated = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
+        assert_eq!(digest, repeated);
+        assert_eq!(
+            observation
+                .snapshot()
+                .get(HostWorkCounter::CompileViewBuild),
+            1
+        );
+        assert_eq!(
+            observation
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            first.get(HostWorkCounter::CompileViewDigestInputByte)
         );
     }
 
