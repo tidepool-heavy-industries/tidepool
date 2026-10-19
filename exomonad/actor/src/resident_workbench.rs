@@ -17035,6 +17035,79 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn world_capture_keeps_each_checked_binding_from_one_value_row() {
+        with_test_compiler_owner(|preparation_client| async move {
+            use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+            let (machines, context, source, _root) = actor_registry_fixture();
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                source.bind_preparation(preparation_client),
+                None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+            workbench
+                .publish_cell_for_test(
+                    context.clone(),
+                    "let (worldA, worldB) = ((7 :: Int), (8 :: Int))",
+                )
+                .await
+                .unwrap();
+            workbench
+                .access
+                .with_machine(context, |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let first = session.current_binding_in(scope, "worldA").unwrap();
+                    let second = session.current_binding_in(scope, "worldB").unwrap();
+                    assert_ne!(first.0, second.0);
+                    assert_eq!(
+                        first.1, second.1,
+                        "one checked item owns both visible names"
+                    );
+                    let symbols = session
+                        .prepared_retained()
+                        .into_iter()
+                        .filter(|(_, generation)| *generation == first.1.gen().0)
+                        .map(|(symbol, _)| symbol)
+                        .collect::<Vec<_>>();
+                    assert_eq!(symbols.len(), 2);
+                    assert_ne!(symbols[0], symbols[1]);
+                    assert!(symbols.iter().all(|symbol| !symbol.unit.is_empty()
+                        && !symbol.module.is_empty()
+                        && !symbol.namespace.is_empty()
+                        && !symbol.occurrence.is_empty()));
+                    let source = tidepool_runtime::session::GenerationArtifactReference::capture(
+                        b"checked binding capture".to_vec(),
+                    );
+                    let original = context.source_dependency().source_lease()?;
+                    let observation = HostWorkObservation::new();
+                    let admitted = observation
+                        .scope(|| session.capture_inspection_world_in(scope, &source, &original))
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    assert!(admitted.needs_source_capture());
+                    let work = observation.snapshot();
+                    assert_eq!(work.get(HostWorkCounter::ValueInterfaceCapture), 1);
+                    assert_eq!(
+                        work.get(HostWorkCounter::ReachableValueVisit),
+                        2,
+                        "bindings sharing a checked row retain independent occurrences"
+                    );
+                    assert_eq!(work.get(HostWorkCounter::RetainedValueSupportMerge), 0);
+                    assert_eq!(work.get(HostWorkCounter::CompilerMetadataSnapshot), 0);
+                    assert_eq!(work.get(HostWorkCounter::ScopeEncodedByte), 0);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn public_module_world_hot_queries_skip_retained_history_preparation() {
         with_test_compiler_owner(|preparation_client| async move {

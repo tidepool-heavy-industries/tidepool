@@ -1744,52 +1744,54 @@ impl PersistentSession {
             tidepool_toolchain::timing::HostWorkCounter::ColdBootstrap,
             1,
         );
-        let mut visible = self
+        let visible = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
             .filter(|(_, entry)| !hidden(entry.id))
             .collect::<Vec<_>>();
-        visible.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
-        let visibility = visible
+        // A generic source stub has no checked row. Refuse the whole captured
+        // namespace before constructing bindings, including when a different
+        // visible entry also lacks retained interface custody.
+        if let Some((name, entry)) = visible
             .iter()
-            .map(|(name, entry)| {
-                (
-                    name.0.clone(),
-                    entry.module.module_name(),
-                    entry.module.gen.0,
-                    entry.scope.0,
-                    entry.id.raw(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut encoded = Vec::new();
-        ciborium::ser::into_writer(&("TPCWV001", scope.0, visibility), &mut encoded)
-            .map_err(|error| SessionError::Io(std::io::Error::other(error.to_string())))?;
-        tidepool_toolchain::timing::record_host_work(
-            tidepool_toolchain::timing::HostWorkCounter::ScopeEncodedByte,
-            encoded.len() as u64,
-        );
-        let mut modules = HashSet::new();
-        let mut rows = Vec::new();
+            .find(|(_, entry)| self.is_stub_module(entry.module))
+        {
+            return Err(SessionError::UnsupportedCompilerWorldBinding {
+                binding: (*name).clone(),
+                identity: entry.value.identity.clone(),
+                id: entry.id,
+                scope: entry.scope,
+                module: entry.module,
+            });
+        }
+        let mut bindings = Vec::with_capacity(visible.len());
         tidepool_toolchain::timing::record_host_work(
             tidepool_toolchain::timing::HostWorkCounter::ValueInterfaceCapture,
             1,
         );
-        for (_, entry) in visible {
-            if self.is_stub_module(entry.module) || !modules.insert(entry.module) {
-                continue;
-            }
+        for (name, entry) in visible {
             tidepool_toolchain::timing::record_host_work(
                 tidepool_toolchain::timing::HostWorkCounter::ReachableValueVisit,
                 1,
             );
-            rows.push(
-                self.retained_checked_value_artifact(entry.module)
-                    .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?
-                    .clone(),
+            let row = self
+                .retained_checked_value_artifact(entry.module)
+                .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?;
+            bindings.push(
+                tidepool_toolchain::compiler_world::CompilerWorldBinding::from_checked_value(
+                    &name.0,
+                    &entry.value.identity,
+                    entry.id,
+                    entry.scope.0,
+                    row.clone(),
+                ),
             );
         }
+        let bindings =
+            tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
+                scope.0, bindings,
+            )?;
         Ok(AdmittedInspectionWorld {
             base: InspectionWorldBase {
                 scope,
@@ -1802,8 +1804,7 @@ impl PersistentSession {
             },
             inputs: InspectionWorldInputs::Cold {
                 primary: self.lib().current_exact_context_in(scope),
-                rows,
-                visibility: encoded.into(),
+                bindings,
             },
         })
     }
@@ -4600,6 +4601,97 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .prepared_handle_of(own.value.handle.raw()),
             Some(own.value.handle),
+        );
+    }
+
+    #[test]
+    fn world_binding_capture_refuses_visible_stubs_before_missing_rows() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 422);
+        let scope = session.mint_isolated_scope();
+        let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                original_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let legacy = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "aLegacy", 1300,
+                    );
+                    let legacy_module = legacy.module;
+                    session.bind_in(scope, legacy)?;
+                    // Raw retained bytes are deliberately not a checked row.
+                    session.retain_fixture_value_interface(legacy_module, Arc::from([1, 2, 3]));
+                    session.mark_legacy_value_interface(legacy_module);
+                    let stub = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "zStub", 1301,
+                    );
+                    let identity = stub.value.identity.clone();
+                    let id = stub.id;
+                    let module = stub.module;
+                    session.bind_in(scope, stub)?;
+                    session.mark_stub_generation(module.gen());
+                    Ok::<_, SessionError>((legacy_module, identity, id, module))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        let (legacy_module, identity, stub_id, stub_module) =
+            settled.into_outcome().action.unwrap();
+        let source = super::super::GenerationArtifactReference::capture(b"binding source".to_vec());
+        let observation = HostWorkObservation::new();
+        let refused = observation.scope(|| {
+            session.capture_inspection_world_in(scope, &source, &original_source, |_| false)
+        });
+        match refused {
+            Err(SessionError::UnsupportedCompilerWorldBinding {
+                binding,
+                identity: actual,
+                id,
+                scope: actual_scope,
+                module,
+            }) => {
+                assert_eq!(binding.0, "zStub");
+                assert_eq!(actual, identity);
+                assert_eq!(id, stub_id);
+                assert_eq!(actual_scope, scope);
+                assert_eq!(module, stub_module);
+            }
+            _ => panic!("a visible generic stub must refuse the complete namespace first"),
+        }
+        let work = observation.snapshot();
+        assert_eq!(work.get(HostWorkCounter::ColdBootstrap), 1);
+        assert!(work.get(HostWorkCounter::WorldKeyFactRead) > 0);
+        for counter in HostWorkCounter::ALL {
+            if !matches!(
+                counter,
+                HostWorkCounter::ColdBootstrap | HostWorkCounter::WorldKeyFactRead
+            ) {
+                assert_eq!(
+                    work.get(counter),
+                    0,
+                    "unsupported binding performed {counter:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            session.capture_inspection_world_in(scope, &source, &original_source, |id| id == stub_id),
+            Err(SessionError::MissingRetainedValueInterface(module)) if module == legacy_module
+        ));
+        let hidden = session
+            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .unwrap();
+        assert!(
+            hidden.needs_source_capture(),
+            "hidden unsupported rows do not enter the binding namespace"
         );
     }
 

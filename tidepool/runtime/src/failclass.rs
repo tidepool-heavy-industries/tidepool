@@ -82,6 +82,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
+        | SessionError::UnsupportedCompilerWorldBinding { .. }
         | SessionError::WrongPublicManifestTicket
         | SessionError::InvalidDurablePublicAdmission { .. }
         | SessionError::InvalidRecoveryInitialization { .. }
