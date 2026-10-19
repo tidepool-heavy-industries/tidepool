@@ -280,8 +280,8 @@ fn green_completion_requires_integer_thread_identity_after_valid_control() {
 }
 
 #[test]
-fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
-    use tidepool_protocol::schema::{HandlingClass, TypeShape};
+fn source_inspection_stays_with_its_actor_owner() {
+    use tidepool_protocol::schema::HandlingClass;
     let source = tidepool_protocol::effects::source::source();
     source.validate().unwrap();
     assert!(!source.generated_handler);
@@ -293,11 +293,37 @@ fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
         source.constructor_signatures(),
         [
             "SourceReadModule :: Text -> Source (Either SourceError (Text, Text))",
-            "SourceReloadWith :: [Text] -> Source (Either SourceError ReloadOutcome)",
             "SourceStatusWith :: Source (Either SourceError SourceStatus)",
         ]
     );
-    let outcome = source
+    assert!(!source.type_defs.iter().any(|ty| ty.name == "ReloadOutcome"));
+    let generated = tidepool_protocol::actor_generated_files();
+    let decoder = generated
+        .iter()
+        .find(|file| file.path == "exomonad/actor/src/generated/source.rs")
+        .unwrap();
+    assert!(decoder.contents.contains("pub enum SourceError"));
+    assert!(!decoder.contents.contains("SourceReloadWith"));
+    assert!(!tidepool_protocol::generated_files()
+        .iter()
+        .any(|file| file.path == "bridge/handlers/src/generated/source.rs"));
+}
+
+#[test]
+fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
+    use tidepool_protocol::schema::{HandlingClass, TypeShape};
+    let reload = tidepool_protocol::effects::reload::reload();
+    reload.validate().unwrap();
+    assert!(!reload.generated_handler);
+    assert!(reload
+        .verbs
+        .iter()
+        .all(|verb| verb.handling == HandlingClass::Actor));
+    assert_eq!(
+        reload.constructor_signatures(),
+        ["ReloadSourceWith :: ReloadOptions -> Reload (Either ReloadError ReloadOutcome)",]
+    );
+    let outcome = reload
         .type_defs
         .iter()
         .find(|ty| ty.name == "ReloadOutcome")
@@ -311,6 +337,7 @@ fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
             .map(|variant| variant.ctor)
             .collect::<Vec<_>>(),
         [
+            "ReloadRefused",
             "ReloadUnchanged",
             "ReloadPublished",
             "ReloadRejected",
@@ -322,12 +349,13 @@ fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
     let generated = tidepool_protocol::actor_generated_files();
     let decoder = generated
         .iter()
-        .find(|file| file.path == "exomonad/actor/src/generated/source.rs")
+        .find(|file| file.path == "exomonad/actor/src/generated/reload.rs")
         .unwrap();
-    assert!(decoder.contents.contains("pub enum SourceError"));
+    assert!(decoder.contents.contains("pub enum ReloadError"));
+    assert!(decoder.contents.contains("ReloadSourceWith"));
     assert!(!tidepool_protocol::generated_files()
         .iter()
-        .any(|file| file.path == "bridge/handlers/src/generated/source.rs"));
+        .any(|file| file.path == "bridge/handlers/src/generated/reload.rs"));
 }
 
 #[test]

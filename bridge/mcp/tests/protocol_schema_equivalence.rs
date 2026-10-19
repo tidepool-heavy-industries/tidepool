@@ -365,55 +365,64 @@ fn context_read_write_decl_matches_the_schema_exactly() {
     );
 }
 
-/// Every effect the schema claims to own must actually be wired into
-/// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
-/// looking like coverage.
+/// Compare the compiled consumer with its owning schemas in both directions.
+/// The independent public order pin remains in `protocol_goldens`.
 #[test]
 fn every_schema_effect_is_reachable() {
-    let names: Vec<&str> = tidepool_protocol::effects::all()
+    use std::collections::BTreeSet;
+    let schemas = tidepool_protocol::effects::all();
+    let declarations = tidepool_mcp::all_decls();
+    // These declarations remain hand-authored rather than schema-generated.
+    let handwritten = [
+        tidepool_mcp::kv_decl(),
+        tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::fs_write_decl(),
+        tidepool_mcp::http_decl(),
+        tidepool_mcp::git_decl(),
+        tidepool_mcp::time_decl(),
+        tidepool_mcp::entropy_decl(),
+        tidepool_mcp::meta_decl(),
+        tidepool_mcp::ask_decl(),
+        tidepool_mcp::llm_decl(),
+    ];
+    let mut expected = BTreeSet::new();
+    for declaration in &handwritten {
+        assert!(
+            expected.insert(declaration.type_name),
+            "duplicate handwritten declaration"
+        );
+    }
+    for schema in &schemas {
+        assert!(
+            expected.insert(schema.name),
+            "duplicate schema or handwritten owner: {}",
+            schema.name
+        );
+        let mut matching = declarations
+            .iter()
+            .filter(|declaration| declaration.type_name == schema.name);
+        let declaration = matching
+            .next()
+            .expect("schema effect missing from compiled MCP declarations");
+        assert!(
+            matching.next().is_none(),
+            "schema effect compiled more than once: {}",
+            schema.name
+        );
+        assert_decl_matches_schema(declaration, schema);
+    }
+    let actual = declarations
         .iter()
-        .map(|e| e.name)
-        .collect();
+        .map(|declaration| declaration.type_name)
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        names,
-        vec![
-            "Console",
-            "Exec",
-            "Journal",
-            "Web",
-            "Worktree",
-            "RepoEvent",
-            "AskUser",
-            "ReadState",
-            "RecipeCheck",
-            "Green",
-            "ResourceScopes",
-            "Actor",
-            "ActorContext",
-            "Introspection",
-            "Lookup",
-            "ActorKernel",
-            "ActorLocal",
-            "Sleep",
-            "AgentControl",
-            "Commands",
-            "Notifications",
-            "Jev",
-            "AgentInspection",
-            "AgentLaunch",
-            "AgentTools",
-            "AgentSession",
-            "Reflect",
-            "Source",
-            "RuntimeInfo",
-            "ModelCall",
-            "ContextReadWrite",
-            "BoundWorktree",
-            "WorktreeRegistry",
-            "WorktreeAllocation",
-            "WorktreeIntegration",
-        ],
-        "the migrated set changed — add the new effect's equivalence assertion above"
+        actual.len(),
+        declarations.len(),
+        "compiled declaration names must be unique"
+    );
+    assert_eq!(
+        actual, expected,
+        "compiled MCP declarations and their owners must cover each other exactly"
     );
 }
 
