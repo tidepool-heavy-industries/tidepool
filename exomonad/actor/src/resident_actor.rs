@@ -6486,6 +6486,16 @@ where
                     .resume_structured_introspection(context.clone(), continuation, query, kind)
                     .await
             }),
+            ResidentActorBoundary::CompilerQuery {
+                continuation,
+                query,
+            } => Box::pin(async move {
+                environment
+                    .runner
+                    .application_workbench()
+                    .resume_compiler_query(context.clone(), continuation, query)
+                    .await
+            }),
             ResidentActorBoundary::InspectResult {
                 continuation,
                 reference,
