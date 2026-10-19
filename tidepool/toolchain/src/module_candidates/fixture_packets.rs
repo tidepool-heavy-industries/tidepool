@@ -263,7 +263,7 @@ fn admit_fixture_scope(
 fn empty_fixture_scope(producer_sha: [u8; 32]) -> ExactDeclarationContext {
     ExactDeclarationContext::from_authenticated_interfaces(
         producer_sha,
-        crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+        &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
         crate::artifact_inventory::CompilerInputProjection::default(),
     )
     .unwrap()

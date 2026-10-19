@@ -399,7 +399,7 @@ pub(super) fn issue_planned_original_with_source_value(
     let context = Arc::new(
         ExactDeclarationContext::from_authenticated_interfaces(
             canonical_producer,
-            crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
             crate::artifact_inventory::CompilerInputProjection::default(),
         )
         .unwrap(),

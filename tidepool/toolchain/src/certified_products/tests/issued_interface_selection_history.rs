@@ -147,7 +147,7 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
         let public = Arc::new(
             ExactDeclarationContext::from_authenticated_interfaces(
                 producer,
-                crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
                 crate::artifact_inventory::CompilerInputProjection::default(),
             )
             .unwrap(),
