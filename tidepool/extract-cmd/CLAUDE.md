@@ -37,6 +37,12 @@ captured endpoint; stale epochs refuse rather than silently rebinding an already
 prepared offer. Direct identity handshakes retain their existing child owner.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
+The private source-free exact-input exchange requires that pinned transaction.
+Its complete acquisition uses the existing exact-scope manifest and descriptor
+owners. Typed control results travel on the machine channel; captured stdout
+remains diagnostic text. Malformed accepted control responses poison the same
+transaction and retain END/input ownership without replay. Framing alone does
+not authenticate a root or issue a reusable realization.
 An ordinary one-shot response is delivered only after the worker acknowledges
 transaction cleanup, so a client closing after receiving it preserves the warm
 worker. Explicit transactions stream request responses and acknowledge cleanup
@@ -184,6 +190,9 @@ workload success and acknowledged cleanup remain independent observations.
 Every process edge in the extractor chain uses the crate's parent-death
 contract. Killing a caller, frontend, or daemon must reap its frontend or GHC
 worker descendants; process-tree ownership is not delegated to test scripts.
+Retirement controls keep the client transport open until they observe the
+worker's owned exit. Client EOF is an independent termination cause and cannot
+establish that unsafe cleanup retired the worker.
 
 ## Wire boundary
 

@@ -37,8 +37,8 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (Exception, IOException, try, throwIO, evaluate)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Control.Exception (Exception, IOException, try, throwIO, evaluate, mask)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVarMasked)
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -1246,150 +1246,183 @@ scopeValueInterfaces scope = case scopePurpose scope of
 -- The exact scope separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
-readExactScope path = newExactInputOwner >>= \owner -> readExactScopeWithOwner owner path
+readExactScope path = do
+  result <- newExactInputOwner >>= \owner -> readExactScopeWithOwner owner path
+  case result of
+    Left reason -> pure (Left reason)
+    Right scope -> case scopeCapturedInputs scope of
+      Nothing -> pure (Left "exact scope lacks its captured input owner")
+      Just captured -> do
+        -- This scope owns the decoder; no inactive universe retains it.
+        -- Its live reads may share decoded facts even without retained images.
+        decoder <- newRequestIfaceDecoder
+        pure (Right (retainCapturedInputsUsing captured decoder scope))
 
 readExactScopeWithOwner :: ExactInputOwner -> FilePath -> IO (Either String ExactScope)
 readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
   summary <- readSummaryTimingEnabled
   counts <- newIORef (Map.fromList [("original_inputs." ++ kind ++ suffix,0)
     | kind <- ["certificate","packages","census","graph"], suffix <- [".hits",".misses"]])
-  withValidationTiming summary "original_inputs" "scope_acquisition" (Map.toList <$> readIORef counts) $
-    modifyMVar state $ \previous@(RetainedOriginalInputs retained decoder (DecodedOriginalFacts certificates packages native graphs)) -> do
-    timing <- readTimingEnabled
-    certificatesState <- newIORef certificates
-    packagesState <- newIORef packages
-    nativeState <- newIORef native
-    graphsState <- newIORef graphs
-    timeDetailPhase timing "exact_scope" "read" $ do
-      captured <- try (do
-        unless (isAbsolute path) (fail "exact scope path must be absolute")
-        ((bytes,(offered,descriptors,interfaceEvidence,nativeDescriptors,acquisition)),envelope) <-
-          captureRequestInputs Nothing $ \readInput -> do
-            bytes <- readInput path (4 * 1024 * 1024)
-            decoded <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
-              Left failure -> fail (show failure)
-              Right (remaining,result)
-                | BL.null remaining -> pure result
-                | otherwise -> fail "exact scope has trailing bytes"
-            pure (bytes,decoded)
-        let images = case acquisition of FreshFiles -> []; ContinueOwnedOriginals values -> values
-            imageReferences = [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
-            available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
-              emptyCapturedOriginalContent retained
-        case acquisition of
-          FreshFiles -> pure ()
-          ContinueOwnedOriginals _ -> validateOwnedInputImages offered descriptors interfaceEvidence nativeDescriptors images
-        base <- case acquisition of
-          FreshFiles -> pure envelope
-          ContinueOwnedOriginals _ -> do
-            selected <- continueRequestInputs available imageReferences
-            either fail pure (mergeRequestInputs selected [envelope])
-        let captureOriginals = case acquisition of
-              FreshFiles -> captureRequestInputTokens (Just base)
-              ContinueOwnedOriginals _ -> withCapturedRequestInputTokens base
-        (scope, originals) <- captureOriginals $ \readToken -> do
-         let readInput artifact bound = artifactBytes <$> readToken artifact bound
-             readVerified artifact bound sha = do
-               token <- readToken artifact bound
-               unless (artifactSha256 token == sha) (fail "exact input differs from its selected seal")
-               pure (artifactBytes token)
-         graphs <- readExecutionSourceGraphsWithFacts (\sha artifact -> do
-           token <- readToken artifact (64 * 1024 * 1024)
-           either fail pure (checkArtifactSeal sha token)
-           memoOriginalFact counts timing "original_inputs.graph" graphsState sha
-             (either fail pure (decodeExecutionSourceBody token))) path descriptors
-         let OfferedScope producer semantic rows lexical products references purpose types published = offered
-         forM_ rows $ \(iface,packages,_) -> do
-           _ <- readInput (exactPath iface) (32 * 1024 * 1024)
-           _ <- readInput packages (4 * 1024 * 1024)
-           pure ()
-         let certificateFacts descriptor = do
-               let artifact = descriptorCertificatePath descriptor
-                   sha = descriptorCertificateSha256 descriptor
-               payload <- readVerified artifact (4 * 1024 * 1024) sha
-               memoOriginalFact counts timing "original_inputs.certificate" certificatesState sha
-                 (decodeCertificateBytes payload)
-         evidence <- validateInterfaceEvidenceUsing readInput readVerified certificateFacts producer rows interfaceEvidence
-         forM_ (Map.elems evidence) $ \entry -> case entry of
-           ModuleInterfaceEvidence proof -> forM_ (canonicalCoreArtifact proof) $ \core -> do
-             _ <- readVerified (canonicalCorePath core) (32 * 1024 * 1024) (canonicalCoreSha256 core)
+  timing <- readTimingEnabled
+  (result,decodedCount) <- mask $ \restore ->
+    modifyMVarMasked state $ \previous@(RetainedOriginalInputs retained decoder (DecodedOriginalFacts certificates packages native graphs)) -> do
+    captured <- try (restore $ do
+      certificatesState <- newIORef certificates
+      packagesState <- newIORef packages
+      nativeState <- newIORef native
+      graphsState <- newIORef graphs
+      withValidationTiming summary "original_inputs" "scope_acquisition" (Map.toList <$> readIORef counts) $
+       timeDetailPhase timing "exact_scope" "read" $ do
+        acquisition <- try (do
+          unless (isAbsolute path) (fail "exact scope path must be absolute")
+          ((bytes,(offered,descriptors,interfaceEvidence,nativeDescriptors,acquisition)),envelope) <-
+            captureRequestInputs Nothing $ \readInput -> do
+              bytes <- readInput path (4 * 1024 * 1024)
+              decoded <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
+                Left failure -> fail (show failure)
+                Right (remaining,result)
+                  | BL.null remaining -> pure result
+                  | otherwise -> fail "exact scope has trailing bytes"
+              pure (bytes,decoded)
+          let images = case acquisition of FreshFiles -> []; ContinueOwnedOriginals values -> values
+              imageReferences = [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
+              available = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
+                emptyCapturedOriginalContent retained
+          case acquisition of
+            FreshFiles -> pure ()
+            ContinueOwnedOriginals _ -> validateOwnedInputImages offered descriptors interfaceEvidence nativeDescriptors images
+          base <- case acquisition of
+            FreshFiles -> pure envelope
+            ContinueOwnedOriginals _ -> do
+              selected <- continueRequestInputs available imageReferences
+              either fail pure (mergeRequestInputs selected [envelope])
+          let captureOriginals = case acquisition of
+                FreshFiles -> captureRequestInputTokens (Just base)
+                ContinueOwnedOriginals _ -> withCapturedRequestInputTokens base
+          (scope, originals) <- captureOriginals $ \readToken -> do
+           let readInput artifact bound = artifactBytes <$> readToken artifact bound
+               readVerified artifact bound sha = do
+                 token <- readToken artifact bound
+                 unless (artifactSha256 token == sha) (fail "exact input differs from its selected seal")
+                 pure (artifactBytes token)
+           graphs <- readExecutionSourceGraphsWithFacts (\sha artifact -> do
+             token <- readToken artifact (64 * 1024 * 1024)
+             either fail pure (checkArtifactSeal sha token)
+             memoOriginalFact counts timing "original_inputs.graph" graphsState sha
+               (either fail pure (decodeExecutionSourceBody token))) path descriptors
+           let OfferedScope producer semantic rows lexical products references purpose types published = offered
+           forM_ rows $ \(iface,packages,_) -> do
+             _ <- readInput (exactPath iface) (32 * 1024 * 1024)
+             _ <- readInput packages (4 * 1024 * 1024)
              pure ()
-           _ -> pure ()
-         forM_ products $ \product -> do
-           _ <- readVerified (originalProductPath product) (64 * 1024 * 1024) (originalProductSha256 product)
-           pure ()
-         census <- admitOriginalCensusUsing (\artifact sha -> do
-           token <- readToken artifact (32 * 1024 * 1024)
-           either fail pure (checkArtifactSeal sha token)
-           memoOriginalFact counts timing "original_inputs.census" nativeState sha
-             (decodeOriginalNativeCensusBody sha token)) producer evidence nativeDescriptors
-         selectedProducts <- selectedCensusProducts nativeDescriptors census
-         roots <- extendAdmittedPackageImportsWithFacts (\(iface,artifact,sha) -> do
-           payload <- readVerified artifact (4 * 1024 * 1024) sha
-           _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
-           Right <$> memoOriginalFact counts timing "original_inputs.packages" packagesState
-             (sha,exactUnit iface,exactModule iface,exactSha256 iface)
-             (either fail pure (decodeCapturedPackageImports iface payload))) emptyAdmittedPackageImports rows >>= either fail pure
-         let AdmittedScopeInputs order admitted _ _ _ = makeScopeInputs rows evidence roots
-             inputs = AdmittedScopeInputs order admitted roots census Nothing
-             sha = digest bytes
-             scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
-               purpose types Set.empty (Set.fromList (map fst published)) (Set.fromList (concatMap snd published))
-         case acquisition of
-           FreshFiles -> forM_ (scopeValueInterfaces scope) $ \iface -> do
+           let certificateFacts descriptor = do
+                 let artifact = descriptorCertificatePath descriptor
+                     sha = descriptorCertificateSha256 descriptor
+                 payload <- readVerified artifact (4 * 1024 * 1024) sha
+                 memoOriginalFact counts timing "original_inputs.certificate" certificatesState sha
+                   (decodeCertificateBytes payload)
+           evidence <- validateInterfaceEvidenceUsing readInput readVerified certificateFacts producer rows interfaceEvidence
+           forM_ (Map.elems evidence) $ \entry -> case entry of
+             ModuleInterfaceEvidence proof -> forM_ (canonicalCoreArtifact proof) $ \core -> do
+               _ <- readVerified (canonicalCorePath core) (32 * 1024 * 1024) (canonicalCoreSha256 core)
+               pure ()
+             _ -> pure ()
+           forM_ products $ \product -> do
+             _ <- readVerified (originalProductPath product) (64 * 1024 * 1024) (originalProductSha256 product)
+             pure ()
+           census <- admitOriginalCensusUsing (\artifact sha -> do
+             token <- readToken artifact (32 * 1024 * 1024)
+             either fail pure (checkArtifactSeal sha token)
+             memoOriginalFact counts timing "original_inputs.census" nativeState sha
+               (decodeOriginalNativeCensusBody sha token)) producer evidence nativeDescriptors
+           selectedProducts <- selectedCensusProducts nativeDescriptors census
+           roots <- extendAdmittedPackageImportsWithFacts (\(iface,artifact,sha) -> do
+             payload <- readVerified artifact (4 * 1024 * 1024) sha
              _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
-             pure ()
-           ContinueOwnedOriginals _ -> pure ()
-         validateInputClosure producer inputs (map scopeOriginalProduct selectedProducts)
-         forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
-           Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
-           _ -> fail "published original lacks its canonical source owner"
-         validatePreviewOriginalTarget scope evidence
-         validateExecutionSources scope graphs
-         when timing $ do
-           _ <- evaluate (length sha)
-           emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
-         pure scope
-        admittedInputs <- case acquisition of
-          FreshFiles -> pure originals
-          ContinueOwnedOriginals _ -> either fail pure (bindCapturedPurposeValues scope originals)
-        let complete = retainCapturedInputsUsing admittedInputs decoder scope
-        additions <- forM images $ \(OriginalInputImage _ _ key parts) -> do
-          content <- either fail pure (selectedOriginalContent (map snd parts) originals)
-          pure (key,content)
-        let keys = Set.fromList (map fst additions)
-            candidates = additions ++ filter ((`Set.notMember` keys) . fst) retained
-            unionContent entries = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
-              emptyCapturedOriginalContent entries
-            keep _ [] = []
-            keep content (entry@(_,more):rest)
-              | capturedOriginalContentBytes combined <= retentionLimit = entry : keep combined rest
-              | otherwise = keep content rest
-              where combined = mergeCapturedOriginalContent content more
-            settled = take 4096 (keep emptyCapturedOriginalContent candidates)
-            retainedContent = unionContent settled
-            bytesRetained = capturedOriginalContentBytes retainedContent
-            bytesBefore = capturedOriginalContentBytes (unionContent candidates)
-        decodedCount <- pruneRequestIfaceDecoder (Set.map fst (capturedOriginalContentKeys retainedContent)) decoder
-        emitCount timing "original_inputs.retained_encoded_bytes" bytesRetained
-        emitCount timing "original_inputs.evicted_encoded_bytes" (bytesBefore - bytesRetained)
-        emitCount timing "original_inputs.live_request_encoded_bytes" (requestInputBytes originals)
-        emitCount timing "original_inputs.receiving_images" (fromIntegral (length images))
-        emitCount timing "original_inputs.decoded_interfaces" (fromIntegral decodedCount)
-        emitCount timing "original_inputs.receiving_encoded_bytes" (capturedOriginalContentBytes (unionContent additions))
-        let seals = Set.map fst (capturedOriginalContentKeys retainedContent)
-        certificateFacts <- Map.restrictKeys <$> readIORef certificatesState <*> pure seals
-        packageFacts <- Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) <$> readIORef packagesState
-        nativeFacts <- Map.restrictKeys <$> readIORef nativeState <*> pure seals
-        graphFacts <- Map.restrictKeys <$> readIORef graphsState <*> pure seals
-        emitCount timing "original_inputs.decoded_content_facts" (fromIntegral
-          (Map.size certificateFacts + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts))
-        pure (complete,RetainedOriginalInputs settled decoder
-          (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts)))
-          :: IO (Either IOException (ExactScope,RetainedOriginalInputs))
-      pure $ case captured of
-        Left failure -> (previous,Left (show failure))
-        Right (scope,settled) -> (settled,Right scope)
+             Right <$> memoOriginalFact counts timing "original_inputs.packages" packagesState
+               (sha,exactUnit iface,exactModule iface,exactSha256 iface)
+               (either fail pure (decodeCapturedPackageImports iface payload))) emptyAdmittedPackageImports rows >>= either fail pure
+           let AdmittedScopeInputs order admitted _ _ _ = makeScopeInputs rows evidence roots
+               inputs = AdmittedScopeInputs order admitted roots census Nothing
+               sha = digest bytes
+               scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
+                 purpose types Set.empty (Set.fromList (map fst published)) (Set.fromList (concatMap snd published))
+           case acquisition of
+             FreshFiles -> forM_ (scopeValueInterfaces scope) $ \iface -> do
+               _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
+               pure ()
+             ContinueOwnedOriginals _ -> pure ()
+           validateInputClosure producer inputs (map scopeOriginalProduct selectedProducts)
+           forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
+             Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
+             _ -> fail "published original lacks its canonical source owner"
+           validatePreviewOriginalTarget scope evidence
+           validateExecutionSources scope graphs
+           when timing $ do
+             _ <- evaluate (length sha)
+             emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
+           pure scope
+          admittedInputs <- case acquisition of
+            FreshFiles -> pure originals
+            ContinueOwnedOriginals _ -> either fail pure (bindCapturedPurposeValues scope originals)
+          let complete = retainCapturedInputsUsing admittedInputs decoder scope
+          additions <- forM images $ \(OriginalInputImage _ _ key parts) -> do
+            content <- either fail pure (selectedOriginalContent (map snd parts) originals)
+            pure (key,content)
+          let keys = Set.fromList (map fst additions)
+              candidates = additions ++ filter ((`Set.notMember` keys) . fst) retained
+              unionContent entries = foldl (\content (_,more) -> mergeCapturedOriginalContent content more)
+                emptyCapturedOriginalContent entries
+              keep _ [] = []
+              keep content (entry@(_,more):rest)
+                | capturedOriginalContentBytes combined <= retentionLimit = entry : keep combined rest
+                | otherwise = keep content rest
+                where combined = mergeCapturedOriginalContent content more
+              settled = take 4096 (keep emptyCapturedOriginalContent candidates)
+              retainedContent = unionContent settled
+              bytesRetained = capturedOriginalContentBytes retainedContent
+              bytesBefore = capturedOriginalContentBytes (unionContent candidates)
+          emitCount timing "original_inputs.retained_encoded_bytes" bytesRetained
+          emitCount timing "original_inputs.evicted_encoded_bytes" (bytesBefore - bytesRetained)
+          emitCount timing "original_inputs.live_request_encoded_bytes" (requestInputBytes originals)
+          emitCount timing "original_inputs.receiving_images" (fromIntegral (length images))
+          emitCount timing "original_inputs.receiving_encoded_bytes" (capturedOriginalContentBytes (unionContent additions))
+          let seals = Set.map fst (capturedOriginalContentKeys retainedContent)
+          certificateFacts <- Map.restrictKeys <$> readIORef certificatesState <*> pure seals
+          packageFacts <- Map.filterWithKey (\(sha,_,_,_) _ -> sha `Set.member` seals) <$> readIORef packagesState
+          nativeFacts <- Map.restrictKeys <$> readIORef nativeState <*> pure seals
+          graphFacts <- Map.restrictKeys <$> readIORef graphsState <*> pure seals
+          emitCount timing "original_inputs.decoded_content_facts" (fromIntegral
+            (Map.size certificateFacts + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts))
+          let next = RetainedOriginalInputs settled decoder
+                (DecodedOriginalFacts certificateFacts packageFacts nativeFacts graphFacts)
+              staged = (seals,complete,next)
+          -- Force the candidate's retention metadata while cancellation and all
+          -- acquisition/timing failures still restore the previous owner.
+          _ <- evaluate (Set.size seals + length settled + Map.size certificateFacts
+            + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts)
+          _ <- evaluate (bytesRetained + bytesBefore)
+          _ <- evaluate complete
+          _ <- evaluate next
+          evaluate staged)
+          :: IO (Either IOException (Set.Set String,ExactScope,RetainedOriginalInputs))
+        pure (either (Left . show) Right acquisition))
+          :: IO (Either IOException (Either String (Set.Set String,ExactScope,RetainedOriginalInputs)))
+    case captured of
+      Left failure -> pure (previous,(Left (show failure),Nothing))
+      Right (Left reason) -> pure (previous,(Left reason,Nothing))
+      Right (Right (seals,scope,next)) -> do
+        -- The outer slot is empty and this callback is masked. The inner lock
+        -- can be interrupted before pruning; after it commits, only the outer
+        -- nonblocking publication remains. No fallible observer can roll back
+        -- raw custody while leaving the shared decoder's policy advanced.
+        ready <- evaluate (Right scope)
+        count <- pruneRequestIfaceDecoder seals decoder
+        pure (next,(ready,Just count))
+  -- Observation follows publication, so an observer failure cannot roll back
+  -- either half of the already committed owner state.
+  forM_ decodedCount (emitCount timing "original_inputs.decoded_interfaces" . fromIntegral)
+  pure result
 
 -- Protected value paths and materialized transport paths can differ. Their
 -- typed owner and seal select already captured bytes, never a filesystem read.
