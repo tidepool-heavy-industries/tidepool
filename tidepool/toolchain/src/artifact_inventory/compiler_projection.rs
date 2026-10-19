@@ -1416,38 +1416,6 @@ impl CompilerSourceSupport {
             })
     }
 
-    /// Carry checked candidate availability and its custody while preserving
-    /// recorded source choices. Executable demand belongs to target admission.
-    #[cfg(test)]
-    pub(crate) fn admit_available_checked_products(
-        &self,
-        producer: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
-    ) -> Result<Self, CompileError> {
-        if products.is_empty() {
-            return Ok(self.clone());
-        }
-        let fragment =
-            crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
-                self, producer, products,
-            )?;
-        let (artifacts, projection, decisions) =
-            ArtifactView::receive_original_fragment(self, &fragment)?;
-        self.rebuild(
-            projection,
-            artifacts,
-            self.native_offers
-                .iter()
-                .chain(fragment.issued_offers())
-                .cloned(),
-        )
-        .and_then(|support| support.retain_normalized_availability(fragment.native_availability()))
-        .map(|mut support| {
-            support.input_decisions = decisions;
-            support
-        })
-    }
-
     #[tracing::instrument(
         target = "exomonad_harness::timing", name = "exact.value_interface_admission",
         level = "debug", skip_all, fields(inclusive = true, value_count = values.len())

@@ -661,7 +661,14 @@ mod program_source_support_history {
                 let context = Arc::new(
                     ExactDeclarationContext::new(&[], &[], vec![])
                         .unwrap()
-                        .extend_checked_original_products([2; 32], &products)
+                        .extend_issued_compiler_support(&match support_offer(&products) {
+                            CompilerSupportFixture::Complete(inputs) => {
+                                inputs.compiler_source_support().clone()
+                            }
+                            CompilerSupportFixture::RecordedRoles { .. } => {
+                                unreachable!("closed zero-group output cohort")
+                            }
+                        })
                         .unwrap(),
                 );
                 let mut request =

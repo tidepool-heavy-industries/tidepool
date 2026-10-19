@@ -9,7 +9,7 @@ use crate::certified_products::{
 use crate::declaration_context::ExactCompileContext;
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -239,17 +239,52 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                 );
                 return None;
             }
-            // The manifest advertises ordinals; authenticated original groups
-            // retain their independent binder identities and definitions.
+            let owner = ExactModuleIdentity {
+                unit: original.owner().unit.clone(),
+                module: original.owner().module.clone(),
+            };
+            let explicit_original = context
+                .compiler_input_projection()
+                .snapshot_roles()
+                .get(&owner)
+                .is_some_and(|role| role.original().is_some());
+            // The recovered fixture selects no executable groups. Its explicit
+            // Original keeps that bounded-empty permission; authored fallback
+            // under an interface-only role carries its complete sparse offer.
             assert_eq!(
                 row[6],
-                Value::Array(
+                Value::Array(if explicit_original {
+                    Vec::new()
+                } else {
                     [3u32, 17]
                         .map(|ordinal| Value::Integer(ordinal.into()))
                         .into()
-                ),
-                "complete sparse native availability census"
+                }),
+                "advertised ordinals follow the fixture's issued role and permission"
             );
+            assert_eq!(
+                row[8],
+                if explicit_original {
+                    Value::Array(vec![
+                        Value::Text("issued-groups".into()),
+                        Value::Array(vec![]),
+                    ])
+                } else {
+                    Value::Array(vec![Value::Text("full-carrier".into())])
+                }
+            );
+            assert_eq!(
+                row[9],
+                Value::Text(
+                    if explicit_original {
+                        "compiler-original"
+                    } else {
+                        "private-native"
+                    }
+                    .into()
+                )
+            );
+            // Authenticate the complete sparse body independently of demand.
             let groups = crate::certified_products::original_available_groups(original)
                 .unwrap()
                 .collect::<Vec<_>>();
@@ -675,10 +710,21 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
         1,
         "repeated availability of the same issued original retains one owner"
     );
+    let selected_interfaces = |context: &ExactDeclarationContext| {
+        context
+            .compiler_input_roles()
+            .iter()
+            .map(|role| role.interface())
+            .collect::<BTreeSet<_>>()
+    };
     assert_eq!(
-        offered_native_owners(&original),
-        offered_native_owners(&canonical),
+        selected_interfaces(&original),
+        selected_interfaces(&canonical),
         "an original role retains its selected canonical type evidence"
+    );
+    assert!(
+        offered_native_owners(&canonical).is_empty(),
+        "raw native custody under interface-only roles cannot issue an offer"
     );
     let recovered =
         crate::certified_products::tests::recovered_witness_fixtures(&[declaration_groups(
@@ -695,13 +741,45 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
     );
     assert_ne!(selected[0].product_bytes(), substitute.product_bytes());
     assert!(!selected[0].same_durable_artifact(substitute));
-    assert!(
-        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_context(
-            &original,
-            CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-            std::slice::from_ref(substitute),
+    let substitute_entry = Arc::new(
+        ArtifactEntry::original(
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            substitute.clone(),
         )
-        .is_err(),
+        .unwrap(),
+    );
+    let inventory = ArtifactInventory::default();
+    let substitute_view = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![substitute_entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let substitute_projection =
+        CompilerInputProjection::from_issued_entries(&[substitute_entry]).unwrap();
+    let substitute_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &substitute_projection,
+            &substitute_view.metadata_snapshot(),
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+    let substitute_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        &substitute_selection,
+        &substitute_view,
+    )
+    .unwrap();
+    let substitution_directory = tempfile::tempdir().unwrap();
+    assert!(
+        ExactCompileContext::new(original.clone())
+            .prepare_compilation_with_private_input(
+                substitution_directory.path(),
+                PRODUCER,
+                None,
+                Some(substitute_output),
+            )
+            .is_err(),
         "an equal interface cannot substitute another issued implementation"
     );
 
@@ -787,17 +865,28 @@ proptest::proptest! {
 fn preview_reuses_selected_original_with_issued_group_custody() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let fixture = issued_declarations(true)[0].clone();
-    let crate::artifact_inventory::ArtifactPayload::Original(product) = &fixture.original.payload
-    else {
+    let crate::artifact_inventory::ArtifactPayload::Original(_) = &fixture.original.payload else {
         panic!("preview fixture must carry its certified original product");
     };
-    let candidate =
-        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
-            &crate::artifact_inventory::CompilerSourceSupport::empty(),
-            producer,
-            std::slice::from_ref(product),
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![fixture.original.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        &projection,
+        &artifacts.metadata_snapshot(),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .unwrap();
+    let candidate =
+        crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            .unwrap();
     let support =
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&candidate)
             .unwrap();
