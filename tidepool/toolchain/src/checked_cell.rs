@@ -361,6 +361,59 @@ impl ExactCheckedSignature {
     }
 }
 
+/// Compiler-issued closure/data tier for one original bound binder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorldItemBinderTier {
+    ForceData,
+    RetainOpaque,
+}
+
+/// The host authority attached to an original binder, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorldItemHostAuthority {
+    JsonValue,
+    Text,
+    CommandJob,
+}
+
+/// One decoded original binder from a world item's field 10. It retains the
+/// compiler-issued name, stable variable id, module, tier and optional type
+/// identity; it issues no runtime value or execution permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorldItemBinder {
+    name: String,
+    varid: u64,
+    module: String,
+    tier: WorldItemBinderTier,
+    type_display: String,
+    root_head: Option<Value>,
+    host_authority: Option<WorldItemHostAuthority>,
+}
+
+impl WorldItemBinder {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn varid(&self) -> u64 {
+        self.varid
+    }
+    pub(crate) fn module(&self) -> &str {
+        &self.module
+    }
+    pub(crate) fn tier(&self) -> WorldItemBinderTier {
+        self.tier
+    }
+    pub(crate) fn type_display(&self) -> &str {
+        &self.type_display
+    }
+    pub(crate) fn root_head(&self) -> Option<&Value> {
+        self.root_head.as_ref()
+    }
+    pub(crate) fn host_authority(&self) -> Option<WorldItemHostAuthority> {
+        self.host_authority
+    }
+}
+
 /// Native result types captured at one original request site. The complete
 /// payload belongs to the site's metadata seal; presentation never issues it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -534,6 +587,19 @@ impl CheckedTypedSegmentItem {
     }
     pub fn body(&self) -> &CheckedTypedSegmentBody {
         &self.body
+    }
+}
+
+impl CheckedTypedSegmentBody {
+    /// Ordered capture names the compiler issued for this typed item. A world
+    /// item's original binders and checked signatures must follow this order.
+    pub(crate) fn captures(&self) -> Vec<&str> {
+        match self {
+            Self::Action { captures, .. } | Self::Let { captures, .. } => {
+                captures.iter().map(String::as_str).collect()
+            }
+            Self::Observation { capture, .. } => vec![capture.as_str()],
+        }
     }
 }
 
@@ -4539,6 +4605,153 @@ fn decode_signature(value: &Value) -> Result<ExactCheckedSignature, CompileError
         iface: iface.clone().into(),
         names,
     })
+}
+
+fn world_binder_word(value: &Value, message: &'static str) -> Result<u64, CompileError> {
+    match value {
+        Value::Integer(value) => u64::try_from(*value).map_err(|_| failure(message)),
+        _ => Err(failure(message)),
+    }
+}
+
+fn validate_world_binder_symbol(value: &Value) -> Result<(), CompileError> {
+    let fields = row(value, 5)?;
+    if string(&fields[0])?.is_empty()
+        || string(&fields[1])?.is_empty()
+        || string(&fields[2])?.is_empty()
+        || string(&fields[3])?.is_empty()
+    {
+        return Err(failure("world binder type identity has an empty symbol field"));
+    }
+    match &fields[4] {
+        Value::Array(option) => match option.as_slice() {
+            [Value::Integer(tag)] if u64::try_from(*tag).ok() == Some(0) => Ok(()),
+            [Value::Integer(tag), Value::Text(parent)]
+                if u64::try_from(*tag).ok() == Some(1) && !parent.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(failure(
+                "world binder type identity has an invalid record parent",
+            )),
+        },
+        _ => Err(failure(
+            "world binder type identity has an invalid record parent",
+        )),
+    }
+}
+
+fn validate_world_binder_root_head(value: &Value) -> Result<(), CompileError> {
+    let fields = row(value, 2)?;
+    validate_world_binder_symbol(&fields[0])?;
+    // `encodeTypeIdentity` uses the execution schema's short constructor
+    // arrays: `[0]` for a wired-in declaration and `[1, bytes]` for a GHC ABI.
+    // These are not CBOR tags.
+    let version = match &fields[1] {
+        Value::Array(version) => version.as_slice(),
+        _ => return Err(failure("world binder type identity has an invalid version")),
+    };
+    match version {
+        [Value::Integer(tag)] if u64::try_from(*tag).ok() == Some(0) => Ok(()),
+        [Value::Integer(tag), Value::Bytes(bytes)]
+            if u64::try_from(*tag).ok() == Some(1) && bytes.len() == 16 =>
+        {
+            Ok(())
+        }
+        _ => Err(failure("world binder type identity has an invalid version")),
+    }
+}
+
+/// Decode one world item's original binders (field 10) against the exact
+/// reserved binder identity for that item. Binder order, names and stable
+/// variable ids must all match; nothing here issues a runtime value.
+pub(crate) fn decode_world_item_binders(
+    value: &Value,
+    expected: &[(String, tidepool_repr::SessionVarId)],
+) -> Result<Vec<WorldItemBinder>, CompileError> {
+    let entries = list(value, 65536)?;
+    if entries.len() != expected.len() {
+        return Err(failure(
+            "world item binder count differs from its exact reservation",
+        ));
+    }
+    let mut decoded = Vec::with_capacity(entries.len());
+    let mut seen = BTreeSet::new();
+    for (entry, (expected_name, expected_id)) in entries.iter().zip(expected) {
+        let fields = row(entry, 7)?;
+        let name = string(&fields[0])?.to_owned();
+        let varid = world_binder_word(&fields[1], "world binder id is not unsigned")?;
+        let module = string(&fields[2])?.to_owned();
+        let tier = match string(&fields[3])? {
+            "ForceData" => WorldItemBinderTier::ForceData,
+            "RetainOpaque" => WorldItemBinderTier::RetainOpaque,
+            _ => return Err(failure("world binder has an unknown closure tier")),
+        };
+        let type_display = string(&fields[4])?.to_owned();
+        let root_head = match &fields[5] {
+            Value::Null => None,
+            value => {
+                validate_world_binder_root_head(value)?;
+                Some(value.clone())
+            }
+        };
+        let host_authority = match &fields[6] {
+            Value::Null => None,
+            Value::Text(authority) => Some(match authority.as_str() {
+                "JsonValue" => WorldItemHostAuthority::JsonValue,
+                "Text" => WorldItemHostAuthority::Text,
+                "CommandJob" => WorldItemHostAuthority::CommandJob,
+                _ => return Err(failure("world binder has an unknown host authority")),
+            }),
+            _ => return Err(failure("world binder has an invalid host authority")),
+        };
+        if name.is_empty()
+            || module.is_empty()
+            || name != *expected_name
+            || varid != expected_id.raw()
+            || !seen.insert(varid)
+        {
+            return Err(failure(
+                "world binder differs from its exact reserved identity",
+            ));
+        }
+        decoded.push(WorldItemBinder {
+            name,
+            varid,
+            module,
+            tier,
+            type_display,
+            root_head,
+            host_authority,
+        });
+    }
+    Ok(decoded)
+}
+
+/// Decode one world item's checked signatures (field 11) and require each key
+/// to name the typed item's entry and its ordered capture.
+pub(crate) fn decode_world_item_signatures(
+    value: &Value,
+    entry: &str,
+    captures: &[&str],
+) -> Result<Vec<ExactCheckedSignature>, CompileError> {
+    let entries = list(value, 65536)?;
+    if entries.len() != captures.len() {
+        return Err(failure(
+            "world item signature count differs from its typed captures",
+        ));
+    }
+    let mut decoded = Vec::with_capacity(entries.len());
+    for (value, capture) in entries.iter().zip(captures) {
+        let signature = decode_signature(value)?;
+        if signature.key() != format!("{entry}:{capture}") {
+            return Err(failure(
+                "world item signature differs from its typed entry or capture",
+            ));
+        }
+        decoded.push(signature);
+    }
+    Ok(decoded)
 }
 fn unique_key(values: &[Value], key: &str, count: usize) -> Result<Value, CompileError> {
     let matches = values
