@@ -13426,13 +13426,19 @@ mod tests {
         let extended = context
             .as_ref()
             .clone()
-            .extend_checked_original_products(
-                context.owner.facts.producer,
-                &[crate::certified_products::fixture_finalized_product(
+            .extend_issued_compiler_support(&match support_offer(&[
+                crate::certified_products::fixture_finalized_product(
                     support_product("Later"),
                     context.owner.facts.producer,
-                )],
-            )
+                ),
+            ]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
             .unwrap();
         assert_ne!(extended.semantic_sha256(), context.semantic_sha256());
         assert_ne!(
@@ -16886,7 +16892,14 @@ mod tests {
             ancestor
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(ancestor.owner.facts.producer, &[gamma])
+                .extend_issued_compiler_support(&match support_offer(&[gamma]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let completed = descendant
@@ -16945,7 +16958,14 @@ mod tests {
             descendant
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(descendant.owner.facts.producer, &[epsilon])
+                .extend_issued_compiler_support(&match support_offer(&[epsilon]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let private = (|| -> Result<OriginalCompilerInputs, CompileError> {
@@ -17092,7 +17112,14 @@ mod tests {
             ancestor
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(ancestor.owner.facts.producer, &[gamma])
+                .extend_issued_compiler_support(&match support_offer(&[gamma]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let completed = descendant
@@ -17128,7 +17155,14 @@ mod tests {
             descendant
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(descendant.owner.facts.producer, &[delta])
+                .extend_issued_compiler_support(&match support_offer(&[delta]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let request = next
@@ -17188,7 +17222,14 @@ mod tests {
         let b = Arc::new(
             a.as_ref()
                 .clone()
-                .extend_checked_original_products(a.owner.facts.producer, &[gamma])
+                .extend_issued_compiler_support(&match support_offer(&[gamma]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let second = b
@@ -18225,7 +18266,14 @@ mod tests {
                     context
                         .as_ref()
                         .clone()
-                        .extend_checked_original_products(context.owner.facts.producer, &[product])
+                        .extend_issued_compiler_support(&match support_offer(&[product]) {
+                            CompilerSupportFixture::Complete(inputs) => {
+                                inputs.compiler_source_support().clone()
+                            }
+                            CompilerSupportFixture::RecordedRoles { .. } => {
+                                unreachable!("closed output fixture")
+                            }
+                        })
                         .unwrap(),
                 );
                 let request = context
@@ -18336,13 +18384,19 @@ mod tests {
         let extended = context
             .as_ref()
             .clone()
-            .extend_checked_original_products(
-                context.owner.facts.producer,
-                &[crate::certified_products::fixture_finalized_product(
+            .extend_issued_compiler_support(&match support_offer(&[
+                crate::certified_products::fixture_finalized_product(
                     support_product("Later"),
                     context.owner.facts.producer,
-                )],
-            )
+                ),
+            ]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
             .unwrap();
         assert_ne!(extended.semantic_sha256(), expected);
         let owners = context
@@ -19559,10 +19613,17 @@ mod tests {
     fn authored_native_root_rejects_source_original_with_authored_module_spelling() {
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(
-                [2; 32],
-                &[support_product_in_unit("main", "Tidepool.Session.Lib.G1")],
-            )
+            .extend_issued_compiler_support(&match support_offer(&[support_product_in_unit(
+                "main",
+                "Tidepool.Session.Lib.G1",
+            )]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
             .unwrap();
         for generation in [0, 1] {
             assert!(matches!(
