@@ -10,13 +10,14 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
 | `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | issuer production/test compile and eight focused controls passed; joined runtime and root/transition work remain |
-| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | settled; exact `08feadc4..da4be05f` source parcel folded |
-| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | settled; final cumulative `5b74c2f1..ff2c4577` source acceptance |
+| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | reactivated at exact `d33b9a29` for acquired-owner membership slice and bounded bridge proposal |
+| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | reactivated for independent membership semantics, candidate review and bridge counterexample |
 
 Two descendant grants retained; no deeper descendants permitted. Starts,
 reviewer settlement/reactivation and repaired candidate review were reported to
-the campaign owner. Both descendants are now dormant, with no outstanding source
-repair or command. No grant was transferred outside this area.
+the campaign owner. The compiled issuer gate reopened the approved successor
+frontier; both existing descendants are active again. No grant was transferred
+outside this area and no extra descendant was created.
 
 `selected_root` owns `compiler_projection.rs` selected-support representation
 and tests. The owned-inputs area owns physical checked-value row borrowing in
@@ -153,6 +154,16 @@ and private optional replacement versus required dependency conflicts. The
 selected-home negative-dependency census remains a source design and oracle
 recipe, not an implemented or executed model.
 
+Two additional maintained continuation controls passed at documentation successor
+`d33b9a29affcb0c86f52ac587a4fe6aaa6af9824`, with identical code and test binary:
+`program_admission_keeps_semantic_growth_and_group_witnesses_without_transport_writes`
+and `program_admission_promotes_canonical_owner_without_transport_writes`.
+The admitted `just test-lib tidepool-toolchain` command used both exact names,
+`--expected-count 2 --jobs 1`, with retained reports in `continuation-cases` and
+`continuation.log` under the same evidence directory. Exit 0, selected/executed/
+passed 2, failed 0; build ID `4bad2e12-8c53-4872-a920-4ca7dc7d1c7f`.
+The complete component gate is therefore ten distinct tests passed.
+
 Host Buck daemon PID 3873490 belongs to
 `/build.slice/inanna-build-1792399827-3873418.scope`.
 Observed scope peak was 5,929,332,736 bytes; after terminal results its current
@@ -176,8 +187,6 @@ performance and release qualification remain **unqualified**. Remaining focused
 controls include:
 
 ```sh
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::program_admission_keeps_semantic_growth_and_group_witnesses_without_transport_writes --expected-count 1
-swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::program_admission_promotes_canonical_owner_without_transport_writes --expected-count 1
 swarm-build just test-lib tidepool-runtime --exact session::turn::tests::prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles --expected-count 1
 swarm-build just test-lib tidepool-runtime --exact session::turn::tests::cell_program_host_cancellation_after_end_refuses_sealing_without_new_request --expected-count 1
 ```
@@ -229,10 +238,19 @@ The source-backed deferred design is
 Persistent roots must not hold a strong
 predecessor chain. Even value-only additions can change `HomePresence`, so native
 group equality does not by itself permit reusing Package absence conclusions.
-The custody-owner collision query in `prepare_value_interface_append` still
-scans all acquired payloads; a persistent acquisition membership index belongs
-to `ViewLease`, distinct from the selected-home census. Its fields are reserved
-with owned-inputs; no implementation started yet.
+The acquired-owner collision query in `prepare_value_interface_append` still
+scans all acquired payloads. The approved 01D successor puts a private persistent
+owner-count index beside `ViewLease.payloads`, counting distinct actual payload
+IDs. It clones the first parent's counts and updates only actual inserted,
+replaced or removed payload rows in the existing issuer loops. The fast-path
+guard then queries membership without rebuilding a census. This is distinct from
+the selected-home census; acquired dormant custody must still prevent the fast
+append. Owned-inputs explicitly reserved the narrow
+`retain_projected_materializations` payload copy/removal subsection for matching
+count updates; its physical frontier/cache/lifetime code stays with that owner.
+Current owned candidate `29d6467c` does not overlap that subsection.
+The existing full-payload `state.intern`, live-view pruning and restriction scans
+remain explicit; this slice cannot establish total delta-sized append work.
 
 Physical collaboration: rejected an unconditional materialization-frontier
 refresh after each value because it would add a full closure/metadata scan.
@@ -263,9 +281,14 @@ producer, recipient and continuation, then yield. The producer checks recipient
 state and uses `followup_task` for a completed/idle non-root parent; `send_message`
 suffices while it is running. Every command retains its observer until terminal.
 
-The campaign owns the next shared transition decision and joined qualification
-admission. On that event the area reactivates the two reserved leaves for the
-bounded issuer implementation plus independent exact-candidate review, or joins
-concrete runtime gate evidence. Preserve checkouts, scratch registrations, grants,
-remaining warm folds and the exact pending commands. This issuer checkpoint is
-not completion of the host-inputs area or campaign.
+The campaign owns the shared transition decision and joined qualification
+admission. Independent acquired-owner implementation and review proceed now at
+exact base `d33b9a29`; both leaves also supply the minimal old/new-owner bridge
+option before bridge code. The implementation leaf configures/builds its own
+checkout serially within the area's admitted 32 GiB disk / 24 GiB memory allowance,
+including the retained area daemon, with actual transition accounting. It must
+compile production and cfg(test) consumers early, run meaningful counted guards,
+then return an exact candidate for independent review/repair and owner fold.
+Preserve checkouts, scratch registrations, grants, remaining warm folds and exact
+pending commands. This issuer checkpoint is not completion of the host-inputs
+area or campaign.
