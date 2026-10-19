@@ -9164,9 +9164,15 @@ mod module_product_tests {
                     )
                     .unwrap()
                     .with_source_search_context(&include);
+                let original_output =
+                    crate::declaration_context::OriginalCompilerInputs::from_selection(
+                        compiled.source_selection.as_ref().unwrap(),
+                        &compiled.artifact_view,
+                    )
+                    .unwrap();
                 let original = (&request)
                     .product_admission(admission)
-                    .original_execution_fixture(&compiled.artifact_view)
+                    .original_execution_context(&original_output)
                     .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(
