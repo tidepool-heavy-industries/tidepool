@@ -655,6 +655,16 @@ impl CompilerPreparationOwner {
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
         let owner = self.services.with_compiler_owner(owner).for_preparation();
+        if tidepool_runtime::CompilerTransactionOrigin::current().is_some() {
+            return Err(crate::resident_actor::ResidentRootPreparationFailure {
+                cause: Box::new(
+                    tidepool_runtime::session::SourceAdmissionError::ForeignTransaction,
+                ),
+                close: None,
+                draft: None,
+                preparation: self,
+            });
+        }
         let ticket = match owner.admit_work() {
             Ok(ticket) => ticket,
             Err(error) => {
@@ -1502,6 +1512,43 @@ impl RetainedActorExit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn root_preparation_refuses_borrowed_outer_end_before_factory() {
+        let calls = std::cell::Cell::new(0);
+        let outer = tidepool_runtime::with_compiler_transaction(
+            |_| {},
+            |_| {
+                let origin = tidepool_runtime::CompilerTransactionOrigin::current().unwrap();
+                let failure = super::CompilerPreparationOwner::new()
+                    .prepare_resident_root::<frunk::HNil, tidepool_mcp::CapturedOutput, ()>(|_| {
+                        calls.set(calls.get() + 1);
+                        Err(std::io::Error::other("borrowed factory must not run").into())
+                    })
+                    .err()
+                    .expect("root phases cannot borrow an unsettled outer END");
+                assert!(matches!(
+                    failure
+                        .cause
+                        .downcast_ref::<tidepool_runtime::session::SourceAdmissionError>(),
+                    Some(tidepool_runtime::session::SourceAdmissionError::ForeignTransaction)
+                ));
+                assert_eq!(
+                    tidepool_runtime::CompilerTransactionOrigin::current().as_ref(),
+                    Some(&origin)
+                );
+                assert_eq!(calls.get(), 0);
+                assert!(failure.draft.is_none());
+                assert!(failure.close.is_none());
+                assert!(failure.cleanup().observation().work.is_empty());
+            },
+        );
+        assert_eq!(
+            outer.close,
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        assert!(tidepool_runtime::CompilerTransactionOrigin::current().is_none());
+    }
+
     #[test]
     fn closed_preparation_owner_cannot_issue_or_replay_root_recipe() {
         let mut owner = super::CompilerPreparationOwner::new();
