@@ -22441,8 +22441,9 @@ mod tests {
                 .unwrap();
         let original_id =
             ArtifactEntry::original_artifact_id(issued.owner.facts.producer, certificate.product());
-        let projection = issued.compiler_input_projection().interface_only();
-        let context = Arc::new(issued.recover_fixture_projection(projection).unwrap());
+        // Empty lexical publication already selects the authored interface while
+        // retaining its issued native availability for the protected recipe.
+        let context = Arc::new(issued);
         assert_ne!(
             context.compiler_metadata_snapshot().unwrap().entries
                 [&identity("main", &owner.module_name())]
