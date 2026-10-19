@@ -8813,10 +8813,12 @@ mod tests {
             original_ordinal: 7,
         };
         let groups = |support: &CompilerSourceSupport| {
-            NativeDependencyCatalog::from_source(support)
+            support
+                .native_availability()
+                .dependency_support(key, product.owner())
                 .unwrap()
-                .groups(key, product.owner())
-                .unwrap()
+                .groups()
+                .collect::<BTreeSet<_>>()
         };
         let left_groups = groups(&support);
         assert_eq!(left_groups.len(), 1);
