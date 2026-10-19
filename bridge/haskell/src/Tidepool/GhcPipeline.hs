@@ -1358,10 +1358,13 @@ runWorldPublicModule producer universe baseEnv timing
     setSession fresh
     resolved <- case Map.lookup (mkModuleName requested) sources of
       Just source@(WorldHomeSource _ _ physical _) ->
-        case [owner | (owner,selected) <- Map.toAscList receipts
-          , moduleNameString (moduleName owner) == requested, sameWorldSource source selected] of
-          [owner] -> pure (Just (owner,prepared))
-          [] -> do
+        case lookupHpt table (mkModuleName requested) of
+          Just home -> do
+            let owner = mi_module (hm_iface home)
+            case Map.lookup owner receipts of
+              Just selected | sameWorldSource source selected -> pure (Just (owner,prepared))
+              _ -> liftIO (throwIO WorldQueryCorrupt)
+          Nothing -> do
             -- A cold demand checks the real module and its transitive source
             -- closure. Historical memo/candidate/home alternatives are absent.
             compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
@@ -1392,7 +1395,6 @@ runWorldPublicModule producer universe baseEnv timing
                   table (eltsHpt compiled)
                 completed = WorldPreparedModules combined (Map.union selected receipts)
             pure (Just (owner,completed))
-          _ -> liftIO (throwIO WorldQueryCorrupt)
       Nothing -> do
         -- A known source name without a captured finder-representable path
         -- cannot become a package answer or an asserted closed-domain miss.
