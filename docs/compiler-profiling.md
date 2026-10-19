@@ -32,6 +32,28 @@ subtract child intervals; do not add them to the existing `turn stage` rows.
 In particular, context preparation before materialization and sealing after
 `products.target_admission` have their own spans.
 
+Post-compiler native admission has four nested synchronous phase sequences:
+
+| Sequence | Work distinguished |
+| --- | --- |
+| `products.segment_originals` | Product certification, package availability, source membership, artifact/value entries, native availability and final assembly |
+| `products.segment_native_availability` | Initial interface admission, continuation, metadata projection and receiving completed availability, and finishing new products |
+| `products.native_selection` | Projection, continuation rows, input custody, complete-product selection/issuance, coverage and final offer custody |
+| `products.complete_native_availability` | Projection, entries, requirements and dependency catalog, namespace admission, complete issuance, body validation, custody and normalized rows |
+
+These use `InvocationTiming`: wall time and current-thread CPU are observed
+only with the timing target enabled. Early return and panic close the current
+interval without claiming successful completion. Phases within a sequence are
+sequential; nested sequences are inclusive and must not be added to their
+parents. Retain the enclosing invocation/cell spans when grouping them. A phase
+boundary does not itself identify the work count: use the owning operation's
+counters, not graph traversals added just to measure graph size.
+
+The `harness-performance-persona` cohort is a scripted, prepared-workspace
+13-cell workload. Its name does not establish execution of an authored
+`Persona.Spec`. Use it for matched workload comparisons and retain separate
+actual authored-Persona startup/history acceptance.
+
 `compiler_transaction.scope` measures the host owner, including work before
 worker admission. Use `compiler_endpoint.bind`, `compiler_transaction.begin`,
 the existing admitted event, ordered `compile_request` spans, and

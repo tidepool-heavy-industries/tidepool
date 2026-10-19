@@ -437,6 +437,10 @@ impl CertifiedSegmentOriginals {
                 "segment originals contain a target",
             ));
         }
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "products.segment_originals",
+            "certify_products",
+        );
         let mut products = certify_products_with_validation(
             candidates,
             &receipt,
@@ -450,6 +454,7 @@ impl CertifiedSegmentOriginals {
             produced,
             validation,
         )?;
+        timing.advance("package_availability");
         let mut package_availability =
             inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
         for (owner, witness) in &receipt.packages {
@@ -464,10 +469,12 @@ impl CertifiedSegmentOriginals {
                 package_availability.insert(owner.clone(), witness.clone());
             }
         }
+        timing.advance("source_membership");
         let original_sources = AvailableOriginalSources::authenticate(
             &products.recovery_products,
             &validation.inventory,
         )?;
+        timing.advance("artifact_entries");
         validation
             .inventory
             .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
@@ -502,6 +509,7 @@ impl CertifiedSegmentOriginals {
                 .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?,
             ));
         }
+        timing.advance("value_entries");
         validation
             .inventory
             .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
@@ -530,6 +538,7 @@ impl CertifiedSegmentOriginals {
                 ),
             ));
         }
+        timing.advance("native_availability");
         // Completed selection rows already retain this physical custody. The
         // segment owner needs their issuances, not another view handle here.
         let _ =
@@ -543,11 +552,12 @@ impl CertifiedSegmentOriginals {
                     .collect(),
             )
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
             .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
             .collect();
-        Ok(Self {
+        let segment = Self {
             artifact_entries: artifact_entries.into(),
             value_entry_index,
             value_entries: value_entries.into(),
@@ -556,7 +566,9 @@ impl CertifiedSegmentOriginals {
             raw,
             receipt,
             products,
-        })
+        };
+        timing.finish(true);
+        Ok(segment)
     }
 
     pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
