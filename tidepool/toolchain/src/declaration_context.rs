@@ -23995,7 +23995,8 @@ mod tests {
                 None,
                 Some(wrong_private),
             )
-            .unwrap_err();
+            .err()
+            .expect("conflicting selected support must refuse actual preparation");
         assert!(matches!(conflicting_support,
             CompileError::ArtifactInventory(error)
                 if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual }
