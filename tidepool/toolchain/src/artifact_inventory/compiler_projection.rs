@@ -619,8 +619,7 @@ impl CompilerSourceSupport {
             row.retain_acquisitions(&retained)?;
         }
         timing.advance("qualify_canonical_availability");
-        let native_availability =
-            native_availability.for_canonical_roles(&projection, &retained)?;
+        let native_availability = native_availability.for_compiler_roles(&projection, &retained)?;
         timing.advance("assemble_support");
         let support = Self {
             native_availability,
@@ -852,7 +851,7 @@ impl CompilerSourceSupport {
         );
         let availability = original
             .native_availability
-            .for_canonical_roles(&self.projection, &original.artifacts)?;
+            .for_compiler_roles(&self.projection, &original.artifacts)?;
         timing.advance("collect_offers");
         let mut offers = Vec::new();
         for row in availability.rows() {
@@ -891,7 +890,7 @@ impl CompilerSourceSupport {
             crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => {
                 let mut result = self.clone();
                 result.native_availability =
-                    rows.for_canonical_roles(&self.projection, &self.artifacts)?;
+                    rows.for_compiler_roles(&self.projection, &self.artifacts)?;
                 Ok(result)
             }
         }
@@ -1343,7 +1342,7 @@ impl CompilerSourceSupport {
         Ok(Self {
             native_availability: self
                 .native_availability
-                .for_canonical_roles(&projection, &self.artifacts)?,
+                .for_compiler_roles(&projection, &self.artifacts)?,
             projection,
             artifacts: self.artifacts.clone(),
             native_offers: Arc::clone(&self.native_offers),
@@ -1702,7 +1701,7 @@ impl CompilerSourceSupport {
         Ok(Self {
             native_availability: self
                 .native_availability
-                .for_canonical_roles(&projection, &artifacts)?,
+                .for_compiler_roles(&projection, &artifacts)?,
             projection,
             artifacts,
             native_offers: offers.into(),

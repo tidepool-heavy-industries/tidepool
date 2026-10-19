@@ -690,7 +690,7 @@ impl OriginalCompilerInputs {
             Some(Self {
                 native_availability: source
                     .native_availability()
-                    .for_canonical_roles(&projection, source.artifacts())?,
+                    .for_compiler_roles(&projection, source.artifacts())?,
                 demand: OriginalInputDemand::RolePolicy,
                 projection,
                 artifacts: retain_native_offers(source.artifacts(), &native_offers)?,
@@ -1120,7 +1120,7 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_availability: self
                 .native_availability
-                .for_canonical_roles(&projection, &artifacts)?,
+                .for_compiler_roles(&projection, &artifacts)?,
             demand,
             projection,
             artifacts,
@@ -1145,7 +1145,7 @@ impl OriginalCompilerInputs {
                 .native_availability
                 .merge(&other.native_availability)?
                 .into_rows()
-                .for_canonical_roles(&projection, &artifacts)?,
+                .for_compiler_roles(&projection, &artifacts)?,
             demand,
             projection,
             artifacts,
@@ -1588,7 +1588,10 @@ impl RequestNativeAvailability {
         })
     }
 
-    pub(crate) fn for_canonical_roles(
+    /// Select direct availability roots from effective compiler roles, then keep
+    /// their exact dependencies. Replacing a direct Original cannot erase a
+    /// historical child still required by a surviving issued body.
+    pub(crate) fn for_compiler_roles(
         &self,
         roles: &CompilerInputProjection,
         artifacts: &ArtifactView,
@@ -1604,7 +1607,9 @@ impl RequestNativeAvailability {
             let Some(role) = roles.snapshot_roles().get(&owner) else {
                 continue;
             };
-            if role.interface() != row.canonical {
+            if role.interface() != row.canonical
+                || role.original().is_some_and(|selected| selected != *id)
+            {
                 continue;
             }
             retained.insert(*id);
@@ -1624,7 +1629,7 @@ impl RequestNativeAvailability {
             }
         }
         // Traverse each distinct authenticated contribution once, retaining only
-        // descendants of canonical-role bodies, never unrelated sibling roots.
+        // descendants of direct compiler-role bodies, never unrelated sibling roots.
         let mut dependencies: BTreeMap<
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
@@ -1884,7 +1889,7 @@ impl NativeInputSelection {
         normalized: &RequestNativeAvailability,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
-        let normalized = normalized.for_canonical_roles(roles, artifacts)?;
+        let normalized = normalized.for_compiler_roles(roles, artifacts)?;
         normalized.validate_role_coverage(roles)?;
         Self::from_normalized_rows(roles, projection, artifacts, normalized, offers)
     }
@@ -15546,7 +15551,7 @@ mod tests {
         let roles = inputs.projection();
         let artifacts = inputs.artifacts();
         let expected = normalized
-            .for_canonical_roles(roles, artifacts)
+            .for_compiler_roles(roles, artifacts)
             .and_then(|normalized| {
                 normalized.validate_role_coverage(roles)?;
                 reference_native_transport(

@@ -50,6 +50,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Artifact-only custody and unions across carriers cannot supply that proof.
   Availability preserves exact dependency graphs without selecting executable
   groups or restoring source, lexical or instance authority.
+  An explicit Original excludes other equal-interface bodies as optional
+  availability roots, not as exact dependencies of surviving issued bodies.
+  Keep required historical edges and validate their namespace conflicts.
   Distinguish consuming an already issued dependency from qualifying new Full
   availability. An interface-only consumer may retain a historical dependency's
   exact closure when canonical bytes agree, without rebinding its edges. Check

@@ -3700,7 +3700,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     assert_eq!(rows.rows().next().unwrap().mode, NativeTransportMode::Full);
     let independent = independently_cloned_availability(rows);
     let expected = rows
-        .for_canonical_roles(support.projection(), support.artifacts())
+        .for_compiler_roles(support.projection(), support.artifacts())
         .unwrap();
     assert_eq!(
         &expected, rows,
@@ -3771,7 +3771,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
         rebound.selection_snapshot().namespace.get(&canonical_id),
         "equal canonical payloads must still have distinct issued bindings in this control",
     );
-    let downgraded = rows.for_canonical_roles(&projection, &rebound).unwrap();
+    let downgraded = rows.for_compiler_roles(&projection, &rebound).unwrap();
     let downgraded_row = downgraded.rows().next().unwrap();
     assert_eq!(downgraded_row.mode, NativeTransportMode::IssuedGroups);
     assert!(downgraded_row.permits(7));
@@ -3791,7 +3791,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     .unwrap();
     let expected = rebound_support
         .native_availability()
-        .for_canonical_roles(rebound_support.projection(), rebound_support.artifacts())
+        .for_compiler_roles(rebound_support.projection(), rebound_support.artifacts())
         .unwrap();
     assert_eq!(&expected, rebound_support.native_availability());
     let unchanged = rebound_support
@@ -3860,7 +3860,7 @@ fn unchanged_native_availability_merge_preserves_indirect_permissions() {
     assert!(hidden_row.permits(7));
     assert!(!hidden_row.permits(9001));
     let expected = rows
-        .for_canonical_roles(support.projection(), support.artifacts())
+        .for_compiler_roles(support.projection(), support.artifacts())
         .unwrap();
     assert_eq!(
         &expected, rows,
@@ -4432,7 +4432,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         )
         .unwrap();
         let normalized = prior.merge(&current_rows).unwrap().into_rows();
-        let filtered = normalized.for_canonical_roles(&projection, &view).unwrap();
+        let filtered = normalized.for_compiler_roles(&projection, &view).unwrap();
         let required = filtered
             .rows()
             .find(|row| row.original.descriptor.id == entries[0].descriptor.id)
