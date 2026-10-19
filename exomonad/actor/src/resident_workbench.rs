@@ -3958,6 +3958,9 @@ pub(crate) enum ResidentActorBoundary {
         metadata: serde_json::Value,
         effects: Vec<crate::ActorEffectKey>,
     },
+    RuntimeInfo {
+        continuation: ResidentHole,
+    },
     Source {
         continuation: ResidentHole,
         request: crate::generated::source::SourceReq,
@@ -4188,7 +4191,9 @@ impl ResidentActorBoundary {
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,
-            Self::SpecValidation { .. } => WorkbenchOperationDisposition::Read,
+            Self::SpecValidation { .. } | Self::RuntimeInfo { .. } => {
+                WorkbenchOperationDisposition::Read
+            }
             Self::Source {
                 request:
                     crate::generated::source::SourceReq::SourceReadModule(_)
@@ -4213,6 +4218,7 @@ impl ResidentActorBoundary {
             Self::Jev { .. } => "jev",
             Self::Model { .. } => "model call",
             Self::Context { .. } => "context transformation",
+            Self::RuntimeInfo { .. } => "getRuntimeInfo",
             Self::Source { request, .. } => source_operation(request),
             Self::Reload { .. } => "reloadSource",
             Self::SpecValidation { .. } => "validateAgentSpec",
@@ -4397,6 +4403,7 @@ resident_request_roster! {
     SpawnAgent(crate::generated::spawn_agent::SpawnAgentReq) => None,
     Context(crate::ContextReq) => None,
     Reload(crate::generated::reload::ReloadReq) => Some(exomonad_tool::ToolEffectKey::Reload),
+    RuntimeInfo(crate::generated::runtime_info::RuntimeInfoReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::RuntimeInfo)),
     Source(crate::generated::source::SourceReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Source)),
     Actor(crate::generated::actor::ActorReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Actor)),
     ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
@@ -4470,6 +4477,10 @@ impl ResidentRequest {
             crate::generated::spawn_agent::SpawnAgentReq
         );
         try_member!(Self::Context, crate::ContextReq);
+        try_member!(
+            Self::RuntimeInfo,
+            crate::generated::runtime_info::RuntimeInfoReq
+        );
         try_member!(Self::Source, crate::generated::source::SourceReq);
         try_member!(Self::Reload, crate::generated::reload::ReloadReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
@@ -4534,6 +4545,7 @@ impl ResidentRequest {
             Self::Model(_) => "model call",
             Self::ResourceScopes(_) => "withScope",
             Self::Context(_) => "context transformation",
+            Self::RuntimeInfo(_) => "getRuntimeInfo",
             Self::Source(request) => source_operation(request),
             Self::Reload(_) => "reloadSource",
             Self::Commands(request) => command_operation(request),
@@ -9982,6 +9994,7 @@ where
                         table: session.data_con_table().clone(),
                     }),
                     ResidentRequest::Reload(request) => Ok(ResidentActorBoundary::Reload { continuation: hole, request }),
+                    ResidentRequest::RuntimeInfo(crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith) => Ok(ResidentActorBoundary::RuntimeInfo { continuation: hole }),
                     ResidentRequest::Source(request) => Ok(ResidentActorBoundary::Source {
                         continuation: hole,
                         request,

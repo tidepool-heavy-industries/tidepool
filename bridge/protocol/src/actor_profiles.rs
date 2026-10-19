@@ -476,6 +476,14 @@ pub const EFFECTS: &[NominalEffect] = &[
         "Tidepool.Effects.Core"
     ),
     nominal!(Source, EffectSource, 21, 28, 23, "Tidepool.Effects.Core"),
+    nominal!(
+        RuntimeInfo,
+        EffectRuntimeInfo,
+        26,
+        40,
+        39,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Journal, EffectJournal, 22, 24, 24, "Tidepool.Effects.Core"),
     nominal!(Web, EffectWeb, 23, 25, 25, "Tidepool.Effects.Core"),
     nominal!(

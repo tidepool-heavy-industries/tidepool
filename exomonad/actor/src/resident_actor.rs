@@ -56,6 +56,7 @@ mod provider_initial_tests;
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
+mod runtime_info;
 #[cfg(test)]
 mod scope_runtime_tests;
 mod scopes;
@@ -6180,6 +6181,22 @@ where
                     let answer = workbench
                         .validate_agent_spec(context.clone(), metadata, effects, allowed)
                         .await;
+                    let disposition = if answer.is_ok() {
+                        WorkbenchOperationDisposition::Read
+                    } else {
+                        WorkbenchOperationDisposition::Rejected
+                    };
+                    commands::CommandResolution::settled(
+                        disposition,
+                        runner.resume_value(context, continuation, answer).await,
+                    )
+                });
+                return Box::pin(std::future::ready(Ok(operation)));
+            }
+            ResidentActorBoundary::RuntimeInfo { continuation } => {
+                let answer = self.runtime_info(effect_owner.issued_snapshot());
+                let runner = self.environment.runner.clone();
+                let operation = Box::pin(async move {
                     let disposition = if answer.is_ok() {
                         WorkbenchOperationDisposition::Read
                     } else {

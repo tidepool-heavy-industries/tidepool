@@ -44,6 +44,7 @@ pub mod recipe_check;
 pub mod reflect;
 pub mod reload;
 pub mod resource_scope;
+pub mod runtime_info;
 pub mod sleep;
 pub mod source;
 pub mod web;
@@ -98,6 +99,7 @@ pub fn all() -> Vec<Effect> {
         agent_session::agent_session(),
         reflect::reflect(),
         source::source(),
+        runtime_info::runtime_info(),
         reload::reload(),
         model::model(),
         context_read_write::context_read_write(),

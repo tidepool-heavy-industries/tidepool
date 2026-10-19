@@ -1,13 +1,14 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Persona.Orientation (renderMemory, startup) where
+module Persona.Orientation (renderMemory, renderRuntime, startup, startupWithRuntime) where
 
 import Prelude
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Agent.Contract (StartupInput, ContextSeed, contextSection)
-import Tidepool.Effects.Core (FsRead, FsWrite)
+import Tidepool.Effects.Core (FsRead, FsWrite, RuntimeInfo, RuntimeInfoError)
+import qualified Tidepool.Effects as E
 import Tidepool.Records (FsError)
 import qualified Persona.Memory as Memory
 
@@ -37,3 +38,18 @@ startup _ = do
         Left problem -> error (show problem)
         Right body -> pure $ contextSection "persona memory"
           (Just "Persona.Orientation.startup; .exomonad/state/memory/{persona,human,curiosities}.md") body
+
+-- | Opt-in authored composition. Runtime observations are separate from memory
+-- selection; a startup query reports its current phase, not future publication.
+renderRuntime :: Member RuntimeInfo effects => Eff effects (Either RuntimeInfoError Text)
+renderRuntime = fmap (T.pack . show) <$> E.getRuntimeInfo
+
+startupWithRuntime :: (Member FsRead effects, Member FsWrite effects, Member RuntimeInfo effects)
+  => StartupInput -> Eff effects ContextSeed
+startupWithRuntime input = do
+  memory <- startup input
+  observed <- renderRuntime
+  case observed of
+    Left problem -> error (show problem)
+    Right body -> pure $ memory <> contextSection "runtime at arrival"
+      (Just "getRuntimeInfo; observed during initialization") body

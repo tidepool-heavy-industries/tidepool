@@ -4,7 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
-module Persona.Spec (agentSpec, helperSpec, PersonaEffects, HelperEffects) where
+module Persona.Spec (agentSpec, runtimeSpec, helperSpec, PersonaEffects, HelperEffects) where
 import GHC.Generics (Generic)
 import Control.Monad.Freer (Members)
 import Tidepool.Aeson (FromJSON)
@@ -15,7 +15,7 @@ import qualified Persona.FileTools as Files
 import qualified Tidepool.Lookup.Tools as LookupTools
 import qualified Tidepool.Command.Tools as CommandTools
 import Tidepool.Effects.Core
-  ( AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
+  ( AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, RuntimeInfo, Source, Web
   , Actor, ActorContext, AgentLaunch, AgentInspection
   , AgentControl, Notifications, ResourceScopes, BoundWorktree )
 import Tidepool.Agent.Reply (Replies)
@@ -25,13 +25,13 @@ import qualified Persona.Orientation as Orientation
 -- These base rows are delegable. Sync supplies invocation-only context editing
 -- and reload; child grants retain only the effects listed here.
 type PersonaEffects =
-  '[AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
+  '[AskUser, Commands, Console, FsRead, FsWrite, Jev, Lookup, Reflect, RuntimeInfo, Source, Web
    , Actor, ActorContext, AgentLaunch, AgentInspection
    , AgentControl, Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Helpers can explore, compose and curate their own context. Findings return
 -- to the companion, which owns human-facing forms and durable memory edits.
 type HelperEffects =
-  '[Console, FsRead, Jev, Lookup, Reflect, Source, Web
+  '[Console, FsRead, Jev, Lookup, Reflect, RuntimeInfo, Source, Web
    , Actor, ActorContext, AgentLaunch, AgentInspection, AgentControl
    , Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Hosted functions use an object input. The operation retains typed
@@ -80,6 +80,12 @@ agentSpec = defaultSpec { specTools = PersonaTools
   , haskell = haskellTool "Use the persistent Haskell notebook to recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Use the installed file tools for direct source reads and edits, including when a notebook cell will not compile. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections."
   , reload = standardReload }
   , initialContext = Just Orientation.startup }
+
+-- Optional arrival policy: retain authored memory and describe actual runtime
+-- facts as observed while initialization is running.
+runtimeSpec :: (KnownToolEffects effects, AsyncEffects effects, Subset effects (SyncEffects effects), Members '[Commands, FsRead, FsWrite, Lookup, Console, RuntimeInfo] effects)
+  => AgentSpec (PersonaTools effects) effects
+runtimeSpec = agentSpec { initialContext = Just Orientation.startupWithRuntime }
 
 data HelperTools effects mode = HelperTools
   { haskell :: mode :- Sync (HaskellCell effects) }

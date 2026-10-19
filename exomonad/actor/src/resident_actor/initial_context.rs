@@ -262,7 +262,7 @@ where
     }
 }
 
-fn wire_initial_context(
+pub(super) fn wire_initial_context(
     observed: InitialContextObservation,
 ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError> {
     use tidepool_bridge_effects::{

@@ -708,3 +708,146 @@ fn preparation(workspace: &Path, name: &str) -> Value {
         .unwrap();
     serde_json::from_str(&text).expect("persona web evaluation uses native JSON")
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authored_runtime_info_reports_preparing_then_actual_publication() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "Persona.Spec.runtimeSpec", |_, _| {});
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let retained = host
+                .context
+                .forest
+                .initial_context_observation(host.context.actor.identity())
+                .await
+                .unwrap();
+            assert_eq!(retained.state, InitialContextState::Published);
+            let seed = retained.result.as_ref().unwrap();
+            assert_eq!(seed.sections.len(), 2);
+            assert_eq!(seed.sections[1].label, "runtime at arrival");
+            let at_arrival = &seed.sections[1].body;
+            assert!(
+                at_arrival.contains("InitialContextPreparing"),
+                "{at_arrival}"
+            );
+            assert!(
+                !at_arrival.contains("InitialContextPublished"),
+                "{at_arrival}"
+            );
+            assert!(
+                at_arrival.contains("Persona.Spec.runtimeSpec"),
+                "{at_arrival}"
+            );
+            assert!(
+                at_arrival.contains("RuntimeConfiguredInference"),
+                "{at_arrival}"
+            );
+            assert!(
+                at_arrival.contains("runtimeToolName = \"haskell\""),
+                "{at_arrival}"
+            );
+            host.input("Observe the completed startup").await.unwrap();
+            let mut pending = VecDeque::new();
+            let root = harness::model::AgentPath("/root".into());
+            let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            super::startup_context_acceptance_tests::assert_request_user_texts(
+                host,
+                host.context.actor.identity(),
+                &first.request,
+                &[seed.rendered.as_str(), "Observe the completed startup"],
+            )
+            .await;
+            let operation = first.operation("runtime-after-publication");
+            first.sync_call_named(
+                "runtime-after-publication",
+                "haskell",
+                "Right runtimeFacts <- getRuntimeInfo\ndisplay (show runtimeFacts)\n",
+            );
+            let after = host
+                .while_operation_succeeds(
+                    &operation,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let text = retained_committed_display_text(
+                &host.runtime.store(),
+                &harness::store::actor_output::ActorOutputOrigin {
+                    run: host.runtime.run_identity().to_owned(),
+                    native_actor: host.context.actor.identity().id.0,
+                    incarnation: host.context.actor.identity().incarnation.0,
+                },
+                &after.settled_output("runtime-after-publication"),
+            );
+            assert!(text.contains("InitialContextPublished"), "{text}");
+            assert!(text.contains("Persona.Spec.runtimeSpec"), "{text}");
+            assert!(
+                text.contains(&retained.identity.as_ref().unwrap().spec_source),
+                "{text}"
+            );
+            // Change actual selected source, then publish through the existing Reload owner.
+            let orientation = host.context.config.workspace.join(".exomonad/Persona/Orientation.hs");
+            let original_source = std::fs::read_to_string(&orientation).unwrap();
+            std::fs::write(&orientation, format!("-- runtime-info reload observation\n{original_source}")).unwrap();
+            let operation = after.operation("runtime-during-reload");
+            after.sync_call_named("runtime-during-reload", "haskell",
+                "Right runtimeReload <- reloadSource []\nRight duringReload <- getRuntimeInfo\ndisplay (runtimeExecutingSpec duringReload == runtimeExecutingSpec runtimeFacts && runtimeExecutingGeneration duringReload == runtimeExecutingGeneration runtimeFacts)\n");
+            let reloaded = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+            let origin = harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: host.context.actor.identity().id.0,
+                incarnation: host.context.actor.identity().incarnation.0,
+            };
+            assert_eq!(retained_committed_display_text(&host.runtime.store(), &origin,
+                &reloaded.settled_output("runtime-during-reload")), "True");
+            let operation = reloaded.operation("runtime-after-reload");
+            reloaded.sync_call_named("runtime-after-reload", "haskell",
+                "Right afterReloadFacts <- getRuntimeInfo\ndisplay (runtimeExecutingSpec afterReloadFacts /= runtimeExecutingSpec runtimeFacts && runtimeExecutingGeneration afterReloadFacts /= runtimeExecutingGeneration runtimeFacts && runtimeStartup afterReloadFacts == runtimeStartup runtimeFacts)\n");
+            let final_round = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+            assert_eq!(retained_committed_display_text(&host.runtime.store(), &origin,
+                &final_round.settled_output("runtime-after-reload")), "True");
+            final_round.finish();
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_info_distinguishes_absent_initializer_from_unobserved_startup() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "Persona.Spec.helperSpec", |_, _| {});
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        assert_eq!(host.context.forest.initial_context_observation(host.context.actor.identity())
+            .await.unwrap().state, InitialContextState::AbsentHook);
+        host.input("Observe this spec without an initializer").await.unwrap();
+        let mut pending = VecDeque::new();
+        let root = harness::model::AgentPath("/root".into());
+        let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let operation = first.operation("runtime-absent-initializer");
+        first.sync_call_named("runtime-absent-initializer", "haskell",
+            "Right observedRuntime <- getRuntimeInfo\ndisplay (case runtimeStartup observedRuntime of { RuntimeStartupObserved InitialContextAbsent -> True; _ -> False })\n");
+        let after = host.while_operation_succeeds(&operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+        assert_eq!(retained_committed_display_text(&host.runtime.store(),
+            &harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: host.context.actor.identity().id.0,
+                incarnation: host.context.actor.identity().incarnation.0,
+            }, &after.settled_output("runtime-absent-initializer")), "True");
+        after.finish();
+    })).await;
+}
