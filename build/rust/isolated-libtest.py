@@ -36,6 +36,7 @@ TRACE_QUEUE_BYTE_LIMIT = 64 << 10
 TRANSACTION_DIRECTORY_LIMIT = 4096
 TRANSACTION_CAPTURE_LIMIT = 256
 COMPILER_SELECTION_RESOURCES = (
+    'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
     'TIDEPOOL_COMPILER_MODULES',
     'TIDEPOOL_PREPARED_ROOT_ENTRY',
     'TIDEPOOL_PREPARED_BUILTIN_ENTRIES',
@@ -43,6 +44,7 @@ COMPILER_SELECTION_RESOURCES = (
     'TIDEPOOL_RECIPE_WORKSPACE',
 )
 COMPILER_SELECTION_FLAGS = (
+    'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256',
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_NO_DAEMON',
 )
@@ -142,6 +144,8 @@ DELEGATED_ENVIRONMENT = (
     'PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
     'LD_LIBRARY_PATH', 'TMPDIR', 'TMP', 'TEMP', 'TEMPDIR',
     'TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT',
+    'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
+    'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256',
     'TIDEPOOL_PRELUDE_DIR', 'TIDEPOOL_GHC_LIBDIR', 'GHC_LIBDIR',
     'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES', 'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
@@ -473,6 +477,17 @@ def resolve_resource_environment(names):
         if not path.exists():
             raise RuntimeError(f'declared resource does not exist: {name}={path}')
         selected[name] = str(path)
+    source_config = selected.get('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG')
+    if source_config is not None:
+        # The declared service producer owns this fixed sibling. This is launch
+        # data, not service authority: the frontend measures the configuration
+        # and admission checks the deployment's independently expected digest.
+        digest_file = Path(source_config).with_suffix('.sha256')
+        with digest_file.open('rb') as stream:
+            digest = stream.read(66)
+        if re.fullmatch(rb'[0-9a-f]{64}\n', digest) is None:
+            raise RuntimeError(f'invalid declared compiler service digest: {digest_file}')
+        selected['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256'] = digest[:-1].decode('ascii')
     # Source-backed libtests may inherit caller variables even when Buck did
     # not declare them. Clear these selectors before either direct or delegated
     # execution, then restore only paths explicitly bound as runner resources.
