@@ -1,108 +1,35 @@
 # Reload area handoff
 
-Owner `/root/warm_compiler_campaign/reload`; real checkout
-`/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
-`feature/shared-warm/reload`. Original base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Campaign owns shared contracts,
-joined qualification and release acceptance. The imported peer is prerequisite.
+Owner `/root/warm_compiler_campaign/reload`; checkout `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch `feature/shared-warm/reload`. Original base `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Campaign owns shared contracts and joined acceptance. Imported peer work is prerequisite.
 
-## Current candidate and executed evidence
+## Current candidate and gate
 
-Code checkpoint `4c2c653d4aa3684df40c097f2b9ecc0da0ac88f9` joins canonical C6,
-WatchRoute/FormOpen original-source owners, actual final-source workbench and
-replacement adoption, native/worker pending lifetime accounting and population
-cleanup truth. Foundation `24748ad3c3a8d706c15c730d26f9374ea94b58f8` was already
-folded by campaign as `21d61e9b2d849f0d77e913547944a1a3cf17283b`.
+Tested source `c93436ca898f60066f38b5bddc10863bfa6d4d82` (fc748 product code plus handoff) joins opaque-root968, reply capsule/register78, atomic publisher/terminal settlementfa492, and the independently reviewed startup readiness repair. The exact two-file repair uses actual Starting+attached lifecycle readiness before natural-stop cleanup; the same transition is ordered with retained shutdown intent. Early terminal intent before lifecycle closure remains intact. Successful completed birth and open resource/source admission are separate facts.
 
-Private evidence root is
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/`.
-At exact369d, `producer-lifetime-retry-receipt.json` records owning actor/host
-five production/cfg(test)/binary labels compiled0, actual Form/Jev services2
-passed, worker ownership3 passed, population cleanup2 passed, and Rust notebook4
-passed. Its replacement control failed before target in raw fixture binding.
-At exact4c, the SAME original source now owns that fixture setup;
-`replacement-fixture-retry-receipt.json` records actor cfg(test) compile0 and
-that exact replacement grant/order/refusal control executed1/passed1. All native
-commands are terminal; idle daemon3984377 remains globally counted. No combined
-8/8 run is inferred from these separate source receipts.
+At exact986, owning runtime/actor/host production+cfg(test), actor binary and integration eight targets compiled successfully. Runtime5, actor24/25, host2 and notebook4 passed: 36 reports, 35 passing, one actual natural-startup regression. This is NOT a complete passing candidate. `publisher-root-reply-retry-receipt.json` SHA256 `0277de7bb55698a8d11a3a4bd8547f5290aec77a5da88751b0a70da58fe484cf` retains all reports/streams and terminal resource facts. The failed completed-startup case motivated fc748; its strict oracle was preserved. The repaired exact c934 gate is now fully terminal: owning8 compiled, actor30/30 (including all seven startup/terminal controls), host2/2 and actual notebook4/4 passed. All36 reports and72 streams were hash-verified; process cleanup confirmed36, hosted cleanup confirmed1/not_observed35, compiler cleanup not_observed36. This does not establish physical compiler teardown. Receipt `startup-readiness-repair-receipt.json` SHA256 `d842f4e99fa1bdeb9407b01e93e99b8941621449d743bd0ca904ba30929e09a4` owns these results. Earlier runtime5 at986 remains separate; no cross-revision combined passing count is claimed.
 
-Reviews include `replacement-fixture-review-4c2c653.md`,
-`final-source-issuer-review-df748-1087.md`,
-`r2-worker-lifetime-final-review-97b369.md`,
-`population-regression-review-3ce2478.md`, `form-open-core-exact-review-141b8e.md`,
-`watch-route-exact-review-eb15de.md` and the strict route fixture reviews.
-Dedicated replacement provision branches and full Form race/transfer histories
-remain unexecuted. This is a bounded source/native checkpoint, not full R1/R2.
+Private evidence root: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/`. Exact source reviews are `publisher-scoped-settlement-review-242e2e5.md`, `receiving-review-572fd211.md` (including986 compile repair), `root-opaque-ingress-review-2e02835.md`, `root-child-factory-fixture-review-968b3e0.md`, `reply-capsule-registration-review-78cdc64.md` and `startup-readiness-review-fc7487a.md`. Cumulative original-base-to-c934 owned source acceptance is `cumulative-source-foundation-review-c93436c.md` SHA256 `6a3e0a37086ffc3c941fe0fa9e3f681ed6b8a810f3a9a0cab160bdcd7e8dde6b`; imported dependencies retain their separate owner reviews. This bounded source/native foundation is ready for campaign receiving integration, not release qualification. Earlier failed42bd/bde5/572 gates remain retained with their separate repairs; no aggregate passing-count claim is made.
 
-## Actual owners and ready frontier
+## Actual owner boundaries
 
-The supervisor owns integration, direct critical review, native admission and
-terminal collection. Existing Sol-high leaves have no descendants.
-`generation_admission` owns opaque root ingress in its isolated root-ingress
-checkout; `authority_review` owns independent exact publisher/control and area
-review. No native leaf jobs exist.
+PublicationVisible records physically selected D while the intermediate token itself remains source-fenced and every operational snapshot/current path unavailable until ACK. Private affine publication ownership remains outside machine checkout. World (when present), canonical issuer guards, own source gate, actual shutdown/lifecycle/cleanup eligibility and Installed compare have one enforced order. Own-fence commit occurs while the exact Installed compare guard is retained. Missing commit, stale attempt, terminal clear, panic or uncertainty stays closed. No unconditional production actor reopen caller remains; the lower raw runtime reopen method still exists with test-only found callers. Runtime own-fence success is only OwnSourceFenceReopened; every fresh operation still checks the complete original source chain.
 
-Publisher repair is isolated in
-`/srv/swarm/checkouts/tidepool-shared-warm-reload-targets-20261019`, branch
-`feature/shared-warm/reload-publisher`, code0981f488de after source-reviewed27e731e.
-The existing Installed owner reserves one exact attempt before machine checkout;
-affine World phase/fence/prerequisite custody remains outside await. Visibility
-locks World then Installed briefly, never around native IO. Unknown cancellation
-keeps both operational views unavailable, including late actual visibility.
-Known no-effect restoration requires a completed body and actual precommit phase.
-Source controls exercise real canonical leases and actual private owner/callback
-entries with latches; they issue no compiler code or durable head. They and the
-new publisher source are uncompiled/unexecuted. Actual hosted callback race,
-reply lock composition and physical GHC-fault histories remain distinct limits.
-Next action: exact review, integrate, early owning compile and focused controls,
-then actual notebook4. The supervisor owns that launch/observer.
+Opaque non-Clone ResidentActorRoot is issued by consuming actual preparation after Clean|NotStarted and cancellation. Fresh final C adoption precedes distinct native Startup INSTALL/seal without authored evaluation. Initial durable Committed checks the SAME C; recovery waits actual transfer/new epoch. Typed committed readiness survives later source failure. Matching directory cleanup custody receives machine/owner before registry insertion. Raw descriptor/outcome root constructors are removed. Actual first-display and model-free child-cell controls passed at986.
 
-Root ingress proposal and independent review at aeaf are approved for bounded
-implementation. Remove public raw outcome+descriptor pairing and retain the
-actual preparation cancellation owner in one opaque non-Clone root product.
-Factory preparation must physically settle Clean|NotStarted; Retired refuses.
-After final fresh placement, a distinct runtime source owner installs/seals
-Startup without authored evaluation. Initial binding preserves SAME C lease;
-only real Committed permits queued Startup. Recovery transfer advances issuer
-epoch and requires post-transfer adoption. Committed readiness plus later source
-failure must survive typed lifecycle settlement, never String-only loss or
-Refused relabel. Native-only model_free claims no ApplicationBound guarantee;
-real durable deployment preserves journal/bind/recovery/release ordering.
-Leaf owns exact host compile_root/root admission/model_free/display test callers;
-HOST acknowledged that reservation. Coherent core/direct consumers compile early.
+ReplyToolDefinition now retains the captured CallbackExecution, preserving original source A/lease even for snapshotNone and transfer to recipient B. Actual registration acquires source authority before RequestMutex and rechecks the exact request/slot. Capsule/register and representative native result custody controls passed at986. Mount and final-slot composition are NOT accepted by that result.
 
-Required R1 successors: reply-tool definition installation, callable Display
-stage/select, Form reservation/cutoff and async drop/transfer controls. Existing
-source-neutral receipts, answers/commit/close and admitted pure continuations
-remain permitted. Reply/display producer packet is `REPLY-DISPLAY-OWNERS-8b.md`
-under the private reload-admission evidence; no reply implementation is accepted.
+## Active successor frontier
 
-Required R2 successor extends EXISTING RunState retirement ownership with Checking
-and exact-attempt pre-effect transitive physical closure capture, including all
-pending worker/native preparations and transfer settlement. Known pending differs
-from unknown cleanup; default no-effect refusal can restore selected A while
-known records remain live. P cannot stop if its closure would stop independently
-owned LLM C: exact P/C typed refusal precedes any effects. Only actual prior lifetime
-transfer removes collateral. Forms/routes/direct callback admissions must compose
-with that same lifetime exclusion; source A fencing alone is insufficient.
-Per-resource owner stopped/refused/unconfirmed facts precede shared schema.
-Force=true stays explicitly unsupported until actual selective drain is checked.
+Existing Sol-high generation_admission owns the next reply mount policy tranche in the isolated reply checkout: clean frozen `c857dfb5a2bfca2a5a3f22377ad79f51d0c3a382`, based on fc748, independently source-accepted early foundation and not merged/compiled by this checkpoint. The actual ActorSourceRoots Deployment|Complete policy plus optional ACTUAL checkpoint must replace mandatory checkpoint metadata in the existing installation/compilation owner; paths, recipient B and absence never issue authority. Private prepare_reply_tools consumes the SAME definition capsule. Checkpoint-specific source services/reload/prompt/child operations refuse missing evidence truthfully. Source→Request final-slot ordering must retain actual already-Published native activation and pending installation cleanup after partial refusal, with prior Arc Drop outside all guards. Independent design packet `reply-mount-source-policy-review-78cdc64.md` names exact consumers and required controls. Exact early review `reply-mount-policy-review-c857dfb.md` excludes async mount, final-slot partial custody and physical import/Unknown/Drop histories. Supervisor owns its next early directly affected compile; leaf actively traces the same existing request and retained actor cleanup owners for the final-slot successor without mutating frozen c857.
 
-## Qualification and resource limits
+Existing Sol-high authority_review owns independent exact candidate and bounded category review. Supervisor owns native observation/integration, actual hosted before-ACK alias/cancellation histories and R2 Checking/selective retirement composition. No additional descendants or leaf native jobs. Real physical post-resume GHC END fault remains blocked before resume by the separate strict native constructor failure; owner-cluster latch controls are not that fault qualification.
 
-Durable Sleep positive remains blocked before resume in actual Rust artifact
-assembly (fresh Prelude62 requires supplied exact-version private Full Text8).
-Qualification owns product/certificate/carrier discrimination. No physical
-ACK-loss relay before a real positive. Existing quoted selection reconstruction
-and baseline native failures retain strict oracles, with no inferred common cause.
-Published-session compiler migration2a67 applies queries and ordinary cells,
-successors/fork/reload/recovery; HOST/warm own service clients. Cache hits preserve
-same original/ancestor/placement admission and actual END obligations.
+R1 remaining acceptance includes full Form/Route transfer/race histories, reply actual mount/final-slot and callable Display stage/select. Static receipts and admitted pure continuation remain source-neutral. Source-dependent fresh compile/install/registration must retain original A independently of target B. Independent LLM worlds remain unaffected.
 
-Reload14GiB TOTAL/32GiB prospective growth is conditional on fresh LIVE/per-scope
-accounting below80GiB pressure and100GiB floor. No current reload clients run.
-Idle Buck3984377 scope `/build.slice/inanna-build-1792401778-3984302.scope` stays
-in global actual usage. Update only reload LIVE at launch/terminal; command owner
-collects terminal. No periodic wakes, source mutation during frozen builds or
-deployment. Producers send actionable terminal events and followup_task dormant
-recipients; retained leaves own subsequent repair/review/fold waves.
+R2 actual existing RunState Checking/closure capture is still implementation work. Force=true remains explicitly unsupported before preparation until real selective drain exists. The approved owner record must atomically capture/freeze exact registered and pending physical lifetime closure, retain real generation fence, and preserve known-pending versus unknown cleanup. Dependent P enclosing independent C refuses before any stop; no implicit reparent. Default no-effect refusal may restore still-selected A without waiting known live pending. Partial stop/uncertain publication retains truth and stays fenced as required; no rollback/restart claim. Full force is later required acceptance, independent of the first service-backed bind→atomic successor→second-use with dependency reuse milestone.
+
+## Resources and continuation
+
+The986 observer12033 and repaired c934 observer78245 are fully terminal. Reload LIVE grant14GiB TOTAL/32GiB growth was released; idle daemon3984377 remains in `/build.slice/inanna-build-1792401778-3984302.scope` and globally counted. The next native lane requires fresh LIVE/per-scope accounting below80GiB and100GiB disk floor. Supervisor owns every terminal observer and only the reload LIVE row. No source mutation during frozen native commands, shared daemon restart, deployment or periodic wake loops.
+
+Next local action: send the exact cumulative scoped foundation and tested-source receipts to dormant campaign for full-history receiving fold/joined qualification. Then integrate the independently reviewed early c857 mount tranche and compile its actual actor/host direct consumers with fresh resource accounting. Final-slot investigation remains active in the retained leaf. Private `BACKEND-HANDOFF.json` links exact supervisor/leaf checkout states, source/WIP/review/evidence and continuation; both leaf handoffs were refreshed at their natural checkpoints. Any concrete native/review failure preempts the leaf for bounded repair. Producers reactivate dormant recipients explicitly with candidate/evidence/next action; no status-only polling.

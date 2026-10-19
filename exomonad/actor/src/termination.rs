@@ -553,6 +553,11 @@ pub struct CompilerPreparationClient {
 }
 
 impl CompilerPreparationClient {
+    #[cfg(test)]
+    pub(crate) fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
+        self.retained.with_live_source_settlement(settle)
+    }
+
     pub(crate) fn claim<T>(
         &self,
         claim: impl FnOnce() -> T,
@@ -619,6 +624,244 @@ impl CompilerPreparationOwner {
             preparation: Arc::new(crate::agent_spec::preparation::ToolsetPreparation::default()),
             services: crate::capabilities::WorkbenchServices::new(),
         }
+    }
+
+    /// Run a fresh root factory once, settle its actual preparation END, then
+    /// install fresh startup under a distinct runtime source transaction.
+    /// Recovery retains the recipe until the actual owner transfer commits.
+    /// Authored code remains unexecuted until committed actor admission.
+    pub fn prepare_resident_root<H, O, T: 'static>(
+        self,
+        factory: impl FnOnce(
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> Result<
+            (
+                crate::ActorDescriptor,
+                tidepool_runtime::session::ResidentSession<H, O>,
+                Arc<tidepool_runtime::session::CompiledTurn>,
+                Option<tidepool_runtime::session::RecoveryPublicOwner>,
+                T,
+            ),
+            Box<dyn std::error::Error>,
+        >,
+    ) -> Result<
+        (crate::ResidentActorRoot<H, O>, T),
+        crate::resident_actor::ResidentRootPreparationFailure<H, O, T>,
+    >
+    where
+        H: tidepool_effect::dispatch::DispatchEffect<O> + Send + 'static,
+        O: tidepool_runtime::session::OutputSink + Sync + 'static,
+    {
+        use crate::resident_actor::root_preparation::{RootPreparationDraft, RootStartupCode};
+        let mut guard = PreparationAdmissionGuard {
+            owner: self.retained.clone(),
+            completed: false,
+        };
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
+        let owner = self.services.with_compiler_owner(owner).for_preparation();
+        if tidepool_runtime::CompilerTransactionOrigin::current().is_some() {
+            return Err(crate::resident_actor::ResidentRootPreparationFailure {
+                cause: Box::new(
+                    tidepool_runtime::session::SourceAdmissionError::ForeignTransaction,
+                ),
+                close: None,
+                draft: None,
+                preparation: self,
+            });
+        }
+        let ticket = match owner.admit_work() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                return Err(crate::resident_actor::ResidentRootPreparationFailure {
+                    cause: Box::new(error),
+                    close: None,
+                    draft: None,
+                    preparation: self,
+                })
+            }
+        };
+        let settled = ticket.run_with_close(factory);
+        let preparation_close = CompilerWorkClose::Settled(settled.close().clone());
+        let cancellation = settled.host_admission_cancellation().cloned();
+        let output = settled.into_outcome().action;
+        let (descriptor, machine, program, predecessor, metadata) = match output {
+            Ok(output) => output,
+            Err(error) => {
+                return Err(crate::resident_actor::ResidentRootPreparationFailure {
+                    cause: error,
+                    close: Some(preparation_close),
+                    draft: None,
+                    preparation: self,
+                })
+            }
+        };
+        let mut draft = Box::new(RootPreparationDraft {
+            descriptor,
+            machine,
+            program,
+            predecessor,
+            metadata,
+            startup: None,
+        });
+        let mut observed_close = preparation_close;
+        let mut installation_cancellation = None;
+        let result: Result<
+            tidepool_runtime::HostAdmissionCancellation,
+            Box<dyn std::error::Error>,
+        > = (|| {
+            if !matches!(
+                observed_close,
+                CompilerWorkClose::Settled(
+                    tidepool_runtime::CompilerTransactionClose::Clean
+                        | tidepool_runtime::CompilerTransactionClose::NotStarted
+                )
+            ) {
+                return Err(std::io::Error::other(
+                    "root preparation did not reach a successful END",
+                )
+                .into());
+            }
+            let cancellation = cancellation.ok_or_else(|| {
+                std::io::Error::other("root preparation lost its cancellation owner")
+            })?;
+            cancellation.checkpoint()?;
+            if !matches!(
+                draft.descriptor.source_dependency(),
+                crate::resident_workbench::generation_admission::SourceDependency::Unqualified
+            ) || draft.descriptor.creator().is_some()
+                || draft.descriptor.supervisor_parent().is_some()
+                || draft.descriptor.context_parent().is_some()
+                || draft.descriptor.checkpoint_boundary().is_some()
+            {
+                return Err(std::io::Error::other(
+                    "root factory must return a fresh independent recipe",
+                )
+                .into());
+            }
+            if draft.machine.is_bootstrapped() {
+                return Err(std::io::Error::other(
+                    "root factory returned an already installed machine",
+                )
+                .into());
+            }
+            let placement = draft.descriptor.placement();
+            if draft
+                .machine
+                .compile_view_in(placement.lexical_scope)
+                .is_none_or(|view| view.session() != placement.session)
+            {
+                return Err(std::io::Error::other(
+                    "root recipe placement differs from its actual session",
+                )
+                .into());
+            }
+            if placement.lexical_scope == tidepool_codegen::scope::ScopeId::ROOT {
+                return Err(std::io::Error::other(
+                    "root factory did not resolve its final lexical scope",
+                )
+                .into());
+            }
+            draft.machine.set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope: placement.lexical_scope,
+                    resource_scope: placement.resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )?;
+            let recovery = draft.machine.recovered_domain_presence()?;
+            if draft.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
+                && recovery.is_none()
+            {
+                return Err(std::io::Error::other(
+                    "durable root factory has no attached recovery domain",
+                )
+                .into());
+            }
+            if let Some(predecessor) = &draft.predecessor {
+                if !draft.machine.validate_recovered_public_owner(predecessor)? {
+                    return Err(std::io::Error::other(
+                        "root predecessor is not the attached recovered public owner",
+                    )
+                    .into());
+                }
+                if draft
+                    .program
+                    .ordinary_original_compile_input()
+                    .and_then(|proof| proof.replay_eligible_identity())
+                    .is_none()
+                {
+                    return Err(std::io::Error::other(
+                        "recovered startup requires exact original compile identity",
+                    )
+                    .into());
+                }
+                draft
+                    .machine
+                    .seal_recovery_initialization_scope(placement.lexical_scope)?;
+                draft.startup = Some(RootStartupCode::Recovered(Arc::clone(&draft.program)));
+            } else {
+                if recovery == Some(tidepool_runtime::session::RecoveredDomainPresence::Published) {
+                    return Err(std::io::Error::other(
+                        "published root recovery requires its exact predecessor",
+                    )
+                    .into());
+                }
+                draft.descriptor = draft.descriptor.clone().admit_independent_world();
+                let dependency = draft.descriptor.source_dependency().clone();
+                dependency.adopt_final_scope(&mut draft.machine, placement.lexical_scope)?;
+                let ticket = owner.admit_continuation()?;
+                let observation = ticket.control.observation();
+                let installation_cancel = ticket.control.cancellation.host_admission_cancellation();
+                let entry = CompilerWorkTicket::run_source_transaction(
+                    &mut draft.machine,
+                    ticket,
+                    &dependency,
+                    |session, _| session.prepare_startup_entry(draft.program.code()),
+                );
+                observed_close = observation.observation();
+                draft.startup = Some(RootStartupCode::Installed(entry??));
+                if !matches!(
+                    observed_close,
+                    CompilerWorkClose::Settled(
+                        tidepool_runtime::CompilerTransactionClose::Clean
+                            | tidepool_runtime::CompilerTransactionClose::NotStarted
+                    )
+                ) {
+                    return Err(std::io::Error::other(
+                        "root startup installation did not reach a successful END",
+                    )
+                    .into());
+                }
+                installation_cancel.checkpoint()?;
+                installation_cancellation = Some(installation_cancel);
+                if draft.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable {
+                    draft
+                        .machine
+                        .seal_recovery_initialization_scope(placement.lexical_scope)?;
+                }
+            }
+            cancellation.checkpoint()?;
+            Ok(cancellation)
+        })();
+        let cancellation = match result {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                return Err(crate::resident_actor::ResidentRootPreparationFailure {
+                    cause: error,
+                    close: Some(observed_close),
+                    draft: Some(draft),
+                    preparation: self,
+                })
+            }
+        };
+        // Recovery has no issuing lexical lease until the real transfer commits.
+        draft.descriptor = draft.descriptor.admit_independent_world();
+        guard.completed = true;
+        drop(guard);
+        Ok(draft.issue(self, cancellation, installation_cancellation))
     }
 
     pub(crate) fn client(&self) -> CompilerPreparationClient {
@@ -1145,6 +1388,23 @@ impl RetainedActorExit {
         }
     }
 
+    /// Source settlement enters after canonical issuer/gate locks. Keep this
+    /// incarnation's intent, terminal and cleanup eligibility stable through the
+    /// final publication compare. The callback borrows all cleanup custody.
+    pub(crate) fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
+        let shutdown = self.state.requested_shutdown.lock();
+        let lifecycle = self.state.lifecycle.lock();
+        let cleanup = self.state.cleanup.lock();
+        if shutdown.is_some()
+            || matches!(lifecycle.current, ActorLifecycle::Exited(_))
+            || cleanup.outcome.is_some()
+            || cleanup.compiler_admission != CompilerAdmission::Active
+        {
+            return None;
+        }
+        Some(settle())
+    }
+
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
         let mut changed = self.state.changed.subscribe();
         loop {
@@ -1274,6 +1534,117 @@ impl RetainedActorExit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn root_preparation_refuses_foreign_outer_before_factory() {
+        let calls = std::cell::Cell::new(0);
+        let outer = tidepool_runtime::with_compiler_transaction(
+            |_| {},
+            || {
+                let origin = tidepool_runtime::CompilerTransactionOrigin::current().unwrap();
+                let failure = super::CompilerPreparationOwner::new()
+                    .prepare_resident_root::<frunk::HNil, tidepool_mcp::CapturedOutput, ()>(|_| {
+                        calls.set(calls.get() + 1);
+                        Err(std::io::Error::other("nested factory must not run").into())
+                    })
+                    .err()
+                    .expect("root phases cannot borrow an unsettled outer END");
+                assert!(matches!(
+                    failure
+                        .cause
+                        .downcast_ref::<tidepool_runtime::session::SourceAdmissionError>(),
+                    Some(tidepool_runtime::session::SourceAdmissionError::ForeignTransaction)
+                ));
+                assert_eq!(
+                    tidepool_runtime::CompilerTransactionOrigin::current().as_ref(),
+                    Some(&origin)
+                );
+                assert_eq!(calls.get(), 0);
+                assert!(failure.draft.is_none());
+                assert!(failure.close.is_none());
+                assert!(failure.cleanup().observation().work.is_empty());
+            },
+        );
+        assert_eq!(
+            outer.close,
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        assert!(tidepool_runtime::CompilerTransactionOrigin::current().is_none());
+    }
+
+    #[test]
+    fn closed_preparation_owner_cannot_issue_or_replay_root_recipe() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let prepared = owner.run(|_| ());
+        prepared.action.unwrap();
+        assert!(prepared.cleanup.observation().admission_closed);
+        let calls = std::cell::Cell::new(0);
+        let failure = owner
+            .prepare_resident_root::<frunk::HNil, tidepool_mcp::CapturedOutput, ()>(|_| {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::other("factory must never run after preparation closed").into())
+            })
+            .err()
+            .expect("closed preparation cannot issue a root");
+        assert!(matches!(
+            failure
+                .cause
+                .downcast_ref::<crate::ResidentActorWorkbenchError>(),
+            Some(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        assert_eq!(calls.get(), 0);
+        assert!(failure.draft.is_none());
+        let cleanup = failure.cleanup().observation();
+        assert!(cleanup.admission_closed);
+        assert_eq!(
+            cleanup.work,
+            vec![super::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        );
+    }
+
+    #[test]
+    fn source_settlement_holds_actual_terminal_and_cleanup_eligibility() {
+        let owner = super::RetainedActorExit::new();
+        assert_eq!(
+            owner.with_live_source_settlement(|| {
+                assert!(owner.state.requested_shutdown.try_lock().is_none());
+                assert!(owner.state.lifecycle.try_lock().is_none());
+                assert!(owner.state.cleanup.try_lock().is_none());
+                7
+            }),
+            Some(7)
+        );
+        let requested =
+            super::ActorTerminal::new(super::ActorExitKind::Cancelled, "actual retirement intent");
+        owner.request_shutdown(requested.clone());
+        assert!(owner
+            .with_live_source_settlement(|| panic!("retiring owner cannot settle source"))
+            .is_none());
+        assert_eq!(owner.requested_shutdown(), Some(requested));
+        assert!(
+            owner.get().is_none(),
+            "intent is not a fabricated terminal result"
+        );
+
+        let exited = super::RetainedActorExit::new();
+        exited
+            .publish(super::ActorTerminal::new(
+                super::ActorExitKind::Completed,
+                "actual completed owner",
+            ))
+            .unwrap();
+        assert!(exited
+            .with_live_source_settlement(|| panic!("exited owner cannot settle source"))
+            .is_none());
+        let mut preparation = super::CompilerPreparationOwner::new();
+        let client = preparation.client();
+        preparation.run(|_| ()).action.unwrap();
+        assert!(client
+            .with_live_source_settlement(|| panic!("closed preparation cannot settle source"))
+            .is_none());
+    }
+
     fn uncertain_close() -> tidepool_runtime::CompilerTransactionClose {
         tidepool_runtime::CompilerTransactionClose::Unconfirmed(
             tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(

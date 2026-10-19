@@ -56,6 +56,8 @@ mod provider_initial_tests;
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
+pub(crate) mod root_preparation;
+pub use root_preparation::{ResidentRootAdmission, ResidentRootPreparationFailure};
 mod runtime_info;
 #[cfg(test)]
 mod scope_runtime_tests;
@@ -121,48 +123,33 @@ use crate::{
     ResidentToolEndpoint,
 };
 
-/// The original executable retained by the actor's existing boot owner.
-pub enum ResidentRootEntry {
-    Prepared(ResidentOutcome),
-    Startup(tidepool_runtime::session::PreparedStartupEntry),
-}
-
-/// A compiled root at the point where ownership moves into its local actor.
+/// An affine root issued after successful preparation. Fresh native startup is
+/// installed; recovery retains its recipe until committed epoch transfer.
+/// Its executable, source provenance and cancellation owner move together.
 pub struct ResidentActorRoot<H, O> {
     descriptor: ActorDescriptor,
     machine: ResidentSession<H, O>,
-    outcome: ResidentRootEntry,
+    startup: root_preparation::RootStartupCode,
+    predecessor: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+    preparation: crate::CompilerPreparationOwner,
+    cancellation: tidepool_runtime::HostAdmissionCancellation,
+    installation_cancellation: Option<tidepool_runtime::HostAdmissionCancellation>,
 }
 
-impl<H, O> ResidentActorRoot<H, O> {
+impl<H, O> ResidentActorRoot<H, O>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
     #[must_use]
-    pub fn new(
-        descriptor: ActorDescriptor,
-        machine: ResidentSession<H, O>,
-        outcome: ResidentOutcome,
-    ) -> Self {
-        Self {
-            descriptor: descriptor.admit_independent_world(),
-            machine,
-            outcome: ResidentRootEntry::Prepared(outcome),
-        }
+    pub fn handlers(&self) -> &H {
+        // Read-only host composition does not consume or execute the root.
+        self.machine.handlers()
     }
 
-    /// Native installation has completed, but no authored entry has executed.
-    pub fn pending(
-        descriptor: ActorDescriptor,
-        machine: ResidentSession<H, O>,
-        entry: tidepool_runtime::session::PreparedStartupEntry,
-    ) -> Self {
-        Self {
-            descriptor: descriptor.admit_independent_world(),
-            machine,
-            outcome: ResidentRootEntry::Startup(entry),
-        }
-    }
-
-    pub fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentRootEntry) {
-        (self.descriptor, self.machine, self.outcome)
+    #[must_use]
+    pub fn compile_input_identity(&self) -> Option<&str> {
+        self.startup.compile_input_identity()
     }
 }
 
@@ -2392,7 +2379,7 @@ impl std::fmt::Debug for RootStartupRelease {
 enum ResidentBoot {
     Workbench,
     Prepared(Box<ResidentOutcome>),
-    Startup(tidepool_runtime::session::PreparedStartupEntry),
+    Startup(root_preparation::RootStartupCode),
     Entry(RootCustody),
     Replacement(Box<replacement::PreparedSuccessor>),
 }
@@ -7670,11 +7657,26 @@ where
                 installation,
                 session,
                 installer,
-            } => Box::pin(async move {
-                let outcome = self
+                mut execution,
+            } => {
+                Box::pin(async move {
+                    let dependency = execution.source_dependency().clone();
+                    execution.snapshot = effect_owner.issued_snapshot().map(|snapshot| {
+                        crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                            crate::InstalledToolLease::source_callback_custody(
+                                context.actor,
+                                snapshot.installation().source().clone(),
+                                dependency.clone(),
+                            ),
+                        )
+                    });
+                    execution.scope = effect_owner
+                        .callback_scope()
+                        .or(Some(dependency.source_lease()?));
+                    let outcome = self
                     .environment
                     .application_workbench()
-                    .prepare_reply_tool(context.clone(), installation, session, installer)
+                    .prepare_reply_tool(context.clone(), installation, session, installer, execution)
                     .await
                     .map_err(|error| {
                         crate::request_effect::RequestError::RequestReplyToolInvalid(
@@ -7685,13 +7687,21 @@ where
                         self.environment
                             .requests
                             .register_reply_tool(context.actor, request, Arc::new(definition))
-                            .map_err(crate::request_effect::RequestError::RequestSubmissionRejected)
+                            .map_err(|error| match error {
+                                crate::request::ReplyToolRegistrationError::Source(error) => {
+                                    crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string())
+                                }
+                                crate::request::ReplyToolRegistrationError::Request(error) => {
+                                    crate::request_effect::RequestError::RequestSubmissionRejected(error)
+                                }
+                            })
                     });
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, outcome)
-                    .await
-            }),
+                    self.environment
+                        .runner
+                        .resume_value(context.clone(), continuation, outcome)
+                        .await
+                })
+            }
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
                 use crate::request_effect::RequestError;
                 if let Err(error) = self
@@ -8824,7 +8834,15 @@ where
             .session_context(context.actor)
             .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
-        let publisher = workbench.generation_publisher(self.installed_tools.clone());
+        let lifecycle = self.lifecycle.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "generation publication has no actor lifecycle owner".into(),
+            )
+        })?;
+        let publisher = workbench.generation_publisher(
+            self.installed_tools.clone(),
+            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle),
+        );
         let prepared = workbench
             .prepare_initial_generation(
                 self.installed_tools.clone(),
@@ -9365,7 +9383,7 @@ where
             ResidentBoot::Startup(entry) => {
                 self.environment
                     .runner
-                    .run_startup_entry(context.clone(), entry)
+                    .run_root_startup(context.clone(), entry)
                     .await?
             }
             ResidentBoot::Entry(entry) => {
@@ -12417,7 +12435,10 @@ where
                             || (self.descriptor.creator().is_none()
                                 && self.descriptor.supervisor_parent().is_none()
                                 && self.descriptor.context_parent().is_none()
-                                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
+                                && matches!(
+                                    self.boot.as_ref(),
+                                    Some(ResidentBoot::Prepared(_) | ResidentBoot::Startup(_))
+                                )))
                     {
                         let outcome = lifecycle
                             .publish_public_owner(None)
@@ -12442,9 +12463,11 @@ where
                             }
                         }
                     }
-                    if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
-                        || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
-                            && self.explicit_installer.is_some())
+                    if matches!(
+                        self.boot.as_ref(),
+                        Some(ResidentBoot::Prepared(_) | ResidentBoot::Startup(_))
+                    ) || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
+                        && self.explicit_installer.is_some())
                     {
                         // Resume is queued before executor_started acknowledges readiness.
                         // Only then may bootstrap publish a provider-consumable installation.
@@ -13451,7 +13474,7 @@ where
             let context = self.context(kernel.identity());
             if self.root_startup.is_none()
                 && ((self.descriptor.checkpoint_boundary().is_none()
-                    && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_))))
+                    && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_) | ResidentBoot::Startup(_))))
                     || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
                         && self.explicit_installer.is_some()))
             {
@@ -14011,24 +14034,9 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let (descriptor, machine, entry) = root.into_parts();
-    let ResidentRootEntry::Prepared(outcome) = entry else {
-        return Err(ractor::SpawnErr::StartupFailed(Box::new(
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "retained startup requires pending root admission with its exact intent",
-            ),
-        )));
-    };
-    let (forest, receiver) = ResidentForest::new(
-        source,
-        descriptor.placement().session,
-        machine,
-        fork_workspaces,
-        incarnation,
-    )
-    .await?;
-    let (actor, task) = forest.admit_root(descriptor, outcome).await?;
+    let (forest, receiver, admission) =
+        ResidentForest::from_prepared_root(source, root, fork_workspaces, incarnation).await?;
+    let (actor, task) = forest.admit_root(admission).await?;
     Ok((actor, task, receiver))
 }
 
@@ -14546,9 +14554,57 @@ where
         fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
         incarnation: crate::Incarnation,
     ) -> Result<(Self, mpsc::Receiver<LocalResidentDeployment>), ractor::SpawnErr> {
-        let (directory, control_task) = crate::LocalActorDirectory::start().await?;
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
+        Self::with_machines(source, session, machines, fork_workspaces, incarnation).await
+    }
+
+    /// Configure the forest while the affine token still owns the uninserted machine.
+    pub async fn from_prepared_root(
+        source: ActorWorkbenchSource,
+        root: ResidentActorRoot<H, O>,
+        fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
+        incarnation: crate::Incarnation,
+    ) -> Result<
+        (
+            Self,
+            mpsc::Receiver<LocalResidentDeployment>,
+            ResidentRootAdmission<H, O>,
+        ),
+        ractor::SpawnErr,
+    > {
+        root.cancellation
+            .checkpoint()
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        if let Some(cancellation) = &root.installation_cancellation {
+            cancellation
+                .checkpoint()
+                .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        }
+        let session = root.descriptor.placement().session;
+        let (forest, receiver) = Self::with_machines(
+            source,
+            session,
+            Arc::new(ActorMachineRegistry::<H, O>::new()),
+            fork_workspaces,
+            incarnation,
+        )
+        .await?;
+        let admission = ResidentRootAdmission {
+            root,
+            directory: forest.directory.clone(),
+        };
+        Ok((forest, receiver, admission))
+    }
+
+    async fn with_machines(
+        source: ActorWorkbenchSource,
+        session: tidepool_repr::SessionId,
+        machines: Arc<ActorMachineRegistry<H, O>>,
+        fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
+        incarnation: crate::Incarnation,
+    ) -> Result<(Self, mpsc::Receiver<LocalResidentDeployment>), ractor::SpawnErr> {
+        let (directory, control_task) = crate::LocalActorDirectory::start().await?;
         let source = source.bind_preparation(directory.preparation_client());
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
@@ -14868,7 +14924,11 @@ where
                     })
                 }));
                 let result = async {
-                    let (publication, outcome, source_dependency) = environment
+                    let root_preparation::PreparedRootExecution {
+                        publication,
+                        outcome,
+                        dependency: source_dependency,
+                    } = environment
                         .runner
                         .prepare_root_program_tracked(session, compiled, publisher.into_mint())
                         .await?;
@@ -15095,48 +15155,34 @@ where
         }
     }
 
-    /// Admit a prepared independent root. Its continuation and scopes must have
-    /// been prepared in this forest's machine, just as for a child entry.
-    ///
-    /// A retained startup executable requires the pending transaction API.
-    ///
-    /// ```compile_fail,E0308
+    /// Consume the root issued by its preparation owner. Native startup is
+    /// queued after normal native public-owner commitment, without a host journal.
+    /// ```compile_fail
     /// use exomonad_actor::{ActorDescriptor, ResidentForest};
     /// use tidepool_effect::dispatch::DispatchEffect;
-    /// use tidepool_runtime::session::{OutputSink, PreparedStartupEntry};
-    /// async fn rejects_startup<H, O>(
-    ///     forest: &ResidentForest<H, O>, descriptor: ActorDescriptor,
-    ///     entry: PreparedStartupEntry,
-    /// ) where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
-    ///     forest.admit_root(descriptor, entry).await;
+    /// use tidepool_runtime::session::{OutputSink, ResidentOutcome};
+    /// async fn refuses_raw_pair<H, O>(forest: &ResidentForest<H, O>, descriptor: ActorDescriptor, outcome: ResidentOutcome)
+    /// where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
+    ///     forest.admit_root(descriptor, outcome).await;
     /// }
     /// ```
     pub async fn admit_root(
         &self,
-        descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        admission: ResidentRootAdmission<H, O>,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        self.admit_prepared_root(descriptor, outcome).await
+        let (actor, task, _) = self
+            .admit_pending_root_inner(
+                admission,
+                None,
+                None::<fn(ActorRef) -> crate::RootStartupIntent>,
+            )
+            .await?;
+        Ok((actor, task))
     }
 
-    /// Admit an initial durable root with the directory's original reserved identity.
-    /// An already executed outcome cannot enter the pending startup transaction.
-    ///
-    /// ```compile_fail,E0308
-    /// use exomonad_actor::{ActorDescriptor, ResidentForest, RootStartupIntent};
-    /// use tidepool_effect::dispatch::DispatchEffect;
-    /// use tidepool_runtime::session::{OutputSink, ResidentOutcome};
-    /// async fn rejects_preexecuted<H, O>(
-    ///     forest: &ResidentForest<H, O>, descriptor: ActorDescriptor,
-    ///     outcome: ResidentOutcome, intent: RootStartupIntent,
-    /// ) where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
-    ///     forest.admit_pending_root(descriptor, outcome, move |_| intent).await;
-    /// }
-    /// ```
     pub async fn admit_pending_root<F>(
         &self,
-        descriptor: ActorDescriptor,
-        entry: tidepool_runtime::session::PreparedStartupEntry,
+        admission: ResidentRootAdmission<H, O>,
         intent: F,
     ) -> Result<
         (
@@ -15149,16 +15195,19 @@ where
     where
         F: FnOnce(ActorRef) -> crate::RootStartupIntent + Send,
     {
-        self.admit_pending_root_inner(descriptor, entry, None, intent)
-            .await
+        let (actor, task, release) = self
+            .admit_pending_root_inner(admission, None, Some(intent))
+            .await?;
+        Ok((
+            actor,
+            task,
+            release.expect("journal startup retains its release"),
+        ))
     }
 
-    /// Register a durable root and retain its original boot without executing it.
-    /// The admission and exact startup intent are one fsynced journal row.
     pub async fn admit_pending_root_with_identity(
         &self,
-        descriptor: ActorDescriptor,
-        entry: tidepool_runtime::session::PreparedStartupEntry,
+        admission: ResidentRootAdmission<H, O>,
         identity: ActorRef,
         intent: crate::RootStartupIntent,
     ) -> Result<
@@ -15169,21 +15218,26 @@ where
         ),
         ractor::SpawnErr,
     > {
-        self.admit_pending_root_inner(descriptor, entry, Some(identity), move |_| intent)
-            .await
+        let (actor, task, release) = self
+            .admit_pending_root_inner(admission, Some(identity), Some(move |_| intent))
+            .await?;
+        Ok((
+            actor,
+            task,
+            release.expect("journal startup retains its release"),
+        ))
     }
 
     async fn admit_pending_root_inner<F>(
         &self,
-        descriptor: ActorDescriptor,
-        entry: tidepool_runtime::session::PreparedStartupEntry,
+        admission: ResidentRootAdmission<H, O>,
         identity: Option<ActorRef>,
-        intent: F,
+        intent: Option<F>,
     ) -> Result<
         (
             LocalActorRef,
             ractor::concurrency::JoinHandle<()>,
-            RootStartupRelease,
+            Option<RootStartupRelease>,
         ),
         ractor::SpawnErr,
     >
@@ -15192,17 +15246,45 @@ where
     {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        if !self.directory.same_owner(&admission.directory) {
+            return Err(refuse("root admission belongs to another directory"));
+        }
+        admission
+            .root
+            .cancellation
+            .checkpoint()
+            .map_err(|error| refuse(&error.to_string()))?;
+        if let Some(cancellation) = &admission.root.installation_cancellation {
+            cancellation
+                .checkpoint()
+                .map_err(|error| refuse(&error.to_string()))?;
+        }
+        let ResidentActorRoot {
+            descriptor,
+            machine,
+            startup,
+            predecessor,
+            preparation,
+            cancellation,
+            installation_cancellation,
+        } = admission.root;
         descriptor
             .validate_conversation_selection()
             .map_err(|error| refuse(&error))?;
-        let journal = self
-            .environment
-            .recovery
-            .clone()
-            .ok_or_else(|| refuse("pending root requires durable recovery journal"))?;
+        let journal = if intent.is_some() {
+            Some(
+                self.environment
+                    .recovery
+                    .clone()
+                    .ok_or_else(|| refuse("pending root requires durable recovery journal"))?,
+            )
+        } else {
+            None
+        };
         if descriptor.placement().session != self.session
-            || descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
-            || descriptor.actor_path().is_none()
+            || (intent.is_some()
+                && (descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
+                    || descriptor.actor_path().is_none()))
             || descriptor.creator().is_some()
             || descriptor.supervisor_parent().is_some()
             || descriptor.context_parent().is_some()
@@ -15218,8 +15300,22 @@ where
         }
         .map_err(|error| refuse(&error.to_string()))?;
         // The borrowed intent callback ends before owned work enters supervision.
-        let intent = intent(reservation.identity());
-        let descriptor = descriptor.admit_independent_world();
+        let intent = intent.map(|intent| intent(reservation.identity()));
+        if predecessor.as_ref()
+            != intent
+                .as_ref()
+                .and_then(|intent| intent.manifest.as_ref())
+                .map(|pin| &pin.public_owner.owner)
+        {
+            return Err(refuse(
+                "root startup intent differs from its validated native predecessor",
+            ));
+        }
+        if matches!(startup, root_preparation::RootStartupCode::Recovered(_)) && intent.is_none() {
+            return Err(refuse(
+                "recovered root requires its exact durable startup intent",
+            ));
+        }
         let placement = descriptor.placement();
         let environment = self.environment.clone();
         let directory = self.directory.clone();
@@ -15249,40 +15345,48 @@ where
                 let publication = match publication {
                     Ok(record) => record,
                     Err(error) => {
+                        // The affine machine has never entered the registry.
                         let detail = error.to_string();
-                        match environment.runner.retire_root_placement(placement).await {
-                            Ok(()) => {
-                                let _ = error.into_record().release();
-                                return (
-                                    Err(std::io::Error::other(detail).into()),
-                                    crate::CleanupComponentOutcome::Confirmed,
-                                );
-                            }
-                            Err(cleanup) => {
-                                // Keep the exact publication record in the returned
-                                // typed error when local removal is unconfirmed.
-                                return (
-                                    Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
-                                    crate::CleanupComponentOutcome::Unconfirmed(
-                                        cleanup.to_string(),
-                                    ),
-                                );
-                            }
-                        }
+                        let _ = error.into_record().release();
+                        drop(machine);
+                        return (
+                            Err(std::io::Error::other(detail).into()),
+                            crate::CleanupComponentOutcome::Confirmed,
+                        );
                     }
                 };
+                if let Err(machine) = environment
+                    .runner
+                    .insert_root_machine(placement.session, machine)
+                {
+                    // Collision returns this exact uninserted machine, not the live registry entry.
+                    drop(machine);
+                    let _ = publication.release();
+                    return (
+                        Err(std::io::Error::other("root session already exists").into()),
+                        crate::CleanupComponentOutcome::Confirmed,
+                    );
+                }
+                let _preparation = preparation;
+                let _cancellation = cancellation;
+                let _installation_cancellation = installation_cancellation;
                 let result: crate::local_actor::run_control::RootOperationResult = async {
-                    let permit = directory
-                        .authorize_root_startup(&reservation, intent.clone(), journal, None)
-                        .await?;
+                    let permit = match (&intent, journal) {
+                        (Some(intent), Some(journal)) => Some(
+                            directory
+                                .authorize_root_startup(&reservation, intent.clone(), journal, None)
+                                .await?,
+                        ),
+                        _ => None,
+                    };
                     let mut behavior = ResidentKernelBehavior::with_boot(
                         descriptor,
                         environment,
-                        ResidentBoot::Startup(entry),
+                        ResidentBoot::Startup(startup),
                         Vec::new(),
                     );
-                    behavior.root_startup = Some(intent.clone());
-                    behavior.root_startup_admission = Some(permit);
+                    behavior.root_startup = intent.clone();
+                    behavior.root_startup_admission = permit;
                     crate::local_actor::spawn_reserved_local_actor(
                         None,
                         behavior,
@@ -15290,16 +15394,21 @@ where
                         directory,
                     )
                     .await
-                    .map(|(actor, task)| {
-                        let release = RootStartupRelease {
-                            actor: actor.identity(),
-                            placement,
-                            lifecycle: actor.lifecycle().clone(),
-                            intent,
-                        };
-                        crate::local_actor::run_control::RootAdmissionOutcome::Pending(
-                            actor, task, release,
-                        )
+                    .map(|(actor, task)| match intent {
+                        Some(intent) => {
+                            let release = RootStartupRelease {
+                                actor: actor.identity(),
+                                placement,
+                                lifecycle: actor.lifecycle().clone(),
+                                intent,
+                            };
+                            crate::local_actor::run_control::RootAdmissionOutcome::Pending(
+                                actor, task, release,
+                            )
+                        }
+                        None => crate::local_actor::run_control::RootAdmissionOutcome::Actor(
+                            actor, task,
+                        ),
                     })
                     .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                 }
@@ -15328,7 +15437,10 @@ where
                 actor,
                 task,
                 release,
-            )) => Ok((actor, task, release)),
+            )) => Ok((actor, task, Some(release))),
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)) => {
+                Ok((actor, task, None))
+            }
             Err(error) => Err(error
                 .downcast::<ractor::SpawnErr>()
                 .map(|error| *error)
@@ -15387,69 +15499,6 @@ where
             .await
             .map_err(|error| refuse(&error.to_string()))?;
         Ok(())
-    }
-
-    async fn admit_prepared_root(
-        &self,
-        descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
-    ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        let refuse =
-            |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
-        descriptor
-            .validate_conversation_selection()
-            .map_err(|error| refuse(&error))?;
-        if descriptor.placement().session != self.session
-            || descriptor.supervisor_parent().is_some()
-            || descriptor.context_parent().is_some()
-        {
-            return Err(refuse(
-                "forest root must be independent and belong to the forest machine",
-            ));
-        }
-        let descriptor = descriptor.admit_independent_world();
-        let reservation = self
-            .directory
-            .reserve(self.incarnation)
-            .await
-            .map_err(|error| refuse(&error.to_string()))?;
-        let environment = self.environment.clone();
-        let directory = self.directory.clone();
-        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
-            Box::pin(async move {
-                let _ = ticket.placement_prepared(descriptor.placement());
-                let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
-                let result = crate::local_actor::spawn_reserved_local_actor(
-                    None,
-                    behavior,
-                    reservation,
-                    directory,
-                )
-                .await
-                .map(|(actor, task)| {
-                    crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)
-                })
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
-                (result, crate::CleanupComponentOutcome::Confirmed)
-            })
-        });
-        match self
-            .directory
-            .prepare_root(operation)
-            .await
-            .map_err(|error| refuse(&error.to_string()))?
-        {
-            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)) => {
-                Ok((actor, task))
-            }
-            Err(error) => Err(error
-                .downcast::<ractor::SpawnErr>()
-                .map(|error| *error)
-                .unwrap_or_else(ractor::SpawnErr::StartupFailed)),
-            _ => Err(refuse(
-                "prepared root producer returned incompatible result",
-            )),
-        }
     }
 }
 

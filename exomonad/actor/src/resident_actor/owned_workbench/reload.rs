@@ -122,6 +122,11 @@ where
                     .into(),
             ));
         }
+        let lifecycle = self.lifecycle.clone().ok_or_else(|| {
+            SourceError::SourceUnavailable(
+                "generation publication has no actor lifecycle owner".into(),
+            )
+        })?;
         Ok(CoherentReloadOperation {
             preparation: crate::resident_workbench::ReloadPreparationServices::new(
                 self.environment.application_workbench(),
@@ -135,7 +140,10 @@ where
             publisher: self
                 .environment
                 .application_workbench()
-                .generation_publisher(self.installed_tools.clone()),
+                .generation_publisher(
+                    self.installed_tools.clone(),
+                    crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle),
+                ),
             control,
             checked,
             policy,

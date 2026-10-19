@@ -26,6 +26,7 @@ struct WorldState {
     claims: usize,
     unconfirmed: usize,
     uncertainty_fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    publication: Option<Arc<()>>,
 }
 impl std::fmt::Debug for WorldState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +56,7 @@ impl BootstrapWorld {
                 claims: 0,
                 unconfirmed: 0,
                 uncertainty_fence: None,
+                publication: None,
             }),
         }))
     }
@@ -144,30 +146,23 @@ impl BootstrapWorld {
             .get()
             .ok_or(GenerationAdmissionError::Unqualified)?;
         scope.validate_source_issuer()?;
-        if !scope
-            .source_admission()
-            .same_owner(target.runtime_admission())
-        {
+        if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
-        let fence = scope.source_admission().fence()?;
-        if fence.pending_claims() != 0 || fence.unconfirmed_claims() != 0 {
-            let claims = fence.pending_claims();
-            let unconfirmed = fence.unconfirmed_claims();
-            if unconfirmed == 0 {
-                fence.reopen()?;
-            }
-            return Err(GenerationAdmissionError::BootstrapBusy {
-                claims,
-                unconfirmed,
-            });
-        }
+        let fence = scope.source_admission().fence_if_idle()?;
         state.phase = WorldPhase::Publishing(target.clone());
+        let attempt = Arc::new(());
+        state.publication = Some(attempt.clone());
         Ok(WorldPublication {
             world: self.clone(),
             settled: false,
             prerequisite,
             fence: Some(fence),
+            visibility: WorldPublicationVisibility {
+                world: self.clone(),
+                target: target.clone(),
+                attempt,
+            },
         })
     }
 }
@@ -224,48 +219,164 @@ pub(super) struct WorldPublication {
     settled: bool,
     prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    visibility: WorldPublicationVisibility,
 }
+
+/// Visibility of one prepared attempt, without its fence or settlement rights.
+#[derive(Clone)]
+pub(super) struct WorldPublicationVisibility {
+    world: BootstrapWorld,
+    target: GenerationDependency,
+    attempt: Arc<()>,
+}
+
+impl WorldPublicationVisibility {
+    pub(super) fn install(
+        &self,
+        installed: &super::InstalledToolsState,
+        attempt: &Arc<super::ActorPublicationAttempt>,
+        generation: Arc<super::ActorGeneration>,
+    ) -> bool {
+        let mut world = self.world.0.state.lock();
+        let mut current = installed.0.lock();
+        let exact = world
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.attempt))
+            && Arc::ptr_eq(&self.target.0, &generation.dependency().0)
+            && Arc::ptr_eq(self.target.runtime_lease(), &generation.scope);
+        let live = exact
+            && matches!(&world.phase, WorldPhase::Publishing(_))
+            && matches!(&*current, super::InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, attempt));
+        if exact {
+            world.phase = if live {
+                WorldPhase::Bound(self.target.clone())
+            } else {
+                WorldPhase::Unavailable(self.target.clone())
+            };
+        }
+        // A late callback records actual visibility, never operational authority.
+        if matches!(&*current,
+            super::InstalledToolsAvailability::PublicationInProgress(issued)
+            | super::InstalledToolsAvailability::PublicationUnavailable(issued)
+            if Arc::ptr_eq(issued, attempt))
+        {
+            *current = if live {
+                super::InstalledToolsAvailability::PublicationVisible {
+                    attempt: attempt.clone(),
+                    generation,
+                }
+            } else {
+                super::InstalledToolsAvailability::GenerationUnavailable(generation)
+            };
+        }
+        live
+    }
+}
+
 impl WorldPublication {
+    pub(super) fn visibility(&self) -> WorldPublicationVisibility {
+        self.visibility.clone()
+    }
+
+    pub(super) fn unavailable(&mut self, mark_installed: impl FnOnce()) {
+        let mut state = self.world.0.state.lock();
+        if state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+        {
+            state.phase = WorldPhase::Unavailable(self.visibility.target.clone());
+            state.uncertainty_fence = self.fence.take();
+            mark_installed();
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn visible(&mut self, target: &GenerationDependency) {
         let mut state = self.world.0.state.lock();
         match &state.phase {
-            WorldPhase::Publishing(expected) if expected.same_owner(target) => {}
+            WorldPhase::Publishing(expected) if Arc::ptr_eq(&expected.0, &target.0) => {}
             _ => panic!("initial world publication lost its exact owner"),
         }
         state.phase = WorldPhase::Bound(target.clone());
     }
-    pub(super) fn confirmed(mut self) {
-        self.fence
-            .take()
-            .expect("initial source publication fence")
-            .reopen()
-            .expect("confirmed publisher owns source fence");
-        self.settled = true;
-    }
-    pub(super) fn refused(mut self) {
+    pub(super) fn confirmed_when(
+        mut self,
+        current: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
         let mut state = self.world.0.state.lock();
-        if matches!(state.phase, WorldPhase::Publishing(_)) {
-            state.phase = WorldPhase::Bootstrap;
+        if !state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+            || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target))
+        {
+            return false;
         }
-        self.fence
+        let confirmed = self
+            .fence
             .take()
             .expect("initial source publication fence")
-            .reopen()
-            .expect("refused publisher owns source fence");
-        self.settled = true;
+            .reopen_with(self.visibility.target.runtime_lease(), current)
+            .is_ok_and(|result| result.is_ok());
+        if confirmed {
+            self.settled = true;
+            state.publication = None;
+        }
+        confirmed
+    }
+    #[cfg(test)]
+    pub(super) fn confirmed(self) {
+        assert!(self.confirmed_when(|reopen| {
+            reopen.commit();
+            Ok(())
+        }));
+    }
+    pub(super) fn refused_when(
+        mut self,
+        current: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
+        let mut state = self.world.0.state.lock();
+        if !state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+            || !matches!(state.phase, WorldPhase::Publishing(_))
+        {
+            return false;
+        }
+        let refused = self
+            .fence
+            .take()
+            .expect("initial source publication fence")
+            .reopen_with(self.visibility.target.runtime_lease(), current)
+            .is_ok_and(|result| result.is_ok());
+        if refused {
+            state.phase = WorldPhase::Bootstrap;
+            state.publication = None;
+            self.settled = true;
+        }
+        refused
+    }
+    #[cfg(test)]
+    pub(super) fn refused(self) {
+        assert!(self.refused_when(|reopen| {
+            reopen.commit();
+            Ok(())
+        }));
     }
 }
 impl Drop for WorldPublication {
     fn drop(&mut self) {
         if !self.settled {
+            self.unavailable(|| {});
             if let Some(prerequisite) = self.prerequisite.take() {
                 prerequisite.retain_unconfirmed();
-            }
-            let mut state = self.world.0.state.lock();
-            if let WorldPhase::Publishing(target) | WorldPhase::Bound(target) = &state.phase {
-                let target = target.clone();
-                state.uncertainty_fence = self.fence.take();
-                state.phase = WorldPhase::Unavailable(target);
             }
         }
     }
@@ -494,6 +605,9 @@ impl GenerationDependency {
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         self.0.admission.same_owner(&other.0.admission)
     }
+    pub(super) fn same_prepared(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) && Arc::ptr_eq(self.runtime_lease(), other.runtime_lease())
+    }
     pub(crate) fn depends_on(&self, other: &Self) -> bool {
         self.0.admission.depends_on(&other.0.admission)
     }
@@ -537,6 +651,7 @@ impl GenerationFence {
     pub(crate) async fn wait_for_claims(&self) -> Result<(), GenerationAdmissionError> {
         self.fence.wait_for_claims().await
     }
+    #[cfg(test)]
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
         self.fence.reopen()
     }
@@ -588,6 +703,432 @@ mod tests {
         );
         history.scopes.push(scope);
         dependency
+    }
+
+    /// Owner-cluster controls use real canonical runtime leases and the actual
+    /// publication/visibility entry. They allocate no compiler code or durable head.
+    struct PublicationFixture {
+        _history: History,
+        preparation: Option<crate::CompilerPreparationOwner>,
+        source: SourceDependency,
+        state: Arc<super::super::InstalledToolsState>,
+        generation: Arc<super::super::ActorGeneration>,
+        expected: super::super::ActorRequestSnapshot,
+    }
+
+    impl PublicationFixture {
+        fn new() -> Self {
+            let mut history = History::new();
+            let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+            let world = BootstrapWorld::new(None);
+            world
+                .adopt_scope(dependency.runtime_lease().clone())
+                .unwrap();
+            let source = SourceDependency::World(world);
+            let placement = crate::ActorPlacement {
+                session: tidepool_repr::SessionId(71),
+                resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+                lexical_scope: dependency.runtime_lease().scope(),
+            };
+            let descriptor = crate::ActorDescriptor::new("publication owner component", placement)
+                .with_persistence_policy(crate::ActorPersistencePolicy::Ephemeral)
+                .with_source_dependency(SourceDependency::Generation(dependency.clone()));
+            let context = descriptor.session_context(dependency.actor());
+            let owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
+                &context,
+                &descriptor,
+                dependency.runtime_lease(),
+                None,
+            )
+            .unwrap()
+            .bind(None);
+            let installation = super::super::InstalledToolLease::new(
+                dependency.actor(),
+                crate::CheckpointSourceLayer::default(),
+                None,
+            )
+            .with_source_dependency(&source);
+            let state = Arc::new(super::super::InstalledToolsState::default());
+            state
+                .install_bootstrap(
+                    super::super::BootstrapExpectation::Empty,
+                    installation.clone(),
+                )
+                .unwrap();
+            let expected = super::super::ActorRequestSnapshot::Bootstrap(installation.clone());
+            let generation = Arc::new(super::super::ActorGeneration {
+                id: dependency.generation(),
+                installation: installation
+                    .with_source_dependency(&SourceDependency::Generation(dependency.clone())),
+                context,
+                scope: dependency.runtime_lease().clone(),
+                public_owner: owner,
+                prompts: tidepool_runtime::session::ComposedPromptSnapshot::capture(String::new()),
+                configuration_digest: [0; 32],
+                durable: None,
+            });
+            Self {
+                _history: history,
+                preparation: Some(crate::CompilerPreparationOwner::new()),
+                source,
+                state,
+                generation,
+                expected,
+            }
+        }
+
+        fn after_confirmed_c() -> Self {
+            let mut fixture = Self::new();
+            let initial = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(initial.visibility().install(fixture.generation.clone()));
+            assert!(initial.confirmed());
+            let predecessor = fixture.generation.clone();
+            let dependency = generation(
+                &mut fixture._history,
+                predecessor.id.next().unwrap(),
+                predecessor.dependency().prerequisite().clone(),
+            );
+            let mut context = predecessor.context.clone();
+            context.placement.lexical_scope = dependency.runtime_lease().scope();
+            context.source_dependency = SourceDependency::Generation(dependency.clone());
+            let descriptor =
+                crate::ActorDescriptor::new("replacement publication component", context.placement)
+                    .with_persistence_policy(crate::ActorPersistencePolicy::Ephemeral)
+                    .with_source_dependency(context.source_dependency().clone());
+            let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
+                &context,
+                &descriptor,
+                dependency.runtime_lease(),
+                None,
+            )
+            .unwrap()
+            .bind(None);
+            fixture.generation = Arc::new(super::super::ActorGeneration {
+                id: dependency.generation(),
+                installation: predecessor
+                    .installation
+                    .clone()
+                    .with_source_dependency(&SourceDependency::Generation(dependency.clone())),
+                context,
+                scope: dependency.runtime_lease().clone(),
+                public_owner,
+                prompts: predecessor.prompts.clone(),
+                configuration_digest: [0; 32],
+                durable: None,
+            });
+            fixture.source = SourceDependency::Generation(predecessor.dependency().clone());
+            fixture.expected = super::super::ActorRequestSnapshot::Generation(predecessor);
+            fixture
+        }
+
+        fn assert_candidate_unavailable(&self) {
+            assert!(matches!(
+                self.generation.installation.source_dependency().claim(),
+                Err(GenerationAdmissionError::Closed { .. })
+            ));
+            assert!(self.state.snapshot_for_call().is_err());
+            assert!(self.state.current_generation().is_none());
+        }
+
+        fn reserve(
+            &self,
+            decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        ) -> super::super::ActorPublicationGuard {
+            super::super::ActorPublicationGuard::reserve(
+                self.state.clone(),
+                self.expected.clone(),
+                self.generation.dependency().clone(),
+                &self.source,
+                decision,
+                super::super::ActorPublicationOwner::Preparation(
+                    self.preparation.as_ref().unwrap().client(),
+                ),
+            )
+            .unwrap()
+            .unwrap()
+        }
+
+        fn assert_unavailable(&self) {
+            assert!(self.source.claim().is_err());
+            assert!(self.state.snapshot_for_call().is_err());
+            assert!(matches!(
+                self.state.observe(),
+                super::super::InstalledToolsObservation::SourceUnavailable(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn publisher_terminal_clear_before_confirmation_never_reopens_retained_target() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::new()
+            } else {
+                PublicationFixture::after_confirmed_c()
+            };
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            fixture.state.clear();
+            assert!(!owner.confirmed());
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_settlement_holds_installed_compare_through_gate_commit() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::new()
+            } else {
+                PublicationFixture::after_confirmed_c()
+            };
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            let (entered, observed) = std::sync::mpsc::sync_channel(0);
+            let (release, released) = std::sync::mpsc::channel();
+            owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+                entered,
+                release: parking_lot::Mutex::new(released),
+            }));
+            let settling = std::thread::spawn(move || owner.confirmed());
+            observed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            // This observation occurs in the actual publisher callback, after
+            // selection but before the same borrowed gate token commits.
+            assert!(fixture.state.0.try_lock().is_none());
+            let state = fixture.state.clone();
+            let (clearing, started) = std::sync::mpsc::sync_channel(0);
+            let clear = std::thread::spawn(move || {
+                clearing.send(()).unwrap();
+                state.clear();
+            });
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            release.send(()).unwrap();
+            assert!(settling.join().unwrap());
+            clear.join().unwrap();
+            assert!(fixture.state.snapshot_for_call().is_err());
+        }
+    }
+
+    #[test]
+    fn publisher_closed_actual_preparation_owner_prevents_confirmation_and_refusal_reopen() {
+        for confirmed in [true, false] {
+            let mut fixture = PublicationFixture::new();
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            if confirmed {
+                assert!(owner.visibility().install(fixture.generation.clone()));
+            }
+            drop(fixture.preparation.take());
+            if confirmed {
+                assert!(!owner.confirmed());
+            } else {
+                owner.refused();
+            }
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_terminal_clear_before_refusal_does_not_restore_bootstrap_aliases() {
+        let fixture = PublicationFixture::new();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        fixture.state.clear();
+        owner.refused();
+        assert!(fixture.source.claim().is_err());
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn publisher_busy_target_refuses_without_fencing_original_admission() {
+        let fixture = PublicationFixture::new();
+        let claim = fixture.generation.scope.admit_source().unwrap();
+        let result = super::super::ActorPublicationGuard::reserve(
+            fixture.state.clone(),
+            fixture.expected.clone(),
+            fixture.generation.dependency().clone(),
+            &fixture.source,
+            tidepool_runtime::session::PublicationDecision::new(),
+            super::super::ActorPublicationOwner::Preparation(
+                fixture.preparation.as_ref().unwrap().client(),
+            ),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::ResidentActorWorkbenchError::SourceAdmission(
+                GenerationAdmissionError::BootstrapBusy {
+                    claims: 1,
+                    unconfirmed: 0
+                }
+            ))
+        ));
+        assert!(fixture.state.snapshot_for_call().is_ok());
+        fixture.source.claim().unwrap();
+        drop(claim);
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        owner.refused();
+        fixture.source.claim().unwrap();
+    }
+
+    #[test]
+    fn publisher_replacement_visibility_waits_for_ack_before_selection_and_source() {
+        let fixture = PublicationFixture::after_confirmed_c();
+        // D is a real new canonical scope, not bootstrap C's already-owned fence.
+        assert!(!fixture
+            .generation
+            .dependency()
+            .depends_on(fixture.source.generation().unwrap()));
+        let retained_d = fixture.generation.installation.source_dependency().clone();
+        drop(retained_d.claim().unwrap());
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        fixture.assert_candidate_unavailable();
+        assert!(owner.visibility().install(fixture.generation.clone()));
+        // Visibility records actual D while the actual ACK owner has not completed.
+        fixture.assert_candidate_unavailable();
+        assert!(matches!(
+            owner.complete(Ok(super::super::ActorGenerationCommit::Published {
+                generation: fixture.generation.clone(),
+                cancellation_pending: false,
+            })),
+            Ok(super::super::ActorGenerationCommit::Published { .. })
+        ));
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &fixture.generation
+        ));
+        drop(retained_d.claim().unwrap());
+    }
+
+    #[test]
+    fn publisher_replacement_unknown_after_visibility_never_opens_retained_d() {
+        let fixture = PublicationFixture::after_confirmed_c();
+        let retained_d = fixture.generation.installation.source_dependency().clone();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        assert!(owner.visibility().install(fixture.generation.clone()));
+        fixture.assert_candidate_unavailable();
+        assert!(matches!(
+            owner.complete(Ok(super::super::ActorGenerationCommit::Unconfirmed(
+                "post-visible acknowledgement unavailable".into()
+            ))),
+            Ok(super::super::ActorGenerationCommit::Unconfirmed(_))
+        ));
+        fixture.assert_candidate_unavailable();
+        assert!(retained_d.claim().is_err());
+        assert!(
+            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            if Arc::ptr_eq(selected, &fixture.generation))
+        );
+    }
+
+    #[test]
+    fn publisher_cancel_after_current_check_keeps_late_visibility_unavailable() {
+        let fixture = PublicationFixture::new();
+        let decision = tidepool_runtime::session::PublicationDecision::new();
+        let owner = fixture.reserve(decision.clone());
+        let visibility = owner.visibility();
+        let (checked, checked_rx) = std::sync::mpsc::sync_channel(0);
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let callback_release = release.clone();
+        let generation = fixture.generation.clone();
+        let callback = std::thread::spawn(move || {
+            assert!(visibility.is_current());
+            checked.send(()).unwrap();
+            callback_release.wait();
+            visibility.install(generation)
+        });
+        checked_rx.recv().unwrap();
+        drop(owner); // The async owner can disappear while native visibility is pending.
+        fixture.assert_unavailable();
+        assert!(decision.claim_commit().is_none());
+        release.wait();
+        assert!(!callback.join().unwrap());
+        fixture.assert_unavailable();
+        assert!(
+            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            if Arc::ptr_eq(selected, &fixture.generation))
+        );
+    }
+
+    #[test]
+    fn publisher_cancel_after_visibility_retires_both_operational_views() {
+        let fixture = PublicationFixture::new();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let visibility = owner.visibility();
+        let generation = fixture.generation.clone();
+        let (visible, visible_rx) = std::sync::mpsc::sync_channel(0);
+        let callback = std::thread::spawn(move || {
+            assert!(visibility.install(generation));
+            visible.send(()).unwrap();
+        });
+        visible_rx.recv().unwrap();
+        drop(owner);
+        callback.join().unwrap();
+        fixture.assert_unavailable();
+        assert!(
+            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            if Arc::ptr_eq(selected, &fixture.generation))
+        );
+    }
+
+    #[test]
+    fn publisher_refusal_retry_rejects_stale_visibility_attempt() {
+        let fixture = PublicationFixture::new();
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let stale = owner.visibility();
+        assert!(matches!(
+            owner.complete(Ok(super::super::ActorGenerationCommit::Refused(
+                "known precommit refusal".into()
+            ))),
+            Ok(super::super::ActorGenerationCommit::Refused(_))
+        ));
+        drop(fixture.source.claim().unwrap());
+        assert!(fixture.state.snapshot_for_call().is_ok());
+        let retry = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        assert!(!stale.install(fixture.generation.clone()));
+        assert!(retry.visibility().is_current());
+        assert!(retry.visibility().install(fixture.generation.clone()));
+        assert!(retry.confirmed());
+        drop(fixture.source.claim().unwrap());
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &fixture.generation
+        ));
+    }
+
+    #[test]
+    fn publisher_completed_error_needs_no_commit_proof_and_setup_panic_stays_closed() {
+        for mode in 0..3 {
+            let fixture = PublicationFixture::new();
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            let owner = fixture.reserve(decision.clone());
+            if mode == 0 {
+                assert!(owner
+                    .complete(Err(crate::ResidentActorWorkbenchError::ActorProtocol(
+                        "body precommit error".into()
+                    )))
+                    .is_err());
+                drop(fixture.source.claim().unwrap());
+                assert!(fixture.state.snapshot_for_call().is_ok());
+            } else if mode == 1 {
+                let claim = decision.claim_commit().unwrap();
+                assert!(owner
+                    .complete(Err(crate::ResidentActorWorkbenchError::ActorProtocol(
+                        "unknown after claim".into()
+                    )))
+                    .is_err());
+                fixture.assert_unavailable();
+                drop(claim);
+            } else {
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let _owner = owner;
+                    panic!("setup or body did not return a completed result");
+                }));
+                assert!(panic.is_err());
+                fixture.assert_unavailable();
+            }
+        }
     }
 
     #[test]

@@ -3792,6 +3792,19 @@ where
         self.state.publish_durable_public_bootstrap(bootstrap)
     }
 
+    /// Observe attachment absence separately from a selected recovery domain.
+    pub fn recovered_domain_presence(
+        &self,
+    ) -> Result<Option<super::RecoveredDomainPresence>, SessionError> {
+        if !self.state.has_lib() {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        if self.state.lib().durable_graph.is_none() {
+            return Ok(None);
+        }
+        self.state.lib().recovered_domain_presence().map(Some)
+    }
+
     pub fn validate_recovered_public_owner(
         &self,
         owner: &super::RecoveryPublicOwner,

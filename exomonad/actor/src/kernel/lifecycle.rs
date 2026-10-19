@@ -1159,12 +1159,18 @@ impl Actor for LifecycleCoordinator {
                 let _ = reply.send(result);
             }
             LifecycleCommand::ExecutorStarted(reply) => {
-                let result = if state.phase == LifecyclePhase::Starting && state.executor.is_some()
-                {
-                    state.phase = LifecyclePhase::Open;
-                    Ok(())
-                } else {
-                    Err(KernelCallFailure::MailboxClosed(state.identity))
+                // Retirement intent may precede its asynchronous Close command.
+                let terminal = state.terminal.clone();
+                let result = match terminal.claim_before_shutdown(|| {
+                    if state.phase == LifecyclePhase::Starting && state.executor.is_some() {
+                        state.phase = LifecyclePhase::Open;
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    Ok(true) => Ok(()),
+                    Ok(false) | Err(_) => Err(KernelCallFailure::MailboxClosed(state.identity)),
                 };
                 let _ = reply.send(result);
             }

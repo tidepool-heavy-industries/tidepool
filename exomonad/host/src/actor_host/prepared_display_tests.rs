@@ -104,7 +104,7 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
             ActorPlacement {
                 session,
                 resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
-                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+                lexical_scope: machine.mint_isolated_scope(),
             },
         );
         machine
@@ -118,14 +118,12 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .expect("initial display actor placement");
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            machine.run_with_sites("prepared_first_display", compiled.code(), settlement)
-        })
-        .unwrap();
-        let (forest, mut deployments) = ResidentForest::new(
+        let (root, ()) = exomonad_actor::CompilerPreparationOwner::new()
+            .prepare_resident_root(|_| Ok((descriptor, machine, Arc::new(compiled), None, ())))
+            .expect("actual affine root issuer installs without evaluating startup");
+        let (forest, mut deployments, admission) = ResidentForest::from_prepared_root(
             ActorWorkbenchSource::new(preamble, include),
-            session,
-            machine,
+            root,
             None,
             exomonad_actor::Incarnation::FIRST,
         )
@@ -133,13 +131,11 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         .unwrap();
         // No receiver/provider has been started. The timeout only detects the
         // circular admission dependency, not a performance threshold.
-        let (actor, task) = tokio::time::timeout(
-            Duration::from_secs(30),
-            forest.admit_root(descriptor, outcome),
-        )
-        .await
-        .expect("root admission must return before the output consumer starts")
-        .unwrap();
+        let (actor, task) =
+            tokio::time::timeout(Duration::from_secs(30), forest.admit_root(admission))
+                .await
+                .expect("root admission must return before the output consumer starts")
+                .unwrap();
         let request = loop {
             match deployments.recv().await.unwrap() {
                 LocalResidentDeployment::DisplayPublished(request) => break request,

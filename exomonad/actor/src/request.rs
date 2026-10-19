@@ -30,6 +30,12 @@ use crate::owned_result::{OwnedResultSnapshot, RequestResultDestination};
 use crate::{ActorExitKind, ActorRef, ActorTerminal};
 use std::sync::Arc;
 
+#[derive(Debug)]
+pub(crate) enum ReplyToolRegistrationError {
+    Source(crate::resident_workbench::generation_admission::GenerationAdmissionError),
+    Request(ReplyError),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeadlineUnit {
     Milliseconds,
@@ -1720,16 +1726,25 @@ impl RequestRegistry {
         owner: ActorRef,
         request: RequestId,
         definition: Arc<crate::request_reply_tool::ReplyToolDefinition>,
-    ) -> Result<(), ReplyError> {
-        let mut state = self.state.lock();
-        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
-        authorize_owner(record, owner)?;
-        if record.target_state() != TargetState::Reserved || record.reply_tool.is_some() {
-            return Err(ReplyError::AlreadySettled);
-        }
-        record.operation()?;
-        record.reply_tool = Some(definition);
-        Ok(())
+    ) -> Result<(), ReplyToolRegistrationError> {
+        // The caller retains the capsule outside both guards, including refusal.
+        // Source admission precedes the request lock; the guarded action only
+        // reserves this exact native request's callable definition.
+        definition
+            .execution
+            .with_activation_admission(|| {
+                let mut state = self.state.lock();
+                let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+                authorize_owner(record, owner)?;
+                if record.target_state() != TargetState::Reserved || record.reply_tool.is_some() {
+                    return Err(ReplyError::AlreadySettled);
+                }
+                record.operation()?;
+                record.reply_tool = Some(definition.clone());
+                Ok(())
+            })
+            .map_err(ReplyToolRegistrationError::Source)?
+            .map_err(ReplyToolRegistrationError::Request)
     }
 
     pub(crate) fn reply_tool(

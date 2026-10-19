@@ -177,7 +177,8 @@ pub use resident_actor::{
     ActorProviderAdmission, ActorPublicOwnerRefusal, DisplayConversationIdentity,
     DisplayPublication, DisplayPublicationHostContext, DisplayPublicationOutcome,
     LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait, ResidentActorRoot,
-    ResidentForest, ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
+    ResidentForest, ResidentKernelBehavior, ResidentRootAdmission, ResidentRootPreparationFailure,
+    ResourceRelease, RootStartupRelease,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{

@@ -1,16 +1,12 @@
 //! The real resident MCP policy driven directly by the canonical local actor.
 
 use exomonad_actor::WorkbenchRequest;
-use exomonad_actor::{
-    ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
-};
+use exomonad_actor::{ActorWorkbenchSource, LocalResidentDeployment, ResidentForest};
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_bridge::HaskellValue;
-use tidepool_codegen::scope::ScopeId;
-use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
+use tidepool_effect::Response;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
@@ -1209,19 +1205,11 @@ async fn resident_await_watch_case(case: WatchCase) {
     )
     .expect("declaration plane")
     .with_validation_include(include.clone());
-    let mut machine =
+    let machine =
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let notebook =
         primary.then(|| compile_notebook_entry(&machine, &preamble, &include, session_root.path()));
-    let descriptor = ActorDescriptor::new(
-        "resident-await-watch",
-        ActorPlacement {
-            session,
-            resource_scope: RealmId::fresh(),
-            lexical_scope: ScopeId::ROOT,
-        },
-    );
-    let outcome = if primary {
+    let structured_program = if primary {
         None
     } else {
         let retained = machine.prepared_retained();
@@ -1252,23 +1240,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             TurnResult::Expr { compiled, .. } => compiled,
             other => panic!("policy should be an expression, got {other:?}"),
         };
-        machine
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    resource_scope: descriptor.placement().resource_scope,
-                    lexical_scope: descriptor.placement().lexical_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                EffectRunPolicy::SuspendAll,
-                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            )
-            .expect("initial policy actor placement");
-        Some(
-            tidepool_testing::with_settlement(|settlement| {
-                machine.run_with_sites("resident_await_watch_policy", compiled.code(), settlement)
-            })
-            .expect("first policy boundary"),
-        )
+        Some(std::sync::Arc::new(compiled))
     };
     let mut source = ActorWorkbenchSource::new(preamble, include);
     if primary {
@@ -1329,10 +1301,20 @@ async fn resident_await_watch_case(case: WatchCase) {
         assert_eq!(installation.actor.identity(), actor.identity());
         (actor, Some(task), installation.policy)
     } else {
-        let (actor, task) = forest
-            .admit_root(descriptor, outcome.expect("structured policy boundary"))
-            .await
-            .expect("spawn local resident root");
+        let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+        let prepared = preparation
+            .scope(forest.new_program_root(
+                "resident-await-watch".into(),
+                exomonad_actor::ActorCapabilities::default(),
+                structured_program.expect("structured program"),
+            ))
+            .await;
+        assert!(
+            prepared.cleanup.observation().is_confirmed(),
+            "structured root preparation: {:?}",
+            prepared.cleanup
+        );
+        let (actor, task) = prepared.action.expect("spawn local resident root");
         let LocalResidentDeployment::PolicyInstalled(installation) =
             deployments.recv().await.expect("policy installation")
         else {
@@ -1945,7 +1927,7 @@ async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
     )
     .expect("declaration plane")
     .with_validation_include(include.clone());
-    let mut machine =
+    let machine =
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match tidepool_testing::with_settlement(|settlement| {
@@ -1977,54 +1959,7 @@ async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
         TurnResult::Expr { compiled, .. } => compiled,
         other => panic!("policy should be an expression, got {other:?}"),
     };
-    let descriptor = ActorDescriptor::new(
-        "resident-local-policy",
-        ActorPlacement {
-            session,
-            resource_scope: RealmId::fresh(),
-            lexical_scope: ScopeId::ROOT,
-        },
-    );
-    machine
-        .set_actor_execution(
-            tidepool_runtime::session::SessionRunContext {
-                resource_scope: descriptor.placement().resource_scope,
-                lexical_scope: descriptor.placement().lexical_scope,
-                ..tidepool_runtime::session::SessionRunContext::ROOT
-            },
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .expect("initial policy actor placement");
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        machine.run_with_sites("resident_local_policy", compiled.code(), settlement)
-    })
-    .expect("first policy boundary");
-    let sibling_scope = machine.mint_isolated_scope();
-    let sibling_realm = RealmId::fresh();
-    machine
-        .set_actor_execution(
-            tidepool_runtime::session::SessionRunContext {
-                resource_scope: sibling_realm,
-                lexical_scope: sibling_scope,
-                ..tidepool_runtime::session::SessionRunContext::ROOT
-            },
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .expect("independent root scope");
-    let sibling_outcome = tidepool_testing::with_settlement(|settlement| {
-        machine.run_with_sites("resident_sibling_policy", compiled.code(), settlement)
-    })
-    .expect("sibling policy boundary");
-    let sibling_descriptor = ActorDescriptor::new(
-        "sibling",
-        ActorPlacement {
-            session,
-            resource_scope: sibling_realm,
-            lexical_scope: sibling_scope,
-        },
-    );
+    let compiled = std::sync::Arc::new(compiled);
     let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
         session,
@@ -2034,41 +1969,20 @@ async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
     )
     .await
     .expect("start resident forest");
-    for invalid in [
-        ActorDescriptor::new(
-            "foreign",
-            ActorPlacement {
-                session: support::process_unique_session(179),
-                ..descriptor.placement()
-            },
-        ),
-        descriptor
-            .clone()
-            .with_supervisor_parent(exomonad_actor::ActorRef {
-                id: exomonad_actor::ActorId(1),
-                incarnation: exomonad_actor::Incarnation::FIRST,
-            }),
-        descriptor
-            .clone()
-            .with_context_parent(exomonad_actor::ActorRef {
-                id: exomonad_actor::ActorId(1),
-                incarnation: exomonad_actor::Incarnation::FIRST,
-            }),
-    ] {
-        assert!(forest
-            .admit_root(
-                invalid,
-                tidepool_runtime::session::ResidentOutcome::BindingsCommitted {
-                    output: Vec::new()
-                },
-            )
-            .await
-            .is_err());
-    }
-    let (actor, task) = forest
-        .admit_root(descriptor, outcome)
-        .await
-        .expect("spawn local resident root");
+    let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let prepared = preparation
+        .scope(forest.new_program_root(
+            "resident-local-policy".into(),
+            exomonad_actor::ActorCapabilities::default(),
+            std::sync::Arc::clone(&compiled),
+        ))
+        .await;
+    assert!(
+        prepared.cleanup.observation().is_confirmed(),
+        "root preparation: {:?}",
+        prepared.cleanup
+    );
+    let (actor, task) = prepared.action.expect("spawn local resident root");
 
     let LocalResidentDeployment::PolicyInstalled(installation) =
         deployments.recv().await.expect("policy installation")
@@ -2077,10 +1991,20 @@ async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
     };
     assert_eq!(installation.actor.identity(), actor.identity());
     let policy = installation.policy;
-    let (sibling, sibling_task) = forest
-        .admit_root(sibling_descriptor, sibling_outcome)
-        .await
-        .expect("admit independent sibling");
+    let mut sibling_preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let sibling_prepared = sibling_preparation
+        .scope(forest.new_program_root(
+            "sibling".into(),
+            exomonad_actor::ActorCapabilities::default(),
+            compiled,
+        ))
+        .await;
+    assert!(
+        sibling_prepared.cleanup.observation().is_confirmed(),
+        "sibling preparation: {:?}",
+        sibling_prepared.cleanup
+    );
+    let (sibling, sibling_task) = sibling_prepared.action.expect("admit independent sibling");
     let LocalResidentDeployment::PolicyInstalled(sibling_installation) = deployments
         .recv()
         .await
