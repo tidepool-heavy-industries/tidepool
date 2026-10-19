@@ -21769,10 +21769,18 @@ mod tests {
         let manifest: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
-        assert!(manifest.as_array().unwrap()[6]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        // Scope field 6 carries native availability, including private inputs;
+        // each row separates executable ordinals (6), availability (8), and
+        // compiler-role versus private classification (9).
+        let native = current_scope_fields(&manifest)[6].as_array().unwrap();
+        assert_eq!(native.len(), 1);
+        let row = native[0].as_array().unwrap();
+        assert_eq!(row[0], text("main"));
+        assert_eq!(row[1], text("Tidepool.Internal.Resume"));
+        assert!(row[6].as_array().unwrap().is_empty());
+        assert_eq!(row[8], Value::Array(vec![text("full-carrier")]));
+        assert_eq!(row[9], text("private-native"));
+        assert!(public.artifact_view().selected_native_groups().is_empty());
         // A forged home resolution of the package import has no request-local
         // permission, even when matching home products remain in custody.
         let receipt = import_receipt_source_owner(
