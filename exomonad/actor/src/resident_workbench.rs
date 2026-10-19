@@ -4584,6 +4584,7 @@ pub(crate) enum ResidentActorBoundary {
         installation: serde_json::Value,
         session: tidepool_repr::SessionId,
         installer: Arc<RootCustody>,
+        execution: crate::request::sources::CallbackExecution,
     },
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
@@ -9624,6 +9625,7 @@ where
         metadata: serde_json::Value,
         session: tidepool_repr::SessionId,
         installer: Arc<RootCustody>,
+        execution: crate::request::sources::CallbackExecution,
     ) -> Result<crate::request_reply_tool::ReplyToolDefinition, ResidentActorWorkbenchError> {
         if context.placement.session != session {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9641,7 +9643,7 @@ where
             .with_machine(context, move |machine, _, _| {
                 support.extend(observer(machine.handlers()));
                 crate::request_reply_tool::ReplyToolDefinition::prepare(
-                    metadata, session, installer, &support,
+                    metadata, session, installer, execution, &support,
                 )
             })
             .await
@@ -11160,6 +11162,7 @@ where
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
                             installation, session: context.placement.session, installer: Arc::new(installer),
+                            execution: crate::request::sources::CallbackExecution::from_context(context.clone()),
                         })
                     }
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
