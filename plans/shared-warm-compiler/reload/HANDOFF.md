@@ -57,15 +57,19 @@ an informed worker yields.
   in `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`,
   branch `feature/shared-warm/reload-admission`. It incorporated area `dc2c858795`
   and owns the lower runtime source gate, context/callback provenance, real
-  compile/install consumers and typed child reservation callers. Awaited event:
-  coherent committed R1 candidate plus exact pending checks. The area owner then
-  reviews/folds it and requests cumulative independent review.
+  compile/install consumers and typed child reservation callers. Its committed
+  R1 source is `3d56ffcc344a12606f095d1f0bac2ff0abf69959`, joined with area
+  `a0d293d2a0` at `fe3ef791f96788d9d71ac1d2333b6d6436bac35d` in the leaf
+  checkout. Awaited event: bounded final RunOwned/ticket/SourceCallback control
+  checkpoint plus exact pending checks. The area owner then integrates it,
+  regenerates source maps and owns the first admitted compile/repair stage.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
   `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
   and completed the bootstrap-world/typed-child strategy review with the settled
-  reopen-only recovery contract. It is dormant awaiting the exact joined R1
-  candidate and actual compile/focused-gate evidence. The area owner uses
-  `followup_task` to supply that checkpoint for cumulative review, then
+  reopen-only recovery contract. It was reactivated for exact cumulative
+  `5b74..fe3ef791` review while the leaf finishes its bounded delta. Actual
+  compile/focused-gate evidence is still pending. The area owner supplies that
+  final delta and native evidence for cumulative review, then
   repairs findings, requests exact rereview and owns the fold.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
@@ -111,6 +115,12 @@ Forms, WatchRoute callbacks, SourceBinding connections and ActorDisplays have
 existing owners outside the run directory. Their generation-filtered inspect,
 stop and physical settlement paths remain joined R2 obligations. Closing an
 entire invocation/actor to substitute for selective cleanup is too broad.
+Their fresh source-dependent registration gates and callback provenance are
+required R1 successors: WatchRoute currently retains bare root/recipient, and
+forms/reply-tool/display issuing consumers still need exact source dependency
+carried through refusal. These acceptance blockers are held until the first
+runtime/actor production and unit harness compilation; they are not permission
+to begin force-drain implementation.
 A Closing/no-executor lifecycle snapshot is not terminal cleanup proof: a
 cleanup executor can attach later. Retain uncertainty until actual settlement.
 
