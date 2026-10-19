@@ -1312,11 +1312,7 @@ impl ModuleCandidateOffer {
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
         crate::compiler_world::check_world_visibility_size(visibility.len(), visible_rows.len())?;
         let primary = checked_offer_context(primary)?;
-        let directory = Arc::new(
-            tempfile::Builder::new()
-                .prefix("tidepool-compiler-world-")
-                .tempdir()?,
-        );
+        let directory = Arc::new(compiler_scratch_directory()?);
         let mut owners = BTreeSet::new();
         let mut issuers = Vec::with_capacity(visible_rows.len());
         for artifact in &visible_rows {
