@@ -86,6 +86,77 @@ pub enum SnapshotError {
     Malformed(String),
 }
 
+/// Projection keeps legacy materialization errors separate from operation refusal.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SnapshotProjectionError {
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error(transparent)]
+    Operation(#[from] tidepool_repr::execution_schema::ParseError),
+    #[error("snapshot projection checkpoint: {0}")]
+    Checkpoint(#[from] std::io::Error),
+    #[error("selected snapshot key is outside its cold fact owner")]
+    MissingFact,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MapProjectionWork {
+    pub(crate) key_lookups: u64,
+    pub(crate) reused_values: u64,
+    pub(crate) route_blocks: u64,
+    pub(crate) route_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FrontierProjectionWork {
+    pub(crate) root_references: u64,
+    pub(crate) edges: u64,
+    pub(crate) reused_blocks: u64,
+    pub(crate) reused_bytes: u64,
+    pub(crate) new_blocks: u64,
+    pub(crate) new_bytes: u64,
+    pub(crate) staged_hash_bytes: u64,
+}
+
+/// Count borrowed scalar/key wire bytes before allocating their encoding or copy.
+/// The four publication codecs use scalar CID wires; this never serializes facts.
+fn projection_wire_bound<T: Serialize>(
+    value: &T,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<(), SnapshotProjectionError> {
+    struct Counter<'a> {
+        operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+        refused: Option<tidepool_repr::execution_schema::ParseError>,
+    }
+    impl std::io::Write for Counter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let amount = bytes
+                .len()
+                .checked_mul(4)
+                .ok_or_else(|| std::io::Error::other("snapshot wire bound overflow"))?;
+            if let Err(error) = self.operation.charge(amount) {
+                self.refused = Some(error);
+                return Err(std::io::Error::other("snapshot wire budget"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter {
+        operation,
+        refused: None,
+    };
+    if let Err(error) = ciborium::ser::into_writer(value, &mut counter) {
+        if let Some(error) = counter.refused {
+            return Err(error.into());
+        }
+        return Err(malformed(error).into());
+    }
+    Ok(())
+}
+
 macro_rules! root_type {
     ($name:ident) => {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -290,6 +361,97 @@ impl ReachableBlocks {
         }
         next.roots = roots;
         Ok(next)
+    }
+
+    /// Build independent custody for selected roots, borrowing only cached block
+    /// bytes/links. Local incoming counts belong to this root set, never the base.
+    pub(crate) fn project_roots(
+        &self,
+        staged: &StagedBlocks,
+        roots: Vec<Cid>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(Self, FrontierProjectionWork), SnapshotProjectionError> {
+        fn tag_capacity(value: &ciborium::value::Value) -> usize {
+            use ciborium::value::Value;
+            match value {
+                Value::Array(values) => values.iter().map(tag_capacity).sum(),
+                Value::Map(values) => values
+                    .iter()
+                    .map(|(k, v)| tag_capacity(k) + tag_capacity(v))
+                    .sum(),
+                Value::Tag(_, _) => 1,
+                _ => 0,
+            }
+        }
+        let mut next = Self::default();
+        let mut work = FrontierProjectionWork::default();
+        let mut pending = Vec::new();
+        for root in &roots {
+            operation.reserve::<Cid>(1)?;
+            pending.push(*root);
+            work.root_references += 1;
+        }
+        while let Some(cid) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            operation.charge(1)?;
+            next.work.link_visits += 1;
+            if let Some(block) = next.blocks.get_mut(&cid) {
+                block.incoming = block
+                    .incoming
+                    .checked_add(1)
+                    .ok_or_else(|| malformed("snapshot block reference overflow"))?;
+                continue;
+            }
+            operation.reserve::<(Cid, ReachableBlock)>(4)?;
+            let (bytes, children) = if let Some(block) = self.blocks.get(&cid) {
+                work.reused_blocks += 1;
+                work.reused_bytes += block.bytes.len() as u64;
+                (Arc::clone(&block.bytes), Arc::clone(&block.children))
+            } else {
+                // Staged packets are sorted by Materializer::finish. A keyed
+                // search avoids constructing a census of unrelated staged blocks.
+                let index = staged
+                    .blocks
+                    .binary_search_by_key(&cid, |(key, _)| *key)
+                    .map_err(|_| SnapshotError::MissingBlock(cid))?;
+                let bytes = &staged.blocks[index].1;
+                if bytes.len() > operation.limits().max_bytes {
+                    return Err(tidepool_repr::execution_schema::ParseError::ByteLimit {
+                        limit: operation.limits().max_bytes,
+                        actual: bytes.len(),
+                    }
+                    .into());
+                }
+                operation.charge(bytes.len())?;
+                work.staged_hash_bytes += bytes.len() as u64;
+                verify_block(&cid, bytes)?;
+                let value = operation.decode_value(bytes, operation.limits().max_bytes)?;
+                let capacity = tag_capacity(&value);
+                operation.reserve::<Cid>(capacity)?;
+                let mut children = Vec::with_capacity(capacity);
+                snapshot_links(&value, &mut children)?;
+                work.new_blocks += 1;
+                work.new_bytes += bytes.len() as u64;
+                next.work.verified_bytes += bytes.len() as u64;
+                next.work.decoded_bytes += bytes.len() as u64;
+                (Arc::clone(bytes), Arc::from(children))
+            };
+            for child in children.iter() {
+                operation.reserve::<Cid>(1)?;
+                pending.push(*child);
+                work.edges += 1;
+            }
+            next.blocks.insert(
+                cid,
+                ReachableBlock {
+                    bytes,
+                    children,
+                    incoming: 1,
+                },
+            );
+        }
+        next.roots = roots;
+        Ok((next, work))
     }
 
     fn retain(
@@ -568,6 +730,111 @@ impl<BS: Blockstore> Blockstore for Materializer<'_, BS> {
 
 fn add_bytes(counter: &Cell<u64>, bytes: usize) {
     counter.set(counter.get().saturating_add(bytes as u64));
+}
+
+/// Keyed reads borrow the actual immutable receipt so copy size is known
+/// before Blockstore's Vec allocation. Cached block integrity is already held.
+struct ProjectionReadStore<'a> {
+    base: &'a ReachableBlocks,
+    operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+    blocks: Cell<u64>,
+    bytes: Cell<u64>,
+}
+impl Blockstore for ProjectionReadStore<'_> {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        let block = self
+            .base
+            .blocks
+            .get(cid)
+            .ok_or(SnapshotError::MissingBlock(*cid))?;
+        // Reserve the copy plus bounded HAMT key/pointer decode storage before
+        // exposing the encoded route. The byte counter below stays actual.
+        self.operation
+            .charge(block.bytes.len().checked_mul(8).ok_or_else(|| {
+                SnapshotProjectionError::Operation(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded("work"),
+                )
+            })?)
+            .map_err(SnapshotProjectionError::Operation)?;
+        self.blocks.set(self.blocks.get() + 1);
+        self.bytes.set(self.bytes.get() + block.bytes.len() as u64);
+        Ok(Some(block.bytes.to_vec()))
+    }
+    fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+        Err(malformed("immutable projection cannot write its cold route").into())
+    }
+}
+fn projection_hamt_error(error: fvm_ipld_hamt::Error) -> SnapshotProjectionError {
+    match error {
+        fvm_ipld_hamt::Error::Dynamic(source) => match source.downcast::<SnapshotProjectionError>()
+        {
+            Ok(error) => error,
+            Err(source) => hamt_error(fvm_ipld_hamt::Error::Dynamic(source)).into(),
+        },
+        error => hamt_error(error).into(),
+    }
+}
+impl Materializer<'_, ReachableBlocks> {
+    /// Select actual cold CID wires by key. No caller-supplied fact, equality
+    /// comparison, value clone or value codec participates in this operation.
+    pub(crate) fn project_map_with<K, V, C>(
+        &mut self,
+        base: &MaterializedMap<K, V, C>,
+        keys: &std::collections::BTreeSet<K>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(SnapshotMapRoot, MapProjectionWork), SnapshotProjectionError>
+    where
+        K: SnapshotKey,
+        C: SnapshotValueCodec<V, Wire = Cid>,
+    {
+        let mut work = MapProjectionWork::default();
+        let mut edits = Vec::new();
+        let route = ProjectionReadStore {
+            base: self.base,
+            operation,
+            blocks: Cell::new(0),
+            bytes: Cell::new(0),
+        };
+        operation.reserve::<usize>(64)?;
+        // Do not load any cold HAMT for an empty projection.
+        let cold = if keys.is_empty() {
+            None
+        } else {
+            Some(
+                Hamt::<_, C::Wire>::load_with_config(base.root.cid(), &route, HAMT_CONFIG)
+                    .map_err(projection_hamt_error)?,
+            )
+        };
+        for key in keys {
+            crate::host_work::checkpoint()?;
+            operation.charge(1)?;
+            work.key_lookups += 1;
+            projection_wire_bound(&(key,), operation)?;
+            if !base.facts.contains_key(key) {
+                return Err(SnapshotProjectionError::MissingFact);
+            }
+            operation.reserve::<(BytesKey, C::Wire)>(4)?;
+            operation.reserve::<usize>(64)?;
+            let key = BytesKey(key.encode_key()?);
+            let wire = cold
+                .as_ref()
+                .expect("nonempty projection")
+                .get(&key)
+                .map_err(projection_hamt_error)?
+                .ok_or_else(|| malformed("cold snapshot facts lack their encoded value"))?;
+            projection_wire_bound(wire, operation)?;
+            edits.push((key, *wire));
+            work.reused_values += 1;
+        }
+        work.route_blocks = route.blocks.get();
+        work.route_bytes = route.bytes.get();
+        let mut projected: Hamt<_, C::Wire> = Hamt::new_with_config(&*self, HAMT_CONFIG);
+        for (key, wire) in edits {
+            projected.set(key, wire).map_err(hamt_error)?;
+        }
+        let root = projected.flush().map(SnapshotMapRoot).map_err(hamt_error)?;
+        Ok((root, work))
+    }
 }
 
 /// A structurally authenticated root and its actual immutable resident facts.
@@ -1711,7 +1978,198 @@ pub(crate) fn take_native_fact_work() -> NativeFactWork {
     NATIVE_FACT_WORK.with(|work| work.replace(NativeFactWork::default()))
 }
 
+/// Key selection is passive data, not a replacement permission/role value.
+/// The actual consumer must refuse changed permission rows before selecting keys.
+#[derive(Default)]
+pub(crate) struct PublicationNativeMapKeys {
+    pub(crate) roles: std::collections::BTreeSet<ExactModuleIdentity>,
+    pub(crate) offers: std::collections::BTreeSet<[u8; 32]>,
+    pub(crate) native_availability: std::collections::BTreeSet<ArtifactId>,
+    pub(crate) input_decisions: std::collections::BTreeSet<ExactModuleIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeFactProjectionWork {
+    pub(crate) maps: MapProjectionWork,
+    pub(crate) frontier: FrontierProjectionWork,
+    pub(crate) materialization: MaterializationMetrics,
+}
+
 impl PublicationNativeFacts {
+    /// Select exact cold facts and their own encoded wires from the same owner.
+    /// Changed permission/role facts require their issuing consumer's separate
+    /// refusal/encoding path and cannot be supplied to this projection.
+    pub(crate) fn project(
+        self: &Arc<Self>,
+        keys: PublicationNativeMapKeys,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(Arc<Self>, NativeFactProjectionWork), SnapshotProjectionError> {
+        fn role_strings(
+            role: &crate::artifact_inventory::RecordedCompilerRole,
+            operation: &tidepool_repr::execution_schema::InventoryOperation,
+        ) -> Result<(), SnapshotProjectionError> {
+            if let CompilerInputRole::PublishedSourceOriginal {
+                source_revision,
+                original_input_identity,
+                ..
+            } = role.as_role()
+            {
+                operation.charge(source_revision.len())?;
+                operation.charge(original_input_identity.len())?;
+            }
+            Ok(())
+        }
+        fn owner_strings(
+            owner: &ExactModuleIdentity,
+            operation: &tidepool_repr::execution_schema::InventoryOperation,
+        ) -> Result<(), SnapshotProjectionError> {
+            operation.charge(owner.unit.len())?;
+            operation.charge(owner.module.len())?;
+            Ok(())
+        }
+        let mut maps = PublicationNativeMaps {
+            roles: OrdMap::new(),
+            offers: OrdMap::new(),
+            native_availability: OrdMap::new(),
+            input_decisions: OrdMap::new(),
+        };
+        // Only these concrete immutable fact types are copied: their variable
+        // owned strings are charged first; proof and persistent maps share roots.
+        for key in &keys.roles {
+            crate::host_work::checkpoint()?;
+            owner_strings(key, operation)?;
+            let value = self
+                .receipt
+                .roles
+                .facts
+                .get(key)
+                .ok_or(SnapshotProjectionError::MissingFact)?;
+            operation.reserve::<(
+                ExactModuleIdentity,
+                crate::artifact_inventory::RecordedCompilerRole,
+            )>(4)?;
+            role_strings(value, operation)?;
+            maps.roles.insert(key.clone(), value.clone());
+        }
+        for key in &keys.offers {
+            crate::host_work::checkpoint()?;
+            let value = self
+                .receipt
+                .offers
+                .facts
+                .get(key)
+                .ok_or(SnapshotProjectionError::MissingFact)?;
+            operation.reserve::<([u8; 32], NativeOfferSnapshotFacts)>(4)?;
+            owner_strings(&value.owner, operation)?;
+            maps.offers.insert(*key, value.clone());
+        }
+        for key in &keys.native_availability {
+            crate::host_work::checkpoint()?;
+            let value = self
+                .receipt
+                .native_availability
+                .facts
+                .get(key)
+                .ok_or(SnapshotProjectionError::MissingFact)?;
+            operation.reserve::<(ArtifactId, NativeAvailabilitySnapshotFacts)>(4)?;
+            operation.charge(value.owner.unit.len())?;
+            operation.charge(value.owner.module.len())?;
+            maps.native_availability.insert(*key, value.clone());
+        }
+        for key in &keys.input_decisions {
+            crate::host_work::checkpoint()?;
+            owner_strings(key, operation)?;
+            let value = self
+                .receipt
+                .input_decisions
+                .facts
+                .get(key)
+                .ok_or(SnapshotProjectionError::MissingFact)?;
+            operation.reserve::<(
+                ExactModuleIdentity,
+                crate::artifact_inventory::RecordedInputNativeDecision,
+            )>(4)?;
+            role_strings(&value.role, operation)?;
+            maps.input_decisions.insert(key.clone(), value.clone());
+        }
+        let mut writer = Materializer::new(&self.receipt.frontier);
+        let (root, rw) = writer.project_map_with(&self.receipt.roles, &keys.roles, operation)?;
+        let roles = MaterializedMap {
+            root,
+            facts: maps.roles.clone(),
+            codec: PhantomData,
+        };
+        let (root, ow) = writer.project_map_with(&self.receipt.offers, &keys.offers, operation)?;
+        let offers = MaterializedMap {
+            root,
+            facts: maps.offers.clone(),
+            codec: PhantomData,
+        };
+        let (root, nw) = writer.project_map_with(
+            &self.receipt.native_availability,
+            &keys.native_availability,
+            operation,
+        )?;
+        let native_availability = MaterializedMap {
+            root,
+            facts: maps.native_availability.clone(),
+            codec: PhantomData,
+        };
+        let (root, iw) = writer.project_map_with(
+            &self.receipt.input_decisions,
+            &keys.input_decisions,
+            operation,
+        )?;
+        let input_decisions = MaterializedMap {
+            root,
+            facts: maps.input_decisions.clone(),
+            codec: PhantomData,
+        };
+        let descriptor = PublicationNativeDescriptor {
+            version: 2,
+            roles: roles.root.clone(),
+            offers: offers.root.clone(),
+            native_availability: native_availability.root.clone(),
+            input_decisions: input_decisions.root.clone(),
+        };
+        projection_wire_bound(&descriptor, operation)?;
+        let root = writer.materialize_value(&descriptor)?;
+        let staged = writer.finish()?;
+        let materialization = staged.metrics();
+        operation.reserve::<Cid>(1)?;
+        let (frontier, fw) = self
+            .receipt
+            .frontier
+            .project_roots(&staged, vec![root], operation)?;
+        let work = NativeFactProjectionWork {
+            maps: MapProjectionWork {
+                key_lookups: rw.key_lookups + ow.key_lookups + nw.key_lookups + iw.key_lookups,
+                reused_values: rw.reused_values
+                    + ow.reused_values
+                    + nw.reused_values
+                    + iw.reused_values,
+                route_blocks: rw.route_blocks + ow.route_blocks + nw.route_blocks + iw.route_blocks,
+                route_bytes: rw.route_bytes + ow.route_bytes + nw.route_bytes + iw.route_bytes,
+            },
+            frontier: fw,
+            materialization,
+        };
+        Ok((
+            Arc::new(Self {
+                maps,
+                receipt: NativeFactReceipt {
+                    root,
+                    roles,
+                    offers,
+                    native_availability,
+                    input_decisions,
+                    frontier,
+                },
+            }),
+            work,
+        ))
+    }
+
     pub(crate) fn commitment(&self) -> Cid {
         self.receipt.root
     }
@@ -2331,3 +2789,408 @@ pub fn hydrate_context<BS: Blockstore>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
+    thread_local! { static CODEC_WORK: Cell<(u64,u64)> = const { Cell::new((0,0)) }; }
+    struct ObservedScopeCodec;
+    impl SnapshotValueCodec<ImmutableScopeProofRef> for ObservedScopeCodec {
+        type Wire = Cid;
+        fn encode<BS: Blockstore>(
+            store: &mut Materializer<'_, BS>,
+            value: &ImmutableScopeProofRef,
+        ) -> Result<Cid, SnapshotError> {
+            CODEC_WORK.with(|work| {
+                let (e, d) = work.get();
+                work.set((e + 1, d));
+            });
+            ScopeProofCodec::encode(store, value)
+        }
+        fn decode<BS: Blockstore>(
+            store: &SnapshotHydrator<'_, BS>,
+            value: Cid,
+        ) -> Result<ImmutableScopeProofRef, SnapshotError> {
+            CODEC_WORK.with(|work| {
+                let (e, d) = work.get();
+                work.set((e, d + 1));
+            });
+            ScopeProofCodec::decode(store, value)
+        }
+    }
+
+    #[test]
+    fn projection_reuses_only_demanded_scope_values_without_codec_work() {
+        // Serializer facts only: these packets issue no inventory/native authority.
+        for unrelated in [0u64, 32, 128] {
+            let facts = (0..=unrelated)
+                .map(|key| {
+                    let mut id = [0; 32];
+                    id[..8].copy_from_slice(&key.to_le_bytes());
+                    let selection = ArtifactSelectionId(id);
+                    let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+                        selection,
+                        nodes: (0..128)
+                            .map(|n| {
+                                ArtifactBindingNode::Artifact(ArtifactBinding {
+                                    artifact: ArtifactId([n; 32]),
+                                    selection,
+                                })
+                            })
+                            .collect(),
+                        dependencies: vec![],
+                    }));
+                    (key, proof)
+                })
+                .collect::<OrdMap<_, _>>();
+            let empty = ReachableBlocks::default();
+            let mut cold = Materializer::new(&empty);
+            let base = cold
+                .materialize_map_with::<_, _, ObservedScopeCodec>(None, &facts)
+                .unwrap();
+            assert!(CODEC_WORK.with(|work| work.replace((0, 0))).0 > 0);
+            let staged = cold.finish().unwrap();
+            let frontier = empty
+                .replace_roots(&staged, vec![*base.root.cid()])
+                .unwrap();
+            let next = [(0u64, facts[&0].clone())]
+                .into_iter()
+                .collect::<OrdMap<u64, _>>();
+            let keys = std::collections::BTreeSet::from([0u64]);
+            let operation = InventoryOperation::new(Default::default());
+            let mut writer = Materializer::new(&frontier);
+            let (projected, work) = writer.project_map_with(&base, &keys, &operation).unwrap();
+            assert_eq!((work.key_lookups, work.reused_values), (1, 1));
+            assert_eq!(CODEC_WORK.with(Cell::get), (0, 0));
+            let staged = writer.finish().unwrap();
+            assert_eq!(staged.metrics().changed_entries, 0);
+            let (selected, fw) = frontier
+                .project_roots(&staged, vec![*projected.cid()], &operation)
+                .unwrap();
+            assert!(fw.reused_blocks > 0 && fw.reused_bytes > 4096);
+            let proof_cid = facts[&0].encoded().unwrap().0;
+            assert!(Arc::ptr_eq(
+                &selected.blocks[&proof_cid].bytes,
+                &frontier.blocks[&proof_cid].bytes
+            ));
+            let mut oracle = Materializer::new(&empty);
+            let canonical = oracle
+                .materialize_map_with::<_, _, ObservedScopeCodec>(None, &next)
+                .unwrap();
+            assert_eq!(&projected, canonical.root());
+            assert!(CODEC_WORK.with(|work| work.replace((0, 0))).0 > 0);
+            let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+                max_work: 0,
+                ..Default::default()
+            });
+            let mut refused = Materializer::new(&frontier);
+            assert!(matches!(
+                refused.project_map_with(&base, &keys, &exhausted),
+                Err(SnapshotProjectionError::Operation(_))
+            ));
+            let missing = std::collections::BTreeSet::from([unrelated + 1]);
+            assert!(matches!(
+                refused.project_map_with(&base, &missing, &operation),
+                Err(SnapshotProjectionError::MissingFact)
+            ));
+            assert_eq!(CODEC_WORK.with(Cell::get), (0, 0));
+            drop(frontier);
+            drop(staged);
+            drop(base);
+            drop(facts);
+            assert!(selected.get(&proof_cid).unwrap().is_some());
+        }
+    }
+
+    fn block_fixture() -> (ReachableBlocks, Vec<Cid>, BTreeMap<Cid, Vec<Cid>>) {
+        let empty = ReachableBlocks::default();
+        let mut writer = Materializer::new(&empty);
+        let leaf = writer.materialize_value(&("leaf", 0u64)).unwrap();
+        let a = writer.materialize_value(&("a", vec![leaf, leaf])).unwrap();
+        let b = writer.materialize_value(&("b", vec![leaf])).unwrap();
+        let top = writer.materialize_value(&("top", vec![a, b])).unwrap();
+        let other = writer.materialize_value(&("other", 1u64)).unwrap();
+        let staged = writer.finish().unwrap();
+        let frontier = empty.replace_roots(&staged, vec![top, other]).unwrap();
+        (
+            frontier,
+            vec![leaf, a, b, top, other],
+            BTreeMap::from([
+                (leaf, vec![]),
+                (a, vec![leaf, leaf]),
+                (b, vec![leaf]),
+                (top, vec![a, b]),
+                (other, vec![]),
+            ]),
+        )
+    }
+    fn expected_counts(roots: &[Cid], edges: &BTreeMap<Cid, Vec<Cid>>) -> BTreeMap<Cid, u64> {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending = roots.to_vec();
+        while let Some(cid) = pending.pop() {
+            if selected.insert(cid) {
+                pending.extend(&edges[&cid]);
+            }
+        }
+        selected
+            .iter()
+            .map(|cid| {
+                let count = roots.iter().filter(|root| *root == cid).count()
+                    + selected
+                        .iter()
+                        .map(|parent| edges[parent].iter().filter(|child| *child == cid).count())
+                        .sum::<usize>();
+                (*cid, count as u64)
+            })
+            .collect()
+    }
+    #[test]
+    fn projection_frontier_recounts_edges_and_survives_owner_drop() {
+        let (base, nodes, edges) = block_fixture();
+        let operation = InventoryOperation::new(Default::default());
+        let roots = vec![nodes[1], nodes[1], nodes[2]];
+        let (next, work) = base
+            .project_roots(&StagedBlocks::default(), roots.clone(), &operation)
+            .unwrap();
+        assert_eq!(
+            next.blocks
+                .iter()
+                .map(|(k, v)| (*k, v.incoming))
+                .collect::<BTreeMap<_, _>>(),
+            expected_counts(&roots, &edges)
+        );
+        assert_eq!(
+            (
+                work.root_references,
+                work.edges,
+                work.reused_blocks,
+                work.new_blocks
+            ),
+            (3, 3, 3, 0)
+        );
+        assert!(!next.blocks.contains_key(&nodes[3]) && !next.blocks.contains_key(&nodes[4]));
+        let weak = Arc::downgrade(&base.blocks[&nodes[0]].bytes);
+        let (fork, _) = base
+            .project_roots(&StagedBlocks::default(), vec![nodes[0]], &operation)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &base.blocks[&nodes[0]].bytes,
+            &next.blocks[&nodes[0]].bytes
+        ));
+        drop(base);
+        drop(fork);
+        assert!(weak.upgrade().is_some());
+        assert!(next.get(&nodes[0]).unwrap().is_some());
+        drop(next);
+        assert!(weak.upgrade().is_none());
+    }
+    #[test]
+    fn projection_frontier_refuses_missing_children_without_mutating_base() {
+        let (base, nodes, _) = block_fixture();
+        let mut broken = base.clone();
+        broken.blocks.remove(&nodes[0]);
+        let before = broken.blocks.clone();
+        let operation = InventoryOperation::new(Default::default());
+        assert!(
+            matches!(broken.project_roots(&StagedBlocks::default(),vec![nodes[3]],&operation),Err(SnapshotProjectionError::Snapshot(SnapshotError::MissingBlock(cid))) if cid==nodes[0])
+        );
+        assert!(broken.blocks == before);
+        assert!(base.get(&nodes[0]).unwrap().is_some());
+        let mut writer = Materializer::new(&base);
+        let new = writer.materialize_value(&("new", vec![nodes[0]])).unwrap();
+        let staged = writer.finish().unwrap();
+        assert!(
+            matches!(ReachableBlocks::default().project_roots(&staged,vec![new],&operation),Err(SnapshotProjectionError::Snapshot(SnapshotError::MissingBlock(cid))) if cid==nodes[0])
+        );
+    }
+    #[test]
+    fn native_fact_projection_matches_cold_subset_and_refuses_missing_keys() {
+        for unrelated in [0u64, 32, 128] {
+            let roles = (0..=unrelated)
+                .map(|index| {
+                    (
+                        ExactModuleIdentity {
+                            unit: "unit".into(),
+                            module: format!("M{index}"),
+                        },
+                        CompilerInputRole::InterfaceOnly {
+                            interface: ArtifactId([index as u8; 32]),
+                        }
+                        .recorded_fact(),
+                    )
+                })
+                .collect::<OrdMap<_, _>>();
+            let key = ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "M0".into(),
+            };
+            let cold = PublicationNativeFacts::maintain(
+                None,
+                PublicationNativeMaps {
+                    roles: roles.clone(),
+                    offers: Default::default(),
+                    native_availability: Default::default(),
+                    input_decisions: Default::default(),
+                },
+            )
+            .unwrap();
+            let maps = PublicationNativeMaps {
+                roles: [(key.clone(), roles[&key].clone())].into_iter().collect(),
+                offers: Default::default(),
+                native_availability: Default::default(),
+                input_decisions: Default::default(),
+            };
+            let operation = InventoryOperation::new(Default::default());
+            let keys = PublicationNativeMapKeys {
+                roles: std::collections::BTreeSet::from([key.clone()]),
+                ..Default::default()
+            };
+            let (projected, work) = cold.project(keys, &operation).unwrap();
+            assert_eq!((work.maps.key_lookups, work.maps.reused_values), (1, 1));
+            assert_eq!(
+                projected.commitment(),
+                PublicationNativeFacts::maintain(None, maps.clone())
+                    .unwrap()
+                    .commitment()
+            );
+            let missing = PublicationNativeMapKeys {
+                roles: std::collections::BTreeSet::from([ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: "missing".into(),
+                }]),
+                ..Default::default()
+            };
+            assert!(matches!(
+                cold.project(missing, &operation),
+                Err(SnapshotProjectionError::MissingFact)
+            ));
+            let root = projected.commitment();
+            drop(cold);
+            assert!(projected.receipt.frontier.get(&root).unwrap().is_some());
+        }
+    }
+    #[test]
+    fn projection_staged_hash_is_bounded_before_integrity_work() {
+        let (base, nodes, _) = block_fixture();
+        // Intentionally wrong CID distinguishes pre-hash refusal from Integrity.
+        let staged = StagedBlocks {
+            blocks: vec![(nodes[0], Arc::from(vec![0u8; 65_536]))],
+            metrics: Default::default(),
+        };
+        let work_limited = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 16_384,
+            ..Default::default()
+        });
+        assert!(matches!(
+            ReachableBlocks::default().project_roots(&staged, vec![nodes[0]], &work_limited),
+            Err(SnapshotProjectionError::Operation(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
+        ));
+        let bytes_limited = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: 256,
+            ..Default::default()
+        });
+        assert!(matches!(
+            ReachableBlocks::default().project_roots(&staged, vec![nodes[0]], &bytes_limited),
+            Err(SnapshotProjectionError::Operation(
+                tidepool_repr::execution_schema::ParseError::ByteLimit { .. }
+            ))
+        ));
+        assert!(base.get(&nodes[0]).unwrap().is_some());
+    }
+
+    #[test]
+    fn key_projection_keeps_full_proof_bytes_when_observations_are_equal() {
+        fn data(extra_unselected_node: bool) -> NativeOfferSnapshotFacts {
+            let scope = ArtifactSelectionId([1; 32]);
+            let binding = ArtifactBinding {
+                artifact: ArtifactId([2; 32]),
+                selection: scope,
+            };
+            let node = ArtifactBindingNode::Artifact(binding);
+            let mut nodes = vec![node];
+            if extra_unselected_node {
+                nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
+                    artifact: ArtifactId([3; 32]),
+                    selection: scope,
+                }));
+            }
+            let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+                selection: scope,
+                nodes,
+                dependencies: vec![],
+            }));
+            let snapshot = Arc::new(ExactSelectionSnapshot {
+                scopes: [(scope, proof)].into_iter().collect(),
+                roots: [(node, ())].into_iter().collect(),
+                namespace: [(binding.artifact, binding)].into_iter().collect(),
+                custody_roots: Default::default(),
+            });
+            NativeOfferSnapshotFacts {
+                original: binding.artifact,
+                interface: ArtifactId([4; 32]),
+                owner: ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: "Data".into(),
+                },
+                body: NativeOfferSnapshotBody::Full(
+                    crate::artifact_inventory::ExactArtifactSelection::from_snapshot(snapshot),
+                ),
+            }
+        }
+        // Passive decoded DATA may claim the same scope identity with different
+        // atomic proof bytes. This is not a pair of authenticated live issuers.
+        let a = data(false);
+        let b: NativeOfferSnapshotFacts =
+            serde_json::from_slice(&serde_json::to_vec(&data(true)).unwrap()).unwrap();
+        assert_eq!(a, b, "selected observations omit the unselected proof node");
+        let key = a.identity().unwrap();
+        assert_eq!(key, b.identity().unwrap());
+        let maps = |fact| PublicationNativeMaps {
+            roles: Default::default(),
+            offers: [(key, fact)].into_iter().collect(),
+            native_availability: Default::default(),
+            input_decisions: Default::default(),
+        };
+        let cold_a = PublicationNativeFacts::maintain(None, maps(a)).unwrap();
+        let cold_b = PublicationNativeFacts::maintain(None, maps(b)).unwrap();
+        assert_ne!(
+            cold_a.commitment(),
+            cold_b.commitment(),
+            "complete proof encoding preserves the extra atomic node"
+        );
+        let wire = |facts: &PublicationNativeFacts| {
+            lookup_map::<_, Cid, _>(&facts.receipt.frontier, facts.receipt.offers.root(), &key)
+                .unwrap()
+                .unwrap()
+        };
+        assert_ne!(wire(&cold_a), wire(&cold_b));
+        let mismatched = PublicationNativeTransport {
+            root: cold_a.commitment(),
+            maps: cold_b.maps.clone(),
+        };
+        assert!(
+            serde_json::from_slice::<PublicationNativeFacts>(
+                &serde_json::to_vec(&mismatched).unwrap()
+            )
+            .is_err(),
+            "semantic Eq cannot associate foreign full facts with another owner's encoded root"
+        );
+        let keys = PublicationNativeMapKeys {
+            offers: std::collections::BTreeSet::from([key]),
+            ..Default::default()
+        };
+        let operation = InventoryOperation::new(Default::default());
+        let (projected, work) = cold_a.project(keys, &operation).unwrap();
+        assert_eq!((work.maps.key_lookups, work.maps.reused_values), (1, 1));
+        assert_eq!(wire(&projected), wire(&cold_a));
+        let decoded: PublicationNativeFacts =
+            serde_json::from_slice(&serde_json::to_vec(projected.as_ref()).unwrap()).unwrap();
+        assert_eq!(decoded.commitment(), projected.commitment());
+        assert_eq!(wire(&decoded), wire(&cold_a));
+    }
+}
