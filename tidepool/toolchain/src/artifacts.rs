@@ -8175,6 +8175,28 @@ mod module_product_tests {
         )
         .unwrap();
         for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
+            let issued_groups = shadowed
+                .certified_groups
+                .iter()
+                .filter(|group| group.owner().module == module)
+                .map(|group| (group.origin(), group.owner()))
+                .fold(Vec::new(), |mut issuers, issuer| {
+                    if !issuers.contains(&issuer) {
+                        issuers.push(issuer);
+                    }
+                    issuers
+                });
+            let source_witnesses = shadowed.completed_source_evidence.as_ref().map(|evidence| {
+                evidence
+                    .modules
+                    .iter()
+                    .filter(|owner| owner.module == module)
+                    .collect::<Vec<_>>()
+            });
+            eprintln!(
+                "source shadow {module}: prior_owner={:?}; issued_groups={issued_groups:?}; source_witnesses={source_witnesses:?}",
+                owners.get(module)
+            );
             assert!(
                 shadowed
                     .certified_groups
