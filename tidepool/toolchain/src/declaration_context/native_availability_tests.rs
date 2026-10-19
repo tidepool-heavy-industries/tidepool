@@ -2131,6 +2131,8 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             .compiler_inputs(&context, None)
             .unwrap();
         let empty = &baseline.native_selection.availability[&entry.descriptor.id];
+        assert_eq!(empty.offers().len(), 1);
+        let baseline_empty = empty.offers().next().unwrap().clone();
         assert!(!empty.permits(7));
         assert!(!empty.permits(9001));
         assert!(empty
@@ -2165,8 +2167,52 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 .compiler_inputs()
                 .native_availability(chosen.original())
                 .unwrap();
-            assert_eq!(availability.offers().len(), 1);
-            let retained = availability.offers().next().unwrap();
+            assert!(!baseline_empty.same_issuance(chosen));
+            assert_eq!(availability.offers().len(), 2);
+            assert_eq!(
+                availability
+                    .offers()
+                    .filter(|offer| offer.same_issuance(&baseline_empty))
+                    .count(),
+                1,
+            );
+            assert_eq!(
+                availability
+                    .offers()
+                    .filter(|offer| offer.same_issuance(chosen))
+                    .count(),
+                1,
+            );
+            let retained = availability
+                .offers()
+                .find(|offer| offer.same_issuance(chosen))
+                .unwrap();
+            for ordinal in [7, 9001] {
+                let support = availability
+                    .dependency_support(
+                        crate::artifact_inventory::NativeGroupKey {
+                            artifact: entry.descriptor.id,
+                            original_ordinal: ordinal,
+                        },
+                        &entry.descriptor.owner,
+                    )
+                    .unwrap();
+                let expected = chosen
+                    .issued_group_carriers()
+                    .unwrap()
+                    .into_keys()
+                    .filter(|group| group.original_ordinal == ordinal)
+                    .collect::<BTreeSet<_>>();
+                let actual = support.groups().collect::<BTreeSet<_>>();
+                assert!(!expected.is_empty());
+                assert_eq!(actual, expected);
+                for group in actual {
+                    assert!(support
+                        .offer_for_group(group)
+                        .unwrap()
+                        .same_issuance(chosen));
+                }
+            }
             assert!(retained.same_issuance(chosen));
             assert_eq!(retained.proof(), chosen.proof());
             assert_eq!(
