@@ -128,3 +128,20 @@ Area supervisor resumes for critical diff inspection, repair coordination and
 whole-candidate fold, then informs campaign with OID/evidence/status. The parent
 alone owns campaign integration. No area process, build command, Buck daemon or
 uncertain external action is currently awaiting observation.
+
+Every child outcome requires a terminal event: success, refusal, failure,
+blocked, cancelled or standdown. Send exact task/base/candidate/evidence/status
+and next action to the owning supervisor and affected dependents. Inspect the
+recipient state: `send_message` for running, `followup_task` for dormant.
+Completion auto-notification is supporting evidence only. The build/process
+owner observes its terminal result and emits this event; the parent reconciles
+review, repair and fold disposition.
+
+Concrete dependency added during row lifetime review: selected support may
+already retain broad physical V+S materialization before the V leaf is issued.
+The row producer requested a same-logical-selection physical-frontier refresh
+through the existing ArtifactView projection owner. Host inputs owns approval
+of the small CompilerSourceSupport forwarding helper; source_lifetime is active
+for bounded strong-retainer review. This is part of the existing once-only
+promotion/sibling-release assignment, not a new work scope. The row producer
+continues independent mutex/collector tests while that helper is coordinated.
