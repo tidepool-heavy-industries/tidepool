@@ -612,9 +612,16 @@ async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() 
             installation.policy.as_ref(), &["getRuntimeInfo"],
         ).await;
         assert_eq!(lookup["status"], "committed", "{lookup}");
-        let found = lookup["items"][0]["output"].as_str().unwrap();
-        assert!(found.contains("getRuntimeInfo") && found.contains("[available]")
-            && !found.contains("no match:"), "{found}");
+        let [item] = lookup["items"].as_array().unwrap().as_slice() else {
+            panic!("one lookup result: {lookup}");
+        };
+        assert_eq!(item["status"], "committed", "{item}");
+        assert!(item["value"]["lookupCaptureSlot"].as_i64().is_some_and(|slot| slot > 0),
+            "lookup must retain its exact capture: {item}");
+        let found = item["output"].as_str().unwrap();
+        assert!(found.lines().any(|line| line.contains(
+            "getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found] [Signature"))
+            && !found.contains("no match:") && !found.contains("Lookup issue:"), "{found}");
         after_reuse.finish();
     })).await;
 }
