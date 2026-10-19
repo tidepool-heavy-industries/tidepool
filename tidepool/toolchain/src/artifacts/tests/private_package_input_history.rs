@@ -376,10 +376,25 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Public inheritance and a current package receipt independently reach
     // the same consumer. Neither grants lexical imports for this original.
+    let public_view = crate::declaration_context::certified_product_artifact_view_with_validation(
+        producer,
+        &issued.recovery_products,
+        &issued.module_interfaces,
+        &issued.value_interfaces,
+        None,
+        NativeArtifactDemand::ScopeInterfaces,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    let public_output =
+        OriginalCompilerInputs::from_selection(&issued.source_selection, &public_view).unwrap();
+    let public_support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&public_output)
+            .unwrap();
     let public_original = Arc::new(
         ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
-            .extend_checked_original_products(producer, &issued.recovery_products)
+            .extend_issued_compiler_support(&public_support)
             .unwrap(),
     );
     let public_request = public_original
