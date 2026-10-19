@@ -2007,12 +2007,25 @@ impl CheckedValueInputs {
         let inputs = self
             .baseline
             .iter()
-            .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
+            .map(|artifact| (artifact.input().module.as_str(), artifact))
             .collect::<BTreeMap<_, _>>();
         let destination = destination.join("checked-value-inputs");
         std::fs::create_dir(&destination)?;
         let mut captured = Vec::with_capacity(inputs.len());
-        for artifact in inputs.into_values() {
+        for value in inputs.into_values() {
+            let artifact = value.input();
+            let selected_transport = match value {
+                CapturedValueInterface::Certified { original, .. } => {
+                    let transport = original.row.checked_value_transport();
+                    Some(serde_json::json!({
+                        "endpoint": transport.endpoint(), "offset": transport.offset(),
+                        "length": transport.len(), "arena_bytes": transport.arena_len(),
+                        "sha256_bytes": transport.sha256(),
+                    }))
+                }
+                #[cfg(test)]
+                CapturedValueInterface::Raw(_) => None,
+            };
             let relative = artifact.owner.relative_hi_path();
             let expected = destination.join("expected").join(&relative);
             std::fs::create_dir_all(expected.parent().expect("generated interface parent"))?;
@@ -2034,6 +2047,8 @@ impl CheckedValueInputs {
                 "original_path": artifact.path,
                 "relative_path": relative,
                 "expected_sha256": artifact.digest,
+                "selected_transport": selected_transport,
+                "observed_source": "alias_file",
                 "observed_sha256": observed_digest,
                 "observation_error": observation_error,
             }));
@@ -5355,6 +5370,22 @@ mod tests {
         assert_eq!(inputs.work().initial_files_written, 0);
         assert_eq!(inputs.work().initial_bytes_written_and_hashed, 0);
         let authority = inputs.import_authority();
+        let expected = value.bytes_owned().clone();
+        std::fs::write(&path, b"changed diagnostic alias").unwrap();
+        authority.validate().unwrap();
+        assert!(std::fs::read(&endpoint).unwrap().starts_with(&expected));
+        let diagnostics = tempfile::tempdir().unwrap();
+        inputs.retain_diagnostics(diagnostics.path()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(diagnostics.path().join("checked-value-inputs/inputs.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest[0]["observed_source"], "alias_file");
+        assert!(manifest[0]["selected_transport"].is_object());
+        assert_ne!(
+            manifest[0]["expected_sha256"],
+            manifest[0]["observed_sha256"]
+        );
         drop(context);
         drop(sibling);
         assert!(
@@ -5378,7 +5409,7 @@ mod tests {
     }
 
     #[test]
-    fn promoted_value_leaf_releases_broad_sibling_backing_before_next_request() {
+    fn original_value_materialization_is_dedicated_and_reused_after_sibling_drop() {
         use super::*;
         let producer_bytes = b"checked value broad sibling";
         let producer = Sha256::digest(producer_bytes).into();
@@ -5441,6 +5472,31 @@ mod tests {
             let files = broad.input_transport_files();
             files.iter().map(Arc::downgrade).collect::<Vec<_>>()
         };
+        assert_eq!(
+            broad_files.len(),
+            2,
+            "two value rows have independent backing descriptors"
+        );
+        let full_context = context;
+        let selected = full_context
+            .compiler_source_support()
+            .select_value_interface(produced.output(owner).unwrap().interface.as_ref())
+            .unwrap();
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&selected)
+                .unwrap(),
+        );
+        drop(selected);
+        let before = context
+            .prepare_compilation(&scratch.path().join("narrow-before"), producer_bytes)
+            .unwrap();
+        assert_eq!(
+            before.input_transport_files().len(),
+            1,
+            "V-only source owns only its own descriptor"
+        );
         let support =
             crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
                 .unwrap();
@@ -5481,7 +5537,11 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_ne!(value.interface.path, broad_value);
+        assert_eq!(
+            value.interface.path, broad_value,
+            "P6 borrows the original dedicated row"
+        );
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
         let leaf_path = value.interface.path.clone();
         let overlaid = context
             .prepare_compilation(&scratch.path().join("same-view"), producer_bytes)
@@ -5508,10 +5568,9 @@ mod tests {
             broad_value,
             "already issued requests keep their original complete owner"
         );
-        drop(overlaid);
         drop(broad);
+        drop(full_context);
         drop(support);
-        drop(context);
         drop(produced);
         drop(sibling);
         drop(sibling_inputs);
@@ -5519,12 +5578,16 @@ mod tests {
         drop(inputs);
         drop(original);
         assert!(leaf_path.exists());
-        assert!(!broad_value.exists());
+        assert!(broad_value.exists());
         assert!(!broad_sibling.exists());
+        let survivor_file = value.row.checked_value_transport().compiler_file_lease();
         assert!(
-            broad_files.iter().all(|file| file.upgrade().is_none()),
-            "old broad arena descriptors release while V survives"
+            broad_files.iter().all(|file| file
+                .upgrade()
+                .is_none_or(|file| Arc::ptr_eq(&file, &survivor_file))),
+            "only the original dedicated V descriptor survives sibling drop"
         );
+        drop(survivor_file);
         let next = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -5546,6 +5609,9 @@ mod tests {
         );
         drop(request);
         drop(next);
+        drop(before);
+        drop(overlaid);
+        drop(context);
         drop(value);
         assert!(!leaf_path.exists());
     }
@@ -5603,6 +5669,125 @@ mod tests {
             );
         }
         assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn same_view_many_promotions_keep_one_current_physical_frontier() {
+        use super::*;
+        let producer_bytes = b"many same-view promoted values";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let mut staged = Vec::new();
+        let mut selected = (*original).clone();
+        for generation in 1..=16 {
+            let (inputs, owner, path) = prepare_test_value_interface_files(generation, false);
+            let produced = capture_test_produced_value_interface(
+                producer,
+                owner,
+                &path,
+                generation as usize - 1,
+            );
+            selected = selected
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap();
+            staged.push((inputs, owner, produced));
+        }
+        let context = Arc::new(selected);
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let escaped = staged
+            .iter()
+            .enumerate()
+            .map(|(index, (inputs, _, produced))| {
+                let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+                inputs
+                    .capture_output(
+                        index as u64 + 1,
+                        &cell,
+                        &original,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Ordinary {
+                            produced: Some(produced),
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let base = context
+            .prepare_compilation(&scratch.path().join("base"), producer_bytes)
+            .unwrap();
+        let old_path = base.artifacts[0].interface.path.clone();
+        let old_files = {
+            let files = base.input_transport_files();
+            files.iter().map(Arc::downgrade).collect::<Vec<_>>()
+        };
+        let mut current = None;
+        let mut values = Vec::new();
+        for (index, (inputs, owner, produced)) in staged.iter().enumerate() {
+            let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+            let value = inputs
+                .capture_output(
+                    index as u64 + 1,
+                    &cell,
+                    &context,
+                    &[],
+                    &original,
+                    CheckedValueCaptureInput::Prepared {
+                        support: &support,
+                        produced,
+                    },
+                )
+                .unwrap();
+            let request = context
+                .prepare_compilation(
+                    &scratch.path().join(format!("step-{index}")),
+                    producer_bytes,
+                )
+                .unwrap();
+            let physical = context
+                .artifact_view()
+                .retained_materialization(&context.compiler_metadata_snapshot().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                physical.test_ownership_shape(),
+                (1, 16),
+                "current overlay owns linear facts with no predecessor graph"
+            );
+            assert_eq!(
+                request
+                    .artifacts
+                    .iter()
+                    .find(|row| row.interface.module == owner.module_name())
+                    .unwrap()
+                    .interface
+                    .path,
+                value.interface.path
+            );
+            assert_eq!(base.artifacts[0].interface.path, old_path);
+            assert!(
+                old_path.exists(),
+                "original in-flight request retains its original bytes"
+            );
+            current = Some(request);
+            values.push(value);
+        }
+        drop(base);
+        assert!(!old_path.exists());
+        assert!(old_files.iter().all(|file| file.upgrade().is_none()));
+        assert!(current
+            .as_ref()
+            .unwrap()
+            .artifacts
+            .iter()
+            .all(|row| row.interface.path.exists()));
+        assert_eq!(values.len(), 16);
+        assert_eq!(escaped.len(), 16);
     }
 
     #[test]

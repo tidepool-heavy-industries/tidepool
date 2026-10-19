@@ -3956,13 +3956,20 @@ impl CertifiedInterfaceInputs {
 /// selections without storing a copy of every ancestor in each descendant.
 /// A detached selection shares each row and graph file's issuing directory,
 /// independently of historical materialization metadata.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaterializationKind {
+    Issued,
+    CheckedValueOverlay,
+}
+
 pub(crate) struct RetainedArtifactMaterialization {
+    kind: MaterializationKind,
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
-    rows: BTreeMap<ArtifactId, Arc<RetainedArtifactRow>>,
+    rows: imbl::OrdMap<ArtifactId, Arc<RetainedArtifactRow>>,
     groups: Arc<[PendingCertifiedGroup]>,
     execution_scope: Option<Arc<Value>>,
-    graph_paths: BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>,
+    graph_paths: Arc<BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
 }
@@ -3991,7 +3998,12 @@ struct MaterializationCoverage {
 
 impl MaterializationFacts<'_> {
     fn detach(self) -> Arc<RetainedArtifactMaterialization> {
-        Arc::new(RetainedArtifactMaterialization {
+        Arc::new(self.into_owned())
+    }
+
+    fn into_owned(self) -> RetainedArtifactMaterialization {
+        RetainedArtifactMaterialization {
+            kind: MaterializationKind::Issued,
             _directory: None,
             _parents: Vec::new(),
             rows: self
@@ -4001,14 +4013,15 @@ impl MaterializationFacts<'_> {
                 .collect(),
             groups: self.groups.into_iter().cloned().collect::<Vec<_>>().into(),
             execution_scope: None,
-            graph_paths: self
-                .graph_paths
-                .into_iter()
-                .map(|(digest, file)| (digest, Arc::clone(file)))
-                .collect(),
+            graph_paths: Arc::new(
+                self.graph_paths
+                    .into_iter()
+                    .map(|(digest, file)| (digest, Arc::clone(file)))
+                    .collect(),
+            ),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
-        })
+        }
     }
 }
 
@@ -4043,35 +4056,99 @@ pub(crate) enum CheckedValueRowSource<'a> {
 }
 
 impl RetainedArtifactMaterialization {
-    /// Overlay newly issued leaves without mutating an in-flight complete owner
-    /// or copying its execution graph/scope bytes.
+    /// A complete physical view owns current facts directly. Overlay revisions
+    /// share persistent rows and immutable graph/scope owners, never predecessors.
     pub(crate) fn overlay_checked_value_leaves(
         complete: &Arc<Self>,
         leaves: &[Arc<Self>],
+        metadata: &CompilerArtifactMetadata,
     ) -> Arc<Self> {
-        let rows = leaves
-            .iter()
-            .flat_map(|leaf| leaf.rows.iter())
-            .map(|(id, row)| (*id, row.clone()))
-            .collect::<BTreeMap<_, _>>();
-        if rows.iter().all(|(id, row)| {
-            complete
-                .rows
-                .get(id)
-                .is_some_and(|old| Arc::ptr_eq(old, row))
-        }) {
+        if leaves.is_empty() {
             return complete.clone();
         }
-        Arc::new(Self {
-            _directory: None,
-            _parents: vec![complete.clone()],
-            rows,
-            groups: Arc::from([]),
-            execution_scope: complete.execution_scope.clone(),
-            graph_paths: BTreeMap::new(),
-            #[cfg(test)]
-            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
-        })
+        if complete.kind == MaterializationKind::CheckedValueOverlay
+            && leaves
+                .iter()
+                .flat_map(|leaf| leaf.rows.iter())
+                .all(|(id, row)| {
+                    complete
+                        .rows
+                        .get(id)
+                        .is_some_and(|old| Arc::ptr_eq(old, row))
+                })
+        {
+            return complete.clone();
+        }
+        let mut owned = if complete.kind == MaterializationKind::CheckedValueOverlay {
+            Self {
+                kind: MaterializationKind::CheckedValueOverlay,
+                _directory: None,
+                _parents: Vec::new(),
+                rows: complete.rows.clone(),
+                groups: complete.groups.clone(),
+                execution_scope: complete.execution_scope.clone(),
+                graph_paths: complete.graph_paths.clone(),
+                #[cfg(test)]
+                payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+            }
+        } else {
+            // Flatten an issued owner once using the existing exact physical
+            // selection. Replacing its last obsolete row releases that backing.
+            let mut owners = vec![complete.clone()];
+            owners.extend(leaves.iter().cloned());
+            let facts = Self::select_custody_facts(
+                &owners,
+                &metadata.retained.artifacts,
+                &metadata.retained.selected_native_groups,
+            )
+            .expect("selected checked value leaves have issued physical facts");
+            let mut owned = facts.into_owned();
+            owned.kind = MaterializationKind::CheckedValueOverlay;
+            owned.execution_scope = complete.execution_scope.clone();
+            owned
+        };
+        let mut changed_rows = 0usize;
+        for leaf in leaves {
+            for (id, row) in &leaf.rows {
+                if owned.rows.get(id).is_none_or(|old| !Arc::ptr_eq(old, row)) {
+                    owned.rows.insert(*id, row.clone());
+                    changed_rows += 1;
+                }
+            }
+        }
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_overlay",
+            initial_fact_detach = complete.kind == MaterializationKind::Issued,
+            changed_rows, current_rows = owned.rows.len(), predecessor_owners = 0,
+            "retained current immutable physical facts");
+        Arc::new(owned)
+    }
+
+    pub(crate) fn issued_value_row(
+        &self,
+        entry: &Arc<ArtifactEntry>,
+    ) -> Option<Arc<RetainedArtifactRow>> {
+        let mut row = None;
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            if let Some(candidate) = owner.rows.get(&entry.descriptor.id) {
+                if let ValueRowCustody::Private(issued) = &candidate.value_custody {
+                    if Arc::ptr_eq(issued, entry) || issued.as_ref() == entry.as_ref() {
+                        row = Some(candidate.clone());
+                    }
+                }
+            }
+        });
+        row
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_ownership_shape(&self) -> (usize, usize) {
+        let mut owners = 0;
+        let mut rows = 0;
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            owners += 1;
+            rows += owner.rows.len();
+        });
+        (owners, rows)
     }
 
     /// Issue a value-sized physical leaf on the value's existing support view.
@@ -4101,76 +4178,22 @@ impl RetainedArtifactMaterialization {
         let materialization =
             support
                 .artifacts()
-                .retain_checked_value_materialization(value, |entry| {
+                .retain_checked_value_materialization(value, |entry, borrowed| {
                     let mut issued = issuer.map(|issuer| crate::host_work::lock_with_wait(&issuer.row, || {})).transpose()?;
                     if let Some(row) = issued.as_ref().and_then(|row| row.as_ref()) {
                         return Ok(Self::checked_value_leaf(value.artifact_id(), row.clone()));
                     }
-                    let directory = Arc::new(
-                        tempfile::Builder::new()
-                            .prefix("tidepool-checked-value-")
-                            .tempdir()?,
-                    );
                     let mut validation = PackageInterfaceValidation::default();
-                    let files = recovery_artifacts::materialize_selected_interface(
-                        directory.path(),
-                        &owner,
-                        entry.clone(),
-                        value.interface().toolchain_identity_sha256(),
-                        &mut validation,
-                    )
-                    .map_err(materialization_failure)?;
-                    let payloads = original_inputs::entry_payloads(&entry);
-                    let length = payloads
-                        .iter()
-                        .try_fold(0u64, |total, (_, bytes)| {
-                            total.checked_add(bytes.len() as u64)
-                        })
-                        .ok_or_else(|| failure("checked value row size overflow"))?;
-                    let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(length)
-                        .map_err(failure)?;
-                    let pending = payloads
-                        .into_iter()
-                        .map(|(kind, bytes)| Ok((kind, builder.append(bytes).map_err(failure)?)))
-                        .collect::<Result<Vec<_>, CompileError>>()?;
-                    let arena = builder.finish().map_err(failure)?;
-                    let owned_inputs = pending
-                        .into_iter()
-                        .map(|(kind, pending)| {
-                            Ok((kind, arena.issue_slice(pending).map_err(failure)?))
-                        })
-                        .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
-                    let row = RetainedArtifactRow {
-                        owned_inputs,
-                        interface: ExactIfaceArtifact {
-                            unit: owner.unit.clone(),
-                            module: owner.module.clone(),
-                            path: directory.path().join(files.interface_path),
-                            sha256: hex(&files.skinny_iface_sha256),
-                            requirements: entry
-                                .requirements
-                                .iter()
-                                .map(|owner| (owner.unit.clone(), owner.module.clone()))
-                                .collect(),
-                        },
-                        interface_evidence: scope_interface_evidence(
-                            &entry,
-                            directory.path(),
-                            &mut validation,
-                        )?,
-                        _directory: directory,
-                        payload: RetainedArtifactPayload::InterfaceOnly,
-                        canonical_custody: None,
+                    let (row, fresh) = match borrowed {
+                        Some(row) => (row, false),
+                        None => (Arc::new(RetainedArtifactRow::issue_value(entry, &mut validation, ValueRowLocation::Private)?), true),
                     };
+                    #[cfg(test)]
                     let work = validation.work();
-                    tracing::info!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_issue",
-                        fresh_rows = 1, arena_bytes = arena.len(),
-                        promoted_bytes = work.written_bytes, promotion_read_bytes = work.read_bytes,
-                        promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
-                    let row = Arc::new(row);
                     if let Some(issued) = &mut issued { **issued = Some(row.clone()); }
                     #[cfg(test)]
-                    if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    if fresh { if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } }
+                    tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_attach", fresh_rows = usize::from(fresh), borrowed_rows = usize::from(!fresh), "attached exact output row custody");
                     let retained = Self::checked_value_leaf(value.artifact_id(), row);
                     #[cfg(test)]
                     let retained = Self { payload_work: work, ..retained };
@@ -4186,12 +4209,13 @@ impl RetainedArtifactMaterialization {
 
     fn checked_value_leaf(id: ArtifactId, row: Arc<RetainedArtifactRow>) -> Self {
         Self {
+            kind: MaterializationKind::Issued,
             _directory: None,
             _parents: Vec::new(),
-            rows: BTreeMap::from([(id, row)]),
+            rows: std::iter::once((id, row)).collect(),
             groups: Arc::from([]),
             execution_scope: None,
-            graph_paths: BTreeMap::new(),
+            graph_paths: Arc::new(BTreeMap::new()),
             #[cfg(test)]
             payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
         }
@@ -4292,7 +4316,7 @@ impl RetainedArtifactMaterialization {
                     excluded = true;
                 }
             }
-            for (id, file) in &owner.graph_paths {
+            for (id, file) in owner.graph_paths.iter() {
                 if selected
                     .graph_paths
                     .get(id)
@@ -4573,6 +4597,7 @@ impl RetainedArtifactMaterialization {
 }
 
 pub(crate) struct RetainedArtifactRow {
+    value_custody: ValueRowCustody,
     owned_inputs:
         BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
@@ -4599,8 +4624,116 @@ impl std::fmt::Debug for RetainedArtifactRow {
             .finish_non_exhaustive()
     }
 }
-impl RetainedArtifactRow {
+enum ValueRowCustody {
+    Generic,
+    Private(Arc<ArtifactEntry>),
     #[cfg(test)]
+    Packet,
+}
+
+// Durable fixture packets transfer their whole directory to the caller. A row
+// does not extend that external packet lifetime, so only Private custody may be
+// borrowed into independently retained checked values.
+enum ValueRowLocation {
+    Private,
+    #[cfg(test)]
+    Packet(PathBuf),
+}
+
+impl RetainedArtifactRow {
+    /// Every value interface receives independent physical backing at issuance,
+    /// including values first materialized before final checked capture.
+    fn issue_value(
+        entry: Arc<ArtifactEntry>,
+        validation: &mut PackageInterfaceValidation,
+        location: ValueRowLocation,
+    ) -> Result<Self, CompileError> {
+        if !matches!(
+            &entry.payload,
+            ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+        ) {
+            return Err(failure(
+                "value row factory requires an acquired value interface",
+            ));
+        }
+        let before = validation.work();
+        let owner = entry.descriptor.owner.clone();
+        let (directory, value_custody) = match location {
+            ValueRowLocation::Private => (
+                tempfile::Builder::new()
+                    .prefix("tidepool-checked-value-")
+                    .tempdir()?,
+                ValueRowCustody::Private(entry.clone()),
+            ),
+            #[cfg(test)]
+            ValueRowLocation::Packet(root) => {
+                let mut directory = tempfile::Builder::new()
+                    .prefix("tidepool-checked-value-")
+                    .tempdir_in(root)?;
+                directory.disable_cleanup(true);
+                (directory, ValueRowCustody::Packet)
+            }
+        };
+        let directory = Arc::new(directory);
+        let files = recovery_artifacts::materialize_selected_interface(
+            directory.path(),
+            &owner,
+            entry.clone(),
+            entry.descriptor.producer_sha256,
+            validation,
+        )
+        .map_err(materialization_failure)?;
+        let payloads = original_inputs::entry_payloads(&entry);
+        let length = payloads
+            .iter()
+            .try_fold(0u64, |total, (_, bytes)| {
+                total.checked_add(bytes.len() as u64)
+            })
+            .ok_or_else(|| failure("checked value row size overflow"))?;
+        let mut builder =
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(length).map_err(failure)?;
+        let pending = payloads
+            .into_iter()
+            .map(|(kind, bytes)| Ok((kind, builder.append(bytes).map_err(failure)?)))
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let arena = builder.finish().map_err(failure)?;
+        let owned_inputs = pending
+            .into_iter()
+            .map(|(kind, pending)| Ok((kind, arena.issue_slice(pending).map_err(failure)?)))
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let row = RetainedArtifactRow {
+            value_custody,
+            owned_inputs,
+            interface: ExactIfaceArtifact {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                path: directory.path().join(files.interface_path),
+                sha256: hex(&files.skinny_iface_sha256),
+                requirements: entry
+                    .requirements
+                    .iter()
+                    .map(|owner| (owner.unit.clone(), owner.module.clone()))
+                    .collect(),
+            },
+            interface_evidence: scope_interface_evidence(&entry, directory.path(), validation)?,
+            _directory: directory,
+            payload: RetainedArtifactPayload::InterfaceOnly,
+            canonical_custody: None,
+        };
+        let after = validation.work();
+        let work = recovery_artifacts::RecoveryArtifactWork {
+            read_bytes: after.read_bytes - before.read_bytes,
+            written_bytes: after.written_bytes - before.written_bytes,
+            hash_bytes: after.hash_bytes - before.hash_bytes,
+            decoded_bytes: after.decoded_bytes - before.decoded_bytes,
+        };
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_issue",
+                        fresh_rows = 1, arena_bytes = arena.len(),
+                        promoted_bytes = work.written_bytes, promotion_read_bytes = work.read_bytes,
+                        promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
+        Ok(row)
+    }
+
     pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice {
         &self.owned_inputs[&original_inputs::OriginalInputKind::Interface]
     }
@@ -9820,7 +9953,12 @@ impl ExactDeclarationContext {
                 // These paths already belong to the packet's scoped directory. Its
                 // owner releases them after the downstream process consumes them.
                 directory.disable_cleanup(true);
-                let result = self.materialize_retained_artifacts(&metadata, parents, directory);
+                let result = self.materialize_retained_artifacts(
+                    &metadata,
+                    parents,
+                    directory,
+                    &RequestInputTransport::DurableFiles,
+                );
                 if result.is_err() {
                     let _ = std::fs::remove_dir_all(cleanup_on_failure);
                 }
@@ -9933,6 +10071,7 @@ impl ExactDeclarationContext {
         metadata: &CompilerArtifactMetadata,
         parents: Vec<Arc<RetainedArtifactMaterialization>>,
         directory: tempfile::TempDir,
+        transport: &RequestInputTransport,
     ) -> Result<RetainedArtifactMaterialization, CompileError> {
         crate::host_work::checkpoint()?;
         let directory = Arc::new(directory);
@@ -9955,7 +10094,29 @@ impl ExactDeclarationContext {
         .map_err(failure)?;
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
+        let mut validation = PackageInterfaceValidation::default();
         for entry in &new_entries {
+            if matches!(
+                &entry.payload,
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+            ) {
+                rows.insert(
+                    entry.descriptor.id,
+                    RetainedArtifactRow::issue_value(
+                        entry.clone(),
+                        &mut validation,
+                        match transport {
+                            RequestInputTransport::OwnedArena => ValueRowLocation::Private,
+                            #[cfg(test)]
+                            RequestInputTransport::DurableFiles => {
+                                ValueRowLocation::Packet(root.to_path_buf())
+                            }
+                        },
+                    )?,
+                );
+                continue;
+            }
+
             let canonical = match &entry.payload {
                 ArtifactPayload::Canonical(interface) => Some(interface),
                 ArtifactPayload::Original(product) => product.module_interface(),
@@ -9973,12 +10134,21 @@ impl ExactDeclarationContext {
                 );
             }
         }
-        let mut validation = PackageInterfaceValidation::default();
+        let shared_entries = new_entries
+            .iter()
+            .filter(|entry| {
+                !matches!(
+                    &entry.payload,
+                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
         let (materialized, references) = self.materialize_entries_with_validation(
             root,
-            &new_entries,
+            &shared_entries,
             &mut validation,
             MaterializationMode::Scratch,
         )?;
@@ -10007,6 +10177,7 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
+                    value_custody: ValueRowCustody::Generic,
                     owned_inputs: acquired_inputs
                         .remove(&entry.descriptor.id)
                         .unwrap_or_default(),
@@ -10140,6 +10311,7 @@ impl ExactDeclarationContext {
             scope_written_bytes, "completed private artifact ownership");
         crate::host_work::checkpoint()?;
         Ok(RetainedArtifactMaterialization {
+            kind: MaterializationKind::Issued,
             _directory: Some(Arc::clone(&directory)),
             _parents: parents,
             rows: rows
@@ -10148,20 +10320,22 @@ impl ExactDeclarationContext {
                 .collect(),
             groups: groups.into(),
             execution_scope: execution_scope.map(Arc::new),
-            graph_paths: graph_paths
-                .into_iter()
-                .filter(|(digest, _)| !inherited_graphs.contains(digest))
-                .map(|(digest, path)| {
-                    (
-                        digest,
-                        Arc::new(OwnedExecutionGraphFile {
-                            transport: graph_transports[&digest].clone(),
-                            path,
-                            _directory: Arc::clone(&directory),
-                        }),
-                    )
-                })
-                .collect(),
+            graph_paths: Arc::new(
+                graph_paths
+                    .into_iter()
+                    .filter(|(digest, _)| !inherited_graphs.contains(digest))
+                    .map(|(digest, path)| {
+                        (
+                            digest,
+                            Arc::new(OwnedExecutionGraphFile {
+                                transport: graph_transports[&digest].clone(),
+                                path,
+                                _directory: Arc::clone(&directory),
+                            }),
+                        )
+                    })
+                    .collect(),
+            ),
             #[cfg(test)]
             payload_work: work,
         })
@@ -10214,7 +10388,7 @@ impl ExactDeclarationContext {
                 let directory = tempfile::Builder::new()
                     .prefix("tidepool-exact-artifacts-")
                     .tempdir()?;
-                self.materialize_retained_artifacts(metadata, parents, directory)
+                self.materialize_retained_artifacts(metadata, parents, directory, &transport)
             })?;
         let selected_rows = retained.selected_rows(metadata);
         let transported_artifacts = metadata
@@ -16064,6 +16238,20 @@ mod tests {
         assert!(owned_root.starts_with(packet.path()));
         assert!(!paths.is_empty());
         assert!(paths.iter().all(|path| path.starts_with(&owned_root)));
+        let value_entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "Value")))
+            .unwrap();
+        let value_entry = &value_entry[&identity("fixture", "Value")];
+        let owner = request.materialization.as_ref().unwrap();
+        assert!(
+            owner.issued_value_row(value_entry).is_none(),
+            "packet-owned files cannot issue independently retained checked custody"
+        );
+        assert!(matches!(
+            owner.rows[&value_entry.descriptor.id].value_custody,
+            ValueRowCustody::Packet
+        ));
         assert!(context
             .prepare_fixture_compilation(&packet.path().join("second"), &producer)
             .is_err());
@@ -16098,8 +16286,12 @@ mod tests {
                     .artifacts()
                     .retain_materialization(&metadata, |parents| {
                         let directory = tempfile::tempdir().unwrap();
-                        let result = context
-                            .materialize_retained_artifacts(&metadata, parents, directory)?;
+                        let result = context.materialize_retained_artifacts(
+                            &metadata,
+                            parents,
+                            directory,
+                            &RequestInputTransport::OwnedArena,
+                        )?;
                         // The immutable private result has passed its final validation.
                         cancellation.cancel();
                         Ok(result)
@@ -16564,6 +16756,11 @@ mod tests {
         let a_directory = a_owner._directory.as_ref().unwrap();
         let a_directory_weak = Arc::downgrade(a_directory);
         let a_files = private_directory_file_bytes(a_directory.path());
+        let a_row_directories = a_owner
+            .selected_rows(&a.compiler_metadata_snapshot().unwrap())
+            .into_iter()
+            .map(|(id, row)| (id, Arc::downgrade(&row._directory)))
+            .collect::<BTreeMap<_, _>>();
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
             a.owner.facts.producer,
@@ -16615,7 +16812,10 @@ mod tests {
                 [&identity(&artifact.interface.unit, &artifact.interface.module)];
             let inherited = b_rows[&entry.descriptor.id];
             assert_eq!(inherited.artifact(), *artifact);
-            assert!(Arc::ptr_eq(&inherited._directory, a_directory));
+            assert!(Arc::ptr_eq(
+                &inherited._directory,
+                &a_row_directories[&entry.descriptor.id].upgrade().unwrap()
+            ));
         }
         assert_eq!(private_directory_file_bytes(a_directory.path()), a_files);
         let new_file_bytes = private_directory_file_bytes(b_owner.directory().path())

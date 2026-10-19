@@ -6163,6 +6163,7 @@ impl ArtifactView {
         value: &crate::recovery_artifacts::CertifiedValueInterface,
         prepare: impl FnOnce(
             Arc<ArtifactEntry>,
+            Option<Arc<crate::declaration_context::RetainedArtifactRow>>,
         ) -> Result<
             crate::declaration_context::RetainedArtifactMaterialization,
             CompileError,
@@ -6193,7 +6194,22 @@ impl ArtifactView {
         if let Some(retained) = cache.get(&key) {
             return Ok(retained.clone());
         }
-        let retained = Arc::new(prepare(entry.clone())?);
+        // Prefer the current owner's exact acquired value row, then its
+        // recorded inherited custody. Dedicated provenance includes full facts.
+        let mut borrowed = cache
+            .values()
+            .rev()
+            .find_map(|owner| owner.issued_value_row(entry));
+        if borrowed.is_none() {
+            let mut inherited = Vec::new();
+            self.lease
+                .collect_inherited_materializations(&mut inherited, &mut BTreeSet::new())?;
+            borrowed = inherited
+                .iter()
+                .rev()
+                .find_map(|owner| owner.issued_value_row(entry));
+        }
+        let retained = Arc::new(prepare(entry.clone(), borrowed)?);
         cache.insert(key, retained.clone());
         Ok(retained)
     }
@@ -6206,7 +6222,7 @@ impl ArtifactView {
         >,
         metadata: &CompilerArtifactMetadata,
     ) -> Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
-        retained
+        let leaves = retained
             .iter()
             .filter_map(|(key, leaf)| match key {
                 MaterializationKey::CheckedValueLeaf(binding)
@@ -6223,7 +6239,11 @@ impl ArtifactView {
                 }
                 _ => None,
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_leaf_cache_scan",
+            cache_entries_visited = retained.len(), selected_leaf_references = leaves.len(),
+            "observed current scoped physical leaves");
+        leaves
     }
 
     /// Private materialization belongs to this immutable graph view. Failed
@@ -6245,7 +6265,7 @@ impl ArtifactView {
         let key = MaterializationKey::Compilation(metadata.materialization_key());
         let leaves = self.checked_value_leaves(&retained, metadata);
         if let Some(complete) = retained.get(&key) {
-            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves);
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
             retained.insert(key, complete.clone());
             return Ok(complete);
         }
@@ -6318,7 +6338,7 @@ impl ArtifactView {
             return Ok(None);
         };
         let leaves = self.checked_value_leaves(&retained, metadata);
-        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves);
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
         retained.insert(key, complete.clone());
         Ok(Some(complete))
     }
