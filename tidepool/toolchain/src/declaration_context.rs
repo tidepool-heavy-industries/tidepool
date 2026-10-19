@@ -15517,6 +15517,49 @@ mod tests {
             let survived = acquired
                 .published_source_original_selections_for_target(&demanded, &imports)
                 .unwrap();
+            if survived.as_slice() != std::slice::from_ref(&publication) {
+                for actual in &survived {
+                    let actual_context = actual.context();
+                    let expected_context = publication.context();
+                    let actual_support = actual_context.compiler_source_support();
+                    let expected_support = expected_context.compiler_source_support();
+                    eprintln!(
+                        "restored publication consumer: semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} ordered_offers_equal={} offer_facts_equal={} availability_equal={} row_facts_equal={} decisions_equal={} lexical_equal={} templates_equal={} instance_equal={}",
+                        actual_context.semantic_sha256() == expected_context.semantic_sha256(),
+                        actual_support == expected_support,
+                        actual_support.projection() == expected_support.projection(),
+                        actual_support.artifacts() == expected_support.artifacts(),
+                        actual_support.artifacts().capture_graph_selection() == expected_support.artifacts().capture_graph_selection(),
+                        actual_support.native_offers() == expected_support.native_offers(),
+                        actual_support.native_offer_observations().unwrap() == expected_support.native_offer_observations().unwrap(),
+                        actual_support.native_availability() == expected_support.native_availability(),
+                        actual_support.native_availability().persistent_facts() == expected_support.native_availability().persistent_facts(),
+                        actual_support.input_decisions() == expected_support.input_decisions(),
+                        actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
+                        actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
+                        actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
+                    );
+                    eprintln!(
+                        "restored publication offer order actual={:?} expected={:?}",
+                        actual_support
+                            .native_offers()
+                            .iter()
+                            .map(|offer| (
+                                offer.original(),
+                                offer.snapshot_facts().identity().unwrap()
+                            ))
+                            .collect::<Vec<_>>(),
+                        expected_support
+                            .native_offers()
+                            .iter()
+                            .map(|offer| (
+                                offer.original(),
+                                offer.snapshot_facts().identity().unwrap()
+                            ))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
             assert_eq!(survived.as_slice(), std::slice::from_ref(&publication));
         };
         let mut restored = Vec::new();
@@ -15775,8 +15818,107 @@ mod tests {
     }
 
     #[test]
+    fn publication_fact_snapshot_does_not_retain_restored_native_row() {
+        use crate::exact_context::{hydrate_context, Materializer};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let base = published_original_choice_history_fixture();
+        let root = identity("fixture", "Beta");
+        let support = base
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([root.clone()]))
+            .unwrap();
+        assert_eq!(support.native_offers().len(), 1);
+        assert!(support.native_offers()[0].is_full());
+        let source = ExactDeclarationContext::from_authenticated_execution_support(
+            base.owner.facts.producer,
+            support,
+            vec![ExactLexicalNode {
+                owner: root.clone(),
+                imports: vec![],
+            }],
+            root.clone(),
+            &[],
+        )
+        .unwrap();
+        let publication = source
+            .issue_published_source_original("lifetime-revision", "lifetime-input", &root)
+            .unwrap();
+        let expected = publication.context();
+        let original = expected.compiler_input_projection().snapshot_roles()[&root]
+            .original()
+            .unwrap();
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let written = writer
+            .materialize_context(None, &expected.snapshot())
+            .unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let recorded = hydrate_context(&store, written.root()).unwrap();
+        let view = expected.artifact_view();
+        let graph = view.capture_graph_selection();
+        let inventory = RecoveredArtifactInventory {
+            producer: base.owner.facts.producer,
+            entries: view
+                .entries()
+                .into_iter()
+                .map(|entry| (entry.descriptor.id, Arc::new((*entry).clone())))
+                .collect(),
+            recorded_inventory: true,
+            bindings: graph.bindings.iter().copied().collect(),
+            binding_edges: view.binding_dependencies(),
+            interfaces: view.interface_dependencies(),
+        };
+        let restored = inventory
+            .context_for_expected_snapshot(written.root(), &recorded)
+            .unwrap();
+        let restored_birth_row = {
+            let selections = restored.published_source_original_selections().unwrap();
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].public_root(), &root);
+            let born = selections[0].context();
+            let row = born
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == original)
+                .unwrap();
+            let expected_row = expected
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == original)
+                .unwrap();
+            assert_eq!(row.mode, NativeTransportMode::Full);
+            assert!(row.permits(7));
+            assert!(!Arc::ptr_eq(row, expected_row));
+            assert!(!Arc::ptr_eq(&row.original, &expected_row.original));
+            Arc::downgrade(row)
+        };
+        assert!(
+            restored_birth_row.upgrade().is_some(),
+            "the actual restored publication must retain its acquired birth row"
+        );
+        let fact_only_snapshot = restored.snapshot();
+        drop(restored);
+        assert!(
+            restored_birth_row.upgrade().is_none(),
+            "pure fact roots cannot retain an acquired native row after its context drops"
+        );
+        let fact_store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&fact_store);
+        writer
+            .materialize_context(None, &fact_only_snapshot)
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    #[test]
     fn publication_birth_native_modes_distinguish_identical_proof_graphs() {
-        use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
+        use crate::exact_context::{
+            hydrate_context, take_native_fact_work, Materializer, NativeOfferSnapshotBody,
+        };
         use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
         let base = published_original_choice_history_fixture();
         let root = identity("fixture", "Alpha");
@@ -15851,9 +15993,15 @@ mod tests {
                 &[],
             )
             .unwrap();
+            take_native_fact_work();
             let published = source
                 .issue_published_source_original("same-revision", "same-input", &root)
                 .unwrap();
+            let publication_work = take_native_fact_work();
+            eprintln!(
+                "actual publication mode_full={} whole_issue_native_work={publication_work:?}",
+                replacement.is_full(),
+            );
             publications.push(published);
             sources.push(source);
         }
@@ -15971,7 +16119,7 @@ mod tests {
         use crate::artifact_inventory::IssuedNativeOffer;
         use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
         use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-        let base = published_original_history_fixture();
+        let base = published_original_choice_history_fixture();
         let root = identity("fixture", "Alpha");
         let beta = identity("fixture", "Beta");
         let beta_original = base.compiler_input_projection().snapshot_roles()[&beta]
@@ -15989,8 +16137,42 @@ mod tests {
             .find(|offer| offer.original() == beta_original)
             .unwrap();
         assert!(full_beta.is_full());
-        let offers = base
+        assert!(
+            base.compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == beta_original)
+                .unwrap()
+                .permits(7),
+            "the actual selected Beta fixture has Full group-7 authority"
+        );
+        let source_roots = base
+            .compiler_input_projection()
+            .roles()
+            .into_iter()
+            .map(|role| role.interface())
+            .chain([base.compiler_input_projection().snapshot_roles()[&root]
+                .original()
+                .unwrap()])
+            .collect();
+        let birth_basis = base
             .compiler_source_support()
+            .select_support_roots(source_roots)
+            .unwrap();
+        assert!(birth_basis
+            .artifacts()
+            .capture_graph_selection()
+            .roots
+            .iter()
+            .all(|root| !matches!(root, ArtifactBindingNode::Group(_))));
+        assert_eq!(
+            birth_basis.projection().snapshot_roles()[&beta].original(),
+            None
+        );
+        assert!(birth_basis.projection().snapshot_roles()[&root]
+            .original()
+            .is_some());
+        let offers = birth_basis
             .native_offers()
             .iter()
             .map(|offer| {
@@ -16001,10 +16183,10 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let projection = base.compiler_input_projection().clone();
+        let projection = birth_basis.projection().clone();
         let support = recover_fixture_compiler_support(
             projection.clone(),
-            base.artifact_view().clone(),
+            birth_basis.artifacts().clone(),
             offers,
         )
         .unwrap();
@@ -16026,6 +16208,12 @@ mod tests {
             .unwrap()
             .issued_ordinals()
             .is_empty());
+        assert!(!support
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap()
+            .permits(7));
         let mut lexical = base.lexical_graph().to_vec();
         lexical
             .iter_mut()
@@ -16081,6 +16269,13 @@ mod tests {
                 .mode,
             NativeTransportMode::Full
         );
+        assert!(later
+            .compiler_source_support()
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap()
+            .permits(7));
         let selected = later.published_source_original_selections().unwrap();
         assert_eq!(selected.as_slice(), std::slice::from_ref(&published));
         let selected_beta = selected[0]
