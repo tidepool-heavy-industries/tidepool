@@ -459,7 +459,8 @@ pub(crate) struct CandidateBundle {
 pub(crate) struct CandidateSet {
     pub manifest_path: PathBuf,
     pub by_owner: BTreeMap<(String, String), CandidateBundle>,
-    pub(crate) native_availability: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub(crate) contextual_native_availability:
+        Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub(crate) catalog_owner: Option<Arc<deployment::DeploymentModulePackage>>,
     pub(crate) input_transport: Vec<crate::owned_input_arena::OwnedInputSlice>,
 }
@@ -2746,7 +2747,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             (!availability.contains(key)).then_some(product.groups.as_slice())
         })
         .ok()?;
-    let mut native_availability = Vec::new();
+    let mut contextual_native_availability = Vec::new();
     let mut by_owner = BTreeMap::new();
     let manifest = inventory.try_finish(|(key, (mut record, origin, product, _))| {
         tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_manifest_row", unit = %key.0, module = %key.1);
@@ -2756,7 +2757,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 CandidateRecord::Deployment(record) => record.certified_original().cloned(),
                 CandidateRecord::Encoded(_) => None,
             };
-            native_availability.push(match captured {
+            contextual_native_availability.push(match captured {
                 Some(original) => original,
                 None => crate::certified_products::certify_candidate_original_with_validation(
                     crate::certified_products::OriginalNativeCandidate {
@@ -2902,7 +2903,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     let originals = context
         .into_iter()
         .flat_map(|context| context.originals.iter())
-        .chain(native_availability.iter())
+        .chain(contextual_native_availability.iter())
         .cloned()
         .collect::<Vec<_>>();
     retain_closed_execution_capabilities(&mut by_owner, &originals);
@@ -2990,7 +2991,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     Some(CandidateSet {
         manifest_path,
         by_owner,
-        native_availability,
+        contextual_native_availability,
         catalog_owner: None,
         input_transport,
     })

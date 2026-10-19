@@ -57,7 +57,7 @@ fn original_product(record: &Record) -> crate::recovery_artifacts::CertifiedReco
 
 fn assert_empty_offer(selected: CandidateSet) {
     assert!(selected.by_owner.is_empty());
-    assert!(selected.native_availability.is_empty());
+    assert!(selected.contextual_native_availability.is_empty());
     let manifest: Value =
         ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
     assert!(manifest.as_array().unwrap()[4]
@@ -92,19 +92,160 @@ fn compatible_protected_original_is_private_and_absent_from_manifest() {
     let selected = select(scratch.path(), vec![record.clone()], &context).unwrap();
 
     assert!(selected.by_owner.is_empty());
-    assert_eq!(selected.native_availability.len(), 1);
+    assert_eq!(selected.contextual_native_availability.len(), 1);
     assert_eq!(
-        selected.native_availability[0].owner(),
+        selected.contextual_native_availability[0].owner(),
         &computed_owner(&record)
     );
     assert_eq!(
-        selected.native_availability[0].product_bytes(),
+        selected.contextual_native_availability[0].product_bytes(),
         record.products
     );
     let manifest: Value =
         ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
     let fields = manifest.as_array().unwrap();
     assert!(fields[4].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn protected_catalog_availability_preserves_receiving_interface_only_selection() {
+    use crate::artifact_inventory::{
+        ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+        NativeArtifactDemand,
+    };
+    use crate::declaration_context::{
+        ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+    };
+    let sources = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let record = super::tests::candidate_fixture(sources.path(), "ProtectedReceiver");
+    let canonical = record.module_interface_proof.as_ref().unwrap().clone();
+    let entry = Arc::new(ArtifactEntry::canonical(canonical.clone()));
+    let producer = CanonicalProducerIdentity::from_producer_bytes(&record.endpoint);
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let baseline = Arc::new(
+        ExactDeclarationContext::from_authenticated_interfaces(
+            producer.sha256(),
+            &artifacts,
+            CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
+        )
+        .unwrap(),
+    );
+    let key = (record.unit.clone(), record.module.clone());
+    let context = ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
+        .with_canonical_interfaces(
+            BTreeMap::from([(key.clone(), canonical.clone())]),
+            BTreeSet::new(),
+        )
+        .with_interface_seals(BTreeMap::from([(key, canonical.interface_sha256())]));
+    let selected = select(scratch.path(), vec![record.clone()], &context).unwrap();
+    assert!(selected.by_owner.is_empty());
+    assert_eq!(selected.contextual_native_availability.len(), 1);
+    let original = ArtifactEntry::original(
+        producer.sha256(),
+        selected.contextual_native_availability[0].clone(),
+    )
+    .unwrap()
+    .descriptor
+    .id;
+    let support = baseline.compiler_source_support();
+    let received = OriginalCompilerInputs::from_candidates(&baseline, producer, &selected)
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.role_projection(), support.projection());
+    assert_eq!(
+        received.native_availability(),
+        support.native_availability()
+    );
+    assert_eq!(received.issued_offers(), support.native_offers());
+    assert_eq!(
+        received.issued_input_decisions(),
+        Some(support.input_decisions())
+    );
+    assert_eq!(
+        received
+            .issued_artifacts()
+            .capture_graph_selection()
+            .namespace,
+        support.artifacts().capture_graph_selection().namespace
+    );
+    assert!(received
+        .issued_artifacts()
+        .artifact_ids()
+        .contains(&original));
+    let request = ExactCompileContext::new(baseline.clone())
+        .prepare_compilation_with_private_input(
+            scratch.path(),
+            &record.endpoint,
+            None,
+            Some(received),
+        )
+        .unwrap();
+    assert_eq!(request.compiler_inputs().projection(), support.projection());
+    assert!(request
+        .compiler_inputs()
+        .native_availability(original)
+        .is_none());
+    assert_eq!(
+        request
+            .compiler_inputs()
+            .artifacts()
+            .capture_graph_selection()
+            .namespace,
+        support.artifacts().capture_graph_selection().namespace
+    );
+
+    // Reconstructing the valid owner packet must reach the receiver before
+    // perturbing one field at its enforcing canonical/native binding boundary.
+    let product = &selected.contextual_native_availability[0];
+    let reconstruct = |certification, packages| {
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            packages,
+            certification,
+        )
+        .with_source_sha256(canonical.source_sha256())
+        .with_module_interface(canonical.clone())
+    };
+    let valid = reconstruct(
+        product.certification_bytes().to_vec(),
+        product.package_imports_bytes().to_vec(),
+    )
+    .expect("unchanged fixture bytes bind to their original canonical companion");
+    let reconstructed = CandidateSet {
+        manifest_path: selected.manifest_path.clone(),
+        by_owner: BTreeMap::new(),
+        contextual_native_availability: vec![valid],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    assert!(OriginalCompilerInputs::from_candidates(&baseline, producer, &reconstructed).is_ok());
+    for (label, certification, packages) in [
+        (
+            "certification",
+            vec![0xff],
+            product.package_imports_bytes().to_vec(),
+        ),
+        (
+            "packages",
+            product.certification_bytes().to_vec(),
+            vec![0xff],
+        ),
+    ] {
+        assert!(
+            reconstruct(certification, packages).is_err(),
+            "invalid {label} must refuse at the canonical/native binding owner"
+        );
+    }
 }
 
 #[test]
@@ -280,10 +421,10 @@ fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts(
         };
         let selected = select(scratch.path(), vec![record], &context).unwrap();
         if expected {
-            prop_assert_eq!(selected.native_availability.len(), 1);
+            prop_assert_eq!(selected.contextual_native_availability.len(), 1);
             prop_assert!(selected.by_owner.is_empty());
         } else {
-            prop_assert!(selected.native_availability.is_empty());
+            prop_assert!(selected.contextual_native_availability.is_empty());
             prop_assert!(selected.by_owner.is_empty());
         }
         completed.set(completed.get() + 1);
@@ -412,7 +553,7 @@ fn protected_root_selection_matches_a_full_scan_oracle() {
             .collect::<Vec<_>>();
         let selected = select(scratch.path(), arranged, &context).unwrap();
         let actual_private = selected
-            .native_availability
+            .contextual_native_availability
             .iter()
             .map(|product| product.owner().clone())
             .collect::<BTreeSet<_>>();
@@ -468,7 +609,7 @@ fn protected_deployment_record_refuses_changed_source_and_competing_definitions(
     let context = context_for(std::slice::from_ref(&record), &BTreeSet::from([key]));
     let intact = select(scratch.path(), vec![record.clone()], &context).unwrap();
     assert!(intact.by_owner.is_empty());
-    assert_eq!(intact.native_availability.len(), 1);
+    assert_eq!(intact.contextual_native_availability.len(), 1);
     assert!(select(
         scratch.path(),
         vec![record.clone(), record.clone()],
@@ -527,7 +668,7 @@ fn protected_native_closure_issues_missing_type_dependencies_privately() {
     assert!(selected.by_owner.is_empty());
     assert_eq!(
         selected
-            .native_availability
+            .contextual_native_availability
             .iter()
             .map(|product| product.owner().module.as_str())
             .collect::<Vec<_>>(),

@@ -57,9 +57,9 @@ pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExactNameInspection, ExtractRequest, HostedLookupBatch,
     HostedLookupDiscovery, HostedLookupOperation, HostedLookupQuery, InspectionNamespace,
-    InspectionScope, LookupNameInspection, LookupNameMode, PlannedCellSlot, ProtocolError,
-    StructuredInspection, SymbolIdentity, WorldCellPlanRequest, WorldCellPrepareRequest,
-    WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
+    InspectionScope, LookupNameInspection, LookupNameMode, PlannedCellSlot, PlannedCellSlotRef,
+    ProtocolError, StructuredInspection, SymbolIdentity, WorldCellPlanRequest,
+    WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.

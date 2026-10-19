@@ -238,80 +238,126 @@ pub struct WorldCellPrepareRequest {
     pub world: String,
     pub realization: String,
     pub recipe: Arc<WorldCellRecipe>,
-    pub plan: Vec<u8>,
+    pub plan: Arc<[u8]>,
     pub admission: [u8; 32],
     pub slots: Vec<(u64, PlannedCellSlot)>,
     pub directory: PathBuf,
     pub output: PathBuf,
 }
 
-impl WorldCellPrepareRequest {
-    fn valid_fields(&self) -> bool {
-        valid_world_identity(&self.world)
-            && valid_reference(&self.realization)
-            && self.recipe.valid()
-            && !self.plan.is_empty()
-            && self.plan.len() <= 8 << 20
-            && self.slots.len() <= 10000
-            && self
-                .slots
-                .iter()
-                .enumerate()
-                .all(|(index, (ordinal, slot))| {
-                    *ordinal == index as u64
-                        && slot.generation() > 0
-                        && match slot {
-                            PlannedCellSlot::Expression { observation, .. } => {
-                                valid_reference(observation) && observation.len() <= 65536
-                            }
-                            _ => true,
-                        }
-                })
-            && self
-                .slots
-                .iter()
-                .map(|(_, slot)| slot.generation())
-                .collect::<BTreeSet<_>>()
-                .len()
-                == self.slots.len()
-            && valid_cell_path(&self.directory)
-            && valid_cell_path(&self.output)
+/// Borrowed reservation fields used before an operation copies observation names.
+#[derive(Clone, Copy)]
+pub enum PlannedCellSlotRef<'a> {
+    Prologue(u64),
+    Declaration(u64),
+    Bind(u64),
+    Expression {
+        generation: u64,
+        observation: &'a str,
+    },
+}
+
+impl PlannedCellSlot {
+    fn borrowed(&self) -> PlannedCellSlotRef<'_> {
+        match self {
+            Self::Prologue(generation) => PlannedCellSlotRef::Prologue(*generation),
+            Self::Declaration(generation) => PlannedCellSlotRef::Declaration(*generation),
+            Self::Bind(generation) => PlannedCellSlotRef::Bind(*generation),
+            Self::Expression {
+                generation,
+                observation,
+            } => PlannedCellSlotRef::Expression {
+                generation: *generation,
+                observation,
+            },
+        }
     }
+}
+
+impl WorldCellPrepareRequest {
     fn valid(&self) -> bool {
         self.validate_transport().is_ok()
     }
 
-    /// Check the existing encoded frame budget without copying source bodies.
     pub fn validate_transport(&self) -> Result<(), ProtocolError> {
-        if !self.valid_fields() {
+        Self::validate_borrowed(
+            &self.world,
+            &self.realization,
+            &self.recipe,
+            &self.plan,
+            self.slots
+                .iter()
+                .map(|(ordinal, slot)| (*ordinal, slot.borrowed())),
+            &self.directory,
+            &self.output,
+        )
+    }
+
+    /// Bound the complete existing frame before copying caller-owned names.
+    /// Only the bounded generation sets allocate; source and receipt are borrowed.
+    pub fn validate_borrowed<'a>(
+        world: &str,
+        realization: &str,
+        recipe: &WorldCellRecipe,
+        plan: &[u8],
+        slots: impl IntoIterator<Item = (u64, PlannedCellSlotRef<'a>)>,
+        directory: &Path,
+        output: &Path,
+    ) -> Result<(), ProtocolError> {
+        if !valid_world_identity(world)
+            || !valid_reference(realization)
+            || !recipe.valid()
+            || plan.is_empty()
+            || plan.len() > 8 << 20
+            || !valid_cell_path(directory)
+            || !valid_cell_path(output)
+        {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        let slots = self
-            .slots
-            .iter()
-            .map(|(_, slot)| {
-                17 + match slot {
-                    PlannedCellSlot::Expression { observation, .. } => 4 + observation.len(),
-                    _ => 0,
+        let mut declarations = BTreeSet::new();
+        let mut values = BTreeSet::new();
+        let mut slot_bytes = 0usize;
+        for (index, (ordinal, slot)) in slots.into_iter().enumerate() {
+            if index >= 10000 || ordinal != index as u64 {
+                return Err(ProtocolError::InvalidWorldCell);
+            }
+            let (generation, unique, extra) = match slot {
+                PlannedCellSlotRef::Prologue(generation)
+                | PlannedCellSlotRef::Declaration(generation) => {
+                    (generation, declarations.insert(generation), 0)
                 }
-            })
-            .sum::<usize>();
+                PlannedCellSlotRef::Bind(generation) => (generation, values.insert(generation), 0),
+                PlannedCellSlotRef::Expression {
+                    generation,
+                    observation,
+                } => {
+                    if !valid_reference(observation) || observation.len() > 65536 {
+                        return Err(ProtocolError::InvalidWorldCell);
+                    }
+                    (generation, values.insert(generation), 4 + observation.len())
+                }
+            };
+            if generation == 0 || !unique {
+                return Err(ProtocolError::InvalidWorldCell);
+            }
+            slot_bytes += 17 + extra;
+        }
         check_world_cell_bytes(
             21 + 1
                 + 4
-                + self.world.len()
+                + world.len()
                 + 4
-                + self.realization.len()
-                + self.recipe.encoded_len()
+                + realization.len()
+                + recipe.encoded_len()
                 + 4
-                + self.plan.len()
+                + plan.len()
                 + 32
                 + 4
-                + slots
+                + slot_bytes
                 + 4
-                + self.directory.as_os_str().len()
+                + directory.as_os_str().len()
                 + 4
-                + self.output.as_os_str().len(),
+                + output.as_os_str().len(),
         )
     }
 }
@@ -1187,7 +1233,7 @@ impl ExtractRequest {
                         world,
                         realization,
                         recipe,
-                        plan,
+                        plan: plan.into(),
                         admission,
                         slots,
                         directory,
@@ -3466,7 +3512,7 @@ mod tests {
             world: plan.world.clone(),
             realization: plan.realization.clone(),
             recipe,
-            plan: b"plan-receipt".to_vec(),
+            plan: Arc::from(&b"plan-receipt"[..]),
             admission: [b'b'; 32],
             slots: vec![
                 (0, PlannedCellSlot::Bind(7)),
@@ -3563,11 +3609,88 @@ mod tests {
                 ProtocolError::InvalidWorldCell
             );
         }
+        let mut overlapping = prepare.clone();
+        overlapping.slots = vec![
+            (0, PlannedCellSlot::Declaration(1)),
+            (1, PlannedCellSlot::Bind(1)),
+        ];
+        let mut request = ExtractRequest::default();
+        request.world_cell_prepare(overlapping.clone()).unwrap();
+        assert_eq!(
+            ExtractRequest::decode(&request.encode()).unwrap().encode(),
+            request.encode()
+        );
+        overlapping.slots[1].1 = PlannedCellSlot::Prologue(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+        overlapping.slots[0].1 = PlannedCellSlot::Expression {
+            generation: 1,
+            observation: "it".into(),
+        };
+        overlapping.slots[1].1 = PlannedCellSlot::Bind(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+
         let mut empty = prepare;
         empty.slots.clear();
         let mut request = ExtractRequest::default();
         request.world_cell_prepare(empty).unwrap();
         assert!(ExtractRequest::decode(&request.encode()).is_ok()); // Semantic empty-plan proof is owned by the compiler.
+    }
+
+    #[test]
+    fn world_prepare_bounds_borrowed_names_before_owned_slot_copies() {
+        let recipe = WorldCellRecipe {
+            source: "pure ()".into(),
+            template: "{{CELL_BODY}}".into(),
+            turn_templates: vec![],
+        };
+        let world = "a".repeat(64);
+        let oversized = "x".repeat(65537);
+        assert_eq!(
+            WorldCellPrepareRequest::validate_borrowed(
+                &world,
+                "held",
+                &recipe,
+                b"plan",
+                [(
+                    0,
+                    PlannedCellSlotRef::Expression {
+                        generation: 1,
+                        observation: &oversized
+                    }
+                )],
+                Path::new("operation"),
+                Path::new("prepared.cbor"),
+            ),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+        let within_field_limit = "x".repeat(65536);
+        let aggregate = (0..200).map(|index| {
+            (
+                index,
+                PlannedCellSlotRef::Expression {
+                    generation: index + 1,
+                    observation: within_field_limit.as_str(),
+                },
+            )
+        });
+        assert!(matches!(
+            WorldCellPrepareRequest::validate_borrowed(
+                &world,
+                "held",
+                &recipe,
+                b"plan",
+                aggregate,
+                Path::new("operation"),
+                Path::new("prepared.cbor"),
+            ),
+            Err(ProtocolError::RequestBudgetExceeded { .. })
+        ));
     }
 
     #[test]
@@ -3605,7 +3728,7 @@ mod tests {
                 template: String::new(),
                 turn_templates: vec![],
             }),
-            plan: vec![0; 8 << 20],
+            plan: vec![0; 8 << 20].into(),
             admission: [1; 32],
             slots: vec![],
             directory: "operation".into(),

@@ -72,7 +72,7 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -483,6 +483,21 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
       && Map.null (worldInputsBindings original) && worldInputsBindingScope original == 0
       && not (worldInputsPrimaryIsEmpty original))
     (fail "cold v3 reader lost actual primary selection or occurrence identity")
+  let selectedOwners = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
+  unless (all (worldHasSelectedSource original) selectedOwners)
+    (fail "genuine Context source owners lost their exact acquired association")
+  withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+    environment <- getSession
+    admitted <- liftIO (readWorldSourceInputs environment original selectedOwners) >>= either (liftIO . fail) pure
+    let (proofs,interfaces,packages) = admitted
+    unless (Map.keysSet proofs == Set.fromList selectedOwners
+        && Map.keysSet packages == Map.keysSet proofs
+        && Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- interfaces] == Map.keysSet proofs)
+      (liftIO (fail "demanded primary source input lost its genuine canonical/interface/package owners"))
+    missing <- liftIO (readWorldSourceInputs environment original [("main","NeverSelectedInContext")])
+    case missing of
+      Left _ -> pure ()
+      Right _ -> liftIO (fail "demanded primary source input invented an unselected association")
   -- Reordering physical rows/blocks does not change the three logical roots.
   reordered <- readPacket "world-v3-reordered" (packet 3 product primary (reverse blockPairs) (reverse base) [] acquisition emptyBinding)
   unless (worldInputsIdentityBytes reordered == worldInputsIdentityBytes original)

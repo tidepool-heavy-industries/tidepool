@@ -472,10 +472,29 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert!(initial_a.original_native().unwrap().groups.iter().all(|g| {
         matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == initial_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
+    let initial_view = crate::declaration_context::certified_product_artifact_view_with_validation(
+        canonical_producer,
+        &initial.recovery_products,
+        &initial.module_interfaces,
+        &initial.value_interfaces,
+        None,
+        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    let initial_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        &initial.source_selection,
+        &initial_view,
+    )
+    .unwrap();
+    let initial_support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&initial_output)
+            .unwrap();
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
-        .extend_checked_original_products(canonical_producer, &prior)
+        .extend_issued_compiler_support(&initial_support)
         .unwrap();
+    assert!(context.artifact_view().selected_native_groups().is_empty());
 
     // The exact request exposes canonical interfaces while withholding native
     // originals from the compiler input.
@@ -1214,12 +1233,79 @@ fn check_retained_core_promotion_history(item_count: usize) {
         owner_history
     );
     assert_eq!(certified.recovery_products.len(), owner_history.len());
-    let mut history_context = context
-        .extend_checked_original_products(
-            canonical_producer,
-            &[current_a.clone(), current_b.clone()],
+    let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
+        canonical_producer,
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        &certified.value_interfaces,
+        Some(request.compiler_inputs().artifacts()),
+        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        &certified.source_selection,
+        &physical,
+    )
+    .unwrap();
+    let completed =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output).unwrap();
+    let selected_entries = [current_a, current_b]
+        .into_iter()
+        .map(|product| {
+            Arc::new(
+                crate::artifact_inventory::ArtifactEntry::original(
+                    canonical_producer,
+                    product.clone(),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected_projection =
+        crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&selected_entries)
+            .unwrap();
+    let catalog =
+        crate::artifact_inventory::NativeDependencyCatalog::from_source(&completed).unwrap();
+    let selected_view = selected_projection
+        .admit_interfaces_with_native_offers(
+            completed.artifacts(),
+            selected_entries.clone(),
+            completed.native_offers(),
+            &catalog,
         )
         .unwrap();
+    let selected_support = crate::declaration_context::recover_fixture_compiler_support(
+        selected_projection,
+        selected_view,
+        completed.native_offers().iter().cloned(),
+    )
+    .unwrap()
+    .retain_normalized_availability(completed.native_availability())
+    .unwrap();
+    let mut history_context = context
+        .extend_issued_compiler_support(&selected_support)
+        .unwrap();
+    for entry in &selected_entries {
+        assert_eq!(
+            history_context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner]
+                .original(),
+            Some(entry.descriptor.id)
+        );
+        assert_eq!(
+            history_context
+                .compiler_source_support()
+                .native_availability()
+                .snapshot_facts()
+                .unwrap()[&entry.descriptor.id]
+                .mode,
+            crate::declaration_context::NativeTransportMode::Full
+        );
+    }
+    assert!(history_context
+        .artifact_view()
+        .selected_native_groups()
+        .is_empty());
     let mut latest_recovery = certified.recovery_products.clone();
     for (index, body_tag) in [0, 1, 0].into_iter().enumerate() {
         let product_bytes = raw_products(body_tag);
@@ -1306,12 +1392,84 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let projection = history_context.compiler_input_projection().interface_only();
         history_context = history_context
             .recover_fixture_projection(projection)
-            .unwrap()
-            .extend_checked_original_products(
-                canonical_producer,
-                &[current_a.clone(), current_b.clone()],
+            .unwrap();
+        let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
+            canonical_producer,
+            &next.recovery_products,
+            &next.module_interfaces,
+            &next.value_interfaces,
+            Some(history_context.artifact_view()),
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &next.source_selection,
+            &physical,
+        )
+        .unwrap();
+        let completed =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap();
+        let selected_entries = [current_a, current_b]
+            .into_iter()
+            .map(|product| {
+                Arc::new(
+                    crate::artifact_inventory::ArtifactEntry::original(
+                        canonical_producer,
+                        product.clone(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_projection =
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                &selected_entries,
             )
             .unwrap();
+        let catalog =
+            crate::artifact_inventory::NativeDependencyCatalog::from_source(&completed).unwrap();
+        let selected_view = selected_projection
+            .admit_interfaces_with_native_offers(
+                completed.artifacts(),
+                selected_entries.clone(),
+                completed.native_offers(),
+                &catalog,
+            )
+            .unwrap();
+        let selected_support = crate::declaration_context::recover_fixture_compiler_support(
+            selected_projection,
+            selected_view,
+            completed.native_offers().iter().cloned(),
+        )
+        .unwrap()
+        .retain_normalized_availability(completed.native_availability())
+        .unwrap();
+        history_context = history_context
+            .extend_issued_compiler_support(&selected_support)
+            .unwrap();
+        for entry in &selected_entries {
+            assert_eq!(
+                history_context.compiler_input_projection().snapshot_roles()
+                    [&entry.descriptor.owner]
+                    .original(),
+                Some(entry.descriptor.id)
+            );
+            assert_eq!(
+                history_context
+                    .compiler_source_support()
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap()[&entry.descriptor.id]
+                    .mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+        }
+        assert!(history_context
+            .artifact_view()
+            .selected_native_groups()
+            .is_empty());
         assert_eq!(
             history_context
                 .compiler_original_products()

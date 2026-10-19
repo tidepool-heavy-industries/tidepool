@@ -305,7 +305,7 @@ authenticate its own scoped role associations at issuance, then close its type
 dependencies against the receiving context and protected requirements at request
 construction. A missing baseline role cannot be supplied by private custody.
 Activation reuses carried offers unchanged; fresh complete issuance belongs to
-checked candidates or certified physical outputs. Narrowing type
+certified physical outputs and their exact request-owned dependency choices. Narrowing type
 or execution selection does not reissue body availability. Requests consume
 carried offers; they do not census broader context custody. Context snapshots
 record exact offer selections and Empty/Partial/Full mode. Reopening authenticates

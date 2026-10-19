@@ -1711,7 +1711,8 @@ struct DeclaredWorkspaceLock(std::path::PathBuf);
 
 impl crate::exomonad::FlakeLock for DeclaredWorkspaceLock {
     fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        std::fs::copy(&self.0, workspace.join("flake.lock"))?;
+        let bytes = std::fs::read(&self.0)?;
+        tidepool_atomic_write::write_durable(&workspace.join("flake.lock"), &bytes)?;
         Ok(())
     }
 }
@@ -1740,6 +1741,56 @@ pub(super) fn scaffold_workspace(workspace: &Path) {
         revision.trimmed(),
         declared["revision"].as_str().unwrap(),
         "the hosted workspace must compile the recorded shared source"
+    );
+}
+
+#[test]
+fn scaffolded_lock_stays_editable_when_declared_source_is_read_only() {
+    use crate::exomonad::FlakeLock;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let source = declared_workspace_package().join("flake.lock");
+    let bytes = std::fs::read(&source).unwrap();
+    let source_mode = std::fs::metadata(&source).unwrap().permissions().mode();
+    let frozen = tempfile::tempdir().unwrap();
+    let frozen_lock = frozen.path().join("flake.lock");
+    std::fs::write(&frozen_lock, &bytes).unwrap();
+    std::fs::set_permissions(&frozen_lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let frozen_metadata = std::fs::metadata(&frozen_lock).unwrap();
+
+    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repository
+        .writer()
+        .commit_file("README.md", "source\n", "seed")
+        .unwrap();
+    scaffold_workspace(repository.path());
+    DeclaredWorkspaceLock(frozen_lock.clone())
+        .lock(repository.path())
+        .unwrap();
+    let lock = repository.path().join("flake.lock");
+    let metadata = std::fs::metadata(&lock).unwrap();
+    assert_ne!(
+        (metadata.dev(), metadata.ino()),
+        (frozen_metadata.dev(), frozen_metadata.ino())
+    );
+    assert_ne!(metadata.permissions().mode() & 0o200, 0);
+    assert_eq!(std::fs::read(&lock).unwrap(), bytes);
+    let mut edited = bytes.clone();
+    edited.push(b'\n');
+    std::fs::write(&lock, &edited).unwrap();
+    assert_eq!(std::fs::read(&lock).unwrap(), edited);
+    assert_eq!(std::fs::read(&frozen_lock).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&frozen_lock)
+            .unwrap()
+            .permissions()
+            .mode(),
+        frozen_metadata.permissions().mode()
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&source).unwrap().permissions().mode(),
+        source_mode
     );
 }
 
