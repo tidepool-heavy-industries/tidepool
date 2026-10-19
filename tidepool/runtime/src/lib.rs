@@ -915,6 +915,196 @@ mod tests {
         assert!(state.prepared().is_none());
     }
 
+    fn prepared_target_source() -> (
+        session::PersistentSession,
+        Arc<session::RuntimeLexicalScopeLease>,
+    ) {
+        let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
+        let source = state.mint_isolated_scope_with_lease().unwrap();
+        (state, source)
+    }
+
+    fn prepare_target_control(
+        owner: &session::RuntimeSourceCompilerTransaction,
+        source: &str,
+        report: &mut dyn FnMut(CompilerTransactionClose),
+    ) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
+        prepare_runtime_targets_in_context(
+            owner,
+            &artifacts::CompileInvocation {
+                source,
+                targets: &["result"],
+                include: &[],
+                fallback_module_name: "PreparedTargetsControl",
+            },
+            Arc::new(
+                tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
+                    &[],
+                    &[],
+                    vec![],
+                )?,
+            ),
+            |_, _, _| {},
+            report,
+        )
+    }
+
+    const PREPARED_TARGET_CONTROL: &str =
+        "module PreparedTargetsControl where\nresult = 42 :: Int\n";
+
+    #[test]
+    fn prepared_targets_reject_foreign_settlement_and_retired_original() {
+        tidepool_testing::eval_harness::require_extract();
+        let (_state, source) = prepared_target_source();
+        let first = source
+            .with_source_compiler_transaction(
+                artifacts::CompileWorkload::Foreground,
+                CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_target_control(owner, PREPARED_TARGET_CONTROL, report),
+            )
+            .unwrap();
+        assert!(matches!(
+            first.close(),
+            CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+        ));
+        let draft = first.into_outcome().action.unwrap();
+        let foreign = source
+            .with_source_compiler_transaction(
+                artifacts::CompileWorkload::Foreground,
+                CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |_, _| Ok(draft),
+            )
+            .unwrap();
+        assert!(matches!(
+            finish_runtime_targets(foreign),
+            Err(RuntimeError::Compile(CompileError::CompilerPublication(
+                CompilerTransactionPublicationError::DifferentOwner
+            )))
+        ));
+
+        let actual = source
+            .with_source_compiler_transaction(
+                artifacts::CompileWorkload::Foreground,
+                CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_target_control(owner, PREPARED_TARGET_CONTROL, report),
+            )
+            .unwrap();
+        let prepared = finish_runtime_targets(actual).unwrap();
+        assert_eq!(
+            prepared
+                .run(
+                    "result",
+                    DEFAULT_NURSERY_SIZE,
+                    &mut frunk::HNil,
+                    &(),
+                    |_| {}
+                )
+                .unwrap()
+                .to_json(),
+            serde_json::json!(42)
+        );
+        source
+            .source_admission()
+            .fence()
+            .unwrap()
+            .retire(session::NotebookGenerationId::INITIAL)
+            .unwrap();
+        let mut entered = false;
+        let refused = prepared.run(
+            "result",
+            DEFAULT_NURSERY_SIZE,
+            &mut frunk::HNil,
+            &(),
+            |_| entered = true,
+        );
+        assert!(matches!(
+            refused,
+            Err(RuntimeError::SourceAdmission(
+                session::SourceAdmissionError::Closed { .. }
+            ))
+        ));
+        assert!(
+            !entered,
+            "retired original cannot reach fresh engine execution"
+        );
+    }
+
+    #[test]
+    fn prepared_targets_preserve_primary_error_with_uncertain_close() {
+        tidepool_testing::eval_harness::require_extract();
+        for action_fails in [false, true] {
+            let (_state, source) = prepared_target_source();
+            let settled = source.with_source_compiler_transaction(
+                artifacts::CompileWorkload::Foreground, CompilerTransactionCancellation::new(), None, |_| {},
+                |owner, report| {
+                    let source = if action_fails { "module PreparedTargetsControl where\nresult = missingTargetName\n" } else { PREPARED_TARGET_CONTROL };
+                    let result = prepare_target_control(owner, source, report);
+                    assert_eq!(result.is_err(), action_fails);
+                    // Aggregate injection is not a physical GHC END fault.
+                    report(CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                        tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                    )));
+                    result
+                },
+            ).unwrap();
+            match finish_runtime_targets(settled) {
+                Err(RuntimeError::CompilerClose {
+                    primary,
+                    close: CompilerTransactionClose::Unconfirmed(_),
+                }) => {
+                    assert_eq!(primary.is_some(), action_fails);
+                    if let Some(primary) = primary {
+                        assert!(matches!(
+                            *primary,
+                            RuntimeError::Compile(CompileError::Diagnostics(_))
+                        ));
+                    }
+                }
+                other => panic!("uncertain compiler result must refuse promotion: {other:?}"),
+            }
+            assert!(matches!(
+                source.source_admission().admit(),
+                Err(session::SourceAdmissionError::Unconfirmed { count: 1, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn prepared_targets_check_actual_cancellation_after_compilation() {
+        tidepool_testing::eval_harness::require_extract();
+        let (_state, source) = prepared_target_source();
+        let cancellation = CompilerTransactionCancellation::new();
+        let cancel = cancellation.clone();
+        let settled = source
+            .with_source_compiler_transaction(
+                artifacts::CompileWorkload::Foreground,
+                cancellation,
+                None,
+                |_| {},
+                |owner, report| {
+                    let prepared = prepare_target_control(owner, PREPARED_TARGET_CONTROL, report);
+                    assert!(prepared.is_ok());
+                    cancel.cancel_host_admission();
+                    prepared
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+        ));
+        assert!(
+            matches!(finish_runtime_targets(settled), Err(RuntimeError::Compile(CompileError::Io(error))) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+    }
+
     struct DiagnosticTestScope {
         _root: tempfile::TempDir,
         previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
