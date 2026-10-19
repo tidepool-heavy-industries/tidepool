@@ -1398,9 +1398,9 @@ worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions cache memo recover
 worldDependencyRecovery :: WorldDependencyAttempt -> IO CompilerRecoveryCaches
 worldDependencyRecovery (WorldDependencyAttempt _ _ _ _ _ _ _ recoveryRef _) = readIORef recoveryRef
 
-stageHeldWorldDependencies :: WorldDependencyAttempt -> HscEnv -> FilePath -> IO PendingWorldDependencies
+stageHeldWorldDependencies :: WorldDependencyAttempt -> PipelineVariant -> HscEnv -> FilePath -> IO PendingWorldDependencies
 stageHeldWorldDependencies
-    (WorldDependencyAttempt identity reference policy paths previous _ memo recoveryRef interpreter) final path = do
+    (WorldDependencyAttempt identity reference policy paths previous _ memo recoveryRef interpreter) variant final path = do
   target <- targetModuleFor (hsc_mod_graph final) path
   recovery <- readIORef recoveryRef
   recoveryIdentity <- RequestUnique.newUnique
@@ -1414,7 +1414,8 @@ stageHeldWorldDependencies
         , not (isReservedSessionModuleName (moduleNameString (ms_mod_name summary)))
         , Just physical <- [normalise <$> ml_hs_file (ms_location summary)]
         , Just source <- [Map.lookup physical paths]]
-      eligible = Map.filter ((`Map.member` sourceOwners) . payloadOwner . gmePayload) snapshot
+      eligible = Map.filter ((`Map.member` sourceOwners) . payloadOwner . gmePayload)
+        (admittedSourceMemoSnapshot variant final snapshot)
       context = RecoveryContext recoveryIdentity recovery
       -- The normal cycle already validated each selected source version before
       -- entering the working memo. Only captured source owners can be added;
@@ -2665,6 +2666,20 @@ usesUnsealedSourceInputs inputs env entry = any (`Set.member` keys)
     (payloadFinalized (gmePayload entry)))))
   where
     keys = Set.map (\owner -> (unitString (moduleUnit owner),moduleNameString (moduleName owner))) inputs
+
+-- Publication and reuse share the same unsealed-input closure. A successful
+-- target cannot turn a source-less value alias into reusable source evidence.
+admittedSourceMemoSnapshot :: PipelineVariant -> HscEnv -> GutsMemo -> GutsMemo
+admittedSourceMemoSnapshot variant final snapshot = Map.filter
+  ((`Set.notMember` refused) . payloadOwner . gmePayload) snapshot
+  where
+    unsealed = unsealedSourceInputs variant final
+    indirect = Set.fromList [payloadOwner (gmePayload entry)
+      | entry <- Map.elems snapshot, usesUnsealedSourceInputs unsealed final entry]
+    refused
+      | Set.null unsealed = Set.empty
+      | otherwise = reverseDependencyClosure (sourceDependencyGraph (hsc_mod_graph final))
+          (Set.union unsealed indirect)
 
 -- Hash strongly connected dependency identities once. Each node retains a
 -- fixed-size digest rather than a copy of its complete transitive closure.
@@ -6281,15 +6296,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
   let context = ActiveCompilerAttempt final
       recoveryContext = RecoveryContext recoveryIdentity recovery
   snapshot <- liftIO (readIORef memo)
-  let unsealed = unsealedSourceInputs variant final
-      indirectRefusals = Set.fromList [payloadOwner (gmePayload entry)
-        | entry <- Map.elems snapshot, usesUnsealedSourceInputs unsealed final entry]
-      refused
-        | Set.null unsealed = Set.empty
-        | otherwise = reverseDependencyClosure (sourceDependencyGraph (hsc_mod_graph final))
-            (Set.union unsealed indirectRefusals)
-      admittedSnapshot = Map.filter
-        ((`Set.notMember` refused) . payloadOwner . gmePayload) snapshot
+  let admittedSnapshot = admittedSourceMemoSnapshot variant final snapshot
   -- Commit after the complete compiler operation. Failed/cancelled targets or
   -- partial dependency additions never enter this inventory.
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
