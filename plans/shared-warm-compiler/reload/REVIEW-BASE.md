@@ -1,10 +1,11 @@
 # Reload authority review
 
 Original campaign base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-Current compiled/tested source: `69bf78f01a090a51b36ee1c67ad17aee6b76a047`.
-Joined93 cumulative source acceptance plus one-line1bf import repair compose.
-Owning9 compilation passed; exact21 controls passed13/failed8. Current bounded
-production/fixture repairs below require independent exact review and execution.
+Current product compiled/tested source: `ce554a87d11c9a3f51834882e09d884fc5743c0b`.
+Owning9 passed; actual notebook4 and phase1 passed, runtime2/3 passed. Remaining
+strict retirement fixture requires its declared resident resource; exactb713 and
+fresh-joinfff are source accepted for the next native gate. Route eb15 is separately
+source accepted and still uncompiled/unexecuted.
 Independent reviewer: `/root/warm_compiler_campaign/reload/authority_review`,
 retained Sol-high grant. Supervisor directly inspected canonical owner, source/
 target custody, opaque producer/finisher/install, actual recipe caller, ancestry
@@ -12,8 +13,8 @@ issuance and the ordinary-cell mutation consumers. Native evidence is in HANDOFF
 
 ## Current source disposition
 
-The complete owned histories have independent exact source reviews. Actual notebook execution exposed the publication-phase mismatch below; the
-current introduced regression blocks foundation acceptance. Native/combined acceptance is
+The complete owned histories have independent exact source reviews. Actual notebook execution exposed a publication-phase mismatch, repaired by26
+and confirmed through exactce554 notebook4 and phase1. Native/combined acceptance is
 separate. Earlier failures and repaired checkpoints remain in Git/private evidence.
 This is not full R1, physical END-loss, reload force-drain or release acceptance.
 
@@ -36,21 +37,26 @@ registration under issuer/gate exclusion and matching-owner sealed target produc
 No raw gate, raw origin, empty callback or retained bytes grants fresh source work.
 ## Current qualification gaps
 
-Exact69bf owning9 compiled exit0. Counted runtime12=9PASS3FAIL, actor5=4PASS1FAIL,
-notebook4=0PASS4FAIL; all commands terminal. The actual21 reports and cleanup
-observations are bound by `c6-canonical-joined-controls-receipt.json`.
+Exactce554 owning9 compiled exit0; notebook4=4PASS, runtime3=2PASS1FAIL,
+phase1=1PASS. Exact8 reports are bound by publication-owner-repair-receipt.json.
 
-* Introduced publication Restage mismatch: InvocationWork is already Publishing,
-  but new runtime-owner composition requests Active cleanup admission. Reuse
-  existing Publication continuation purpose with lazy source claim, never reopen
-  Active or reject admitted pure Binding continuation. Actual fresh join/certification
-  gate remains mandatory. Leaf repairs; reviewer checks exact joined consumers.
-* Runtime transfer oracle must compare actual durable predecessor epoch1→2,
-  not fresh driver's local0. Both close controls need real owner setup in existing
-  CheckedHome fixture before begin-private admission; no generic helper weakening.
-* Durable Sleep positive failed initial compilation MissingDependency Prelude62→
-  Data.Text8 before resume. Qualification traces actual native producer; strict
-  oracle retained and no physical ACK-loss relay allowed.
+* Actual Publishing Restage repair26 and CheckedHome4a2/epochd289 are independently
+  source accepted: publication-and-checked-fixture-review-26f6503.md. The real
+  notebook workflow now passes; lazy source and explicit lifecycle purpose remain.
+* b713 declared-resident close control is independently source accepted:
+  close-cancel-fixture-review-b713a8.md. Previous DIRECT cancellation could not
+  satisfy strict daemon-confirmed Retired; prior failure retained, no production
+  cleanup waiver. Actual resident retry required.
+* fff fresh-join control source accepted: fresh-join-control-review-fff09de.md.
+  Actual authored declaration positive/open then same-source fence must refuse
+  before join high-water/public/private visibility/request changes; native pending.
+* Route eb15 source accepted after confirmed nested ambient-B fallback repaired:
+  watch-route-exact-review-eb15de.md. Actual capture/registration/take/transfer and
+  final canonical scope remain mandatory; early actor/host compile and controls
+  pending. No broader R1 acceptance.
+* Durable Sleep initial MissingDependency Prelude62→Data.Text8 remains before
+  resume. Qualification observes matching actual supplied private Text version;
+  product binding through assembly is not yet classified. No ACK-loss relay.
 * Real storage owner-transfer ACK loss, races at the actual enqueue/retirement
   seam and physical post-resume GHC END loss remain unqualified. Component guard
   injections and synthetic aggregate Unknown are labelled and cannot substitute.
