@@ -16831,6 +16831,7 @@ pub(crate) mod request_tests {
     }
 
     struct WorldQueryTestSource {
+        issuer: crate::SourceLayerIssuer,
         evidence: crate::SourceGenerationEvidence,
         roots: Vec<tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot>,
         owners: Vec<Arc<tempfile::TempDir>>,
@@ -16839,6 +16840,40 @@ pub(crate) mod request_tests {
         captured: Mutex<Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>>,
         captures: std::sync::atomic::AtomicUsize,
         unsupported: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::SourceInspection for WorldQueryTestSource {}
+
+    impl crate::ActorSourceLayers for WorldQueryTestSource {
+        fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
+            crate::SourceInspectionServices::new(self)
+        }
+
+        fn validate_source_authority(
+            &self,
+            source: &crate::CheckpointSourceLayer,
+        ) -> Result<(), String> {
+            (self.issuer.owns(source)
+                && source.include_paths() == self.paths
+                && source.identities() == self.identities
+                && source.generation_evidence().is_some_and(|evidence| {
+                    std::ptr::eq(evidence, &self.evidence)
+                        && evidence.reference == self.evidence.reference
+                }))
+            .then_some(())
+            .ok_or_else(|| "source is not this retained fixture selection".into())
+        }
+
+        fn stage_reload(
+            self: Arc<Self>,
+            _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
+            _: &[String],
+        ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            Err(crate::SourceLayerReload::Unavailable(
+                "this retained source fixture does not publish reloads".into(),
+            ))
+        }
     }
 
     impl crate::RetainedSourceLayer for WorldQueryTestSource {
@@ -16900,13 +16935,30 @@ pub(crate) mod request_tests {
     fn world_query_test_source_files(
         files_by_root: &[Vec<(&str, &str)>],
     ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {
-        use tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot;
+        world_query_test_source_files_with_support(files_by_root, &[])
+    }
+
+    fn world_query_test_source_files_with_support(
+        files_by_root: &[Vec<(&str, &str)>],
+        support: &[PathBuf],
+    ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {
+        use std::io::Read;
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
         let mut roots = Vec::new();
         let mut owners = Vec::new();
         for root_files in files_by_root {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("fixture root count fits capture allowance");
             let owner = Arc::new(tempfile::tempdir().unwrap());
             let mut files = std::collections::BTreeMap::new();
             for (path, body) in root_files {
+                remaining = remaining
+                    .checked_sub(8 + path.len() as u64 + body.len() as u64)
+                    .expect("authored fixture fits capture allowance before retention");
                 let target = owner.path().join(path);
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(target, body.as_bytes()).unwrap();
@@ -16924,27 +16976,82 @@ pub(crate) mod request_tests {
             });
             owners.push(owner);
         }
+        for source in support {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("support root fits capture allowance");
+            let manifest_files = tidepool_toolchain::cache::source_root_manifest(source).unwrap();
+            let owner = Arc::new(tempfile::tempdir().unwrap());
+            let mut files = std::collections::BTreeMap::new();
+            for (path, digest) in &manifest_files {
+                remaining = remaining
+                    .checked_sub(8 + path.as_os_str().len() as u64)
+                    .expect("support path fits capture allowance before retention");
+                let mut input = std::fs::File::open(source.join(path)).unwrap();
+                let mut body = Vec::new();
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    let allowed = remaining.min(chunk.len() as u64) as usize;
+                    assert!(allowed > 0, "support bytes exhaust capture allowance");
+                    let read = input.read(&mut chunk[..allowed]).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    remaining -= read as u64;
+                    body.try_reserve_exact(read)
+                        .expect("bounded support body allocation");
+                    body.extend_from_slice(&chunk[..read]);
+                }
+                assert_eq!(
+                    blake3::hash(&body).to_hex().as_str(),
+                    digest,
+                    "declared support changed during capture: {}",
+                    path.display()
+                );
+                let target = owner.path().join(path);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, &body).unwrap();
+                files.insert(path.clone(), Arc::<[u8]>::from(body));
+            }
+            let manifest =
+                tidepool_toolchain::cache::SourceRootManifest::from_file_digests(manifest_files)
+                    .unwrap();
+            roots.push(CapturedCompilerSourceRoot {
+                manifest,
+                bodies: files,
+            });
+            owners.push(owner);
+        }
+        let manifests = roots
+            .iter()
+            .map(|root| root.manifest.clone())
+            .collect::<Vec<_>>();
+        let revision = tidepool_toolchain::cache::source_manifests_identity(
+            b"compiler-world-query-test-source-v1",
+            &manifests,
+        );
         let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
-            serde_json::to_vec(&owners.iter().map(|owner| owner.path()).collect::<Vec<_>>())
-                .unwrap(),
+            serde_json::to_vec(&(
+                owners.iter().map(|owner| owner.path()).collect::<Vec<_>>(),
+                &revision,
+            ))
+            .unwrap(),
         );
         let owner = Arc::new(WorldQueryTestSource {
+            issuer: crate::SourceLayerIssuer::default(),
             evidence: crate::SourceGenerationEvidence {
                 reference,
                 configuration_digest: [0; 32],
             },
             paths: owners.iter().map(|owner| owner.path().to_owned()).collect(),
-            identities: vec!["retained test source bytes".into()],
+            identities: vec![revision],
             roots,
             owners,
             captured: Mutex::new(None),
             captures: std::sync::atomic::AtomicUsize::new(0),
             unsupported: std::sync::atomic::AtomicBool::new(false),
         });
-        (
-            crate::SourceLayerIssuer::default().issue(owner.clone()),
-            owner,
-        )
+        (owner.issuer.issue(owner.clone()), owner)
     }
 
     async fn installed_world_query(
@@ -17044,7 +17151,10 @@ pub(crate) mod request_tests {
             );
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
-            let (captured, owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
+            let (captured, owner) = world_query_test_source_files_with_support(
+                &[vec![("WorldQuestion.hs", "module WorldQuestion where\nknown :: Int\nknown = 7\n")]],
+                &source.base_include,
+            );
             context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
             workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
@@ -17056,7 +17166,30 @@ pub(crate) mod request_tests {
             let fingerprint = first.provenance().fingerprint.clone();
 
             {
-                let (frontend, frontend_context) = workbench.shared_view().admit_private_cell_for_test(context.clone()).await.unwrap();
+                let layers: crate::ActorSourceLayerResolver = owner.clone();
+                let foreign = crate::SourceLayerIssuer::default().issue(owner.clone());
+                assert!(std::ptr::eq(foreign.generation_evidence().unwrap(), &owner.evidence));
+                assert!(matches!(crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    context.clone(), foreign, None, Some(&layers),
+                ), Err(crate::KernelInvocationFailure::Rejected { .. })));
+                let (_, other_owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
+                let wrong_reference = owner.issuer.issue(other_owner);
+                assert!(owner.issuer.owns(&wrong_reference));
+                assert_ne!(wrong_reference.generation_evidence().unwrap().reference, owner.evidence.reference);
+                assert!(matches!(crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    context.clone(), wrong_reference, None, Some(&layers),
+                ), Err(crate::KernelInvocationFailure::Rejected { .. })));
+                let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+                let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None).unwrap();
+                let private = Arc::new(workbench_runner_for_test(&workbench).begin_private_execution(
+                    context.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(),
+                ).await.unwrap());
+                let mut private_context = context.clone();
+                private_context.placement.lexical_scope = private.private_scope;
+                let (frontend_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    private_context, captured.clone(), None, Some(&layers),
+                ).unwrap_or_else(|error| panic!("actual source owner must admit its retained selection: {error:?}"));
+                let frontend = workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
                 let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
                 let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
                 let PreparedCell { mut items, dependencies } = prepared;
