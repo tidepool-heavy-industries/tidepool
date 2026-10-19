@@ -6195,7 +6195,13 @@ impl ArtifactView {
             let ids = artifact_ids(&nodes);
             let mut entries = ids
                 .iter()
-                .map(|id| Arc::clone(&self.lease.payloads[id]))
+                .map(|id| {
+                    crate::host_work::record_host_work(
+                        crate::host_work::HostWorkCounter::ArtifactReadRowVisit,
+                        1,
+                    );
+                    Arc::clone(&self.lease.payloads[id])
+                })
                 .collect::<Vec<_>>();
             state
                 .entry_handle_copies
@@ -6431,6 +6437,10 @@ impl ArtifactView {
             let dependencies = self.read_dependencies(&state).clone();
             let mut natives = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
             for entry in &projection.entries {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::ArtifactMetadataRowVisit,
+                    1,
+                );
                 let id = entry.descriptor.id;
                 let owner = entry.descriptor.owner.clone();
                 if entry.is_native() {

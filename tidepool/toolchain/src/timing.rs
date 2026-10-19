@@ -83,6 +83,11 @@
 
 use std::time::{Duration, Instant};
 
+#[doc(hidden)]
+pub use crate::host_work::{
+    record_host_work, HostWorkCounter, HostWorkObservation, HostWorkSnapshot,
+};
+
 /// Sequential diagnostic intervals within one synchronous owning scope.
 /// Parent and child sequences are inclusive and must not be summed together.
 /// Existing tracing spans retain the output/cell/request correlation.
