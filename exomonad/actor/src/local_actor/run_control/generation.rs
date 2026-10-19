@@ -66,29 +66,25 @@ impl RunState {
                 });
                 continue;
             }
-            if matches!(record.phase, ReservationPhase::Registered)
-                && !record
-                    .terminal
-                    .cleanup()
-                    .is_some_and(|cleanup| cleanup.is_confirmed())
-            {
-                let link_state = match record.executor_link {
-                    ExecutorLink::Confirmed => None,
-                    ExecutorLink::Pending => Some(GenerationResourceState::Starting),
-                    ExecutorLink::Unconfirmed => Some(GenerationResourceState::CleanupUnconfirmed(
-                        "executor physical supervision differs from its issued reservation".into(),
-                    )),
-                };
-                if let Some(state) = link_state {
-                    resources.push(GenerationResourceObservation {
-                        identity: GenerationResourceIdentity::Actor(*actor),
-                        state,
-                    });
-                    continue;
-                }
-            }
             if let Some(entry) = self.entries.get(actor) {
                 if entry.actor.terminal().get().is_none() {
+                    let link_state = match record.executor_link {
+                        ExecutorLink::Confirmed => None,
+                        ExecutorLink::Pending => Some(GenerationResourceState::Starting),
+                        ExecutorLink::Unconfirmed => {
+                            Some(GenerationResourceState::CleanupUnconfirmed(
+                                "executor physical supervision differs from its issued reservation"
+                                    .into(),
+                            ))
+                        }
+                    };
+                    if let Some(state) = link_state {
+                        resources.push(GenerationResourceObservation {
+                            identity: GenerationResourceIdentity::Actor(*actor),
+                            state,
+                        });
+                        continue;
+                    }
                     resources.push(GenerationResourceObservation {
                         identity: GenerationResourceIdentity::Actor(*actor),
                         state: GenerationResourceState::Running,
