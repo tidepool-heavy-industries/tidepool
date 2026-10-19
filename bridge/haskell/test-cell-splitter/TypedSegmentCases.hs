@@ -106,6 +106,11 @@ typedValueAliasControl libdir root plan prepared = do
       occurrences <- typedSegmentInputOccurrences environment plan source >>= either (fail . show) pure
       unless (("x" `elem` occurrences) == expected)
         (fail ("held value demand lost submitted module scope: " ++ show (source,occurrences)))
+  forM_ ["data Box = Box { x :: Int }", "class Box a where { x :: a }"] $ \declaration -> do
+    refused <- typedSegmentInputOccurrences environment plan (probe "pure ()" ++ declaration ++ "\n")
+    case refused of
+      Left _ -> pure ()
+      Right names -> fail ("value-group demand admitted generated value binders: " ++ show names)
   (packages,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
     (Session.capturedSessionInterfaceEvidence captured)
   session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure

@@ -38,6 +38,9 @@ import Tidepool.TypedSegment.Types
 -- Expected missing-global diagnostics are discarded only for this demand
 -- probe. Its syntax is never admitted or typechecked, and the real compiler
 -- still validates the complete submitted program through its normal owner.
+-- Constructor/class/foreign-generated value bindings need the full module
+-- renamer environment. This value-group slice refuses those declarations,
+-- rather than misclassifying a same-named historical binding as an input.
 -- Callers must apply the world effective-flag/execution policy before entry.
 typedSegmentInputOccurrences :: HscEnv -> TypedSegmentPlan -> String -> IO (Either TypedSegmentFailure [String])
 typedSegmentInputOccurrences environment plan source = case rootExpression of
@@ -63,10 +66,17 @@ typedSegmentInputOccurrences environment plan source = case rootExpression of
             roots = [() | FunBind {fun_id=identifier} <- map unLoc bindings
               , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan]
             local = HsValBinds noAnn (ValBinds NoAnnSortKey bindings signatures)
-        in case roots of
-          [()] -> Right (noLocA (HsLet noAnn local
+        in case (all (supportedDeclaration . unLoc) declarations,roots) of
+          (True,[()]) -> Right (noLocA (HsLet noAnn local
             (nlHsVar (mkRdrUnqual (mkVarOcc (typedSegmentPlanRoot plan))))))
           _ -> Left UnprovedRootAbstraction
+    supportedDeclaration :: HsDecl GhcPs -> Bool
+    supportedDeclaration ValD{} = True
+    supportedDeclaration SigD{} = True
+    supportedDeclaration DefD{} = True
+    supportedDeclaration (TyClD _ SynDecl{}) = True
+    supportedDeclaration DocD{} = True
+    supportedDeclaration _ = False
     selected :: HsExpr GhcRn -> [String]
     selected (HsUnboundVar _ name)
       | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
