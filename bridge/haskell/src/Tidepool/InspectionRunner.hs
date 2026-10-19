@@ -64,6 +64,7 @@ runSingletons strict paths queries compile inspect = do
     inspectNext (environments, answers) (path, query) = do
       let policy = case query of
             InspectTypeSearch _ -> NormalizeWildcards
+            InspectTypeSearchBounded _ _ -> NormalizeWildcards
             _ -> PreserveSource
           purpose = case policy of
             NormalizeWildcards -> InspectionTypeCompile
