@@ -7151,12 +7151,17 @@ fn replay_native_transport_history(
             .as_ref()
             .clone()
             .rebuild(|facts| facts.compiler_support = support);
-        OriginalCompilerInputs::issue_candidate_from_context(
-            &context,
-            producer,
-            std::slice::from_ref(&products[index + 1]),
-        )
-        .unwrap()
+        let input = OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
+        assert_eq!(input.role_projection(), context.compiler_input_projection());
+        assert_eq!(
+            input.native_availability(),
+            context.compiler_source_support().native_availability()
+        );
+        assert_eq!(
+            input.issued_offers(),
+            context.compiler_source_support().native_offers()
+        );
+        input
     });
     let base_context = context(&base);
     let first = usize::from(reverse);
