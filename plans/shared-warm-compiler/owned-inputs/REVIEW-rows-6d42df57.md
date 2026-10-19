@@ -89,3 +89,34 @@ Both rows and the area supervisor received the concrete finding and history.
 Next producer action: repair overlay ownership and its discriminating controls,
 deliver an exact new candidate, then request cumulative independent re-review.
 Native compilation/tests remain required when an admitted storage lane exists.
+
+## Concrete repair proposal review
+
+Reviewed uncommitted repair over `6d42df57`: explicit `MaterializationKind`,
+persistent `imbl::OrdMap` rows, shared `Arc<BTreeMap>` graph owners, and first
+overlay converting `select_custody_facts([complete, leaves], metadata.retained)`
+through `into_owned`. This direction addresses the counterexamples: current
+physical row/group/graph handles are retained independently, the old complete
+owner is absent, scope bytes remain shared, and subsequent row changes share
+persistent structure with no predecessor materialization chain. Exact candidate
+and executed controls remain pending; this is a bounded proposal judgment.
+
+`metadata.retained` may include hidden custody with no physical materialization.
+`select_custody_facts` gathers existing matching rows/groups/graphs; it does not
+require every retained artifact to have a row. Therefore hidden unmaterialized
+facts do not by themselves prevent detaching the complete physical frontier.
+With a nonempty selected leaf set, `None` should be impossible under the existing
+entries-contained-in-retained invariant because the leaf itself is a matching
+row. Prefer making a violation explicit instead of silently returning the old
+complete owner and concealing a missed overlay.
+
+The existing execution scope was generated from consumed Original entries.
+Those entries remain within retained metadata, so their execution-graph digests
+select the matching `OwnedExecutionGraphFile` handles during detachment. Native
+groups retain their exact pending certified owners. Row/graph handles still
+provide original FD/directory leases to the existing endpoint; no new END owner
+or semantic selection is needed. First overlay detachment is a cold closure
+observation; report that cost separately from persistent later replacements.
+Sent this verdict directly to rows and the area supervisor. Next event: exact
+repaired OID with V-only old-backing release, repeated-overlay growth and
+in-flight-old-owner controls, then cumulative independent re-review.
