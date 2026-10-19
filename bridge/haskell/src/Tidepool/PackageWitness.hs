@@ -12,7 +12,7 @@ module Tidepool.PackageWitness
   , captureSupportedPackageProfileWith, supportedPackageProfileIdentity
   , requireObservationPackageEnvironment
   , CompilerPackageBoot, ServicePackageAssociation, readCompilerPackageBoot
-  , compilerPackageBootLibdir
+  , compilerPackageBootLibdir, servicePackageWorkerInstance, servicePackageProfile
   , validateCompilerPackageBootConfiguration
   , validateCompilerPackageBoot, emitCompilerPackageBootAcknowledgement ) where
 
@@ -598,6 +598,12 @@ data CompilerPackageBoot
 data ServicePackageAssociation = ServicePackageAssociation
   BS.ByteString BS.ByteString BS.ByteString BS.ByteString BS.ByteString
   -- worker instance, service epoch, source identity, profile identity, facts SHA
+
+servicePackageWorkerInstance :: ServicePackageAssociation -> BS.ByteString
+servicePackageWorkerInstance (ServicePackageAssociation worker _ _ _ _) = worker
+
+servicePackageProfile :: ServicePackageAssociation -> BS.ByteString
+servicePackageProfile (ServicePackageAssociation _ _ _ profile _) = profile
 
 data SupportedPackageFacts = SupportedPackageFacts FilePath FilePath [FilePath]
 

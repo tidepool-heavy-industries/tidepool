@@ -2188,6 +2188,10 @@ impl CheckedValueInputs {
 }
 
 impl CheckedValueArtifact {
+    pub(crate) fn world_issuer(&self) -> ([u8; 32], [u8; 32]) {
+        self.authority
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {

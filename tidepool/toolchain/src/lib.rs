@@ -22,6 +22,7 @@ pub mod cell_plan;
 pub mod certified_products;
 pub mod checked_cell;
 mod compile_input;
+pub mod compiler_world;
 mod host_work;
 pub use compile_input::CompileInputError;
 mod declaration_context;
