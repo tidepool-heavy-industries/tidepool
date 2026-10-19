@@ -55,7 +55,7 @@ contexts are waiting dispositions, not permission to duplicate their assignments
 | --- | ---: | --- |
 | host_inputs | 2 | Supervisor + selected_root + selection_oracle active. Area08feadc4ea source-reviewed OrdMap/lazy-P6/borrowed-selected rows, native0/0. Same-context input-Arc reuse implementation and adversarial source-support adoption review active. Group/package rechecks retained after mutable external.hi counterexample. |
 | owned_inputs | 2 | rows active repairing26e0f31d; supervisor and source_lifetime yielded with grants reserved. Rows MUST followup_task dormant reviewer AND supervisor with repaired exact candidate/evidence/next action. Two findings: certificate-bound promotion owner; same-view immutable leaf overlay. Area4bdf767772 records review; no accepted product fold/native check. |
-| warm_workers | 1 | Supervisor + protocol audit active. Codef3a386310b (docs-tip889d82c152) Rust library and cfgtest binary compiled;4counted Rust controls passed. Haskell production worker compile active under new measured lane, observer supervisor. Exact-root Ready implementation waits host/owned owners; global-retainer audit independent. |
+| warm_workers | 1 | Supervisor + protocol audit active. Rust codef3a386310b compiled and4counted controls passed. Haskell production code2b62169cdf compiled after bounded syntax repair; independent review found standalone decoder-policy regression, repaired07c8efbe50 awaits recompile. Supervisor owns exact command observation; no Haskell execution accepted. Exact-root Ready implementation waits host/owned owners; global-retainer audit independent. |
 | reload | 2 | Supervisor + generation_admission active; authority_review yielded reserved awaiting repair. Supervisor MUST followup_task reviewer with exact repaired checkpoint after typed NotStarted/Unconfirmed lifecycle-loss repair. Directory/generation source gate and force schema foundations unqualified; no force publication wired. |
 | qualification | 1 | Supervisor active on exact Haskell graph/resource census; capture_sensitivity completed/integrated. Terminal graph receipt delivered warm; next compiled checkpoint or final frontier-settled event owns reactivation. Final scratch audit not yet ready. |
 
@@ -88,6 +88,14 @@ serialized scratch allowance; expected estimate, not proven peak). Production
 `//bridge/haskell:tidepool_extract_bin` runs first; warm observes terminal and
 re-evaluates before worker_response_test_bin/worker_response_child/cell_splitter_test_bin.
 Those exact compile-only graphs have no Rust generator dependency.
+First Haskell compile889 failed on an introduced local guard parse error; corrected
+before retry. Production2b62169cdf compiled exit0, own output805949440B (Haskell
+growth142438400B), scopepeak3083128832B. Independent adjacent review then found
+standalone decoder reuse changed by the pruning repair;07c8efbe50 separates the
+standalone decoder owner and is the next exact production/test compile candidate.
+No source inputs change while their build action runs. The source-boot test bin
+adds44,146,688B historical retained output; conditional96MiB prospective allowance
+may spend only remaining original640MiB lane after actual four-target growth.
 The counted Haskell wrapper includes effects_generated→Rust runtime/toolchain/mcp;
 retained owner census~1.816GB with unresolved/absent outputs, not admitted.
 Broad host/toolchain/reload compilation and frozen runs remain disk-blocked.
@@ -129,3 +137,27 @@ space bounded top-down by checkout/output owner, active versus idle use, indepen
 required products/evidence, potential reclaimable outputs and exact safe boundaries.
 Analysis only: no deletion, unmount, GC or stopping others. Admission checks continue
 throughout work. Final bundle/performance qualification and deployment remain separate.
+
+## Campaign continuation handoff
+
+Campaign has no running commands; its configure, script checks and authorized
+publication all settled. Public github branch `campaign/shared-warm-compiler`
+contains a6e395d3317c3ec1cc57e232130d6a13753b7334 (tested code6d3b ancestor).
+Next awaited events, not periodic wakes:
+
+- warm_workers owns current Haskell production/test compilation, its terminal
+  artifacts/resources and bounded decoder review repair; deliver exact candidate
+  and checks to campaign, using followup_task if campaign dormant.
+- host_inputs owns final exact da4be05f input-Arc reuse review/area fold. After that,
+  broad02/03/source-adoption implementation is held until native issuer production
+  and tests compile plus focused controls execute. Bridge design only is retained.
+- owned rows owns exact repaired physical-frontier proposal/candidate. It must
+  reactivate source_lifetime and owned_inputs supervisor; no accepted physical
+  candidate exists. Current reviewc29f5187d6 rejects old-complete parent retention.
+- reload supervisor owns typed cleanup uncertainty repair and reactivation of
+  authority_review, then current bounded R1 source checkpoint. Broad force
+  publication/migration is held at compile gate. Actual current handoff required.
+
+Campaign continues independent cumulative review/folds on those actionable events.
+No source-only native candidate is claimed qualified because storage blocks its
+checks. Event-bound yield preserves grants and does not complete the campaign.
