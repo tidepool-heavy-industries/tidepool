@@ -203,7 +203,7 @@ import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, art
 import Tidepool.RequestInputs (capturedRequestInputToken)
 import Tidepool.BoundedRead (readFileAtMost)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM, forM_, when, unless, filterM, foldM, (>=>))
+import Control.Monad (forM, forM_, when, unless, filterM, foldM, void, (>=>))
 import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
@@ -2041,7 +2041,8 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   -- dependency requires its exact selected type closure, not passive custody.
   when (any (not . null . exactRequirements . worldBindingInterfaceArtifact) selected)
     (liftIO (throwIO WorldCellUnsupported))
-  let rejectValueImport reason = emitWorldAcquisitionRejection "world value import" path reason
+  let rejectValueImport :: String -> IO value
+      rejectValueImport reason = emitWorldAcquisitionRejection "world value import" path reason
         >> throwIO WorldCellCorrupt
   readback <- liftIO (readWorldBindingInputs current facts occurrences)
   (inputs,bodies) <- either (liftIO . rejectValueImport) pure readback
