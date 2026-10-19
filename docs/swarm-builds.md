@@ -500,6 +500,12 @@ planner consults before uploading a locally executed result. Both are required;
 either alone leaves uploads disabled. `TIDEPOOL_BUCK_REMOTE=true` is the
 unrelated remote-execution mode, and the two are mutually exclusive.
 
+A running Buck daemon builds its RE client once at startup from the
+configuration present then. Configure therefore stops this checkout's
+default-isolation daemon after writing the file, so the next invocation starts
+with the new client. Without that restart, builds still succeed but every
+upload fails with `No engine address` and the cache never fills.
+
 Do not pass `--local-only` or `-c remote.enabled=false` in cache mode: both
 select the local-only platform and bypass the cache. Configuration stays per
 checkout, but the cache is shared, so a checkout of the same source and

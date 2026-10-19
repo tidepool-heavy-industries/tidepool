@@ -285,6 +285,11 @@ done < "$generation/outputs.tsv"
 chmod 0644 "$tmp_config"
 cp -- "$tmp_config" "$generation/config"
 mv -f -- "$tmp_config" .buckconfig.local
+# A running daemon builds its RE client once at startup from the configuration
+# present then. Without a fresh daemon, cache mode starts an engine-less client:
+# builds still succeed and every upload fails with "No engine address". This
+# script holds the checkout's output lease, so no build is running here.
+"$buck2/bin/buck2" kill >/dev/null 2>&1 || true
 tmp_config=
 printf 'configured\n' > "$generation/status"
 trap - EXIT
