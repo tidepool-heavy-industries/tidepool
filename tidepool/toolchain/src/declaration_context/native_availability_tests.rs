@@ -4383,21 +4383,35 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
         issued,
     );
-    for selected_original in [false, true] {
+    for (selected_original, dependency_in_roles) in [(false, true), (true, true), (false, false)] {
         let baseline = if selected_original {
             complete.clone()
         } else {
+            let mut owners = vec![entries[1].descriptor.owner.clone()];
+            if dependency_in_roles {
+                owners.push(entries[0].descriptor.owner.clone());
+            }
             complete
                 .selected_interfaces()
                 .unwrap()
-                .support_for_owners(vec![
-                    entries[0].descriptor.owner.clone(),
-                    entries[1].descriptor.owner.clone(),
-                ])
+                .support_for_owners(owners)
                 .unwrap()
                 .retain_template_availability(&complete)
                 .unwrap()
         };
+        if !dependency_in_roles {
+            let dependency_interface =
+                ArtifactEntry::canonical(products[0].module_interface().unwrap().clone())
+                    .descriptor
+                    .id;
+            assert!(
+                baseline.projection().roles().iter().all(|role| {
+                    role.interface() != dependency_interface
+                        && role.original() != Some(entries[0].descriptor.id)
+                }),
+                "A is an exact native child of C, outside the current type roles"
+            );
+        }
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             producer: producer.sha256(),
             compiler_support: baseline.clone(),
@@ -4462,18 +4476,28 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         }));
         let availability = inputs.private_native_availability();
         let dependency_owner = products[0].owner();
-        assert!(
+        let advertised_dependency = inputs
+            .advertised_native_originals()
+            .receipt_original(
+                &availability,
+                &dependency_owner.unit,
+                &dependency_owner.module,
+                &dependency_owner.module_version,
+            )
+            .unwrap();
+        assert_eq!(
+            advertised_dependency.is_some(),
+            !selected_original && dependency_in_roles,
+            "private advertisements require a current interface without a compiler Original: selected_original={selected_original}, dependency_in_roles={dependency_in_roles}"
+        );
+        assert_eq!(
             inputs
-                .advertised_native_originals()
-                .receipt_original(
-                    &availability,
-                    &dependency_owner.unit,
-                    &dependency_owner.module,
-                    &dependency_owner.module_version,
-                )
-                .unwrap()
-                .is_some(),
-            "the advertisement observer sees the actual historical owner"
+                .projection()
+                .roles()
+                .iter()
+                .any(|role| { role.original() == Some(entries[0].descriptor.id) }),
+            selected_original,
+            "the actual selected compiler role retains A: selected_original={selected_original}"
         );
         let available_owner = products[2].owner();
         assert!(

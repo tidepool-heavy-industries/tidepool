@@ -108,6 +108,126 @@ fn compatible_protected_original_is_private_and_absent_from_manifest() {
 }
 
 #[test]
+fn protected_catalog_availability_preserves_receiving_interface_only_selection() {
+    use crate::artifact_inventory::{
+        ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+        NativeArtifactDemand,
+    };
+    use crate::declaration_context::{
+        ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+    };
+    let sources = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let record = super::tests::candidate_fixture(sources.path(), "ProtectedReceiver");
+    let canonical = record.module_interface_proof.as_ref().unwrap().clone();
+    let entry = Arc::new(ArtifactEntry::canonical(canonical.clone()));
+    let producer = CanonicalProducerIdentity::from_producer_bytes(&record.endpoint);
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let baseline = Arc::new(
+        ExactDeclarationContext::from_authenticated_interfaces(
+            producer.sha256(),
+            &artifacts,
+            CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
+        )
+        .unwrap(),
+    );
+    let key = (record.unit.clone(), record.module.clone());
+    let context = ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
+        .with_canonical_interfaces(
+            BTreeMap::from([(key.clone(), canonical.clone())]),
+            BTreeSet::new(),
+        )
+        .with_interface_seals(BTreeMap::from([(key, canonical.interface_sha256())]));
+    let selected = select(scratch.path(), vec![record.clone()], &context).unwrap();
+    assert!(selected.by_owner.is_empty());
+    assert_eq!(selected.contextual_native_availability.len(), 1);
+    let original = ArtifactEntry::original(
+        producer.sha256(),
+        selected.contextual_native_availability[0].clone(),
+    )
+    .unwrap()
+    .descriptor
+    .id;
+    let support = baseline.compiler_source_support();
+    let received = OriginalCompilerInputs::from_candidates(&baseline, producer, &selected)
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.role_projection(), support.projection());
+    assert_eq!(
+        received.native_availability(),
+        support.native_availability()
+    );
+    assert_eq!(received.issued_offers(), support.native_offers());
+    assert_eq!(
+        received.issued_input_decisions(),
+        Some(support.input_decisions())
+    );
+    assert_eq!(
+        received
+            .issued_artifacts()
+            .capture_graph_selection()
+            .namespace,
+        support.artifacts().capture_graph_selection().namespace
+    );
+    assert!(received
+        .issued_artifacts()
+        .artifact_ids()
+        .contains(&original));
+    let request = ExactCompileContext::new(baseline.clone())
+        .prepare_compilation_with_private_input(
+            scratch.path(),
+            &record.endpoint,
+            None,
+            Some(received),
+        )
+        .unwrap();
+    assert_eq!(request.compiler_inputs().projection(), support.projection());
+    assert!(request
+        .compiler_inputs()
+        .native_availability(original)
+        .is_none());
+    assert_eq!(
+        request
+            .compiler_inputs()
+            .artifacts()
+            .capture_graph_selection()
+            .namespace,
+        support.artifacts().capture_graph_selection().namespace
+    );
+
+    // Malformed custody does not cross the receiver merely because it carries
+    // an owner already protected by the request.
+    let product = &selected.contextual_native_availability[0];
+    for (certification, packages) in [
+        (vec![0xff], product.package_imports_bytes().to_vec()),
+        (product.certification_bytes().to_vec(), vec![0xff]),
+    ] {
+        let malformed = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            packages,
+            certification,
+        );
+        let invalid = CandidateSet {
+            manifest_path: selected.manifest_path.clone(),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: vec![malformed],
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        assert!(OriginalCompilerInputs::from_candidates(&baseline, producer, &invalid).is_err());
+    }
+}
+
+#[test]
 fn ambiguous_protected_owner_requires_an_explicit_selected_original() {
     let sources = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();

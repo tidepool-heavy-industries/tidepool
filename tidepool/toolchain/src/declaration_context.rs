@@ -794,14 +794,13 @@ impl OriginalCompilerInputs {
                 .map(Arc::new)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let dependencies = crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?;
-        // These protected catalog rows supply authenticated custody. Their
-        // availability does not choose a compiler Original or issue body roots.
-        let custody = source.projection().admit_interfaces_with_native_offers(
+        // Protected catalog closure rows can include private dependency owners
+        // outside the current namespace. Authenticate their type closure without
+        // demanding native groups, then retain custody under the incoming roles.
+        let custody = source.artifacts().inventory().admit_shared_with_demand(
             source.artifacts(),
             entries,
-            &[],
-            &dependencies,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
         )?;
         if let Some(mut carried) = carried {
             carried.artifacts = carried.artifacts.retain_custody(&custody)?;
