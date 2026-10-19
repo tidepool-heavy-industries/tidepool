@@ -16,6 +16,10 @@
 //! changing the child's caller-selected tool surface. Readiness acknowledges
 //! the installed actor before the caller receives its live typed handle.
 
+// Shared compiler snapshots nest persistent map nodes inside actor messages.
+// Allow the trait solver to prove Send/Sync for that retained ownership graph.
+#![recursion_limit = "256"]
+
 pub(crate) mod after_tool;
 pub mod agent_spec;
 mod call_timing;
