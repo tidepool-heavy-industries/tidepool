@@ -342,7 +342,7 @@ pub(super) fn issue_planned_original_with_retained_child(
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     &source,
                     &evidence_bytes,
@@ -480,7 +480,7 @@ pub(super) fn issue_planned_original_with_source_value(
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     &source,
                     &evidence_bytes,
