@@ -329,3 +329,41 @@ fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
         .iter()
         .any(|file| file.path == "bridge/handlers/src/generated/source.rs"));
 }
+
+#[test]
+fn runtime_info_is_read_only_actor_routed_and_reuses_startup_observation() {
+    use tidepool_protocol::{
+        hs::HsType,
+        schema::{HandlingClass, TypeShape},
+    };
+    let effect = tidepool_protocol::effects::runtime_info::runtime_info();
+    effect.validate().unwrap();
+    assert!(!effect.generated_handler);
+    assert_eq!(effect.verbs.len(), 1);
+    assert_eq!(effect.verbs[0].handling, HandlingClass::Actor);
+    assert_eq!(
+        effect.constructor_signatures(),
+        ["GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)",]
+    );
+    let startup = effect
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "RuntimeStartup")
+        .unwrap();
+    let TypeShape::Sum { variants } = &startup.shape else {
+        panic!("startup must distinguish unadmitted from observed")
+    };
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0].ctor, "RuntimeStartupNotAdmitted");
+    assert_eq!(variants[1].ctor, "RuntimeStartupObserved");
+    assert_eq!(
+        variants[1].fields,
+        tidepool_protocol::types::VariantFields::Positional(vec![HsType::Named(
+            "InitialContextObservation"
+        ),])
+    );
+    assert!(effect
+        .external_types
+        .iter()
+        .any(|ty| ty.haskell_name == "InitialContextObservation" && ty.core_module.is_none()));
+}

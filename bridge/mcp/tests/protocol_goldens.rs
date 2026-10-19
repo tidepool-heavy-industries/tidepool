@@ -70,6 +70,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "AgentSession",
             "Reflect",
             "Source",
+            "RuntimeInfo",
             "ModelCall",
             "ContextReadWrite",
             "BoundWorktree",

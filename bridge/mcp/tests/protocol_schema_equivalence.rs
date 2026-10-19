@@ -405,6 +405,7 @@ fn every_schema_effect_is_reachable() {
             "AgentSession",
             "Reflect",
             "Source",
+            "RuntimeInfo",
             "ModelCall",
             "ContextReadWrite",
             "BoundWorktree",
@@ -413,5 +414,13 @@ fn every_schema_effect_is_reachable() {
             "WorktreeIntegration",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"
+    );
+}
+
+#[test]
+fn runtime_info_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::runtime_info_decl(),
+        &tidepool_protocol::effects::runtime_info::runtime_info(),
     );
 }
