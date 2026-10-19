@@ -844,7 +844,7 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
 }
 
 #[test]
-fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
+fn selected_output_carries_baseline_type_dependency_without_granting_body() {
     let baseline_product = product("BaselineOnly", 87);
     let baseline = type_context(std::slice::from_ref(&baseline_product));
     let dependency = identity("fixture", "BaselineOnly");
@@ -867,12 +867,32 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         )])),
     );
     let consumer = recovered_witness_fixtures(&[consumer]).remove(0).product;
-    let private = OriginalCompilerInputs::issue_candidate_from_context(
-        &baseline,
-        producer,
-        std::slice::from_ref(&consumer),
-    )
-    .expect("the private issuer may use receiving baseline type evidence");
+    let private = {
+        let output =
+            Arc::new(ArtifactEntry::original(producer.sha256(), consumer.clone()).unwrap());
+        let dependency = Arc::new(ArtifactEntry::canonical(
+            baseline_product.module_interface().unwrap().clone(),
+        ));
+        let artifacts = baseline
+            .artifact_view()
+            .inventory()
+            .admit_shared_with_demand(
+                baseline.artifact_view(),
+                vec![output.clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[output, dependency]).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap()
+    };
     let offered = identity("fixture", "PrivateFragment");
     assert_eq!(
         private
@@ -881,15 +901,9 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([offered.clone()])
+        BTreeSet::from([offered.clone(), dependency.clone()])
     );
-    assert!(
-        matches!(private.projection.validate(&private.artifacts),
-        Err(CompileError::ArtifactInventory(error))
-        if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { required, .. }
-            if required == &dependency)),
-        "the issued fragment intentionally leaves its baseline dependency unoffered"
-    );
+    private.projection.validate(&private.artifacts).unwrap();
     assert_eq!(
         private.native_availability.rows().map(|row| row.original.descriptor.id).collect::<BTreeSet<_>>(),
         BTreeSet::from([private.native_offers[0].original()]),
@@ -914,7 +928,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(baseline.clone())
         .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private.clone()))
-        .expect("the final request closes the fragment against receiving baseline roles");
+        .expect("the selected output carries the same closed baseline type evidence");
     let final_inputs = request.compiler_inputs();
     final_inputs
         .projection()
@@ -11026,13 +11040,33 @@ fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
             )
             .unwrap(),
         );
-        let fragment = OriginalCompilerInputs::issue_candidate_from_context(
-            &baseline,
-            producer,
-            std::slice::from_ref(&fresh),
-        )
-        .unwrap();
-        assert_eq!(fragment.role_projection().snapshot_roles().len(), 1);
+        let fragment = {
+            let output =
+                Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+            let dependency = Arc::new(ArtifactEntry::canonical(
+                baseline_product.module_interface().unwrap().clone(),
+            ));
+            let artifacts = baseline
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    baseline.artifact_view(),
+                    vec![output.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[output, dependency]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap()
+        };
+        assert_eq!(fragment.role_projection().snapshot_roles().len(), 2);
         assert_eq!(
             fragment
                 .native_availability
