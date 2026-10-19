@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories) where
+module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -8,6 +8,7 @@ import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.ByteString as BS
 import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName)
 import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
@@ -24,6 +25,40 @@ import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOrigi
 import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
+import Tidepool.PackageWitness (requireObservationPackageEnvironment)
+import Tidepool.DiagJson (InputRejection(..))
+
+worldRequestBoundaries :: IO ()
+worldRequestBoundaries = do
+  requireObservationPackageEnvironment
+  let root = replicate 64 'a'
+      resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
+      complete = ExactInputsRequest root (CompleteExactInputs "/unavailable/world-inputs.cbor")
+      question = WorldPublicModuleRequest root "foreign-worker-realization" WorldStructuredInfo
+        (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
+          (InspectionProvenance 1 "display-only")) "/unavailable/world-answer.bin"
+      body = BS.pack [135,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
+        <> BS.pack [130,104] <> "rejected" <> BS.pack [1,246,64]
+      expected = "TPWQ0001" <> BS.pack [60,0,0,0] <> body
+  args <- case workerRequestFromArgv (workerArgv [WorldPublicModule question]) of
+    Right (Just request) -> pure request
+    other -> fail ("invalid world query fixture: " ++ show other)
+  (lateEnsure,lateQuery) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
+    forM_ [resident,complete] $ \request -> do
+      outcome <- scopedEnsureWorld scope request
+      unless (outcome == ExactInputsRejected UnsupportedOperation)
+        (fail "observation boot acquired a world or read complete inputs")
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+      actual <- runBoundWorldQuery request
+      unless (actual == expected) (fail "missing scope hold lost its typed unavailable response")
+      generic <- try (runBoundGhc request (pure ())) :: IO (Either SomeException ())
+      case generic of
+        Left failure | Just CheckedPurposeMismatch <- fromException failure -> pure ()
+        Left failure -> throwIO failure
+        Right _ -> fail "held-world request entered the generic GHC operation path"
+      pure (void (scopedEnsureWorld scope resident),void (runBoundWorldQuery request))
+  requirePhase CompilerTransactionReleased lateEnsure
+  try lateQuery >>= requireCancellation
 
 -- Actual module checking enters the same bound executor and pipeline as the
 -- service query. Refusals must identify the transitive dependency, before
