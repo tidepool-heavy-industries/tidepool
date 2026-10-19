@@ -5,6 +5,7 @@ module Tidepool.ExtractRequest
   ( CompileWorkload(..)
   , ExactInputsRequest(..), ExactInputsAcquisition(..)
   , WorldPublicModuleRequest(..), WorldQueryMode(..)
+  , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
@@ -68,6 +69,84 @@ data WorldPublicModuleRequest = WorldPublicModuleRequest
   , worldQueryInspection :: StructuredInspection
   , worldQueryOutput :: FilePath
   } deriving (Eq, Show)
+
+-- Recipe bytes and reservations are request data. Runtime admission and the
+-- held-world owner, rather than a digest or a slot constructor, grant use.
+data WorldCellRecipe = WorldCellRecipe
+  { worldCellSource :: String
+  , worldCellTemplate :: String
+  , worldCellTurnTemplates :: [(String,String)]
+  } deriving (Eq, Show)
+
+data WorldCellPlanRequest = WorldCellPlanRequest
+  { worldCellPlanIdentity :: String
+  , worldCellPlanRealization :: String
+  , worldCellPlanRecipe :: WorldCellRecipe
+  , worldCellPlanOutput :: FilePath
+  } deriving (Eq, Show)
+
+data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
+  | PlannedBind Word64 | PlannedExpression Word64 String
+  deriving (Eq, Show)
+
+data WorldCellPrepareRequest = WorldCellPrepareRequest
+  { worldCellPrepareIdentity :: String
+  , worldCellPrepareRealization :: String
+  , worldCellPrepareRecipe :: WorldCellRecipe
+  , worldCellPreparePlan :: BS.ByteString
+  , worldCellPrepareAdmission :: BS.ByteString
+  , worldCellPrepareSlots :: [(Word64,PlannedCellSlot)]
+  , worldCellPrepareDirectory :: FilePath
+  , worldCellPrepareOutput :: FilePath
+  } deriving (Eq, Show)
+
+validWorldCellRecipe :: WorldCellRecipe -> Bool
+validWorldCellRecipe recipe = all (utf8Within (2 * 1024 * 1024))
+    (worldCellSource recipe : worldCellTemplate recipe : map snd templates)
+  && length templates <= 256
+  && all (\(kind,_) -> validReference kind && utf8Within 65536 kind) templates
+  && Set.size (Set.fromList (map fst templates)) == length templates
+  where templates = worldCellTurnTemplates recipe
+
+validWorldCellPath :: FilePath -> Bool
+validWorldCellPath path = validReference path && utf8Within 65536 path
+
+utf8Within :: Integer -> String -> Bool
+utf8Within limit = (<= limit) . toInteger . LBS.length
+  . LBS.take (fromInteger (limit + 1)) . LTE.encodeUtf8 . LT.pack
+
+validWorldCellPlanRequest :: WorldCellPlanRequest -> Bool
+validWorldCellPlanRequest request = validWorldIdentity (worldCellPlanIdentity request)
+  && validReference (worldCellPlanRealization request)
+  && validWorldCellRecipe (worldCellPlanRecipe request)
+  && validWorldCellPath (worldCellPlanOutput request)
+
+data PlannedCellModuleKind = PlannedLibrary | PlannedValue deriving (Eq,Ord)
+
+validWorldCellPrepareRequest :: WorldCellPrepareRequest -> Bool
+validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdentity request)
+  && validReference (worldCellPrepareRealization request)
+  && validWorldCellRecipe (worldCellPrepareRecipe request)
+  && not (BS.null (worldCellPreparePlan request)) && BS.length (worldCellPreparePlan request) <= 8 * 1024 * 1024
+  && BS.length (worldCellPrepareAdmission request) == 32
+  && length slots <= 10000
+  && map fst slots == take (length slots) [0..]
+  && all validSlot (map snd slots)
+  && Set.size (Set.fromList (map (owner . snd) slots)) == length slots
+  && all validWorldCellPath [worldCellPrepareDirectory request,worldCellPrepareOutput request]
+  where
+    slots = worldCellPrepareSlots request
+    generation slot = case slot of
+      PlannedPrologue value -> value; PlannedDeclaration value -> value
+      PlannedBind value -> value; PlannedExpression value _ -> value
+    owner slot = (case slot of
+      PlannedPrologue _ -> PlannedLibrary
+      PlannedDeclaration _ -> PlannedLibrary
+      PlannedBind _ -> PlannedValue
+      PlannedExpression _ _ -> PlannedValue, generation slot)
+    validSlot slot = generation slot > 0 && case slot of
+      PlannedExpression _ observation -> validReference observation && utf8Within 65536 observation
+      _ -> True
 
 validWorldPublicModuleRequest :: WorldPublicModuleRequest -> Bool
 validWorldPublicModuleRequest request = validWorldIdentity (worldQueryIdentity request)
@@ -164,6 +243,8 @@ data RequestField
   | PortableOutput
   | EnsureExactInputs ExactInputsRequest
   | WorldPublicModule WorldPublicModuleRequest
+  | WorldCellPlan WorldCellPlanRequest
+  | WorldCellPrepare WorldCellPrepareRequest
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -221,6 +302,8 @@ data WorkerRequest = WorkerRequest
   , requestPortableOutput :: Bool
   , requestEnsureExactInputs :: Maybe ExactInputsRequest
   , requestWorldPublicModule :: Maybe WorldPublicModuleRequest
+  , requestWorldCellPlan :: Maybe WorldCellPlanRequest
+  , requestWorldCellPrepare :: Maybe WorldCellPrepareRequest
   , requestInspectionStrict :: Bool
   }
   deriving (Eq, Show)
@@ -230,6 +313,8 @@ data WorkerRequest = WorkerRequest
 data RequestOperation
   = EnsureExactInputsOperation ExactInputsRequest
   | WorldPublicModuleOperation WorldPublicModuleRequest
+  | WorldCellPlanOperation WorldCellPlanRequest
+  | WorldCellPrepareOperation WorldCellPrepareRequest
   | SourceOperation
   | TurnOperation
   | ActivationPreviewOperation
@@ -244,6 +329,7 @@ data RequestOperation
 data RequestShapeError
   = InvalidExactInputsShape
   | InvalidWorldPublicModuleShape
+  | InvalidWorldCellShape
   | InvalidSourceCheckShape
   | InvalidPortableOutputShape
   | InvalidCellPlanShape
@@ -276,6 +362,22 @@ admitRequestOperation args
         , requestWorldPublicModule = Just request }
       then Right (WorldPublicModuleOperation request)
       else Left InvalidWorldPublicModuleShape
+  | Just request <- requestWorldCellPlan args =
+      if validWorldCellPlanRequest request && args == emptyWorkerRequest
+        { requestWorkload = requestWorkload args
+        , requestCompilerJobs = requestCompilerJobs args
+        , requestCompilerCapabilities = requestCompilerCapabilities args
+        , requestWorldCellPlan = Just request }
+      then Right (WorldCellPlanOperation request)
+      else Left InvalidWorldCellShape
+  | Just request <- requestWorldCellPrepare args =
+      if validWorldCellPrepareRequest request && args == emptyWorkerRequest
+        { requestWorkload = requestWorkload args
+        , requestCompilerJobs = requestCompilerJobs args
+        , requestCompilerCapabilities = requestCompilerCapabilities args
+        , requestWorldCellPrepare = Just request }
+      then Right (WorldCellPrepareOperation request)
+      else Left InvalidWorldCellShape
   | Just batch <- requestHostedLookup args,
       not (validHostedLookup batch) || not (null (requestInspections args))
         || present (requestInspectTypeBatch args)
@@ -384,6 +486,8 @@ emptyWorkerRequest = WorkerRequest
   , requestPortableOutput = False
   , requestEnsureExactInputs = Nothing
   , requestWorldPublicModule = Nothing
+  , requestWorldCellPlan = Nothing
+  , requestWorldCellPrepare = Nothing
   , requestInspectionStrict = False
   }
 
@@ -561,9 +665,11 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       PortableOutput -> request { requestPortableOutput = True }
       EnsureExactInputs inputs -> request { requestEnsureExactInputs = Just inputs }
       WorldPublicModule query -> request { requestWorldPublicModule = Just query }
+      WorldCellPlan query -> request { requestWorldCellPlan = Just query }
+      WorldCellPrepare query -> request { requestWorldCellPrepare = Just query }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v23"
+workerRequestFlag = "--worker-request-v24"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -588,9 +694,12 @@ workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 -- duplicate operations or source/output authority beside a source-free exchange.
 validateExactInputsFields :: [RequestField] -> Either String ()
 validateExactInputsFields fields
-  | null [() | EnsureExactInputs _ <- fields] && null [() | WorldPublicModule _ <- fields] = Right ()
+  | null [() | EnsureExactInputs _ <- fields] && null [() | WorldPublicModule _ <- fields]
+      && null [() | WorldCellPlan _ <- fields] && null [() | WorldCellPrepare _ <- fields] = Right ()
   | [EnsureExactInputs request] <- fields, validExactInputsRequest request = Right ()
   | [WorldPublicModule request] <- fields, validWorldPublicModuleRequest request = Right ()
+  | [WorldCellPlan request] <- fields, validWorldCellPlanRequest request = Right ()
+  | [WorldCellPrepare request] <- fields, validWorldCellPrepareRequest request = Right ()
   | otherwise = Left "worker request: exact input acquisition must be source-free and exclusive"
 
 -- Certification produces originals for every fresh home module. Authenticated
@@ -645,7 +754,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ023"
+  if magic /= "TPREQ024"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -665,7 +774,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ023" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ024" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -720,6 +829,16 @@ encodeField field = case field of
     BS.singleton 57 <> textFrame root <> case acquisition of
       ResidentExactInputs reference -> BS.singleton 0 <> textFrame reference
       CompleteExactInputs manifest -> BS.singleton 1 <> textFrame manifest
+  WorldCellPlan request -> BS.singleton 59
+    <> textFrame (worldCellPlanIdentity request) <> textFrame (worldCellPlanRealization request)
+    <> encodeWorldCellRecipe (worldCellPlanRecipe request) <> textFrame (worldCellPlanOutput request)
+  WorldCellPrepare request -> BS.singleton 60
+    <> textFrame (worldCellPrepareIdentity request) <> textFrame (worldCellPrepareRealization request)
+    <> encodeWorldCellRecipe (worldCellPrepareRecipe request)
+    <> putU32 (BS.length (worldCellPreparePlan request)) <> worldCellPreparePlan request
+    <> worldCellPrepareAdmission request
+    <> putU32 (length (worldCellPrepareSlots request)) <> foldMap encodeWorldCellSlot (worldCellPrepareSlots request)
+    <> textFrame (worldCellPrepareDirectory request) <> textFrame (worldCellPrepareOutput request)
   WorldPublicModule request -> BS.singleton 58
     <> textFrame (worldQueryIdentity request) <> textFrame (worldQueryRealization request)
     <> BS.singleton (case worldQueryMode request of WorldStructuredInfo -> 0; WorldStructuredType -> 1)
@@ -761,6 +880,18 @@ encodeHostedLookup batch = encodeList encodeOperation (hostedLookupOperations ba
       BS.singleton 1 <> encodeList (putU32 . fromIntegral) ordinals <> encodeExactNameInspection query
     encodeScope StructuredCurrentScope = BS.singleton 0
     encodeScope (StructuredPublicModule mdl) = BS.singleton 1 <> textFrame mdl
+
+encodeWorldCellRecipe :: WorldCellRecipe -> BS.ByteString
+encodeWorldCellRecipe recipe = textFrame (worldCellSource recipe) <> textFrame (worldCellTemplate recipe)
+  <> putU32 (length (worldCellTurnTemplates recipe))
+  <> foldMap (\(kind,source) -> textFrame kind <> textFrame source) (worldCellTurnTemplates recipe)
+
+encodeWorldCellSlot :: (Word64,PlannedCellSlot) -> BS.ByteString
+encodeWorldCellSlot (ordinal,slot) = putU64 ordinal <> case slot of
+  PlannedPrologue generation -> BS.singleton 0 <> putU64 generation
+  PlannedDeclaration generation -> BS.singleton 1 <> putU64 generation
+  PlannedBind generation -> BS.singleton 2 <> putU64 generation
+  PlannedExpression generation observation -> BS.singleton 3 <> putU64 generation <> textFrame observation
 
 encodeStructuredInspection :: StructuredInspection -> BS.ByteString
 encodeStructuredInspection query =
@@ -891,10 +1022,76 @@ pField bytes = do
       let request = WorldPublicModuleRequest root reference mode query output
       if validWorldPublicModuleRequest request then Right (WorldPublicModule request, afterOutput)
         else Left "worker request: invalid world public module query"
+    59 -> do
+      (root,a) <- pCellText 64 rest
+      (reference,b) <- pText a
+      (recipe,c) <- pWorldCellRecipe b
+      (output,d) <- pCellText 65536 c
+      let request = WorldCellPlanRequest root reference recipe output
+      if validWorldCellPlanRequest request then Right (WorldCellPlan request,d)
+        else Left "worker request: invalid held world cell plan"
+    60 -> do
+      (root,a) <- pCellText 64 rest
+      (reference,b) <- pText a
+      (recipe,c) <- pWorldCellRecipe b
+      (plan,d) <- pCellFrame (8 * 1024 * 1024) c
+      if BS.length d < 32 then Left "worker request: truncated cell admission" else pure ()
+      let (admission,e) = BS.splitAt 32 d
+      (slots,f) <- pCellList 10000 17 pWorldCellSlot e
+      (directory,g) <- pCellText 65536 f
+      (output,h) <- pCellText 65536 g
+      let request = WorldCellPrepareRequest root reference recipe plan admission slots directory output
+      if validWorldCellPrepareRequest request then Right (WorldCellPrepare request,h)
+        else Left "worker request: invalid held world cell preparation"
     45 -> retired tag
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)
+
+-- Check operational bounds before decoding UTF-8 or allocating collections.
+pCellFrame :: Int -> Parser BS.ByteString
+pCellFrame limit bytes = do
+  (value,rest) <- pFrame bytes
+  if BS.length value <= limit then Right (value,rest)
+    else Left "worker request: cell field exceeds operational bound"
+
+pCellText :: Int -> Parser String
+pCellText limit bytes = do
+  (value,rest) <- pCellFrame limit bytes
+  case TE.decodeUtf8' value of
+    Left _ -> Left "worker request: invalid cell UTF-8"
+    Right text -> Right (T.unpack text,rest)
+
+pCellList :: Int -> Int -> Parser a -> Parser [a]
+pCellList limit minimumBytes item bytes = do
+  (count,rest) <- pWord32 bytes
+  if toInteger count > toInteger limit || toInteger count > toInteger (BS.length rest `div` minimumBytes)
+    then Left "worker request: cell collection exceeds operational bound or remaining bytes"
+    else pN (fromIntegral count) item rest
+
+pWorldCellRecipe :: Parser WorldCellRecipe
+pWorldCellRecipe bytes = do
+  (source,a) <- pCellText (2 * 1024 * 1024) bytes
+  (template,b) <- pCellText (2 * 1024 * 1024) a
+  (templates,c) <- pCellList 256 8 (\input -> do
+    (kind,next) <- pCellText 65536 input
+    (body,rest) <- pCellText (2 * 1024 * 1024) next
+    Right ((kind,body),rest)) b
+  Right (WorldCellRecipe source template templates,c)
+
+pWorldCellSlot :: Parser (Word64,PlannedCellSlot)
+pWorldCellSlot bytes = do
+  (ordinal,a) <- pWord64 bytes
+  (tag,b) <- pWord8 a
+  (generation,c) <- pWord64 b
+  case tag of
+    0 -> Right ((ordinal,PlannedPrologue generation),c)
+    1 -> Right ((ordinal,PlannedDeclaration generation),c)
+    2 -> Right ((ordinal,PlannedBind generation),c)
+    3 -> do
+      (observation,d) <- pCellText 65536 c
+      Right ((ordinal,PlannedExpression generation observation),d)
+    _ -> Left "worker request: invalid cell reservation tag"
 
 mapParser :: (a -> b) -> Parser a -> Parser b
 mapParser f parser bytes = do

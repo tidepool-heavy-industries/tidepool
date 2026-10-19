@@ -15,6 +15,7 @@ import GHC
 import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
 import GHC.Driver.Env.Types (HscEnv, hsc_NC, hsc_unit_env)
+import GHC.Driver.Backend (noBackend)
 import GHC.Iface.Env (allocateGlobalBinder)
 import GHC.Data.FastString (fsLit)
 import GHC.Unit.Env (ue_units)
@@ -22,7 +23,7 @@ import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Module (moduleUnit)
 import GHC.Unit.Types (unitIdString, unitString, GenUnit(RealUnit), Definite(Definite))
-import GHC.Builtin.Types (intTy, doubleTy)
+import GHC.Builtin.Types (intTy, doubleTy, boolTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Cache (NameCache(..), lookupOrigNameCache)
@@ -30,12 +31,15 @@ import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Var (varName)
+import GHC.Types.Id (idType)
+import GHC.Tc.Types (tcg_type_env)
 import GHC.Types.Unique (getKey)
 import GHC.Iface.Syntax (IfaceConDecl(..), IfaceConDecls(..), IfaceDecl(..))
 import GHC.Types.FieldLabel (FieldSelectors(..), flHasFieldSelector, flSelector)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_decls, mi_exports, mi_module)
-import GHC.Unit.Home.ModInfo (hm_details, hm_iface)
+import GHC.Unit.Home.ModInfo (hm_details, hm_iface, lookupHpt)
+import GHC.Driver.Env (hsc_HPT)
 import qualified GHC.Stg.Syntax as Stg
 import GHC.Types.SourceError (SourceError)
 import GHC.Types.SrcLoc (noSrcSpan)
@@ -46,18 +50,119 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.Binders
-import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExtractUtil (getLibdir, shaHex)
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import Tidepool.DiagJson (diagsFromSourceError)
 import Tidepool.GhcPipeline
 import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.SessionArtifacts
+import qualified Tidepool.Session as Session
+import Tidepool.ArtifactBytes (captureArtifactBytes)
+import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
+import Tidepool.CheckedCell (typecheckNativeModule)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules)
+import Tidepool.Identity (nameSymbolIdentity)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
 import qualified Tidepool.TypedSegment as TypedSegment
-import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
+import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot, typedSegmentInputOccurrences)
 import Unsafe.Coerce (unsafeCoerce)
+
+-- Consume an interface actually emitted by the whole-do/typed-batch issuer.
+-- This checks the real alias importer without constructing a world or value
+-- certificate, and does not establish runtime settlement permission.
+typedValueAliasControl :: FilePath -> FilePath -> TypedSegment.TypedSegmentPlan -> PreparedPipelineResult -> IO ()
+typedValueAliasControl libdir root plan prepared = do
+  captured <- case prProducedSessionInterfaces (pprPipelineResult prepared) of
+    value:_ -> pure value
+    [] -> fail "typed alias control requires an actual emitted session interface"
+  let (owner,body) = Session.capturedSessionInterfaceBody captured
+      environment = prHscEnv (pprPipelineResult prepared)
+  -- These call the same pre-import selector as held Prepare. In particular a
+  -- historical home-typed x must never enter its exactRequirements refusal
+  -- when the submitted use is bound locally instead.
+  let probe expression = unlines ["module LexicalDemand where"
+        ,TypedSegment.typedSegmentPlanRoot plan ++ " = " ++ expression]
+  forM_
+    [ ("let x = (1::Int) in x",False)
+    , ("(\\x -> x) (1::Int)",False)
+    , ("do { x <- pure (1::Int); pure x }",False)
+    , ("case (1::Int) of { x -> x }",False)
+    , ("let x = x in x",False)
+    , ("(let x = (1::Int) in x, x)",True)
+    , ("do { y <- pure x; pure y }",True)
+    , ("Other.x",False)
+    ] $ \(expression,expected) -> do
+      occurrences <- typedSegmentInputOccurrences environment plan (probe expression) >>= either (fail . show) pure
+      unless (("x" `elem` occurrences) == expected)
+        (fail ("held value demand lost GHC lexical scope: " ++ show (expression,occurrences)))
+  forM_
+    [ (probe "x" ++ "x = (1::Int)\n",False)
+    , (probe "helper" ++ "helper = x\n",True)
+    , (probe "let x = (1::Int) in x" ++ "helper = x\n",True)
+    ] $ \(source,expected) -> do
+      occurrences <- typedSegmentInputOccurrences environment plan source >>= either (fail . show) pure
+      unless (("x" `elem` occurrences) == expected)
+        (fail ("held value demand lost submitted module scope: " ++ show (source,occurrences)))
+  forM_ ["data Box = Box { x :: Int }", "class Box a where { x :: a }"] $ \declaration -> do
+    refused <- typedSegmentInputOccurrences environment plan (probe "pure ()" ++ declaration ++ "\n")
+    case refused of
+      Left _ -> pure ()
+      Right names -> fail ("value-group demand admitted generated value binders: " ++ show names)
+  (packages,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
+    (Session.capturedSessionInterfaceEvidence captured)
+  session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure
+    (Session.parseSessionModule (moduleNameString (moduleName owner)))
+  (hydrated,identifiers,_) <- Session.injectCapturedSessionIfaceWithBindings session body
+    (captureArtifactBytes packages) required environment
+  home <- maybe (fail "typed alias control lost its installed owner") pure
+    (lookupHpt (hsc_HPT hydrated) (moduleName owner))
+  identifier <- case [value | value <- identifiers,getOccString value == "identity"
+      , varName value `elem` concatMap availNames (mi_exports (hm_iface home))] of
+    [value] -> pure value
+    _ -> fail "typed alias control requires the actual polymorphic identity export"
+  symbol <- maybe (fail "typed alias control export has no external owner") pure
+    (nameSymbolIdentity "value" (varName identifier))
+  let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
+        (Session.sessionHiPath (root </> "stage0") session) (shaHex (snd (Session.capturedSessionInterface captured))) required
+      interfaces = [(artifact,hm_iface home)]
+      requested = [("renamed",symbol,artifact),("synonym",symbol,artifact)]
+  (ready,aliases) <- hydrateCompletedValueAliases requested interfaces hydrated >>= either fail pure
+  forM_ [symbol {symbolUnit="different-unit"},symbol {symbolNamespace="var"}] $ \changed -> do
+    rejected <- hydrateCompletedValueAliases [("renamed",changed,artifact)] interfaces hydrated
+    case rejected of
+      Left _ -> pure ()
+      Right _ -> fail "completed value alias accepted a different defining unit or identity namespace"
+  let path = root </> "TypedAliasProbe.hs"
+  writeFile path (unlines
+    ["{-# LANGUAGE NoMonomorphismRestriction #-}","module TypedAliasProbe where"
+    ,"reference = renamed", "other = synonym"
+    ,"shadow = let renamed = (False :: Bool) in renamed"])
+  runGhc (Just libdir) $ do
+    setSession ready
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags flags {backend=noBackend,ghcLink=NoLink}
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    graph <- depanalSourceModules []
+    summary <- case [value | value <- mgModSummaries graph,ms_mod_name value == mkModuleName "TypedAliasProbe"] of
+      [value] -> pure value
+      _ -> liftIO (fail "typed alias control lost its actual source summary")
+    parsed <- parseModule summary
+    current <- getSession
+    native <- liftIO (transformCompletedValueAliases aliases current parsed)
+    checked <- typecheckNativeModule native
+    let (checkedEnvironment,_) = tm_internals_ checked
+        actual = typeEnvIds (tcg_type_env checkedEnvironment)
+        check name expected = case [idType value | value <- actual,getOccString value == name] of
+          [found] | eqType found expected -> pure ()
+          _ -> fail ("typed alias control changed native type or shadowing: " ++ name)
+    liftIO $ do
+      check "reference" (idType identifier)
+      check "other" (idType identifier)
+      check "shadow" boolTy
 
 -- The owning selector performs the actual whole-source frontend, typed
 -- extraction, real thin-interface hydration, simplify and prepared STG.
@@ -105,6 +210,7 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
         (PrepareAccepted, Right products) -> do
           let prepared = preparedSegmentProducts products
               environment = prHscEnv (pprPipelineResult prepared)
+          when (name == "let-poly") (typedValueAliasControl libdir root plan prepared)
           selected <- maybe (fail (name ++ ": pinned resume package is absent")) pure
             (lookupPackageName (ue_units (hsc_unit_env environment)) (PackageName (fsLit "tidepool-resume")))
           let roots = concatMap packageInterfaces (Map.elems (pprPackageImports prepared))

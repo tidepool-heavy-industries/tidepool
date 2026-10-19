@@ -29,6 +29,9 @@ pub(crate) struct PublishedOriginalEndorsement {
 }
 
 impl PublishedOriginalEndorsement {
+    pub(crate) fn new(owner: ExactModuleIdentity, role: CompilerInputRole) -> Self {
+        Self { owner, role }
+    }
     pub(crate) fn owner(&self) -> &ExactModuleIdentity {
         &self.owner
     }
@@ -134,6 +137,7 @@ impl ExactDeclarationContext {
             source_revision,
             original_input_identity,
             selection,
+            native_authority,
             ..
         } = role
         else {
@@ -218,7 +222,8 @@ impl ExactDeclarationContext {
             }
         }
         let bytes = serde_json::to_vec(&(
-            "published-source-original3",
+            "published-source-original4",
+            native_authority.facts().commitment(),
             self.owner.facts.producer,
             root,
             interface,
@@ -484,6 +489,29 @@ impl ExactDeclarationContext {
             .find(|role| role.original() == Some(entry.descriptor.id))
             .ok_or_else(|| failure("published root lacks its exact interface role"))?
             .interface();
+        if let Some(CompilerInputRole::PublishedSourceOriginal {
+            source_revision,
+            original_input_identity,
+            ..
+        }) = context
+            .owner
+            .facts
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .get(root)
+        {
+            if source_revision == revision && original_input_identity == input_identity {
+                return Ok(Arc::new(PublishedSourceOriginalSelection {
+                    context: Arc::new(context.finish()?),
+                    revision: revision.into(),
+                    public_root: root.clone(),
+                }));
+            }
+            return Err(failure(
+                "publication reissue conflicts with its issued source identity",
+            ));
+        }
         let mut role = CompilerInputRole::PublishedSourceOriginal {
             interface,
             original: entry.descriptor.id,
@@ -493,6 +521,9 @@ impl ExactDeclarationContext {
                 &context.owner.facts.compiler_support.artifacts(),
             ),
             selection_sha256: [0; 32],
+            native_authority: crate::artifact_inventory::PublicationNativeAuthority::capture(
+                &context.owner.facts.compiler_support,
+            )?,
         };
         let digest = context.published_selection_sha256(root, &role)?;
         if let CompilerInputRole::PublishedSourceOriginal {
@@ -812,7 +843,7 @@ mod tests {
             offers,
         )
         .unwrap();
-        let availability = &transport.availability[&original];
+        let availability = &transport.availability.0[&original];
         assert!(availability.permits(7));
         assert!(!availability.permits(11));
         assert!(

@@ -1309,7 +1309,7 @@ impl ModuleCandidateOffer {
         bindings: crate::compiler_world::CompilerWorldBindings,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
-        let (visible_rows, visibility) = bindings.cold_parts()?;
+        let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
         let directory = Arc::new(compiler_scratch_directory()?);
         crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
@@ -1317,7 +1317,6 @@ impl ModuleCandidateOffer {
             visible_rows,
             bindings,
             sources,
-            visibility,
             directory,
         )
     }
@@ -3689,7 +3688,7 @@ fn seal_turn_outputs_with_validation(
             })?;
             let entry = crate::checked_cell::CheckedTypedEntry::issue_program_item(
                 output_dir,
-                &admission.physical_request().request_sha256,
+                admission.exact_request_identity()?.request_sha256(),
                 admission_digest,
                 plans,
                 index,
@@ -3923,7 +3922,7 @@ fn seal_turn_outputs_with_validation(
         let version_origin = exact.map_or(
             module_candidates::CandidateVersionOrigin::Ordinary,
             |admission| module_candidates::CandidateVersionOrigin::Exact {
-                semantic_sha256: admission.physical_request().semantic_sha256,
+                semantic_sha256: admission.product_context_digest(),
             },
         );
         let publication_products = ordinary_products.expect("ordinary product inputs");
@@ -5637,7 +5636,7 @@ fn compile_invocation_inner(
                 exact.as_ref().map_or(
                     module_candidates::CandidateVersionOrigin::Ordinary,
                     |admission| module_candidates::CandidateVersionOrigin::Exact {
-                        semantic_sha256: admission.physical_request().semantic_sha256,
+                        semantic_sha256: admission.product_context_digest(),
                     },
                 ),
                 &certified.recovery_products,

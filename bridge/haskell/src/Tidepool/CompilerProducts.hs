@@ -9,7 +9,7 @@ module Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
-  , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
+  , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , publishStagedOriginalProducts, retainStagedProgramProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
@@ -63,7 +63,7 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
-  , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
+  , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeInterfaceToken, scopeOriginalBytes
@@ -226,6 +226,12 @@ stagedOriginalEntryOrdinal (StagedOriginalProducts certified _ _ _) entry = case
 
 stagedFinalizedArtifacts :: StagedOriginalProducts -> FinalizedModuleArtifacts
 stagedFinalizedArtifacts (StagedOriginalProducts certified _ _ _) = certifiedFinalizedArtifacts certified
+
+-- File identities come from actual emitter writes, including the staged
+-- terminal certificate. Callers do not inventory an output directory.
+stagedOriginalOutputFiles :: StagedOriginalProducts -> [(FilePath,String)]
+stagedOriginalOutputFiles (StagedOriginalProducts _ certificate bytes outputs) =
+  (certificate,shaHex bytes) : freshOutputSealFacts outputs
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -687,13 +693,15 @@ writeCertifiedSegmentProducts includes originals directory prepared context = do
   pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs)
 
 writeCertifiedSegmentItemProducts
-  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO ()
+  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO FilePath
 writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _ _) directory program = do
   context <- maybe (fail "item output lacks its segment original certification") pure
     (certifiedTargetContext originals)
   certified <- encodeCertifiedItemProducts (prHscEnv (pprPipelineResult prepared)) context program
   bytes <- either fail pure certified
-  BS.writeFile (directory </> "certified-products.cbor") bytes
+  let name = "certified-products.cbor"
+  BS.writeFile (directory </> name) bytes
+  pure name
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
 publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs) = do

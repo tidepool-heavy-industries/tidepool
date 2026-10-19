@@ -328,11 +328,15 @@ available catalog body as a new Original. Actual selected outputs retain the
 This source observation is specific to the qualification foundation: actual compiled
 Request permission refusal/Full positive and full source-proof pairing have executed;
 retained-generation, scoped-issuer, physical lifetime and independent generated histories
-have source-specific passing receipts in the qualification handoff. Alternate test issuers
-and obsolete callers still require removal, owning compilation and complete-history review.
+have source-specific passing receipts in the qualification handoff. Foundation `943aafec`
+removes the alternate Candidate issuers and obsolete callers; its final owning targets
+compiled and its complete history received independent source review. Campaign receiving
+compilation remains a separate gate.
 A separate strict publication-context failure remains: saved root reconstruction reattaches
-later unrelated offers as logical custody. Exact birth offer/mode/decision ownership and
-Context6 restoration are approved but unimplemented; no map entry claims they exist.
+later unrelated offers as logical custody. The Context6 birth-owner implementation is a
+qualification WIP, excluded from that foundation. Its exact offer-mode, acquisition lifetime,
+writer/reader/consumer and hot-publication work gates remain open; no map entry claims
+that owner is qualified.
 The actual frozen428b path remains a
 required rerun after integration. No full-map, FD, encoding or hydration work reduction
 is inferred from this role correction; the service and actor migration rows above

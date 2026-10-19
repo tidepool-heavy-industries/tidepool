@@ -113,11 +113,68 @@ qualification.
 
 ## Exact-scope transport
 
-Worker requests use `TPREQ023`. Field 57 acquires one world without source
+Worker requests use `TPREQ024`. Field 57 acquires one world without source
 request fields; field 58 queries public module metadata through the same
-`CompilerRequest` executor admission. `TPCWORLD` custody keeps base and unmerged
+`CompilerRequest` executor admission. Fields 59 and 60 carry the held-world
+cell plan and preparation recipes. Runtime owns reservation/adoption authority;
+parser receipts, admission digests and prepared item descriptions are correlated
+data. Preparation uses operation-local compiler/recovery state and actual typed
+outputs. Captured source imports demand only actual Context-selected canonical
+rows and their exact type closure. The shared current-source validator checks
+source bytes, adjacency, packages and interface compatibility. Their qualification
+receipt remains distinct from genuinely fresh generated-source evidence; an
+admitted owner cannot masquerade as a fresh replacement. The initial slice still
+refuses unsupported primary roles, value types with unprepared home dependencies,
+authored declaration/prologue items and multiple inference segments. General
+inherited lexical import activation remains a separate migration obligation;
+this route does not select Originals from passive rows or construct an ExactScope. A completed
+item description is not a published runtime successor. Source request builders
+preflight binary framing plus hex expansion against the same daemon receive
+budget before appending bulk fields; the transport still charges actual cwd.
+Held-cell occurrence lookups follow the submitted root's parsed names, never
+the complete occurrence inventory. `TPCWBIND4` keeps runtime variable IDs,
+defining scope and the checked row's explicit compiler generation separate.
+Exact exported GHC Names/types supply native alias identity; ordinary renaming
+preserves authored local shadowing. Captured thin interfaces and package facts
+remain explicit operation inputs. `TPCWPREP3` reports actual normalized
+typed-segment plans, correlated input refs and the existing emitters' output
+manifest; it grants no runtime value permission. The private
+`TPCWSOURCE2` receipt carries the completion's ordered materialized root aliases
+as transport DATA. Their positions map back to the captured source domain;
+they neither identify logical worlds nor authorize later filesystem reads.
+The matched `TPCWORLD` version 3 carrier retains exactly the frontier of three
+roots in Context, primary-association, occurrence order. Its fixed `TPCWREST`
+version 3 product binds those roots, the captured source seal, canonical producer,
+profile and runtime query scope; transfer order and physical aliases do not
+change logical identity. Each base row must match an acquired primary association,
+and every visible value row must be referenced by the occurrence map. The actual
+Context roles, namespace and scope proofs select an association by exact binding;
+passive row presence and module names cannot reconstruct that selection. Immutable
+decoded primary facts and their known backing/record charges stay with the same
+world/input owner. The receiver preserves private Rust artifact/scope receipts as
+provenance, and grants no native execution or completed value from them.
+Context descriptors use version 6. Each published source role requires its
+birth-native-authority descriptor2 and all four typed-role, offer, availability
+and decision HAMTs. An acquisition-local CID memo shares immutable decoded birth
+authorities and refuses active cycles; retained charges count unique decoded
+authorities plus references. It is discarded after cold admission. Those immutable
+facts remain passive Rust provenance under the same world
+owner and retention charge; current-context offers cannot replace birth facts.
+Old Context5, authority descriptor1 and published roles without that link refuse. Genuine source-publication fixtures use the explicit
+`TPSOURCEBOOTPUBLISHED1` intent on the existing OriginalProductsProducer completion:
+its completed target and unique publication roots are separate from ordinary
+candidate/interface/native/lexical selectors. Ordinary fixture delivery never
+implicitly endorses a source original. Haskell controls inspect the genuine
+issued Context and mutate only DATA; the Rust publication owner issues roles.
+`TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
-select compiler Originals or native groups. The logical world retains raw
+select compiler Originals or native groups. Cold block admission verifies the
+fixed CIDv1/DAG-CBOR/Blake2b-256 family with declared crypton, every body digest
+and root-reachable child membership. A SHA transfer seal cannot replace CID
+verification. Integrity controls consume actual Rust Materializer blocks, not
+handwritten content addresses; changing this dependency requires a fresh matched
+package-profile/provider/boot qualification before rooted reuse.
+The logical world retains raw
 immutable facts; its universe realization owns NameCache-bound interfaces, and
 the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;

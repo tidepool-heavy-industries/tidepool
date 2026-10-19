@@ -145,17 +145,49 @@ Persona still must execute successfully. At exact6d93, production/cfg(test) and 
 Exacte47 separately passed full actual compiler source-proof pairing, retained-generation
 permissions and scoped historical-offer custody. Exact6be passed the actual Request-owned
 compiled A2 refusal/Full-positive control. The strict later publication-context equality
-still fails from unrelated InlineConsumer logical custody; its birth-offer owner repair
-and matched frozen rerun remain required. The passing Request matrix covers24 internal
+exposed unrelated InlineConsumer logical custody. At7fdb the complete actual publication
+writer/reader/two-acquisition/target-consumer history passes with the new birth owner;
+full receiving review, matched Haskell format/fixture and exact frozen rerun remain required. The passing Request matrix covers24 internal
 states, not24 maintained test executions. Exactef797 additionally passed the declared
 SOURCE boot reuse native-scope leaf1; empty-binder1 and a procedure refusal0 remain
 separate. No component count grants frontend, performance, release or deployment
 acceptance. Private exact receipts are linked from the owning handoff.
 
-The separable availability foundation at exact `d334ef5af9b40578c86f9e93e37571e5d1a2cee2`
-compiled production/cfg(test) and passed the final three owning Request controls
-(3 selected/executed/passed). Its obsolete Candidate issuer/API/enum paths are
-deleted; source-specific earlier GHC/pairing/retained/scoped/physical controls
-remain bound to their receipts. Full-history review and joined campaign compilation
-are receiving gates. Later publication birth-offer contamination remains an open
-product failure; foundation integration cannot qualify it or the frozen workflow.
+
+## Publication-owner component checkpoint
+
+The foundation943a stays independently accepted. The new Context6/Published8 authority
+owner is a separate source tranche, not yet campaign-foldable under the old worker.
+At exact7fdb, owning production/cfgtest compiled and9 controls executed:8 passed,
+1 EmptyBeta fixture failed. At exact1d6c (identical production), corrected EmptyBeta
+executed1 PASS with actual bounded-empty row presence, no Beta in selected transitive
+execution, Alpha7 authorized, later Full7 allowed and restored birth still Empty.
+These source-specific8+1 results are not9 passes at one SHA.
+
+The actual controls prove strict publication reconstruction, two independent restores,
+real target admission and acquired-row release while fact snapshots remain encodable.
+Same-proof Full/Partial and distinct equal-payload carrier/group issuances remain
+separate; insertion order compares through the already-maintained exact offer-fact map.
+Genuine explicitB versus historicalA demand still refuses. Old failed sensitivity
+receipts remain: unchanged request encoded66entries/5493bytes; acquired-row Weak remained
+alive; reversed live order failed despite identical exact facts. Repaired unchanged
+request/capture records0 encoding work at unrelated history0/16/128; one changed role
+records1entry/324serializedbytes each. HAMT offered bytes/frontier and existing graph,
+metadata, selection-hash, FD and whole-publication work are distinct pending obligations.
+
+Explicit descriptor1/missing-four-map-root and Context5 refusal controls, complete
+independent source review, genuine Published OriginalProductsProducer fixture, matched
+Haskell production reader/profile, joined query/ordinary cells and frozen Persona
+remain required. No absent observation is zero, and no component pass establishes
+frontend, performance, release or deployment acceptance. Private exact terminal/review
+receipts and current commands are in HANDOFF.md.
+
+Current bounded repair gate exact666ee compiled production/cfgtest and executed12/12 PASS,
+including actual samegraph Full/Partial wrongdomain refusal, Acquired-role→Recorded-fact
+row release,0/1 changed-fact work and three descriptor/version DATA controls. Exact9529
+separately compiled and executed the changed mode case1/1 PASS with passive Recorded
+endorsement refusal. Source-specific12+1/two binaries, not13 single-source passes.
+OWN source accepts entry and closed-root repairs; full receiving disposition, matching
+HaskellContext6/descriptor2, genuine Published producer and frozen rerun remain required.
+The unchanged SourceBoot fixture producer2b1498 and Haskelld848 are source-only until
+matched writer/reader/consumer execution. See owning HANDOFF for exact receipts/limits.

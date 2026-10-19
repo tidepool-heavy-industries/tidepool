@@ -381,7 +381,7 @@ fn certify_promotion(
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -617,7 +617,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -639,7 +639,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -772,7 +772,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     let bound_source = exact
         .source()
         .match_product(
-            exact.physical_request(),
+            exact.physical_request().unwrap(),
             &input,
             target_source,
             &evidence_bytes,
@@ -995,7 +995,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1141,7 +1141,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1171,7 +1171,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,
@@ -1196,7 +1196,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             (&exact)
                 .source()
                 .match_product(
-                    (&exact).physical_request(),
+                    (&exact).physical_request().unwrap(),
                     &input,
                     target_source,
                     &evidence_bytes,

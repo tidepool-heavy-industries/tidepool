@@ -1,85 +1,35 @@
-# Warm compiler handoff
+# Warm compiler continuation
 
-Campaign owns integration. Warm owns the cross-language world client, protocol,
-Haskell service, and cold constructor. HOST owns the actual runtime/actor query
-and per-item publication consumers; its existing reserved leaf owns the real
-Rooted retention histories. There are no active Warm native commands.
+Owner `/root/warm_compiler_campaign/warm_workers`, account `inanna`. Continuing implementation; no stop or ordinary-cell completion claim.
 
-## Qualified old-profile parcel
+## Source and next action
 
-The area joins the independently qualified reachable frontier `ade307993b8d`
-with canonical producer/diagnostic source `d7cd1bbb6956`, retaining the existing
-four-argument query factory and old profile. It excludes typed bindings,
-TPCWBIND3, new CID parsing and crypton. The merge keeps current-root block
-custody/counters, admits the actual endpoint's canonical producer before the
-first snapshot/root seal, and retains authentic cold FD bytes and geometry in
-existing opt-in diagnostics. Joined source3d1cc4c79eb passed independent source
-review, Rust production/cfgtest compilation (three local actions), and the
-actual admitted-endpoint producer/root-hydration control (one executed/pass).
-The final handoff update changes documentation only.
+Main `/srv/swarm/checkouts/tidepool-shared-warm-cell-bindings-20261019`, `feature/shared-warm/cell-bindings`, clean product `1a97975fb1f444feb69921a7e5d820a0a657da8b` (next commit changes only this handoff). Full histories preserve current canonical producer/frontier, three-root Context→primary associations→occurrences, Context6/Published8/authority descriptor2, PREP3, SOURCE2, exact demand/native helpers and actual same-output source borrower. Native `/srv/swarm/checkouts/tidepool-shared-warm-cell-native-20261019`, branch `feature/shared-warm/cell-native`, frozen at the same 1a979.
 
-Private evidence root:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/`.
+Actual joined Rust prod/cfgtest/candidate issuer early feedback TERMINAL exit3, tests0: `warm-workers/main1a979-early/{rust.log,RUST-TERMINAL.json,PROCESS-OBSERVED.json}`. Failures: native checkpoint ioError conversion, missing test Inventory imports, new receipt fixtures invoking private issuer constructor, and source borrower treating typed ImportQualifier as String. Existing world_dependencies repairs native/receipt regions; existing OWN/rows repairs only borrowed qualifier predicate. No factory visibility widening. Compile these repairs immediately through same owning three targets, then execute eight actual native/identity controls and captured-alias control. Haskell/controls were not launched in this failed gate.
 
-- `cold-producer-367/TERMINAL.json`, SHA256
-  `f03d844a4ab741c6d3673f3782aba0426214876b9660a0ec0654bf27ea64126b`:
-  six production/cfgtest targets compiled at45f (1022 local actions), two actual
-  Rust controls and two Haskell controls passed. The d7 successor changes only
-  test support. The earlier Unicode capture fixture failure is retained.
-- Independent execution receipt
-  `owned-inputs/source-lifetime/COLD-PRODUCER-EXECUTION-REVIEW-d7cd.md`, SHA256
-  `f56bfbfb80979ebd8493a892f61907937f642b9108ce4efa082a545cd22fb31d`,
-  verifies all29 references. Diagnostic slice copies are evidence, not replayable
-  authority. Directory-resource hashes remain unknown; Rust compiler/hosted
-  cleanup is not_observed.
-- `frontier-join-3d1/TERMINAL.json`, SHA256
-  `afb72f523862bad87bea8e7b5964c7fd6a517942bc9f6fdb6e4a30140b4354d0`:
-  joined production/cfgtest and one counted producer/root-hydration control.
-  The fast control process cgroup was not sampled before exit; runner counts,
-  stream hashes and cleanup limits are retained. This is component evidence.
-- `cell/RUST-FRONTIER-NATIVE-acb.json`, SHA256
-  `4cfb90a00ca47246938114b123bf2fdaa49fdcb76f7863c3d8623c346dc5b1b1`:
-  production/cfgtest compilation and five counted frontier controls passed,
-  including full-recomputation histories, multiplicity/forks, actual changed-path
-  work and failure isolation. Production use is cold bootstrap only.
+Primary missing implementation remains genuine World source/MatchedProduct admission, actual selected native groups +instance/prototype/scaffold proof, SAME certifier WorldCellProgram/per-item private successor capability, then HOST atomic adopter. No caller-ready checked Prepare capability exists. Do not reconstruct legacy requests/plans, default authoritative native/instance/groups, pass full cold input into hot scanning certifier, or retain predecessor-world chains. One cold primary compiler_inputs issuance after canonical producer is retained; hot selected compiler/native rows must use indexed exact owners.
 
-## Actual consumer gates
+`WorldCellOutputAdmission` owns actual origin/END-associated captured output, reservation, decoded typed segments and named hash-bound files. SOURCE2 source receipt borrows SAME output temporarily. Captured ordered aliases validate component mapping, namespace first-root selection and negative facts without filesystem reopen; old Exact filesystem path stays unchanged. This is source accepted; full World semantic source consumer is not wired. Actual checked import rows derive only SAME output rows with exact issuance dedup. Actual group admission must use existing certify_selected_owned_products_in_context_with_validation on permitted selected keys and D-sized available product closure, not all availability/default final groups.
 
-HOST's real query at eea reached service Ready but both first Complete offers
-were rejected. Their authentic carriers were not retained; the exact observed
-cause remains unproven. Static raw-versus-canonical producer defects are fixed.
-After HOST's frozen typed gate settles, its actual query checkout must join the
-qualified old-profile repair and retry fresh under source admission. Preserve
-frontend effect resumption, ordered different-body source receipts, defining
-package reexports and exact hot work counters. No accepted request is replayed.
+Required actual milestone: genuinely published Seed.seed=7 under all three roots; BOTH actual protected recipes import Seed; x<-pure(seed::Int), atomic world+bindings publication, then y<-pure(x+1)=8. GHC must demand Seed on both; actual frontend/finalized/interface counters +cold reference prove Arm B. Delete first operation OUTPUT before second to test lazy .hi dependence. Bare x reuse alone is alias activation. KDecl/inherited lexical migration and physical shared-backing eviction/rollback/END histories remain required.
 
-Required Rooted histories remain unqualified: Resident hit, eviction followed by
-same-world Complete restore, budget-zero active hold through actual END followed
-by disposal/NeedsAcquisition, and backing cleanup failure causing worker exit.
-Conditional oversize disposal walks its owned tree; ordinary cached END does
-not inventory the baseline. The separately qualified package owner/retirement
-controls do not establish these world/query properties.
+## Qualified evidence and limits
 
-## Required ordinary-cell work
+Matched publication FORMAT component exact `6959d9b115df55b0cf30a0781fa626a4d44d3113`: worker5local0, SourceBoot2local0, declared wrapper5local0; actual Tasty `owned scope input reuse` selected/executed1 PASS1 exit0/2.37s (51.825s wrapper phase wall). Actual tuple12 PublishedSeed/Sibling/Consumer frontend/finalization reached, strict Context6/Published8/descriptor2 four-map positive/old-version/missing-root checks completed. ONE case, not separate counted mutation tests. Packet `warm-workers/matched-publication-6959/COMPONENT-EXECUTION.json` SHA256 da3a8fd8bbf65f7a930eb95252bc287092446f6687148fa62d795f428cd185e1 (23refs/4 retained actual binaries). Independent OWN receipt `owned-inputs/MATCHED-PUBLICATION-EXECUTION-REVIEW-6959.md` SHA3470e43272ae482f512f5f863fcacf979f4d27e6ee85de03059f1529655eb04f; Qualification FORMAT receiving SHAadce139612c0847e9b1be3990233789b3b7cb8db017e73c5d737ead7b93b5cdc. Prior Rust3label compile at source6d074 in matched-publication-8e821/phase0 verified unchanged Rust source through6959, not a new Rust compile in6959 packet.
 
-`RUST-CLIENT-MIGRATION` and the accepted CELL-WORLD contract require the world
-API for ordinary prepare, every publishable ordinal's successor, both bindings
-and declaration publication, fork/reload/recovery, and deletion of old full
-ordinary input preparation. This is required work, not an optional cache.
+Previous24d9 actual1FAIL before Published is retained at matched-publication-24d9.6959 fixes sealed callback whitelist to lend demanded owning interface AND packages through captured tokens only; no FS fallback. Earlier e30/8e821/3d compiler failures retained. Limits: no actual Ready/provider boot, World Prepare/runtime/ArmB/performance/frozen bundle proof; directories UNKNOWN/compiler-hosted cleanup not_observed/resource directory hashes unknown; no shared birthCID claim. SOURCE2/native926 are later uncompiled source, not covered by6959.
 
-Separate unqualified source holds typed SymbolIdentity/SessionVarId/scope/row
-capture, a binding HAMT and both-root receiver. The new crypton outputs have
-been realized/rooted, but metadata projection, native compilation, matched
-profile/provider boot and a genuine checked-value alias roundtrip remain open.
-The protocol leaf is implementing matched plan/prepare operations; no ordinary
-cell or delta-publication execution has been accepted.
+Earlier physical transport ac739/4dea+c940 four counted controls PASS4, zero transactions; evidence prepare-transport-ac739/counted-c940/COMPONENT-EXECUTION.json SHA4c808bf8896640c561b19f716db3f670f0f71371fe8147491d0fb2ff224bcb02. Actual old-profile query HOSTf82e/campaignaa59 PASS2/2 with strict positive/negative frontend guards, history/hot/source fences/reexport/CAS and confirmed service/process cleanup; frontend hostwork unmeasured. Separate from ordinary-cell acceptance.
 
-The approved primary carrier extends actual AdmittedCompilerRoles acquired
-ArtifactBinding/ArtifactEntry pairs with a third persistent Materializer root.
-Context role/namespace/scope chooses associations; image content sharing never
-chooses scope. Retain lexical/instance/native proof owners and actual output
-checks. Per-item publication changes only persistent nodes; no full flat seal,
-snapshot offers fold, predecessor chain or hidden ExactCompilationRequest.
+## Owners and live resources
 
-Terminal producers wake dormant owners with exact source/evidence and the next
-consumer action. Keep the old-profile query independent of new profile work.
+All Warm clients terminal after observer32843 exit3; LIVE Warm0GiB/0growth. Native idle Buck641810 stays globally charged in /build.slice/inanna-build-1792428206-641740.scope. No local Nix materialization. Fresh LIVE/build.slice/cgroup/disk sample before each new phase; existing approved 8GiB ADD/12GiB growth, no idle subtraction/hypothetical Host reservation. Last admission global38.844GB+8.590GB=47.434GB<80GiB, disk413.490GB; historical, not future reservation. Use swarm-build, pinned dev-shell/Buck, --local-only -c remote.enabled=false -j1; installed launcher COMMAND-only.
+
+Protocol existing child completed6959, checkout tidepool-shared-warm-worker-cell-20261019. Handoff private warm-workers/protocol/cell/HANDOFF.md. World_dependencies existing child reactivated bounded actual compile repairs, checkout tidepool-world-demanded-basis-20261019, branch warm-world-demanded-native, prior exact9262644. Handoff /srv/swarm/evidence/inanna/world-dependencies-20261019/handoff.json. Source native helper cost fix shares full unchanged fact root, D-subset builds D; genuine generic0/32/128 x3 counter sensitivity and exact Original ID tests source-only until executed. No native lane delegated.
+
+OWN/rows existing child reactivated qualifier repair, checkout tidepool-shared-warm-world-source-admission-20261019, branch feature/shared-warm/world-source-membership. Clean786010/producta9d20 full history merged main1a979. Handoff plans/shared-warm-compiler/owned-inputs/HANDOFF-world-source-admission.md there. Owns only source/Product adapter, disjoint native helper. Same-output demand borrower source accepted; actual full source ctor awaits our closed checked/scaffold/group/instance witnesses. OWN high independently reviews final adapter/execution.
+
+HOST is sole runtime finalizer/atomic adopter, dormant ACA3: eight targets+3 counted controls PASS independently verified, no lane. World admission retains same reservation Arc/current original/private key. Final settlement must consume inseparable item certificate/cap, actual binder/native delta, SAME PreparedBindingPromotion postkey/public namespace. Exact semantic base CAS, changed semantic base refuses; storage restage may retry. Wake HOST with real certificate issuer body/OID, no placeholder. Handoff tidepool-shared-warm-host-inputs-20261019/plans/shared-warm-compiler/host-inputs/HANDOFF.md. Qualified Reloadf062 required for genuine Seed cells. Qualification FORMAT6959 accepted, no native; actual caller integration still pending. Campaign current944b/4104 foundation compiled8/workflow154/counted43 PASS; resources released.
+
+At consequential exact candidate/terminal, status-check campaign/HOST/OWN/Qualification: running→send_message, completed→followup_task. Wake rows immediately with concrete closed witnesses, HOST immediately with actual checked cap. No periodic polling/new actors. Preserve WIP/failures and observe every launched process terminal.

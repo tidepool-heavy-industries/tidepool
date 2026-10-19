@@ -16,10 +16,12 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
-pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+pub use compiler_projection::{
+    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
-    RecordedInputNativeDecision,
+    CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
+    IssuedInputNativeDecisions, RecordedCompilerRole, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -1265,6 +1267,8 @@ pub enum ArtifactInventoryFailure {
     MetadataConflict { artifact: ArtifactId },
     #[error("compiler interface owner {owner:?} has differing artifacts")]
     OwnerConflict { owner: ExactModuleIdentity },
+    #[error("published source owner {owner:?} has a different acquired native birth domain")]
+    PublicationNativeDomainMismatch { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("artifact {artifact:?} has multiple issued dependency bindings")]
@@ -5817,24 +5821,79 @@ fn lock_materialization_cache(
     })
 }
 
+/// Actual work of the existing admitted graph walk, including repeated edges.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeClosureWork {
+    pub(crate) nodes: usize,
+    pub(crate) edges: usize,
+    pub(crate) queued: usize,
+}
+
 fn admitted_closure(
     state: &InventoryState,
     roots: impl Iterator<Item = InventoryNodeKey>,
 ) -> imbl::OrdSet<InventoryNodeKey> {
-    let mut pending = roots.collect::<Vec<_>>();
+    admitted_closure_with_operation(state, roots, None)
+        .expect("unbudgeted admitted graph walk cannot refuse")
+        .0
+}
+
+fn admitted_closure_with_operation(
+    state: &InventoryState,
+    roots: impl Iterator<Item = InventoryNodeKey>,
+    operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+) -> Result<(imbl::OrdSet<InventoryNodeKey>, NativeClosureWork), CompileError> {
+    let reserve_pending = || -> Result<(), CompileError> {
+        if let Some(operation) = operation {
+            // Two slots cover Vec capacity growth before each push.
+            operation
+                .reserve::<(InventoryNodeKey, InventoryNodeKey)>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        Ok(())
+    };
+    let mut pending = Vec::new();
+    let mut work = NativeClosureWork::default();
+    for root in roots {
+        if operation.is_some() {
+            crate::host_work::checkpoint()?;
+        }
+        reserve_pending()?;
+        pending.push(root);
+        work.queued += 1;
+    }
     let mut seen = imbl::OrdSet::new();
     while let Some(id) = pending.pop() {
+        if operation.is_some() {
+            crate::host_work::checkpoint()?;
+        }
         // Planned seeds are validated by the admission solver, not represented
         // as retained vertices until its complete atomic plan is committed.
-        if !state.contains_node(&id) {
+        if !state.contains_node(&id) || seen.contains(&id) {
             continue;
         }
-        if seen.insert(id).is_none() {
-            state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            pending.extend(state.outgoing(id).map(|(target, _)| target));
+        if let Some(operation) = operation {
+            operation
+                .reserve::<(InventoryNodeKey, [usize; 8])>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        seen.insert(id);
+        work.nodes += 1;
+        state.graph_visits.fetch_add(1, Ordering::Relaxed);
+        for (target, _) in state.outgoing(id) {
+            if let Some(operation) = operation {
+                crate::host_work::checkpoint()?;
+                operation
+                    .charge(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            }
+            reserve_pending()?;
+            pending.push(target);
+            work.edges += 1;
+            work.queued += 1;
         }
     }
-    seen
+    Ok((seen, work))
 }
 
 #[track_caller]
@@ -7948,7 +8007,7 @@ impl ArtifactView {
             input_decisions.facts.insert(
                 owner.clone(),
                 compiler_projection::RecordedInputNativeDecision {
-                    role: role.clone(),
+                    role: role.recorded_fact(),
                     groups: chosen,
                 },
             );
@@ -18085,6 +18144,18 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
+            native_authority: crate::artifact_inventory::PublicationNativeAuthority::recorded(
+                crate::exact_context::PublicationNativeFacts::maintain(
+                    None,
+                    crate::exact_context::PublicationNativeMaps {
+                        roles: Default::default(),
+                        offers: Default::default(),
+                        native_availability: Default::default(),
+                        input_decisions: Default::default(),
+                    },
+                )
+                .unwrap(),
+            ),
         };
         let mut projection = CompilerInputProjection::default();
         projection

@@ -688,10 +688,34 @@ fn decode_typed_segment_plans(
     value: &Value,
     program: &CheckedPlannedCellSpecification,
 ) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        program.parsed_plan.items(),
+        &program.slots,
+        program.reservation_digest,
+    )
+}
+
+pub(crate) fn decode_world_typed_segment_plans(
+    value: &Value,
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        reservation.plan().items(),
+        reservation.slots(),
+        *reservation.admission_digest(),
+    )
+}
+
+fn decode_typed_segment_plan_facts(
+    value: &Value,
+    parsed_items: &[crate::cell_plan::ParsedCellPlanItem],
+    slots: &[CheckedPlannedCellSlot],
+    reservation_digest: [u8; 32],
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
     use crate::cell_plan::ParsedCellPlanKind as Kind;
-    let expected = program
-        .parsed_plan
-        .items()
+    let expected = parsed_items
         .iter()
         .filter(|item| matches!(item.kind(), Kind::Bind | Kind::Expression))
         .map(|item| item.index())
@@ -703,8 +727,7 @@ fn decode_typed_segment_plans(
         let digest = string(&fields[0])?;
         let reservation = string(&fields[1])?;
         let root = string(&fields[2])?;
-        if reservation != hex(&program.reservation_digest) || root.is_empty() || root.len() > 65536
-        {
+        if reservation != hex(&reservation_digest) || root.is_empty() || root.len() > 65536 {
             return Err(failure("typed segment root or reservation differs"));
         }
         let mut hash = Sha256::new();
@@ -736,9 +759,7 @@ fn decode_typed_segment_plans(
                 .iter()
                 .map(|value| string(value).map(str::to_owned))
                 .collect::<Result<Vec<_>, _>>()?;
-            let parsed = program
-                .parsed_plan
-                .items()
+            let parsed = parsed_items
                 .get(ordinal)
                 .ok_or_else(|| failure("typed segment item is outside parser plan"))?;
             if consumed.len() >= expected.len()
@@ -762,7 +783,7 @@ fn decode_typed_segment_plans(
             frame(entry);
             frame(&generation.to_string());
             frame(kind);
-            let body = match (kind, parsed.kind(), program.slots.get(ordinal)) {
+            let body = match (kind, parsed.kind(), slots.get(ordinal)) {
                 ("action", Kind::Bind, Some(CheckedPlannedCellSlot::Bind { value }))
                     if *value == generation
                         && captures == parsed.binders()
@@ -1705,6 +1726,59 @@ pub(crate) struct CheckedValueImportAuthority {
 }
 
 impl CheckedValueImportAuthority {
+    /// Borrow only the exact rows actually selected by this preparation. The
+    /// output owner has already correlated each input reference with its
+    /// current occurrence, runtime identity and original issuing row.
+    pub(crate) fn from_world_output(
+        output: &crate::compiler_world::WorldCellOutputAdmission,
+    ) -> Result<Self, CompileError> {
+        let operation = &output.validation.inventory;
+        let producer = output.reservation().plan().producer_sha256();
+        let mut values = BTreeMap::<String, CapturedValueInterface>::new();
+        for original in &output.demanded_rows {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if &original.authority.0 != producer {
+                return Err(failure("world value import has another compiler producer"));
+            }
+            if let Some(CapturedValueInterface::Certified {
+                original: previous, ..
+            }) = values.get(&original.interface.module)
+            {
+                if !previous.same_world_type_row(original) {
+                    return Err(failure("world value import has competing issuing rows"));
+                }
+                continue;
+            }
+            operation
+                .reserve::<(String, CapturedValueInterface, [usize; 8])>(1)
+                .and_then(|()| {
+                    operation.charge(
+                        original
+                            .interface
+                            .module
+                            .len()
+                            .saturating_mul(2)
+                            .saturating_add(original.interface.path.as_os_str().len())
+                            .saturating_add(original.interface.digest.len()),
+                    )
+                })
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            values.insert(
+                original.interface.module.clone(),
+                CapturedValueInterface::Certified {
+                    input: original.interface.clone(),
+                    original: Arc::clone(original),
+                },
+            );
+        }
+        Ok(Self {
+            values: Arc::new(values),
+        })
+    }
+
     fn capture(values: impl Iterator<Item = CapturedValueInterface>) -> Self {
         Self {
             values: Arc::new(
@@ -2862,7 +2936,6 @@ impl CheckedTypedEntry {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         producer: [u8; 32],
     ) -> Result<Self, CompileError> {
-        use tidepool_repr::execution_schema::Group;
         let receipt = decode(&read(directory.join("checked-item.cbor"), 4 << 20)?)?;
         let fields = row(&receipt, 9)?;
         validate_item_receipt(
@@ -2890,6 +2963,39 @@ impl CheckedTypedEntry {
             Value::Integer(value) => u32::try_from(value).map_err(failure)?,
             _ => return Err(failure("typed native original ordinal is not integer")),
         };
+        if string(&proof[0])? != plan.digest
+            || origin.occurrence != plan.root
+            || entry.occurrence != item.entry
+        {
+            return Err(typed_entry_failure());
+        }
+        Self::from_original_entry(
+            plan.digest.clone(),
+            origin,
+            entry,
+            original_ordinal,
+            target,
+            owner,
+            products,
+            producer,
+        )
+    }
+
+    // Native membership is independent of the physical receipt format. The
+    // owning operation must authenticate its plan before reaching this check.
+    // A receipt ordinal or SymbolIdentity alone cannot issue a typed entry.
+    #[allow(clippy::too_many_arguments)]
+    fn from_original_entry(
+        plan_digest: String,
+        origin: tidepool_repr::execution_schema::SymbolIdentity,
+        entry: tidepool_repr::execution_schema::SymbolIdentity,
+        original_ordinal: u32,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        producer: [u8; 32],
+    ) -> Result<Self, CompileError> {
+        use tidepool_repr::execution_schema::Group;
         let target_entry = target
             .bindings()
             .iter()
@@ -2908,10 +3014,7 @@ impl CheckedTypedEntry {
                 )
             })
             .collect::<Vec<_>>();
-        if string(&proof[0])? != plan.digest
-            || origin.occurrence != plan.root
-            || entry.occurrence != item.entry
-            || origin.unit != owner.unit
+        if origin.unit != owner.unit
             || origin.module != owner.module
             || entry.unit != origin.unit
             || entry.module != origin.module
@@ -2921,7 +3024,7 @@ impl CheckedTypedEntry {
             return Err(typed_entry_failure());
         }
         Ok(Self {
-            plan_digest: plan.digest.clone(),
+            plan_digest,
             origin,
             entry,
             original_ordinal,

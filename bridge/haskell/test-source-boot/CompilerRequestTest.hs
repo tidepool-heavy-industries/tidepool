@@ -74,6 +74,43 @@ worldRequestBoundaries = do
       pure (void (scopedEnsureWorld scope resident),void (runBoundWorldQuery request))
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
+  let recipe = WorldCellRecipe "(this must not parse" "module CellCheck where" []
+      cellPlan = WorldCellPlanRequest root "foreign-worker-realization" recipe "/unavailable/cell-plan.cbor"
+      cellPrepare = WorldCellPrepareRequest root "foreign-worker-realization" recipe "untrusted-receipt" (BS.replicate 32 1)
+        [] "/unavailable/cell-operation" "/unavailable/cell-prepared.cbor"
+      decode fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just request) -> pure request
+        other -> fail ("invalid held cell fixture: " ++ show other)
+  let decodeSlots slots = workerRequestFromArgv (workerArgv
+        [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
+  case decodeSlots [(0,PlannedDeclaration 1),(1,PlannedBind 1)] of
+    Right (Just _) -> pure ()
+    other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
+  forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
+    ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
+      case decodeSlots slots of
+        Left _ -> pure ()
+        other -> fail ("held request admitted duplicate module reservations: " ++ show other)
+  planArgs <- decode [WorldCellPlan cellPlan]
+  prepareArgs <- decode [WorldCellPrepare cellPrepare]
+  (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
+    latePlan <- (withBoundCompilerRequest (const (pure ())) scope planArgs >=> finishCompletion) $ \request -> do
+      absent <- try (runBoundWorldCellPlan request) :: IO (Either WorldCellRefusal BS.ByteString)
+      unless (either (== WorldCellUnavailable) (const False) absent)
+        (fail "unheld plan parsed source or obtained a compiler world")
+      pure (void (runBoundWorldCellPlan request))
+    latePrepare <- (withBoundCompilerRequest (const (pure ())) scope prepareArgs >=> finishCompletion) $ \request -> do
+      absent <- validateBoundWorldCell request
+      unless (either (== WorldCellUnavailable) (const False) absent)
+        (fail "unheld prepare parsed source or allocated compiler generation state")
+      compiled <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
+        :: IO (Either WorldCellRefusal CheckedEnvironmentResult)
+      unless (either (== WorldCellUnavailable) (const False) compiled)
+        (fail "world compiler bypassed its actual hold/admission owner")
+      pure (void (validateBoundWorldCell request))
+    pure (latePlan,latePrepare)
+  try latePlan >>= requireCancellation
+  try latePrepare >>= requireCancellation
 
 -- Exercise the production human diagnostic emitter without manufacturing a
 -- rooted package/world. Actual Complete dispatch still requires the HOST probe.
@@ -125,6 +162,75 @@ worldAcquisitionDiagnostics = do
 -- They enter the same materialization owner used before world publication.
 worldMaterializationBoundaries :: IO ()
 worldMaterializationBoundaries = do
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")]
+    materialized <- materializeWorldSources parent sources Set.empty pure
+    child <- onlyChild parent
+    let directory = parent </> child
+    -- Three direct realized owners share exactly one physical source tree.
+    retainWorldMaterialization materialized
+    retainWorldMaterialization materialized
+    owners <- worldMaterializationOwners materialized
+    unless (owners == Just 3) (fail "world fork did not retain three direct backing owners")
+    forM_ [2,1] $ \remaining -> do
+      removed <- releaseWorldMaterialization materialized
+      alive <- doesDirectoryExist directory
+      owners <- worldMaterializationOwners materialized
+      unless (not removed && alive && owners == Just remaining)
+        (fail "dropping a predecessor removed surviving successor backing")
+      measured <- measureBacking directory
+      unless (measured == worldMaterializationCharge materialized)
+        (fail "shared source backing changed its once-issued physical charge")
+    removed <- releaseWorldMaterialization materialized
+    alive <- doesDirectoryExist directory
+    owners <- worldMaterializationOwners materialized
+    unless (removed && not alive && owners == Just 0)
+      (fail "last realized world failed to release its physical backing")
+    repeated <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    unless (either (const True) (const False) repeated)
+      (fail "released backing accepted a duplicate release")
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    first <- materializeWorldSources parent sources Set.empty pure
+    firstChild <- onlyChild parent
+    second <- materializeWorldSources parent sources Set.empty pure
+    children <- listDirectory parent
+    secondChild <- case filter (/= firstChild) children of
+      [child] -> pure child
+      _ -> fail "independent cold acquisitions did not keep distinct physical backing"
+    firstOwners <- worldMaterializationOwners first
+    secondOwners <- worldMaterializationOwners second
+    firstCharge <- measureBacking (parent </> firstChild)
+    secondCharge <- measureBacking (parent </> secondChild)
+    unless (firstOwners == Just 1 && secondOwners == Just 1
+        && firstCharge == worldMaterializationCharge first
+        && secondCharge == worldMaterializationCharge second)
+      (fail "equal source bytes substituted sharing for actual physical acquisitions")
+    _ <- releaseWorldMaterialization first
+    remaining <- doesDirectoryExist (parent </> secondChild)
+    unless remaining (fail "independent acquisition lost backing when its equal peer retired")
+    _ <- releaseWorldMaterialization second
+    requireEmpty parent
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    materialized <- materializeWorldSources parent sources Set.empty pure
+    child <- onlyChild parent
+    let directory = parent </> child
+        root = directory </> "root-0"
+    permissions <- getPermissions root
+    setPermissions root (permissions {readable=False,writable=False,searchable=False})
+    failed <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    setPermissions root permissions
+    unless (either (const True) (const False) failed)
+      (fail "unreadable backing unexpectedly reported successful cleanup")
+    owners <- worldMaterializationOwners materialized
+    unless (owners == Nothing) (fail "cleanup failure reported settled backing ownership")
+    retained <- try (retainWorldMaterialization materialized) :: IO (Either SomeException ())
+    unless (either (const True) (const False) retained)
+      (fail "quarantined backing accepted a new successor")
+    retried <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    unless (either (const True) (const False) retried)
+      (fail "quarantined backing manufactured a successful release")
   withScratch $ \parent -> do
     sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")
       ,("Nested/B.hs","module Nested.B where\n")]
@@ -434,6 +540,11 @@ completedRequestRelease = withScratch $ \work -> do
     refused <- try (void (prepareArtifacts originals work first [] [] Map.empty []))
       :: IO (Either SomeException ())
     requireCancellation refused
+    -- A later live allowance on this same GHC scope cannot substitute for the
+    -- completed result's closed issuing allowance, even before pending lookup.
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \later -> do
+      stolen <- try (commitPreparedWorldDependencies later first) :: IO (Either SomeException ())
+      requireCancellation stolen
 
 requireCancellation :: Either SomeException () -> IO ()
 requireCancellation result = case result of

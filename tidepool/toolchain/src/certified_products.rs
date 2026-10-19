@@ -2607,10 +2607,87 @@ enum ReceiptSourceSelection {
 
 #[derive(Clone, Debug)]
 struct ReceiptNativeSelection {
+    original: ReceiptOriginalIdentity,
     origin: ReceiptNativeOrigin,
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
     availability: ReceiptNativeAvailability,
+}
+
+/// Current physical products acquire their exact identity from the producing
+/// cohort. Cached owners and canonical equality cannot choose an Original ID.
+#[derive(Clone, Copy, Debug)]
+enum ReceiptOriginalIdentity {
+    PendingProduct,
+    Bound(crate::artifact_inventory::ArtifactId),
+}
+
+impl ReceiptNativeSelection {
+    fn original_artifact_id(&self) -> CertResult<crate::artifact_inventory::ArtifactId> {
+        match &self.availability {
+            ReceiptNativeAvailability::Issued(row) => {
+                let actual = row.original_artifact_id();
+                if matches!(self.original, ReceiptOriginalIdentity::Bound(id) if id != actual) {
+                    return Err(CertificationError::Mismatch(
+                        "issued original artifact identity",
+                    ));
+                }
+                Ok(actual)
+            }
+            ReceiptNativeAvailability::NewProduct { .. } => match self.original {
+                ReceiptOriginalIdentity::Bound(id) => Ok(id),
+                ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
+                    "new product original identity is not bound",
+                )),
+            },
+        }
+    }
+
+    fn original_entry(
+        &self,
+        interface: crate::artifact_inventory::ArtifactId,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
+    ) -> CertResult<Arc<crate::artifact_inventory::ArtifactEntry>> {
+        use crate::artifact_inventory::ArtifactPayload;
+        let id = self.original_artifact_id()?;
+        let retained = metadata
+            .artifacts
+            .get(&id)
+            .ok_or(CertificationError::Mismatch(
+                "selected original is outside retained custody",
+            ))?;
+        let ArtifactPayload::Original(product) = &retained.payload else {
+            return Err(CertificationError::Mismatch("selected original payload"));
+        };
+        let canonical = metadata
+            .artifacts
+            .get(&interface)
+            .ok_or(CertificationError::Mismatch(
+                "selected original canonical custody",
+            ))?;
+        if retained.descriptor.id != id
+            || product.owner() != &self.owner
+            || !matches!(&canonical.payload, ArtifactPayload::Canonical(current) if Some(current) == product.module_interface())
+        {
+            return Err(CertificationError::Mismatch(
+                "selected original owner or canonical interface",
+            ));
+        }
+        if let ReceiptNativeAvailability::Issued(row) = &self.availability {
+            let actual = row
+                .target_original(&self.owner)
+                .ok_or(CertificationError::Mismatch("issued original owner"))?;
+            if actual.descriptor.id != id
+                || (!Arc::ptr_eq(actual, retained) && actual.as_ref() != retained.as_ref())
+            {
+                return Err(CertificationError::Mismatch(
+                    "issued original differs from retained custody",
+                ));
+            }
+            return Ok(Arc::clone(actual));
+        }
+        Ok(Arc::clone(retained))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2720,6 +2797,17 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    /// Encoding bases borrow immutable facts only; native decisions still come
+    /// from this selection's checked continuation and physical output.
+    pub(crate) fn native_fact_base(
+        &self,
+    ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => Some(source.native_fact_owner()),
+            CertifiedInputOrigin::NewProducts => None,
+        }
+    }
+
     /// A validated output with no certified original rows carries no inherited
     /// input choice. This cannot construct a native role or availability.
     pub(crate) fn empty_product_output() -> Self {
@@ -2777,7 +2865,7 @@ impl CertifiedSourceSelection {
         >,
     ) -> CertResult<()> {
         for selected in Arc::make_mut(&mut self.modules).values_mut() {
-            let ReceiptSourceSelection::Native { native, .. } = selected else {
+            let ReceiptSourceSelection::Native { interface, native } = selected else {
                 continue;
             };
             if !matches!(
@@ -2786,20 +2874,22 @@ impl CertifiedSourceSelection {
             ) {
                 continue;
             }
-            let mut candidates = issued.iter().filter_map(|(id, availability)| {
-                let entry = metadata.artifacts.get(id)?;
-                let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload
-                else {
-                    return None;
-                };
-                (product.owner() == &native.owner).then_some(availability)
-            });
-            let original = candidates.next().ok_or(CertificationError::Mismatch(
-                "new product lacks issued native availability",
+            let id = native.original_artifact_id()?;
+            let original = issued.get(&id).ok_or(CertificationError::Mismatch(
+                "new product lacks exact issued native availability",
             ))?;
-            if candidates.next().is_some() {
+            let entry = native.original_entry(*interface, metadata)?;
+            let actual =
+                original
+                    .target_original(&native.owner)
+                    .ok_or(CertificationError::Mismatch(
+                        "new product issued original owner",
+                    ))?;
+            if original.original_artifact_id() != id
+                || (!Arc::ptr_eq(actual, &entry) && actual.as_ref() != entry.as_ref())
+            {
                 return Err(CertificationError::Mismatch(
-                    "new product has competing issued native availability",
+                    "new product issued original identity",
                 ));
             }
             native.availability = ReceiptNativeAvailability::Issued(Arc::clone(original));
@@ -2809,6 +2899,16 @@ impl CertifiedSourceSelection {
 
     pub(crate) fn from_compiler_inputs(
         inputs: &crate::declaration_context::RequestCompilerInputs,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        Self::from_product_compiler_inputs(
+            &crate::declaration_context::ProductCompilerInputs::from_exact(inputs),
+            operation,
+        )
+    }
+
+    pub(crate) fn from_product_compiler_inputs(
+        inputs: &crate::declaration_context::ProductCompilerInputs<'_>,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let metadata = &inputs.metadata;
@@ -2867,33 +2967,19 @@ impl CertifiedSourceSelection {
         artifacts: &crate::artifact_inventory::ArtifactView,
     ) -> CertResult<Vec<Arc<crate::artifact_inventory::ArtifactEntry>>> {
         let metadata = artifacts.metadata_snapshot();
-        self.native_selections()
-            .filter(|native| {
-                matches!(
-                    native.availability,
-                    ReceiptNativeAvailability::NewProduct { .. }
-                )
-            })
-            .map(|native| {
-                let entries = metadata
-                    .artifacts
-                    .values()
-                    .filter_map(|entry| match &entry.payload {
-                        crate::artifact_inventory::ArtifactPayload::Original(product)
-                            if product.owner() == &native.owner =>
-                        {
-                            Some(Arc::clone(entry))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                match entries.as_slice() {
-                    [entry] => Ok(Arc::clone(entry)),
-                    _ => Err(CertificationError::Mismatch(
-                        "complete native selection payload",
-                    )),
+        self.visible_modules()
+            .filter_map(|(_, selected)| match selected {
+                ReceiptSourceSelection::Native { interface, native }
+                    if matches!(
+                        native.availability,
+                        ReceiptNativeAvailability::NewProduct { .. }
+                    ) =>
+                {
+                    Some((*interface, native))
                 }
+                _ => None,
             })
+            .map(|(interface, native)| native.original_entry(interface, &metadata))
             .collect()
     }
 
@@ -3248,16 +3334,15 @@ impl CertifiedSourceSelection {
         let entries = projection
             .entries_from_metadata(metadata)
             .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
-        let products = entries
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    Some(product.clone())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut selection = Self::from_projected_originals(&products, operation)?;
+        let mut selection = Self::from_projected_original_entries(
+            entries.values().filter(|entry| {
+                matches!(
+                    entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            }),
+            operation,
+        )?;
         let requirements = projection
             .roles()
             .into_iter()
@@ -3591,7 +3676,7 @@ impl CertifiedSourceSelection {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
-        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        use crate::artifact_inventory::CompilerInputProjection;
         let mut entries = Vec::new();
         for ((unit, module), selected) in self.compiler_namespace_rows() {
             if omitted_generated
@@ -3614,18 +3699,7 @@ impl CertifiedSourceSelection {
                 ))?;
             entries.push(Arc::clone(interface));
             if let Some(native) = selected.original {
-                let matching = metadata.artifacts.values().filter(|entry| {
-                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
-                }).collect::<Vec<_>>();
-                let [entry] = matching.as_slice() else {
-                    return Err(CertificationError::OriginalSelectionConflict(Box::new(
-                        OriginalSelectionConflict {
-                            selected: native.owner.clone(),
-                            artifacts: matching.iter().map(|entry| entry.descriptor.id).collect(),
-                        },
-                    )));
-                };
-                entries.push(Arc::clone(entry));
+                entries.push(native.original_entry(selected.interface, metadata)?);
             }
         }
         // The typed issuer already certified these roles and their original
@@ -3635,12 +3709,16 @@ impl CertifiedSourceSelection {
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))
     }
 
-    fn from_projected_originals(
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    fn from_projected_original_entries<'a>(
+        entries: impl IntoIterator<Item = &'a Arc<crate::artifact_inventory::ArtifactEntry>>,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let mut selected = Self::new_product_ingress();
-        for product in products {
+        for entry in entries {
+            let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload
+            else {
+                return Err(CertificationError::Mismatch("projected original entry"));
+            };
             let witness = product
                 .original_native()
                 .ok_or(CertificationError::Mismatch(
@@ -3668,6 +3746,7 @@ impl CertifiedSourceSelection {
                                 ))?,
                         ),
                         native: ReceiptNativeSelection {
+                            original: ReceiptOriginalIdentity::Bound(entry.descriptor.id),
                             origin: ReceiptNativeOrigin::NewProduct,
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
@@ -3685,6 +3764,58 @@ impl CertifiedSourceSelection {
             }
         }
         Ok(selected)
+    }
+
+    #[cfg(test)]
+    fn from_projected_originals(
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        let entries = products
+            .iter()
+            .map(|product| {
+                let producer = product
+                    .module_interface()
+                    .ok_or(CertificationError::Mismatch(
+                        "fixture original canonical issuer",
+                    ))?
+                    .producer_sha256();
+                crate::artifact_inventory::ArtifactEntry::original(producer, product.clone())
+                    .map(Arc::new)
+                    .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))
+            })
+            .collect::<CertResult<Vec<_>>>()?;
+        Self::from_projected_original_entries(entries.iter(), operation)
+    }
+
+    fn bind_produced_originals(&mut self, produced: &IssuedGroupCandidates) -> CertResult<()> {
+        for selected in Arc::make_mut(&mut self.modules).values_mut() {
+            let ReceiptSourceSelection::Native { native, .. } = selected else {
+                continue;
+            };
+            if !matches!(native.original, ReceiptOriginalIdentity::PendingProduct) {
+                continue;
+            }
+            if !matches!(native.origin, ReceiptNativeOrigin::NewProduct)
+                || !matches!(
+                    native.availability,
+                    ReceiptNativeAvailability::NewProduct { .. }
+                )
+            {
+                return Err(CertificationError::Mismatch(
+                    "pending original is not a current product",
+                ));
+            }
+            let actual =
+                produced
+                    .originals
+                    .get(&native.owner)
+                    .ok_or(CertificationError::Mismatch(
+                        "current product lacks its producing original identity",
+                    ))?;
+            native.original = ReceiptOriginalIdentity::Bound(*actual);
+        }
+        Ok(())
     }
 
     fn admit_interface(
@@ -3775,6 +3906,7 @@ impl CertifiedSourceSelection {
             ReceiptSourceSelection::Native {
                 interface,
                 native: ReceiptNativeSelection {
+                    original: ReceiptOriginalIdentity::PendingProduct,
                     origin: ReceiptNativeOrigin::NewProduct,
                     owner: owner.clone(),
                     version,
@@ -8336,19 +8468,21 @@ pub(crate) fn certify_products_with_validation(
                 })
                 .collect()
         });
-    let inherited_products = projected_metadata.map_or_else(Vec::new, |metadata| {
-        metadata
-            .retained
-            .artifacts
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    Some(product.clone())
+    let mut inherited_products = Vec::new();
+    if let Some(admission) = exact {
+        for entry in admission.retained_product_entries() {
+            if let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload {
+                if admission.is_world_compilation() {
+                    // Reserve capacity growth before copying a demanded product
+                    // handle. The exact legacy route keeps its existing budget.
+                    validation
+                        .inventory
+                        .reserve::<[crate::recovery_artifacts::CertifiedRecoveryProduct; 2]>(1)?;
                 }
-                _ => None,
-            })
-            .collect()
-    });
+                inherited_products.push(product.clone());
+            }
+        }
+    }
     let mut retained_seals = BTreeMap::new();
     for interface in inherited_module_interfaces.iter().chain(
         projected_originals
@@ -8365,9 +8499,9 @@ pub(crate) fn certify_products_with_validation(
             ));
         }
     }
-    if projected_metadata
+    if exact
         .into_iter()
-        .flat_map(|metadata| metadata.retained.artifacts.values())
+        .flat_map(|admission| admission.retained_product_entries())
         .any(|entry| entry.descriptor.producer_sha256 != producer_sha256)
     {
         return Err(CertificationError::Mismatch(
@@ -8502,7 +8636,7 @@ pub(crate) fn certify_products_with_validation(
                 let version = if let Some(admission) = exact {
                     crate::module_candidates::exact_module_version_for_product(
                         endpoint_identity,
-                        &admission.physical_request().semantic_sha256,
+                        &admission.product_context_digest(),
                         &key.0,
                         &key.1,
                         &source_sha,
@@ -8940,7 +9074,7 @@ pub(crate) fn certify_products_with_validation(
             let inputs = compiler_inputs
                 .as_ref()
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?;
-            CertifiedSourceSelection::from_compiler_inputs(inputs, &validation.inventory)?
+            CertifiedSourceSelection::from_product_compiler_inputs(&inputs, &validation.inventory)?
         }
         None => CertifiedSourceSelection::new_product_ingress(),
     };
@@ -9256,8 +9390,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                             &raw_producer,
                         ),
-                    semantic_sha256: exact
-                        .map(|admission| admission.physical_request().semantic_sha256),
+                    semantic_sha256: exact.map(|admission| admission.product_context_digest()),
                     include,
                     source_path: fresh_input_path,
                     source: final_target_source,
@@ -9515,6 +9648,7 @@ pub(crate) fn certify_products_with_validation(
         cached_modules = origin_counts[1][0], cached_group_rows = origin_counts[1][1], cached_original_bytes = origin_counts[1][2],
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
     let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
+    source_selection.bind_produced_originals(&groups)?;
     Ok(CertifiedProducts {
         groups,
         recovery_products: recovery_products.into(),
@@ -12264,6 +12398,148 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn receipt_original_identity_selects_exact_issued_artifact_among_equal_owners() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
+        let product = full_native_fixture("ExactReceiptIdentity", vec![(7, vec![])], 1);
+        let producer = product.module_interface().unwrap().producer_sha256();
+        let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
+        let other = Arc::new(
+            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
+                .unwrap(),
+        );
+        let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload
+        else {
+            unreachable!();
+        };
+        assert_eq!(product.owner(), other_product.owner());
+        assert_ne!(entry.descriptor.id, other.descriptor.id);
+        let inventory = ArtifactInventory::default();
+        let left = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let right = inventory
+            .admit_shared(&inventory.empty_view(), vec![other.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            left.clone(),
+        )
+        .unwrap();
+        let both = left.retain_custody(&right).unwrap();
+        let metadata = both.metadata_snapshot();
+        assert!(metadata.artifacts.contains_key(&entry.descriptor.id));
+        assert!(metadata.artifacts.contains_key(&other.descriptor.id));
+        let operation = InventoryOperation::new(Default::default());
+        let mut selected =
+            CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
+                .unwrap();
+        let issued = support
+            .native_availability()
+            .rows()
+            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
+            .collect();
+        selected
+            .finish_new_product_availability(&metadata, &issued)
+            .unwrap();
+        assert_eq!(
+            selected
+                .compiler_projection_from_metadata(&metadata, &BTreeSet::new())
+                .unwrap(),
+            projection
+        );
+        let native = selected.native_selections().next().unwrap();
+        let actual = native
+            .original_entry(projection.roles()[0].interface(), &metadata)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &actual,
+            issued[&entry.descriptor.id]
+                .target_original(product.owner())
+                .unwrap()
+        ));
+        let mut missing = metadata.as_ref().clone();
+        missing.artifacts.remove(&entry.descriptor.id);
+        assert!(
+            selected
+                .compiler_projection_from_metadata(&missing, &BTreeSet::new())
+                .is_err(),
+            "another artifact with equal CachedHomeOwner cannot replace the actual issued Original"
+        );
+    }
+
+    #[test]
+    fn receipt_new_product_identity_binds_only_actual_producing_cohort() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
+        let product = full_native_fixture("ProducedReceiptIdentity", vec![(7, vec![])], 1);
+        let canonical = product.module_interface().unwrap();
+        let entry = Arc::new(
+            ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap(),
+        );
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            view.clone(),
+        )
+        .unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        let mut selected = CertifiedSourceSelection::new_product_ingress();
+        selected
+            .admit_current(product.owner(), ProductOrigin::Fresh, canonical, &operation)
+            .unwrap();
+        assert!(
+            selected.compiler_projection(&view).is_err(),
+            "unfinished producer identity cannot enter Original projection"
+        );
+        assert!(selected
+            .bind_produced_originals(&IssuedGroupCandidates::empty())
+            .is_err());
+        let produced =
+            IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&product)).unwrap();
+        selected.bind_produced_originals(&produced).unwrap();
+        assert_eq!(
+            selected
+                .native_selections()
+                .next()
+                .unwrap()
+                .original_artifact_id()
+                .unwrap(),
+            entry.descriptor.id
+        );
+        assert_eq!(selected.compiler_projection(&view).unwrap(), projection);
+        let completed = selected.complete_native_entries(&view).unwrap();
+        assert_eq!(completed.len(), 1);
+        assert!(Arc::ptr_eq(
+            &completed[0],
+            &view.metadata_snapshot().artifacts[&entry.descriptor.id]
+        ));
+        let issued = support
+            .native_availability()
+            .rows()
+            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
+            .collect();
+        selected
+            .finish_new_product_availability(&view.metadata_snapshot(), &issued)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            selected.issued_native_availability().next().unwrap(),
+            &issued[&entry.descriptor.id]
+        ));
+        assert!(
+            selected.complete_native_entries(&view).unwrap().is_empty(),
+            "already-issued body is not a new product to reissue"
+        );
+    }
+
+    #[test]
     fn issued_interface_upgrade_preserves_exact_choice_and_native_authority() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
@@ -12352,6 +12628,11 @@ pub(crate) mod tests {
                 &operation,
             )
             .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[original.clone()]).unwrap(),
+            )
+            .unwrap();
         assert_eq!(
             selection.receipt_native_body_owners().collect::<Vec<_>>(),
             vec![original.owner()]
@@ -12368,6 +12649,11 @@ pub(crate) mod tests {
                 ProductOrigin::Cached,
                 canonical,
                 &operation,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[original.clone()]).unwrap(),
             )
             .unwrap();
         assert_eq!(selection.compiler_projection(&view).unwrap(), upgraded);
@@ -12517,6 +12803,11 @@ pub(crate) mod tests {
             selection
                 .admit_current(original.owner(), origin, canonical, &operation)
                 .unwrap();
+            selection
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[original.clone()]).unwrap(),
+                )
+                .unwrap();
             assert_eq!(
                 selection.receipt_native_body_owners().collect::<Vec<_>>(),
                 vec![original.owner()]
@@ -12599,6 +12890,11 @@ pub(crate) mod tests {
                         &operation,
                     )
                     .unwrap();
+                carried
+                    .bind_produced_originals(
+                        &IssuedGroupCandidates::bind(Arc::from([]), &[original.clone()]).unwrap(),
+                    )
+                    .unwrap();
                 assert_eq!(carried.compiler_namespace_originals().count(), 1);
                 assert!(carried.compiler_projection(&view).unwrap().roles()[0]
                     .original()
@@ -12618,6 +12914,11 @@ pub(crate) mod tests {
                 ProductOrigin::Cached,
                 canonical,
                 &operation,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[original.clone()]).unwrap(),
             )
             .unwrap();
         assert_eq!(selection.compiler_projection(&view).unwrap(), prior);
@@ -12657,6 +12958,11 @@ pub(crate) mod tests {
                     ProductOrigin::RetainedCore,
                     canonical,
                     &operation,
+                )
+                .unwrap();
+            absent
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[missing.clone()]).unwrap(),
                 )
                 .unwrap();
             let owner = crate::declaration_join::ExactModuleIdentity {
@@ -12920,6 +13226,11 @@ pub(crate) mod tests {
                             ProductOrigin::RetainedCore,
                             fresh.module_interface().unwrap(),
                             &operation,
+                        )
+                        .unwrap();
+                    selection
+                        .bind_produced_originals(
+                            &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
                         )
                         .unwrap();
                     let physical = request
@@ -13260,6 +13571,12 @@ pub(crate) mod tests {
                                     &operation,
                                 )
                                 .unwrap();
+                            selection
+                                .bind_produced_originals(
+                                    &IssuedGroupCandidates::bind(Arc::from([]), &[output.clone()])
+                                        .unwrap(),
+                                )
+                                .unwrap();
                         }
                         let physical = input
                             .artifacts()
@@ -13586,6 +13903,11 @@ pub(crate) mod tests {
                     ProductOrigin::RetainedCore,
                     parent_product.module_interface().unwrap(),
                     &operation,
+                )
+                .unwrap();
+            selection
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[parent_product.clone()]).unwrap(),
                 )
                 .unwrap();
             let physical = parent_request
@@ -14027,6 +14349,11 @@ pub(crate) mod tests {
                 ProductOrigin::RetainedCore,
                 product.module_interface().unwrap(),
                 &operation,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[product.clone()]).unwrap(),
             )
             .unwrap();
         let physical = input
@@ -14523,6 +14850,12 @@ pub(crate) mod tests {
                         &operation,
                     )
                     .unwrap();
+                selection
+                    .bind_produced_originals(
+                        &IssuedGroupCandidates::bind(Arc::from([]), &[output_product.clone()])
+                            .unwrap(),
+                    )
+                    .unwrap();
                 let physical = input
                     .artifacts()
                     .inventory()
@@ -14702,6 +15035,11 @@ pub(crate) mod tests {
                     ProductOrigin::RetainedCore,
                     fresh.module_interface().unwrap(),
                     &operation,
+                )
+                .unwrap();
+            selection
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
                 )
                 .unwrap();
             let physical = request
@@ -14947,6 +15285,11 @@ pub(crate) mod tests {
                 ProductOrigin::RetainedCore,
                 fresh.module_interface().unwrap(),
                 &operation,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
             )
             .unwrap();
         let physical = request
@@ -15469,6 +15812,11 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
+        current_selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[new.clone()]).unwrap(),
+            )
+            .unwrap();
         for version in [None, Some(new.owner().module_version.clone())] {
             assert_eq!(
                 resolve_receipt_owner_with_validation(
@@ -15607,6 +15955,11 @@ pub(crate) mod tests {
                 ProductOrigin::Fresh,
                 new_helper.module_interface().unwrap(),
                 &validation.inventory,
+            )
+            .unwrap();
+        current
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[new_helper.clone()]).unwrap(),
             )
             .unwrap();
         let old_receipt = ReceiptImportOwner::Source {
@@ -16511,6 +16864,11 @@ pub(crate) mod tests {
                         &validation.inventory,
                     )
                     .unwrap();
+                selection
+                    .bind_produced_originals(
+                        &IssuedGroupCandidates::bind(Arc::from([]), &[product.clone()]).unwrap(),
+                    )
+                    .unwrap();
             }
             for broaden in [false, true] {
                 let custody = if broaden {
@@ -16970,6 +17328,11 @@ pub(crate) mod tests {
                 &operation,
             )
             .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[consumer.clone()]).unwrap(),
+            )
+            .unwrap();
         let physical = input
             .artifacts()
             .inventory()
@@ -17327,6 +17690,11 @@ pub(crate) mod tests {
                     ProductOrigin::Cached,
                     current.module_interface().unwrap(),
                     &validation.inventory,
+                )
+                .unwrap();
+            selection
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[current.clone()]).unwrap(),
                 )
                 .unwrap();
             let output =
@@ -20588,7 +20956,7 @@ pub(crate) mod tests {
             .as_ref()
             .map_or(CandidateVersionOrigin::Ordinary, |admission| {
                 CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.physical_request().semantic_sha256,
+                    semantic_sha256: admission.product_context_digest(),
                 }
             });
         let parsed = ParsedModuleProducts::decode(&bytes, &packages).unwrap();
@@ -20602,7 +20970,7 @@ pub(crate) mod tests {
                         exact
                             .source()
                             .match_product(
-                                exact.physical_request(),
+                                exact.physical_request().unwrap(),
                                 &input,
                                 source,
                                 &evidence_bytes,
@@ -20667,7 +21035,7 @@ pub(crate) mod tests {
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -20832,7 +21200,7 @@ pub(crate) mod tests {
                 exact
                     .source()
                     .match_product(
-                        exact.physical_request(),
+                        exact.physical_request().unwrap(),
                         &input,
                         source,
                         &evidence_bytes,
@@ -21473,7 +21841,7 @@ None,
 &packet,
 &parsed,
 &crate::artifacts::SourceEvidenceAdmission::from_exact(exact.source().match_product(
-        exact.physical_request(), &input, source, &evidence_bytes, parsed.operation(),
+        exact.physical_request().unwrap(), &input, source, &evidence_bytes, parsed.operation(),
     ).unwrap()),
 root.path(),
 &producer,
@@ -21607,7 +21975,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -21631,7 +21999,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -22960,7 +23328,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -23304,7 +23672,7 @@ None,
                             cached_exact
                                 .source()
                                 .match_product(
-                                    cached_exact.physical_request(),
+                                    cached_exact.physical_request().unwrap(),
                                     &input,
                                     source,
                                     &cached_evidence,

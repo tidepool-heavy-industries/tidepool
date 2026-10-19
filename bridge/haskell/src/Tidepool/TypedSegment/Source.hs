@@ -1,24 +1,89 @@
 -- | Parsed-source lowering for compiler-owned typed effect segments.
 -- Authored nested do expressions remain opaque to this rewrite.
 module Tidepool.TypedSegment.Source
-  ( rewriteParsedSegmentRoot
+  ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   ) where
 
 import Control.Exception (throwIO)
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
+import qualified Data.Set as Set
 import GHC (ParsedModule (..))
-import GHC.Driver.DynFlags (DynFlags)
+import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset)
+import GHC.Driver.Env (HscEnv, hsc_dflags, hscUpdateFlags)
+import GHC.Rename.Expr (rnLExpr)
+import GHC.Rename.Unbound (isUnboundName)
+import GHC.Tc.Utils.Monad (initTcInteractive, discardErrs)
+import GHC.Types.Name (nameOccName)
+import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Parser qualified as Parser
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Data.FastString (mkFastString)
+import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
-import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (isVarOcc, mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
-import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
+import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc)
 import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
+
+-- GHC owns lexical scope here, before any old binding is hydrated. An empty
+-- global environment leaves unresolved uses as HsUnboundVar, preserving the
+-- original qualifier. The submitted module value group supplies its own
+-- mutually scoped names; GHC also resolves let/do/lambda/case locals.
+-- Expected missing-global diagnostics are discarded only for this demand
+-- probe. Its syntax is never admitted or typechecked, and the real compiler
+-- still validates the complete submitted program through its normal owner.
+-- Constructor/class/foreign-generated value bindings need the full module
+-- renamer environment. This value-group slice refuses those declarations,
+-- rather than misclassifying a same-named historical binding as an input.
+-- Callers must apply the world effective-flag/execution policy before entry.
+typedSegmentInputOccurrences :: HscEnv -> TypedSegmentPlan -> String -> IO (Either TypedSegmentFailure [String])
+typedSegmentInputOccurrences environment plan source = case rootExpression of
+  Left failure -> pure (Left failure)
+  Right expression -> do
+    let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
+        probe = hscUpdateFlags (const probeFlags) environment
+    (_,renamed) <- initTcInteractive probe (discardErrs (fst <$> rnLExpr expression))
+    pure $ case renamed of
+      Nothing -> Left UnprovedRootAbstraction
+      Just result -> Right (Set.toAscList (Set.fromList
+        (everything (++) (mkQ [] selected) result)))
+  where
+    flags = hsc_dflags environment
+    parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
+      (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
+    rootExpression = case unP Parser.parseModule parser of
+      PFailed _ -> Left UnprovedRootAbstraction
+      POk _ parsed ->
+        let declarations = hsmodDecls (unLoc parsed)
+            bindings = [L location binding | L location (ValD _ binding) <- declarations]
+            signatures = [L location signature | L location (SigD _ signature) <- declarations]
+            roots = [() | FunBind {fun_id=identifier} <- map unLoc bindings
+              , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan]
+            local = HsValBinds noAnn (ValBinds NoAnnSortKey bindings signatures)
+        in case (all (supportedDeclaration . unLoc) declarations,roots) of
+          (True,[()]) -> Right (noLocA (HsLet noAnn local
+            (nlHsVar (mkRdrUnqual (mkVarOcc (typedSegmentPlanRoot plan))))))
+          _ -> Left UnprovedRootAbstraction
+    supportedDeclaration :: HsDecl GhcPs -> Bool
+    supportedDeclaration (ValD _ FunBind{}) = True
+    supportedDeclaration (ValD _ PatBind{}) = True
+    supportedDeclaration SigD{} = True
+    supportedDeclaration DefD{} = True
+    supportedDeclaration (TyClD _ SynDecl{}) = True
+    supportedDeclaration DocD{} = True
+    supportedDeclaration _ = False
+    selected :: HsExpr GhcRn -> [String]
+    selected (HsUnboundVar _ name)
+      | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
+    selected (HsVar _ (L _ name))
+      | isUnboundName name && isVarOcc (nameOccName name) = [occNameString (nameOccName name)]
+    selected _ = []
 
 rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> ParsedModule -> IO ParsedModule
 rewriteParsedSegmentRoot operations plan parsed = case rewriteModule of
