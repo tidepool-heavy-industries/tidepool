@@ -166,6 +166,7 @@ library tidepool-extract-internal
     text,
     cborg,
     cryptohash-sha256,
+    crypton >= 1.0.4 && < 1.1,
     unix,
     mtl,
     syb,

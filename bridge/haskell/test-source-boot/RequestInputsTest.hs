@@ -87,14 +87,14 @@ import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..),
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
-import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
+import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
 import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
   , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
-import Codec.CBOR.Term (Term(..), encodeTerm)
+import Codec.CBOR.Term (Term(..), encodeTerm, decodeTerm)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
@@ -389,12 +389,20 @@ semanticWorldBindingControls work scopePath = do
       [seal] -> TList . (row:) . pure . TBytes <$> rawHex (T.unpack seal)
       _ -> fail "genuine row does not have one exact image"
     _ -> fail "genuine world row shape changed"
+  blockPath <- issueCodecFixturePacket work "world-blocks.cbor" (toStrictByteString (encodeTerm
+    (TList [TString "TPCODECFIXTURE1",TString "world-blocks",TList []])))
+  (primary,blockPairs) <- readCodecTerm blockPath >>= \term -> case term of
+    TList [TBytes root,TList encoded] | not (null encoded) -> do
+      pairs <- forM encoded $ \entry -> case entry of
+        TList [TBytes cid,TBytes body] -> pure (cid,body)
+        _ -> fail "Materializer block fixture needs exact CID/body pairs"
+      unless (any ((== root) . fst) pairs) (fail "Materializer fixture omitted its root block")
+      pure (root,pairs)
+    _ -> fail "Materializer fixture needs its root and owned blocks"
   let sources = "TPCSRC01" <> BS.replicate 8 0
       sourcePath = work </> "world-seal-sources.bin"
-      primary = "opaque-context-codec-reference"
-      body = "cold codec binding only"
       profile = BS.replicate 32 97
-      blocks = TList [TList [TBytes primary,TBytes body]]
+      blocks pairs = TList [TList [TBytes cid,TBytes body] | (cid,body) <- pairs]
       acquisition = TList [TString "continue-originals",arenas,TList images]
       base = offered
       visible = reverse offered
@@ -406,14 +414,16 @@ semanticWorldBindingControls work scopePath = do
       ownerKey (TList [TString u,TString n]) = (u,n)
       ownerKey _ = error "test world requirement projection needs an exact owner"
       seal rs = SHA.hash (encode (TList (map rowProjection rs)))
-      restoration version bs vs = encode (TList
-        [TString "TPCWREST",TInt version,TBytes primary,TBytes (SHA.hash sources),TBytes producer
+      restorationFor version root pairs bs vs = encode (TList
+        [TString "TPCWREST",TInt version,TBytes root,TBytes (SHA.hash sources),TBytes producer
         ,TBytes profile,TBytes BS.empty,TBytes (seal bs),TBytes (seal vs)
-        ,TBytes (SHA.hash (encode (TList [TList [TBytes primary,TBytes (SHA.hash body)]])))])
+        ,TBytes (SHA.hash (encode (TList [TList [TBytes cid,TBytes (SHA.hash body)] | (cid,body) <- pairs])))])
+      restoration version = restorationFor version primary blockPairs
       product = restoration 2 base visible
-      packet version receipt bs vs inputs = TList
+      packetFor version receipt root pairs bs vs inputs = TList
         [TString "TPCWORLD",TInt version,TBytes receipt,text sourcePath,TBytes producer,TBytes profile
-        ,TList [TList bs,TList vs],inputs,TBytes BS.empty,TBytes primary,blocks]
+        ,TList [TList bs,TList vs],inputs,TBytes BS.empty,TBytes root,blocks pairs]
+      packet version receipt = packetFor version receipt primary blockPairs
       readPacket label term = do
         let path = work </> (label ++ ".world.cbor")
         BS.writeFile path (encode term)
@@ -438,6 +448,40 @@ semanticWorldBindingControls work scopePath = do
   original <- readPacket "world-seal-valid" (packet 2 product base visible acquisition)
   unless (worldInputsIdentityBytes original == SHA.hash product)
     (fail "cold world reader changed its exact restoration identity")
+  let rootBody = case lookup primary blockPairs of
+        Just value -> value
+        Nothing -> error "validated fixture root disappeared"
+      replaceRoot cid body = [(if key == primary then cid else key,if key == primary then body else bytes)
+        | (key,bytes) <- blockPairs]
+      changedDigest = BS.init primary <> BS.singleton (if BS.last primary == 0 then 1 else 0)
+      malformed = [("body",primary,rootBody <> BS.singleton 0,"compiler world block CID differs from its body")
+        ,("digest",changedDigest,rootBody,"compiler world block CID differs from its body")
+        ,("codec",BS.take 1 primary <> BS.singleton 0x55 <> BS.drop 2 primary,rootBody,"unsupported compiler world block CID")
+        ,("hash-family",BS.pack [1,0x71,0x12,32] <> SHA.hash rootBody,rootBody,"unsupported compiler world block CID")
+        ,("version",BS.singleton 0 <> BS.drop 1 primary,rootBody,"unsupported compiler world block CID")
+        ,("noncanonical-varint",BS.pack [0x81,0] <> BS.drop 1 primary,rootBody,"unsupported compiler world block CID")
+        ,("trailing",primary <> BS.singleton 0,rootBody,"unsupported compiler world block CID")
+        ,("truncated",BS.init primary,rootBody,"unsupported compiler world block CID")]
+  forM_ malformed $ \(label,cid,body,reason) -> do
+    let changedBlocks = replaceRoot cid body
+        -- Rebind the SHA transfer envelope too: only independent CID validation
+        -- can reject these otherwise self-consistent transport mutations.
+        rebound = restorationFor 2 cid changedBlocks base visible
+    requireCorrupt (Just reason) ("block-" ++ label)
+      (packetFor 2 rebound cid changedBlocks base visible acquisition)
+  rootTerm <- case deserialiseFromBytes decodeTerm (BL.fromStrict rootBody) of
+    Right (remaining,value) | BL.null remaining -> pure value
+    _ -> fail "genuine Materializer root is not one complete CBOR value"
+  let links (TTagged 42 (TBytes encoded)) | not (BS.null encoded) && BS.head encoded == 0 = [BS.tail encoded]
+      links (TList values) = concatMap links values
+      links (TMap entries) = concatMap (\(key,value) -> links key ++ links value) entries
+      links _ = []
+  child <- case links rootTerm of
+    value:_ | value /= primary, any ((== value) . fst) blockPairs -> pure value
+    _ -> fail "Materializer fixture needs an actual root-to-child edge"
+  let missingChild = filter ((/= child) . fst) blockPairs
+  requireCorrupt (Just "compiler world block child is absent") "missing-block-child"
+    (packetFor 2 (restorationFor 2 primary missingChild base visible) primary missingChild base visible acquisition)
   forM_ [("base",base,\rs -> (rs,visible)),("visible",visible,\rs -> (base,rs))] $ \(which,selected,replace) -> do
     let mutations = [("drop",tail selected),("reorder",reverse selected)
           ,("retag",replaceFirst (retag (head selected)) selected)

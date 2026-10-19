@@ -49,8 +49,9 @@ import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (Exception, IOException, try, throwIO, evaluate, mask, catch)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVarMasked, readMVar)
 import Control.Monad.State.Strict (StateT(..), runStateT, get, put, lift)
-import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
+import Control.Monad (foldM, forM, forM_, replicateM, unless, when, void)
 import qualified Crypto.Hash.SHA256 as SHA
+import qualified Crypto.Hash as Crypto
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
@@ -2281,6 +2282,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
+      verifyWorldBlocks primary blocks
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility baseSeal visibleSeal blockSeal <-
         decodeWorldBytes decodeWorldRestoration restoration
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
@@ -2340,6 +2342,79 @@ decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict 
   Left failure -> worldCorrupt (show failure)
   Right (remaining,value) | BL.null remaining -> pure value
   Right _ -> worldCorrupt "world input has trailing bytes"
+
+-- The existing Materializer issues one fixed CID family. Require its canonical
+-- CIDv1/DAG-CBOR/Blake2b-256 framing before hashing; SHA transfer commitments do
+-- not independently authenticate the block's content address.
+verifyWorldBlock :: (BS.ByteString,BS.ByteString) -> IO ()
+verifyWorldBlock (cid,body)
+  | not (supportedWorldCID cid) =
+      worldCorrupt "unsupported compiler world block CID"
+  | Crypto.digestFromByteString (BS.drop 6 cid)
+      /= Just (Crypto.hash body :: Crypto.Digest Crypto.Blake2b_256) =
+      worldCorrupt "compiler world block CID differs from its body"
+  | otherwise = pure ()
+
+supportedWorldCID :: BS.ByteString -> Bool
+supportedWorldCID cid = BS.length cid == 38 && BS.take 6 cid == BS.pack [1,0x71,0xa0,0xe4,2,32]
+
+verifyWorldBlocks :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO ()
+verifyWorldBlocks primary blocks = do
+  mapM_ verifyWorldBlock blocks
+  linked <- forM blocks $ \(cid,body) -> do
+    links <- decodeWorldBytes (worldBlockLinks (BS.length body)) body
+    pure (cid,links)
+  let available = Map.fromList linked
+      visit seen pending = case Set.minView pending of
+        Nothing -> pure ()
+        Just (cid,remaining) | cid `Set.member` seen -> visit seen remaining
+        Just (cid,remaining) -> case Map.lookup cid available of
+          Nothing -> worldCorrupt "compiler world block child is absent"
+          Just children -> visit (Set.insert cid seen) (Set.union children remaining)
+  visit Set.empty (Set.singleton primary)
+
+-- Scan the fixed DAG-CBOR block envelope for CID links before schema-specific
+-- decoding. Counting pending values avoids an unbounded recursive term tree;
+-- every pending value needs at least one byte of the already bounded body.
+worldBlockLinks :: Int -> Decoder s (Set.Set BS.ByteString)
+worldBlockLinks bytes = scan 1 bytes Set.empty
+  where
+    scan 0 _ links = pure links
+    scan pending budget links = do
+      unless (budget > 0 && pending <= toInteger budget) (fail "world block exceeds its encoded structure bound")
+      token <- peekTokenType
+      let scalar action = action >> scan (pending-1) (budget-1) links
+          container multiplier decoder = do
+            count <- decoder
+            let next = pending-1 + multiplier * toInteger count
+            unless (next <= toInteger (budget-1)) (fail "world block container exceeds its encoded body")
+            scan next (budget-1) links
+      case token of
+        TypeUInt -> scalar (void decodeIntegerCanonical)
+        TypeUInt64 -> scalar (void decodeIntegerCanonical)
+        TypeNInt -> scalar (void decodeIntegerCanonical)
+        TypeNInt64 -> scalar (void decodeIntegerCanonical)
+        TypeBytes -> scalar (void decodeBytesCanonical)
+        TypeString -> scalar (void decodeStringCanonical)
+        TypeBool -> scalar (void decodeBool)
+        TypeNull -> scalar decodeNull
+        TypeFloat64 -> do
+          value <- decodeDouble
+          when (isNaN value || isInfinite value) (fail "world block has a nonfinite number")
+          scan (pending-1) (budget-1) links
+        TypeListLen -> container 1 decodeListLenCanonical
+        TypeListLen64 -> container 1 decodeListLenCanonical
+        TypeMapLen -> container 2 decodeMapLenCanonical
+        TypeMapLen64 -> container 2 decodeMapLenCanonical
+        TypeTag -> do
+          tag <- decodeTagCanonical
+          unless (tag == 42) (fail "unsupported world block tag")
+          encoded <- decodeBytesCanonical
+          unless (not (BS.null encoded) && BS.head encoded == 0 && supportedWorldCID (BS.tail encoded))
+            (fail "unsupported world block child CID")
+          let next = Set.insert (BS.tail encoded) links
+          Set.size next `seq` scan (pending-1) (budget-1) next
+        _ -> fail "unsupported world block encoding"
 
 -- Bind semantic evidence as well as its immutable image. In particular, the
 -- same image cannot change a source-original absence hint into passive join
