@@ -15822,21 +15822,19 @@ mod tests {
         use crate::exact_context::{hydrate_context, Materializer};
         use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
         let base = published_original_choice_history_fixture();
-        let root = identity("fixture", "Beta");
+        let root = identity("fixture", "Alpha");
+        let target = base.original_instance_target().unwrap().clone();
         let support = base
             .compiler_source_support()
-            .source_support(&BTreeSet::from([root.clone()]))
+            .source_support(&BTreeSet::from([root.clone(), target.clone()]))
             .unwrap();
         assert_eq!(support.native_offers().len(), 1);
         assert!(support.native_offers()[0].is_full());
         let source = ExactDeclarationContext::from_authenticated_execution_support(
             base.owner.facts.producer,
             support,
-            vec![ExactLexicalNode {
-                owner: root.clone(),
-                imports: vec![],
-            }],
-            root.clone(),
+            base.lexical_graph().to_vec(),
+            target,
             &[],
         )
         .unwrap();
@@ -15844,6 +15842,8 @@ mod tests {
             .issue_published_source_original("lifetime-revision", "lifetime-input", &root)
             .unwrap();
         let expected = publication.context();
+        assert_eq!(expected.compiler_source_support().native_offers().len(), 1);
+        assert!(expected.compiler_source_support().native_offers()[0].is_full());
         let original = expected.compiler_input_projection().snapshot_roles()[&root]
             .original()
             .unwrap();
