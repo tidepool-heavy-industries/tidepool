@@ -1494,10 +1494,11 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
     if matches!(
         &failure,
         ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }
+            | ArtifactInventoryFailure::NativeGroupUnavailable { .. }
     ) {
         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
             ?failure, refusal_site = %std::panic::Location::caller(),
-            "native offer selection refusal site");
+            "native admission refusal site");
     }
     ArtifactInventoryError {
         failure,
@@ -3246,7 +3247,19 @@ impl ArtifactInventory {
             incoming,
             &unbound,
             &fixed.native_source,
-        )?;
+        )
+        .map_err(|error| {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "bind_certified_input_demand",
+                demand = match demand {
+                    NativeArtifactDemand::AllGroups => "all_groups",
+                    NativeArtifactDemand::ScopeInterfaces => "scope_interfaces",
+                    NativeArtifactDemand::VerifiedTarget { .. } => "verified_target",
+                    NativeArtifactDemand::CertifiedTargetImports(_) => "certified_target_imports",
+                },
+                %error, "native demand acquisition refused");
+            error
+        })?;
         let native_availability::CertifiedNativeDemandAcquisition {
             entries: incoming,
             bindings: bound_inputs,
@@ -3286,6 +3299,11 @@ impl ArtifactInventory {
                 product.owner(),
                 group.original_ordinal,
             ) {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "bound_demand_permission", ?group, owner = ?product.owner(),
+                    permitted = false, body_present = entry.native_group_ordinals.contains(&group.original_ordinal),
+                    selected_carrier = ?fixed.view.lease.selection.namespace.get(&group.artifact),
+                    "native demand exceeds issued permission");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: group.artifact,
@@ -3324,6 +3342,9 @@ impl ArtifactInventory {
                     crate::certified_products::NativeGroupCandidates::IssuedAvailability(_)
                 )
             {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "bound_demand_candidates", ?group, owner = ?product.owner(),
+                    permitted = true, "native demand has no issued group candidates");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: group.artifact,
@@ -3391,6 +3412,10 @@ impl ArtifactInventory {
                 resolution,
                 crate::certified_products::NativeGroupCandidates::IssuedAvailability(_)
             ) {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "bound_demand_carrier", ?group, owner = ?product.owner(),
+                    ?carrier, ?issued_nodes, permitted = true,
+                    "issued group candidates do not match selected carrier");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: group.artifact,

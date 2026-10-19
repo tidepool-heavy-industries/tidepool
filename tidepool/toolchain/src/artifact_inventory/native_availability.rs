@@ -206,6 +206,11 @@ fn bind_input_demand(
                     product.owner(),
                     key.original_ordinal,
                 ) {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        stage = "input_demand_permission", ?key, owner = ?product.owner(),
+                        permitted = false, body_present = entry.native_group_ordinals.contains(&key.original_ordinal),
+                        selected_carrier = ?namespace.get(&key.artifact),
+                        "native input demand exceeds issued permission");
                     return Err(admission_failure(
                         ArtifactInventoryFailure::NativeGroupUnavailable {
                             artifact: key.artifact,
@@ -229,6 +234,10 @@ fn bind_input_demand(
                             .native_group_support(*key, product.owner(), group)
                             .map(|support| (group, support))
                             .ok_or_else(|| {
+                                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                                    stage = "input_demand_support", ?key, owner = ?product.owner(),
+                                    ?group, permitted = true,
+                                    "native input candidate lost its issued support");
                                 admission_failure(
                                     ArtifactInventoryFailure::NativeGroupUnavailable {
                                         artifact: key.artifact,
@@ -264,6 +273,7 @@ fn bind_input_demand(
                 .module_interface()
                 .ok_or_else(|| failure("native canonical carrier missing"))?,
         );
+        let candidate_count = supports.len();
         let mut compatible = Vec::new();
         for (group, support) in supports {
             let node = InventoryNodeKey::Group(group);
@@ -375,6 +385,15 @@ fn bind_input_demand(
             ));
         }
         let Some((group, payloads, owned, retained_offer)) = compatible.pop() else {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "input_demand_carrier", ?key, owner = ?product.owner(),
+                selected_carrier = ?namespace.get(&key.artifact),
+                ?canonical, selected_canonical = ?namespace.get(&canonical), candidate_count,
+                source = match source {
+                    NativeDemandSource::Certified(_) => "certified_selection",
+                    NativeDemandSource::Catalog(_) => "native_dependency_catalog",
+                },
+                "native input candidates do not match selected carrier or canonical binding");
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeGroupUnavailable {
                     artifact: key.artifact,

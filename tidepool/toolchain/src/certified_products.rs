@@ -551,7 +551,12 @@ impl CertifiedSegmentOriginals {
                     .cloned()
                     .collect(),
             )
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            .map_err(|error| {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "segment_native_availability", %error,
+                    "compiler original selection refused");
+                CertificationError::OriginalClosure(Box::new(error))
+            })?;
         timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
@@ -3185,7 +3190,12 @@ impl CertifiedSourceSelection {
                 self,
             )
             .and_then(|view| view.select_admission_roots(selected_ids.clone()))
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            .map_err(|error| {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "selected_original_closure", ?authored_root, ?excluded, %error,
+                    "compiler original selection refused");
+                CertificationError::OriginalClosure(Box::new(error))
+            })?;
         if excluded.is_some_and(|(unit, module)| {
             native_closure.entries().iter().any(|entry| {
                 entry.descriptor.owner.unit == unit && entry.descriptor.owner.module == module
