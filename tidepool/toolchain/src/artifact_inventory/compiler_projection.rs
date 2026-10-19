@@ -405,6 +405,8 @@ mod type_query_work {
         pub resolved_rows: usize,
         pub canonical_checks: usize,
         pub cloned_rows: usize,
+        pub certificate_hashes: usize,
+        pub descriptor_serializations: usize,
     }
 
     thread_local! {
@@ -412,6 +414,8 @@ mod type_query_work {
             census_rows: 0, iterated_rows: 0, lookups: 0, resolved_rows: 0,
             canonical_checks: 0,
             cloned_rows: 0,
+            certificate_hashes: 0,
+            descriptor_serializations: 0,
         }) };
     }
 
@@ -442,6 +446,12 @@ mod type_query_work {
     }
     pub(super) fn cloned_row() {
         observe(|counts| counts.cloned_rows += 1);
+    }
+    pub(super) fn canonical_descriptor_rebuild() {
+        observe(|counts| {
+            counts.certificate_hashes += 1;
+            counts.descriptor_serializations += 1;
+        });
     }
 }
 
@@ -669,7 +679,6 @@ impl CompilerSourceSupport {
         charge(operation.reserve::<(&ExactModuleIdentity, &ExactModuleIdentity)>(roots.len()))?;
         let mut projection = CompilerInputProjection::default();
         let mut selected = BTreeMap::new();
-        let mut payloads = BTreeMap::new();
         let mut owners = BTreeSet::<ExactModuleIdentity>::new();
         let mut pending = roots.iter().collect::<Vec<_>>();
         let mut work = DemandCompilerProjectionWork::default();
@@ -689,6 +698,16 @@ impl CompilerSourceSupport {
                 .selected
                 .get(owner)
                 .ok_or_else(|| failure("demanded compiler owner lacks its admitted row"))?;
+            if row.interface.0.artifact != role.interface()
+                || &row.interface.1.descriptor.owner != owner
+                || row.interface.1.is_native()
+                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+                || row.original.as_ref().is_some_and(|(_, entry)| {
+                    &entry.descriptor.owner != owner || !entry.is_native()
+                })
+            {
+                return Err(failure("demanded compiler role differs from its admitted row"));
+            }
             // One set key and three map keys, plus conservative node/link
             // storage. All String and role copies are charged before cloning.
             charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
@@ -746,21 +765,34 @@ impl CompilerSourceSupport {
                     crate::host_work::checkpoint()?;
                     pending.push(required);
                 }
-                charge(operation.reserve::<(ArtifactId, Arc<ArtifactEntry>, [usize; 4])>(1))?;
-                payloads.insert(entry.descriptor.id, Arc::clone(entry));
+            }
+            if let Some((carrier, _)) = &row.original {
+                let state = self.artifacts.lease.inventory.0.lock().expect("inventory lock");
+                ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *carrier)?;
             }
             owners.insert(owner.clone());
             projection.admit_role(owner.clone(), role.clone())?;
             selected.insert(owner.clone(), row.clone());
         }
-        // Canonical requirements remain obligations even when this owner's
-        // selected Original has a different interface-use census.
-        projection.validate_requirements(
-            selected.values().map(|row| row.interface.1.as_ref()),
-            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
-        )?;
-        projection.validate_resolved(&selected, &self.artifacts)?;
-        let entries = projection.entries_from_artifacts(&payloads)?;
+        // The exact row and cold payload handles already own canonical/native
+        // admission. Rebuilding their descriptors would repeat certificate
+        // hashing and encoding without acquiring any additional authority.
+        let mut entries = BTreeMap::new();
+        for (owner, row) in &selected {
+            crate::host_work::checkpoint()?;
+            // Canonical requirements remain obligations even when this owner's
+            // selected Original has a different interface-use census.
+            projection.validate_requirements(
+                std::iter::once(&row.interface)
+                    .chain(row.original.iter())
+                    .map(|(_, entry)| entry.as_ref()),
+                |required| selected.get(required).map(|row| row.interface.1.as_ref()),
+            )?;
+            entries.insert(
+                owner.clone(),
+                Arc::clone(&row.original.as_ref().unwrap_or(&row.interface).1),
+            );
+        }
         work.selected_rows = selected.len();
         work.metadata_entries = entries.len();
         Ok(DemandCompilerProjection {
@@ -2599,7 +2631,11 @@ impl CompilerInputProjection {
                     .module_interface()
                     .ok_or_else(|| failure("compiler original offer lacks canonical attachment"))?;
                 if &original.descriptor.owner != owner
-                    || ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
+                    || {
+                        #[cfg(test)]
+                        type_query_work::canonical_descriptor_rebuild();
+                        ArtifactEntry::canonical_artifact_id(canonical) != role.interface()
+                    }
                 {
                     return Err(failure(
                         "compiler original offer differs from its interface",
@@ -2712,7 +2748,10 @@ mod tests {
             let work = type_query_work::take();
             let after = inventory.metrics();
             assert_eq!(demanded.metadata().entries, expected);
-            assert_eq!(demanded.owners(), &expected.keys().cloned().collect());
+            assert_eq!(
+                demanded.owners(),
+                &expected.keys().cloned().collect::<BTreeSet<_>>()
+            );
             assert!(Arc::ptr_eq(demanded.source_support(), &support));
             assert!(Arc::ptr_eq(&demanded.metadata().retained, &retained));
             for owner in expected.keys() {
@@ -2736,6 +2775,9 @@ mod tests {
             assert_eq!(work.iterated_rows, 0);
             assert_eq!(work.census_rows, 0);
             assert_eq!(work.resolved_rows, 0);
+            assert_eq!(work.canonical_checks, 0);
+            assert_eq!(work.certificate_hashes, 0);
+            assert_eq!(work.descriptor_serializations, 0);
             assert_eq!(before.graph_visits, after.graph_visits);
             assert_eq!(before.view_queries, after.view_queries);
             assert_eq!(before.entry_handle_copies, after.entry_handle_copies);
@@ -2800,6 +2842,13 @@ mod tests {
             );
             let retained = support.artifacts.metadata_snapshot();
             let root = entries.last().unwrap().descriptor.owner.clone();
+            // Positive control: the original validation path really rebuilds
+            // descriptors, so zero below cannot be a disconnected observation.
+            type_query_work::take();
+            support.projection.entries_from_metadata(&retained).unwrap();
+            let repeated = type_query_work::take();
+            assert!(repeated.certificate_hashes > 0);
+            assert!(repeated.descriptor_serializations > 0);
             let operation =
                 tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
             let demanded = support
@@ -2809,6 +2858,12 @@ mod tests {
                     &operation,
                 )
                 .unwrap();
+            let work = type_query_work::take();
+            assert_eq!(work.canonical_checks, 0);
+            assert_eq!(work.certificate_hashes, 0);
+            assert_eq!(work.descriptor_serializations, 0);
+            assert_eq!(work.iterated_rows, 0);
+            assert_eq!(work.resolved_rows, 0);
             assert!(Arc::ptr_eq(demanded.source_support(), &support));
             assert_eq!(
                 demanded.projection().snapshot_roles().get(&root),
