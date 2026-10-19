@@ -13447,8 +13447,7 @@ pub(crate) mod tests {
             .remove(1)
             .product;
         let parent_entry = Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
-        let support = issue_issue_fixture_compiler_support(projection.clone(), left.clone())
-            .unwrap()
+        let support = issue_fixture_compiler_support(projection.clone(), left.clone())
             .unwrap()
             .retain_offers([a.clone()])
             .unwrap();
