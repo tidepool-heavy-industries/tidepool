@@ -61,7 +61,7 @@ selection_oracle checkpointed the zero-budget lifecycle source fixture in isolat
 checkout `tidepool-shared-warm-retention-fixture-20261019`, branch
 `feature/shared-warm/retention-fixture`, exact base db1. Four-file dirty patch
 SHA256 `2f6098291512a833c7505b12d8656f1a15dc043d63a5b5f3aa2125b0f0a5aa53`
-is retained under `host-inputs/retention-fixture/`. B expansion is PAUSED by root/
+is retained under `host-inputs/retention-fixture/`. Optional retention-stress fixture expansion is PAUSED by root/
 campaign priority; no metadata, generation, formatting or native execution ran.
 This reserved reviewer now prioritizes actual ordinary-cell consuming API review
 and per-item publication/second-cell reuse. No additional agent or native grant
@@ -197,6 +197,21 @@ changes into the frozen four-argument query source. Later owner-guided compositi
 uses Warm's old-profile typed supplier f1621e9a, independently source accepted but
 not yet compiled as a join.
 
+Controlling six-document amendment2428b82d962a9a98f072c978580b8b22d778fe13
+makes compatible world-owned dependency, validity and recovery reuse CORE to the
+first nonempty three-root/import milestone. This is worker arm B, distinct from
+our paused optional retention-stress fixture. Warm's world_dependencies owner
+must retain eligible checked dependency answers and exact selected HPT/backing
+across compatible successors, with fresh target/request/diagnostic/hooks/executor
+and cancellation. HPT seeding alone is not meaningful reuse if unchanged
+dependencies still compile; empty-world bootstrap is not arm B acceptance.
+HOST finalization preserves those returned owned references without predecessor
+chains or whole-world reconstruction. Same-world and successor reuse are separate
+controls. First scalar bind/use then genuine imported-home/scaffold bind/use must
+observe actual W0→W1→W2, values, matched three-root/profile and work counters.
+Changed dependencies, instance-only changes and equal-interface/different-original
+refusal remain required; optional deeper arm C can conclude with a no-go.
+
 RUST-CLIENT-MIGRATION.md requires ordinary plan/prepareCell, private per-item
 successors, paired atomic binding/declaration publication, fork, recovery and old
 route deletion after the first query. Accepted packet is
@@ -220,9 +235,8 @@ Real source checkout `tidepool-shared-warm-host-cells-20261019`, branch
 `feature/shared-warm/host-cells`, starts at0a1c789733 and joins typedebd3 full
 history. Current3141d6133d repairs shared canonical/typed composition under Warm's
 exact hunk guidance, preserving canonical-before-root and ReachableBlocks owner.
-Its canonical regression callers use truthful empty typed binding DATA. Independent
-joined review is pending; no configuration, formatting or native lane has run in
-this new checkout. Mount is provisioned. Actual new-profile Plan cd30 exists;
+Its canonical regression callers use truthful empty typed binding DATA. Independent joined source review accepted3141d613; no configuration, formatting
+or native lane has run in this new checkout. Mount is provisioned. Actual new-profile Plan cd30 exists;
 Prepare/output certifier/product-update API is not yet caller-ready. Do not invent
 placeholder capability or silently reconstruct ExactCompilationRequest to proceed.
 
