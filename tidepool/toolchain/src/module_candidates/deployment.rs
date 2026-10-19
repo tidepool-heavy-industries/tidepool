@@ -2395,6 +2395,31 @@ mod tests {
     #[test]
     fn configured_compiler_and_worker_are_independently_checked() {
         let fixture = Fixture::new();
+        fixture.load().unwrap();
+        let mut legacy = fixture.authority.clone();
+        legacy.schema = 1;
+        assert!(matches!(
+            DeploymentModulePackage::load_under(
+                &fixture.output.join("catalog.json"),
+                &legacy,
+                RootPolicy::Fixture
+            ),
+            Err(ModulePackageError::CompilerMismatch)
+        ));
+        let mut rooted_expectation = fixture.authority.clone();
+        rooted_expectation.package_source = crate::toolchain::ConfiguredPackageSource::Rooted {
+            source_id: [1; 32],
+            supported_profile_id: [2; 32],
+            launch_configuration_sha256: [3; 32],
+        };
+        // Reading archived products validates provenance, without constructing
+        // an admitted service or claiming its configured rooted source exists.
+        DeploymentModulePackage::load_under(
+            &fixture.output.join("catalog.json"),
+            &rooted_expectation,
+            RootPolicy::Fixture,
+        )
+        .unwrap();
         for worker in [false, true] {
             let mut authority = fixture.authority.clone();
             if worker {
