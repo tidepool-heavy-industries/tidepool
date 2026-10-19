@@ -34,6 +34,7 @@ pub mod diagnostics;
 mod endpoint;
 pub mod exec_check;
 pub mod frontend;
+mod package_source;
 mod process;
 mod request;
 mod resources;
@@ -43,13 +44,13 @@ pub use endpoint::{
     with_compiler_transaction, with_compiler_transaction_cancellable,
     with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
     CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
-    CompilerPackageSourceAssociation,
-    CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
-    CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
-    CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
-    CompilerTransactionOrigin, CompilerTransactionOutcome, CompilerTransactionPublicationError,
-    CompilerTransactionRetirement, CompilerTransactionSettled, CompilerWorkerRetirement,
-    DirectCompilerRetirement, HostAdmissionCancellation,
+    CompilerPackageSourceAssociation, CompilerScratchFailure, CompilerScratchRetirement,
+    CompilerTermination, CompilerTransaction, CompilerTransactionCancellation,
+    CompilerTransactionClose, CompilerTransactionCloseEvidence, CompilerTransactionCloseFailure,
+    CompilerTransactionClosePhase, CompilerTransactionCloseReason, CompilerTransactionOrigin,
+    CompilerTransactionOutcome, CompilerTransactionPublicationError, CompilerTransactionRetirement,
+    CompilerTransactionSettled, CompilerWorkerRetirement, DirectCompilerRetirement,
+    HostAdmissionCancellation,
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
@@ -67,9 +68,7 @@ pub use request::{
 /// directly bound extractor's (see [`ExtractCmd::bind_direct`]).
 pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<CompilerIdentity> {
     daemon::preflight(socket)
-        .map(|binding| {
-            CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch)
-        })
+        .map(|binding| binding.identity())
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,

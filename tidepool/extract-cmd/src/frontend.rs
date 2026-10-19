@@ -80,6 +80,13 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         return stop_daemon(&args[1..]);
     }
 
+    for key in crate::package_source::BOOT_ENV {
+        if std::env::var_os(key).is_some() {
+            return Err(FrontendError::Usage(format!(
+                "owned daemon refuses inherited {key}"
+            )));
+        }
+    }
     let profile = crate::CompilerTraceProfile::select(
         std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
@@ -103,6 +110,23 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
+}
+
+/// Only the existing owned-daemon frontend creates another copy of itself as
+/// daemon parent. A shell-selected standalone control path cannot acquire roots
+/// without that process-lifetime owner.
+pub(crate) fn require_owned_source_parent() -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = unsafe { libc::getppid() };
+    let parent = std::fs::metadata(format!("/proc/{parent}/exe"))?;
+    let current = std::fs::metadata("/proc/self/exe")?;
+    if parent.dev() != current.dev() || parent.ino() != current.ino() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "rooted standalone service has no owned frontend retirement parent",
+        ));
+    }
+    Ok(())
 }
 
 struct OwnedSocketDirectory(PathBuf);
@@ -288,6 +312,20 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         program,
         child_args,
     } = parse_owned_invocation(args)?;
+    if std::env::var_os(crate::package_source::OWNER_ENV).is_some() {
+        return Err(FrontendError::Usage(
+            "owned daemon refuses an inherited package-source owner".into(),
+        ));
+    }
+    for key in crate::package_source::BOOT_ENV {
+        if std::env::var_os(key).is_some() {
+            return Err(FrontendError::Usage(format!(
+                "owned daemon refuses inherited {key}"
+            )));
+        }
+    }
+    let service_configuration =
+        crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?;
     let profile = crate::CompilerTraceProfile::select(
         std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
@@ -348,6 +386,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         allowances,
     );
     let mut command = owned_timing_command(&frontend, profile);
+    if service_configuration.is_some() {
+        command.env(crate::package_source::OWNER_ENV, root);
+    }
     command
         .args(&arguments)
         .env("XDG_CACHE_HOME", &cache)
@@ -375,8 +416,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     };
-    let identity =
-        crate::CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch);
+    let identity = binding.identity();
     if identity.producer_bytes() != expected.producer_bytes()
         || identity.consumed_worker_bytes() != expected.consumed_worker_bytes()
     {
@@ -436,6 +476,11 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 "owned compiler descendant {pid} remains live or unreaped"
             )));
         }
+    }
+    if let Some(configuration) = &service_configuration {
+        configuration
+            .release_after_complete(root, binding.epoch)
+            .map_err(FrontendError::Io)?;
     }
     socket_directory.cleanup().map_err(FrontendError::Io)?;
     let code = exit_code(child?);
@@ -539,6 +584,7 @@ pub(crate) struct PreparedWorker {
     selection: PathBuf,
     bytes: Vec<u8>,
     ghc_libdir: OsString,
+    pub(crate) service_source: Option<std::sync::Arc<crate::package_source::ServicePackageSource>>,
 }
 
 impl PreparedWorker {
@@ -554,6 +600,7 @@ impl PreparedWorker {
             selection,
             bytes,
             ghc_libdir,
+            service_source: None,
         };
         prepared.check_request_protocol()?;
         Ok(prepared)
@@ -652,6 +699,7 @@ impl PreparedWorker {
             selection,
             bytes,
             ghc_libdir: "unused".into(),
+            service_source: None,
         })
     }
 }
@@ -1120,6 +1168,7 @@ mod tests {
             bytes: std::fs::read(&selection).unwrap(),
             selection,
             ghc_libdir: "unused".into(),
+            service_source: None,
         };
         let config = DaemonConfig {
             socket: socket.clone(),
@@ -1189,6 +1238,7 @@ mod tests {
             bytes: std::fs::read(&selection).unwrap(),
             selection,
             ghc_libdir: "unused".into(),
+            service_source: None,
         };
         let config = DaemonConfig {
             socket: socket.clone(),

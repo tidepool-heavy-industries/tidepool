@@ -46,6 +46,73 @@ pub struct CompilerPackageSourceAssociation {
 }
 
 impl CompilerPackageSourceAssociation {
+    pub(crate) fn from_booted_source(
+        source: &crate::package_source::ServicePackageSource,
+        receipts: &[Option<crate::package_source::WorkerPackageBootReceipt>],
+    ) -> io::Result<Self> {
+        let [source_id, profile_id, service_epoch, boot_profile_commitment, launch_configuration_sha256] =
+            source.validated_association_parts(receipts)?;
+        Ok(Self {
+            source_id,
+            profile_id,
+            service_epoch,
+            boot_profile_commitment,
+            launch_configuration_sha256,
+        })
+    }
+
+    pub(crate) fn write_optional(value: Option<&Self>, mut writer: impl Write) -> io::Result<()> {
+        writer.write_all(&[u8::from(value.is_some())])?;
+        if let Some(value) = value {
+            for part in [
+                &value.source_id,
+                &value.profile_id,
+                &value.service_epoch,
+                &value.boot_profile_commitment,
+                &value.launch_configuration_sha256,
+            ] {
+                writer.write_all(part)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_optional(
+        mut reader: impl Read,
+        epoch: &[u8; 32],
+    ) -> io::Result<Option<Self>> {
+        let mut tag = [0];
+        reader.read_exact(&mut tag)?;
+        match tag {
+            [0] => Ok(None),
+            [1] => {
+                let mut parts = [[0; 32]; 5];
+                for part in &mut parts {
+                    reader.read_exact(part)?;
+                }
+                let [source_id, profile_id, service_epoch, boot_profile_commitment, launch_configuration_sha256] =
+                    parts;
+                if &service_epoch != epoch {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "service source association belongs to another endpoint epoch",
+                    ));
+                }
+                Ok(Some(Self {
+                    source_id,
+                    profile_id,
+                    service_epoch,
+                    boot_profile_commitment,
+                    launch_configuration_sha256,
+                }))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown service package source association tag",
+            )),
+        }
+    }
+
     pub fn launch_configuration_sha256(&self) -> &[u8; 32] {
         &self.launch_configuration_sha256
     }
@@ -88,6 +155,14 @@ impl CompilerIdentity {
             endpoint: *hasher.finalize().as_bytes(),
             package_source: None,
         }
+    }
+
+    pub(crate) fn with_service_association(
+        mut self,
+        association: Option<CompilerPackageSourceAssociation>,
+    ) -> Self {
+        self.package_source = association;
+        self
     }
 
     /// Identity of the exact bound endpoint, including a daemon's boot epoch.
@@ -1306,11 +1381,7 @@ impl CompilerEndpoint {
         if let Some(socket) = std::env::var_os(crate::DAEMON_SOCKET_ENV) {
             let socket = PathBuf::from(socket);
             if let Ok(binding) = daemon::preflight(&socket) {
-                let identity = CompilerIdentity::daemon(
-                    binding.producer,
-                    binding.consumed_worker,
-                    binding.epoch,
-                );
+                let identity = binding.identity();
                 if required
                     .as_ref()
                     .is_some_and(|expected| expected != &OsString::from(identity.to_hex()))
@@ -1321,11 +1392,7 @@ impl CompilerEndpoint {
                     ));
                 }
                 return Ok(Self {
-                    identity: CompilerIdentity::daemon(
-                        binding.producer,
-                        binding.consumed_worker,
-                        binding.epoch,
-                    ),
+                    identity,
                     transport: Transport::Daemon {
                         socket,
                         epoch: binding.epoch,
@@ -4395,12 +4462,13 @@ mod tests {
                     }
                     if &kind == b"TPDPF001" {
                         server_counts.lock().unwrap().preflights += 1;
-                        connection.write_all(b"TPDPI003").unwrap();
+                        connection.write_all(b"TPDPI004").unwrap();
                         connection.write_all(&[7; 32]).unwrap();
                         connection.write_all(&[8; 32]).unwrap();
                         connection
                             .write_all(&*server_epoch.lock().unwrap())
                             .unwrap();
+                        connection.write_all(&[0]).unwrap();
                         continue;
                     }
                     assert_eq!(&kind, daemon::TRANSACTION);
