@@ -349,6 +349,7 @@ RUNTIME_SOURCE_PROJECTIONS = {
         ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
         ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
         ".exomonad/workspace/skills/exomonad-command/SKILL.md",
+        ".exomonad/workspace/skills/exomonad-command/references/hosted-tools.md",
         ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
         ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
         ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
@@ -357,6 +358,32 @@ RUNTIME_SOURCE_PROJECTIONS = {
         ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
     ),
 }
+
+# A projection that names a directory root owns its whole file tree: the facade
+# test reads every file under the root, so one the tuple omits is silently
+# absent from its sandbox and never compared. Refuse that gap at generation.
+RUNTIME_SOURCE_PROJECTION_ROOTS = {
+    ("exomonad-host", "exomonad_host_unit_tests"): ".exomonad/workspace/skills",
+}
+
+
+def validate_runtime_source_projection(root_relative, projection):
+    root = ROOT / root_relative
+    if not root.is_dir():
+        return
+    declared = set(projection)
+    actual = {
+        path.relative_to(ROOT).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+    undeclared = sorted(actual - declared)
+    missing = sorted(declared - actual)
+    if undeclared or missing:
+        raise SystemExit(
+            f"skill source projection does not cover {root_relative}: "
+            f"undeclared={undeclared} missing={missing}"
+        )
 
 # Each module is declared behind #[cfg(test)] in prepared_program.rs.
 CODEGEN_TEST_ONLY_SOURCES = {
@@ -570,6 +597,7 @@ EXTERNAL_SOURCE_LABELS = {
     ".exomonad/workspace/skills/exomonad-project-work/SKILL.md": "//:actor_skill_exomonad_project_work",
     ".exomonad/workspace/skills/exomonad-review/SKILL.md": "//:actor_skill_exomonad_review",
     ".exomonad/workspace/skills/exomonad-command/SKILL.md": "//:actor_skill_exomonad_command",
+    ".exomonad/workspace/skills/exomonad-command/references/hosted-tools.md": "//:facade_doc__exomonad_workspace_skills_exomonad_command_references_hosted_tools_md",
     ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md": "//:actor_skill_exomonad_define_actors",
     ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md": "//:actor_skill_exomonad_agent_spec",
     ".exomonad/workspace/skills/exomonad-jev/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md",
@@ -639,7 +667,12 @@ def source_inputs(package, target, features=(), test_target=False):
     includes = re.compile(r'include(?:_(?:str|bytes))?!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = EXTERNAL_SOURCE_LABELS
-    for repo_relative in RUNTIME_SOURCE_PROJECTIONS.get((package["name"], target["name"]), ()):
+    projection_key = (package["name"], target["name"])
+    projection = RUNTIME_SOURCE_PROJECTIONS.get(projection_key, ())
+    projection_root = RUNTIME_SOURCE_PROJECTION_ROOTS.get(projection_key)
+    if projection_root is not None:
+        validate_runtime_source_projection(projection_root, projection)
+    for repo_relative in projection:
         external[external_labels[repo_relative]] = repo_relative
     while pending:
         source = pending.pop()
