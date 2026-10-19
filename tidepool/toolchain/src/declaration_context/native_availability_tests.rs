@@ -4414,9 +4414,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .selected_interfaces()
         .unwrap()
         .support_for_owners(owners)
-        .unwrap()
-        .retain_offers([offer])
         .unwrap();
+    let narrowed = fixture_support_with_issued_offers(
+        narrowed.projection().clone(),
+        narrowed.artifacts().clone(),
+        [offer],
+    )
+    .unwrap();
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),

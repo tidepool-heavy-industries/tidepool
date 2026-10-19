@@ -789,44 +789,19 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     let fixture = issued_declarations(true)[0].clone();
     let inventory = ArtifactInventory::default();
     let full = inventory
-        .admit_shared(
+        .admit_shared_with_demand(
             &inventory.empty_view(),
             vec![fixture.canonical.clone(), fixture.original.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let issued = CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
-    let support =
-        crate::declaration_context::recover_fixture_compiler_support(issued, full.clone(), [])
-            .unwrap();
-    let projected = support
-        .selected_interfaces()
-        .unwrap()
-        .select_owners(vec![fixture.original.descriptor.owner.clone()])
-        .unwrap();
-    let view = full
-        .select_issued(
-            projected
-                .capture_graph_selection()
-                .namespace
-                .iter()
-                .map(|binding| binding.artifact)
-                .collect(),
-            &crate::artifact_inventory::ExactArtifactSelection::capture(&projected),
-        )
-        .unwrap();
-    let projection = CompilerInputProjection::restore(
-        &view,
-        &[CompilerInputRole::ReusableOriginal {
-            interface: fixture.canonical.descriptor.id,
-            original: fixture.original.descriptor.id,
-        }],
-    )
-    .unwrap();
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
     let target = fixture.original.descriptor.owner.clone();
     let context = Arc::new(
         ExactDeclarationContext::from_authenticated_execution(
             producer,
-            &view,
+            &full,
             projection,
             vec![ExactLexicalNode {
                 owner: target.clone(),
