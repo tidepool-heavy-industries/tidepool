@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
 
-use crate::artifact_inventory::CanonicalProducerIdentity;
+use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
@@ -510,6 +510,7 @@ pub struct CompilerWorldRestoration {
     product: Arc<[u8]>,
     primary_root: ContextRoot,
     primary_blocks: ReachableBlocks,
+    primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     producer: [u8; 32],
     profile: [u8; 32],
@@ -523,6 +524,7 @@ impl fmt::Debug for CompilerWorldRestoration {
             .field("logical_id", &self.logical_id)
             .field("primary_root", &self.primary_root)
             .field("primary_frontier_work", &self.primary_blocks.work())
+            .field("primary_association_root", self.primary_associations.root())
             .field("binding_root", self.bindings.root())
             .finish_non_exhaustive()
     }
@@ -808,6 +810,21 @@ fn binding_row_metadata_bound(
     )
 }
 
+// ArtifactBinding's derived codec is a two-field map of fixed 32-byte
+// arrays. Reserve its key, both acquired bindings and the complete private
+// HAMT path before staging any association or copying semantic row fields.
+fn primary_association_metadata_bound(
+    unit: &str,
+    module: &str,
+    requires: &[crate::declaration_join::ExactModuleIdentity],
+) -> Result<u64, CompileError> {
+    let binding = 9 + 2 * (9 + 9 + 32 * 9);
+    let routing = 52 * ((9 + 9 + 4 + 9) + (9 + 9 + 39));
+    binding_row_metadata_bound(unit, module, requires)?
+        .checked_add(routing + 5 * 9 + 3 * binding + 9 + 20 + 1)
+        .ok_or_else(source_size_failure)
+}
+
 struct WorldColdRows {
     producer: [u8; 32],
     files: BTreeMap<PathBuf, Arc<std::fs::File>>,
@@ -1031,6 +1048,208 @@ fn world_semantic_row(
     ]))
 }
 
+fn materialize_primary_association<BS: fvm_ipld_blockstore::Blockstore>(
+    materializer: &mut Materializer<'_, BS>,
+    interface: &ArtifactBinding,
+    original: Option<&ArtifactBinding>,
+    semantic: &ciborium::value::Value,
+) -> Result<cid::Cid, CompileError> {
+    materializer
+        .materialize_value(&("TPCWPRIMARY1", interface, original, semantic))
+        .map_err(|error| source_failure(error.to_string()))
+}
+
+fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
+    context: &ExactDeclarationContext,
+    producer: &[u8; 32],
+    directory: &Path,
+    rows: &mut WorldColdRows,
+    materializer: &mut Materializer<'_, BS>,
+    remaining_raw: &mut u64,
+) -> Result<
+    (
+        Vec<ciborium::value::Value>,
+        MaterializedMap<ArtifactBinding, cid::Cid>,
+    ),
+    CompileError,
+> {
+    use crate::declaration_context::original_inputs::{OriginalInputKind as K, OriginalInputPart};
+    let mut primary_facts = imbl::OrdMap::new();
+    let mut base = Vec::new();
+    for (ordinal, selected) in context
+        .compiler_source_support()
+        .world_primary_type_rows()
+        .enumerate()
+    {
+        let entry = selected.entry;
+        if selected.owner != &entry.descriptor.owner {
+            return Err(source_failure("primary acquired row has another owner"));
+        }
+        crate::host_work::checkpoint()?;
+        let estimate = primary_association_metadata_bound(
+            &entry.descriptor.owner.unit,
+            &entry.descriptor.owner.module,
+            &entry.requirements,
+        )?;
+        *remaining_raw = remaining_raw
+            .checked_sub(estimate)
+            .ok_or_else(|| binding_capture_refusal(estimate, *remaining_raw))?;
+        let root = directory.join(format!("primary-{ordinal}"));
+        let mut builder =
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
+                .map_err(|e| source_failure(e.to_string()))?;
+        let mut pending = Vec::new();
+        for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry) {
+            if matches!(kind, K::Native | K::Census | K::Graph) {
+                continue;
+            }
+            if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
+                return Err(source_failure("world type input exceeds its format bound"));
+            }
+            *remaining_raw = remaining_raw
+                .checked_sub(bytes.len() as u64)
+                .ok_or_else(source_size_failure)?;
+            pending.push((
+                kind,
+                builder
+                    .append(bytes)
+                    .map_err(|e| source_failure(e.to_string()))?,
+            ));
+        }
+        let arena = builder
+            .finish()
+            .map_err(|e| source_failure(e.to_string()))?;
+        let parts = pending
+            .into_iter()
+            .map(|(kind, pending)| {
+                let transport = arena
+                    .issue_slice(pending)
+                    .map_err(|e| source_failure(e.to_string()))?;
+                Ok(OriginalInputPart {
+                    kind,
+                    path: root.join(kind.wire_tag()),
+                    sha256: world_hex(transport.sha256()),
+                    bytes: transport.len(),
+                    transport,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let row = rows.row(entry, parts)?.0;
+        let semantic = world_semantic_row(&row, producer)?;
+        let fact = materialize_primary_association(
+            materializer,
+            selected.interface_binding,
+            selected.original_binding,
+            &semantic,
+        )?;
+        if primary_facts
+            .insert(*selected.transport_binding, fact)
+            .is_some()
+        {
+            return Err(source_failure("duplicate primary transport binding"));
+        }
+        base.push(row);
+    }
+    let primary_associations = materializer
+        .materialize_map(None, &primary_facts)
+        .map_err(|error| source_failure(error.to_string()))?;
+    Ok((base, primary_associations))
+}
+
+/// DATA from an already-issued context, through the production association
+/// writer. The fixture packet owns copied arena bytes until its actual reader
+/// completes. Its tagged file ranges are DATA, not a production acquisition:
+/// the existing Haskell fixture owner must reseal them before the real reader.
+/// These bytes issue no new compiler or runtime permission.
+#[cfg(test)]
+pub(crate) fn world_context_fixture(
+    context: &ExactDeclarationContext,
+    directory: &Path,
+) -> Result<Vec<u8>, CompileError> {
+    use ciborium::value::Value;
+    use std::os::unix::fs::FileExt;
+    let snapshot = context.snapshot();
+    let producer = snapshot.producer_sha256();
+    let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    let primary = materializer
+        .materialize_context(None, &snapshot)
+        .map_err(|error| source_failure(error.to_string()))?;
+    let mut rows = WorldColdRows {
+        producer,
+        files: BTreeMap::new(),
+        images: BTreeMap::new(),
+        rows: BTreeMap::new(),
+        arenas: Default::default(),
+    };
+    let mut remaining = capture_allowance()?;
+    let (base, associations) = materialize_primary_associations(
+        context,
+        &producer,
+        directory,
+        &mut rows,
+        &mut materializer,
+        &mut remaining,
+    )?;
+    let mut acquisition = rows
+        .arenas
+        .acquisition(rows.images.into_values().collect())?;
+    let Value::Array(fields) = &mut acquisition else {
+        unreachable!()
+    };
+    fields[0] = world_text("TPCWORLDFIXTUREBYTES1");
+    let Value::Array(arenas) = &mut fields[1] else {
+        unreachable!()
+    };
+    for (index, descriptor) in arenas.iter_mut().enumerate() {
+        let Value::Array(fields) = descriptor else {
+            unreachable!()
+        };
+        let Value::Text(endpoint) = &fields[0] else {
+            unreachable!()
+        };
+        let extent: u64 = fields[1]
+            .as_integer()
+            .and_then(|n| n.try_into().ok())
+            .ok_or_else(|| source_failure("fixture arena extent"))?;
+        let file = rows
+            .files
+            .get(Path::new(endpoint))
+            .ok_or_else(|| source_failure("fixture arena owner"))?;
+        let destination = directory.join(format!("world-arena-{index}"));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
+        let mut offset = 0;
+        let mut buffer = [0u8; 65536];
+        while offset < extent {
+            crate::host_work::checkpoint()?;
+            let count = (extent - offset).min(buffer.len() as u64) as usize;
+            file.read_exact_at(&mut buffer[..count], offset)?;
+            std::io::Write::write_all(&mut output, &buffer[..count])?;
+            offset += count as u64;
+        }
+        fields[0] = world_path(&destination)?;
+    }
+    let staged = materializer
+        .finish()
+        .map_err(|error| source_failure(error.to_string()))?;
+    world_bytes(&world_array(vec![
+        world_blob(primary.root().cid().to_bytes()),
+        world_blob(associations.root().cid().to_bytes()),
+        world_array(base),
+        acquisition,
+        world_array(
+            staged
+                .blocks()
+                .iter()
+                .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
+                .collect(),
+        ),
+    ]))
+}
+
 impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
@@ -1067,9 +1286,6 @@ impl CompilerWorldOpenInputs {
         mut self,
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
-        use crate::declaration_context::original_inputs::{
-            OriginalInputKind as K, OriginalInputPart,
-        };
         let identity = endpoint.identity();
         let producer = CanonicalProducerIdentity::from_compiler(identity).sha256();
         let profile = *identity
@@ -1107,60 +1323,17 @@ impl CompilerWorldOpenInputs {
         let mut remaining_raw = capture_allowance()?
             .checked_sub(envelope_bytes)
             .ok_or_else(source_size_failure)?;
-        let metadata = self.primary_context.compiler_metadata_snapshot()?;
-        let mut base = Vec::with_capacity(metadata.entries.len());
-        let mut base_references = Vec::with_capacity(metadata.entries.len());
-        for (ordinal, entry) in metadata.entries.values().enumerate() {
-            crate::host_work::checkpoint()?;
-            let root = self.directory.path().join(format!("primary-{ordinal}"));
-            let mut builder =
-                crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
-                    .map_err(|e| source_failure(e.to_string()))?;
-            let mut pending = Vec::new();
-            for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry)
-            {
-                if matches!(kind, K::Native | K::Census | K::Graph) {
-                    continue;
-                }
-                if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
-                    return Err(source_failure("world type input exceeds its format bound"));
-                }
-                remaining_raw = remaining_raw
-                    .checked_sub(bytes.len() as u64)
-                    .ok_or_else(source_size_failure)?;
-                pending.push((
-                    kind,
-                    builder
-                        .append(bytes)
-                        .map_err(|e| source_failure(e.to_string()))?,
-                ));
-            }
-            let arena = builder
-                .finish()
-                .map_err(|e| source_failure(e.to_string()))?;
-            let parts = pending
-                .into_iter()
-                .map(|(kind, pending)| {
-                    let transport = arena
-                        .issue_slice(pending)
-                        .map_err(|e| source_failure(e.to_string()))?;
-                    Ok(OriginalInputPart {
-                        kind,
-                        path: root.join(kind.wire_tag()),
-                        sha256: world_hex(transport.sha256()),
-                        bytes: transport.len(),
-                        transport,
-                    })
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?;
-            let row = rows.row(entry, parts)?.0;
-            base_references.push(world_semantic_row(&row, &producer)?);
-            base.push(row);
-        }
         let mut binding_materializer = Materializer::new(&primary_blocks);
+        let (base, primary_associations) = materialize_primary_associations(
+            &self.primary_context,
+            &producer,
+            self.directory.path(),
+            &mut rows,
+            &mut binding_materializer,
+            &mut remaining_raw,
+        )?;
         let mut binding_rows = BTreeMap::new();
         let mut visible = Vec::with_capacity(self.visible_rows.len());
-        let mut references = Vec::with_capacity(self.visible_rows.len());
         for artifact in &self.visible_rows {
             crate::host_work::checkpoint()?;
             let (entry, parts) = artifact.world_type_parts()?;
@@ -1188,7 +1361,6 @@ impl CompilerWorldOpenInputs {
                 .materialize_value(&row_fact)
                 .map_err(|error| source_failure(error.to_string()))?;
             binding_rows.insert(artifact.owner().module_name(), row_root);
-            references.push(semantic);
             visible.push(row);
         }
         let binding_facts = self.bindings.cold_snapshot(&binding_rows)?;
@@ -1199,7 +1371,14 @@ impl CompilerWorldOpenInputs {
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
         primary_blocks = primary_blocks
-            .replace_roots(&staged, vec![*primary_root.cid(), *bindings.root().cid()])
+            .replace_roots(
+                &staged,
+                vec![
+                    *primary_root.cid(),
+                    *primary_associations.root().cid(),
+                    *bindings.root().cid(),
+                ],
+            )
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
         crate::host_work::record_host_work(
@@ -1219,28 +1398,18 @@ impl CompilerWorldOpenInputs {
             .blocks()
             .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
             .collect();
-        let seals = primary_blocks
-            .blocks()
-            .map(|(cid, body)| {
-                world_array(vec![
-                    world_blob(cid.to_bytes()),
-                    world_blob(world_digest(body)),
-                ])
-            })
-            .collect();
-        // The closed Materializer issued the CID basis. This SHA envelope binds
-        // transfer and restoration; it does not independently verify CID content.
+        // CID-validated roots bind logical facts. Cold transfer order and raw
+        // image inventory are not part of a live successor's fixed identity.
         let product = world_bytes(&world_array(vec![
             world_text("TPCWREST"),
-            2u64.into(),
+            3u64.into(),
             world_blob(primary_root.cid().to_bytes()),
             world_blob(self.sources.seal()),
             world_blob(producer),
             world_blob(profile),
-            world_blob(&visibility),
-            world_blob(world_digest(&world_bytes(&world_array(base_references))?)),
-            world_blob(world_digest(&world_bytes(&world_array(references))?)),
-            world_blob(world_digest(&world_bytes(&world_array(seals))?)),
+            self.bindings.query_scope.into(),
+            world_blob(primary_associations.root().cid().to_bytes()),
+            world_blob(bindings.root().cid().to_bytes()),
         ]))?;
         let logical_id = world_digest(&product);
         let source_path = self.directory.path().join("sources.bin");
@@ -1252,7 +1421,7 @@ impl CompilerWorldOpenInputs {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            2u64.into(),
+            3u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
@@ -1270,6 +1439,7 @@ impl CompilerWorldOpenInputs {
             product: product.into(),
             primary_root,
             primary_blocks,
+            primary_associations,
             bindings,
             producer,
             profile,
@@ -2129,6 +2299,100 @@ mod answer_tests {
         let staged = materializer.finish().unwrap();
         assert!(staged.metrics().staged_bytes <= bound);
     }
+    #[test]
+    fn primary_associations_preserve_scoped_bindings_and_bound_actual_staging() {
+        use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
+        use fvm_ipld_blockstore::Blockstore;
+        let requires = vec![crate::declaration_join::ExactModuleIdentity {
+            unit: "dependency-unit".repeat(8),
+            module: "Dependency.Module".repeat(8),
+        }];
+        let semantic = world_array(vec![
+            world_text("main"),
+            world_text("Owner"),
+            world_blob([1; 32]),
+            world_blob([2; 32]),
+            world_text("module"),
+            world_array(vec![world_array(vec![
+                world_text(&requires[0].unit),
+                world_text(&requires[0].module),
+            ])]),
+        ]);
+        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let mut facts = imbl::OrdMap::new();
+        let mut scoped_roots = Vec::new();
+        let estimate = primary_association_metadata_bound("main", "Owner", &requires).unwrap();
+        for index in 0..128u8 {
+            let interface = ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: ArtifactSelectionId([index; 32]),
+            };
+            let original = ArtifactBinding {
+                artifact: ArtifactId([4; 32]),
+                ..interface
+            };
+            let fact = materialize_primary_association(
+                &mut materializer,
+                &interface,
+                Some(&original),
+                &semantic,
+            )
+            .unwrap();
+            facts.insert(original, fact);
+            if index < 2 {
+                let mut one = imbl::OrdMap::new();
+                one.insert(original, fact);
+                scoped_roots.push(
+                    *materializer
+                        .materialize_map(None, &one)
+                        .unwrap()
+                        .root()
+                        .cid(),
+                );
+            }
+        }
+        assert_ne!(
+            scoped_roots[0], scoped_roots[1],
+            "equal images cannot erase acquisition scopes"
+        );
+        let root = materializer.materialize_map(None, &facts).unwrap();
+        let staged = materializer.finish().unwrap();
+        assert!(staged.metrics().staged_bytes <= 128 * estimate + 128);
+        for (cid, body) in staged.blocks() {
+            store.put_keyed(cid, body).unwrap();
+        }
+        let bytes = store.get(root.root().cid()).unwrap().unwrap();
+        assert!(!bytes.is_empty());
+        let first = *facts.iter().next().unwrap().1;
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(store.get(&first).unwrap().unwrap().as_slice()).unwrap();
+        let fields = value.as_array().unwrap();
+        assert_eq!(fields[0].as_text(), Some("TPCWPRIMARY1"));
+        assert_eq!(&fields[3], &semantic);
+        assert!(primary_association_metadata_bound("main", "Owner", &[]).unwrap() < estimate);
+    }
+
+    #[test]
+    fn empty_context_parcel_uses_production_primary_association_writer() {
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .admit_producer([7; 32])
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let encoded = world_context_fixture(&context, directory.path()).unwrap();
+        let parcel: ciborium::value::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let fields = parcel.as_array().unwrap();
+        assert_eq!(fields.len(), 5);
+        assert!(fields[2].as_array().unwrap().is_empty());
+        let blocks = fields[4].as_array().unwrap();
+        for root in &fields[..2] {
+            assert!(blocks
+                .iter()
+                .any(|block| &block.as_array().unwrap()[0] == root));
+        }
+    }
+
     #[test]
     fn world_identifier_namespace_is_checked_beyond_question_echo() {
         use InspectionNamespace as N;
