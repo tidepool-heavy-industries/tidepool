@@ -1003,6 +1003,29 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 'lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
             ]
         })
+        self.assertEqual(group['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
+                         '$(location //build/package:compiler_deployment)')
+        self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG', group['resource_env'])
+        self.assertNotIn('//build/package:compiler_service_deployment', group['resources'])
+        rooted = self.rule('exomonad/actor', 'actor_compiler_world_queries_test',
+                           'tidepool_rust_test_cases')
+        self.assertEqual(rooted['binary'], group['binary'])
+        self.assertEqual(rooted['exact_tests'], [
+            'resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation',
+            'resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base',
+        ])
+        self.assertEqual(rooted['expected_count'], 2)
+        self.assertTrue(rooted['ignored'])
+        self.assertEqual(rooted['case_compiler_modes'], {
+            name: 'owned-resident' for name in rooted['exact_tests']
+        })
+        self.assertEqual(rooted['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
+                         '$(location //build/package:compiler_service_deployment)/compiler-deployment.json')
+        self.assertEqual(rooted['resource_env']['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'],
+                         '$(location //build/package:compiler_service_deployment)/compiler-service-source.bin')
+        self.assertIn('//build/package:compiler_service_deployment', rooted['resources'])
+        self.assertNotIn('//build/package:compiler_deployment', rooted['resources'])
+        self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted['env'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
