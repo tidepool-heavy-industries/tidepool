@@ -1684,3 +1684,196 @@ move and direct compile/execution evidence. Leaf reports pinned formatting and
 source generation checks only; no leaf or reviewer native execution was
 performed for this repair. Parent owns integration and counted execution.
 Full R1/runtime-END/off-checkout acceptance remains expressly withheld.
+
+
+### Active C6 category/contract review at area 345194431d
+
+Exact area base for this activation:
+345194431d9f8407a7b7e7c4c273eafbce90bfc0. Read CURRENT reload/HANDOFF.md
+(the replaced handoff), actual committed producer/caller objects, and shared C6
+decision 923fd554a08ae208833e6bdd9b88a11d54e227ca. The timing/prefix/strong-lease
+option previously pending in this report is now APPROVED by campaign: actual
+preparation physical END, final canonical lease adoption, then one runtime-owned
+source transaction; unknown preparation refuses advancement. This supersedes
+older waiting-for-signature status, not the documented defects or qualification
+limits. Leaf is implementing, but no WIP implementation is accepted here. Area
+native gate is parent-owned and source-frozen; no native command was launched by
+this reviewer. Parent reports current four-target gate active (session24915);
+no terminal success is inferred.
+
+Primary confirmed new production analogue: checked declaration adoption.
+`ResidentActorWorkbench::begin_prepared_cell_item` (`resident_workbench.rs:8369`)
+reserves a checked item using ordinary access.with_machine; its Declaration
+branch (`8395`) uses another ordinary with_machine and calls
+ResidentSession::adopt_checked_declaration (`resident.rs:3995`). That validates
+target placement and delegates to PersistentSession's adoption in
+`admission.rs:1807`, which checks exact prefix/native products and physical
+visibility. It then invokes adopt_staged_declaration_with_activation and the
+shared adopt_staged_declaration_prepared (`persistent.rs:2013`). Neither checked
+item reservation nor adoption earns source admission. The latter commits the
+source-owner origin, declaration binding changes, public visibility epoch and
+new declaration tip. Source fencing preserves these physical facts, so retained
+compiled declaration products can still mutate the old source domain after
+fencing. This is an actual actor route, not an inferred public-only escape and
+not pure continuation. The prior with_machine observation contract is necessary
+for neutral operations, so making every checkout an eager source gate would be
+an incorrect repair.
+
+Minimal independent joined frontdoor control: extend the existing actual test
+`resident_workbench::request_tests::planned_cell_defers_declaration_until_its_admitted_item`
+(`resident_workbench.rs:25261`). Its real actor registry/private-cell setup calls
+prepare_cell on `plannedDecl args = length (args :: [Int])`, obtains the actual
+PreparedCell.items[0], verifies no declaration exists yet, then invokes
+begin_prepared_cell_item. In a new branch retain the real issuing source A lease,
+fence A AFTER prepare_cell returns, keep the physical private scope alive, and
+invoke the same production begin_prepared_cell_item with the unused actual item.
+Require typed SourceAdmission refusal before declaration-tip/source-origin/binding
+changes; inspect the actual prefix cursor/reservation to distinguish clean refusal
+from partial reservation. Keep an independent open positive with a new affine
+item and source-neutral observation/pure control. An actual pre-fence admitted
+transaction may finish, but an unused issued item cannot manufacture a later
+source claim. The resulting test must enter the final runtime owner and actual
+collector, rather than grant permission through a private test callback.
+
+Related public split frontdoors at the same base:
+
+- stage_declarations_in (`persistent.rs:1910`) and
+  render_declaration_candidate_in (`1945`) bypass ordinary declaration commit's
+  existing admission. render_admitted_candidate_in (`session/mod.rs:2514`) can
+  reserve a declaration generation DURABLY before returning a candidate. That
+  durable mutation is fresh work; unattached pure rendering alone is not
+  automatically publication or compiler authority.
+- Public validate_declaration_candidate (`session/mod.rs:3217`) receives a
+  detached candidate, writes its .hs module, invokes compiler validation and,
+  when reserved, certifies authored declarations/prepares projection. It carries
+  no source capability to check at that actual deferred producer. A candidate
+  rendered open and validated after fencing is analogous to PendingPreparedInstall.
+- adopt_staged_declaration_in and the checked production path share the ungated
+  commit helper above. A staged open artifact may not bypass the final gate.
+  Public commit_declaration_receipt_in (`persistent.rs:3918`; ResidentSession
+  delegate `resident.rs:4309`) also bypasses commit_declarations_in's claim: the
+  durable branch uses stage/adopt, while the unattached branch calls the lower
+  SessionLib compiler/commit directly and changes bindings/visibility.
+- Ordinary define/commit_declarations_in (`3890`) and retract_heads_in (`2276`)
+  ALREADY earn source admission. Preserve these existing owners and consolidate
+  at actual split producer/commit consumers; do not scatter frontend prechecks
+  or equate rendering with publication. Caller search found legacy render/validate
+  uses mostly component fixtures, but checked declaration adoption above supplies
+  the required real actor route.
+
+Parent acknowledged the source-owner category, and leaf acknowledged migrating
+checked adoption through the actual source transaction BEFORE reservation plus
+shared render/stage/adopt hooks. The exact implementation remains unreviewed.
+These concrete owning consumers add session/mod.rs and turn.rs where needed to
+the handoff's enumerated runtime cone; parent was notified to coordinate those
+same-category paths. No broad registration or R2/R3 work is authorized.
+
+Further public fresh compiler producers, with actor wrappers protected:
+turn::compile_activation_renderer (`turn.rs:2699`) requires a native transaction
+origin through PreparedRenderer::prepare, but inner specialization (`2728`)
+creates/writes scratch template, selects/executes GHC and prepares native images
+without earning the real preview admission's source claim. A real preview
+admission retained from open A, then fence A, then call this PUBLIC producer under
+the existing raw settle_compiler_transaction: native origin exists, but is
+identity evidence rather than source permission. Actor's actual caller
+(`resident_workbench.rs:7465`) owns an eager SourceDependency ticket, so this is
+not a second unguarded actor path. Similarly public
+prepare_cell_program_admitted (`turn.rs:3041`) and compile_cell_program_admitted
+(`2845`) consume retained RuntimeCellAdmission. Their inner preparation (`3210`)
+checks origin/purpose/parser facts and then writes scratch/executes the compiler,
+without fresh source admission; actual actor caller (`resident_workbench.rs:8056`)
+is protected by its eager source ticket. Issuing RuntimeCellAdmission originally
+was gated, but does not retain an affine source claim through later compilation.
+The final public owner must cover these compositional producer fronts or make
+private producers consume an actual opaque owner capability. A raw origin or
+caller-supplied permissive hook cannot suffice. Do not confuse this classification
+with standalone original-code preparation or merely observing immutable facts.
+
+Approved phase split rechecked against actual constructors (no hard strategy
+inability found): host ChildSessionFactory (`exomonad/host/src/actor_host.rs:3518`)
+opens/attaches declaration state and returns a fresh UNBOOTSTRAPPED machine.
+The child authored/shared-driver bootstrap is later in
+provision_child_session (`resident_workbench.rs:5079`). Thus the actual factory
+can run ONCE under its preparation ticket and collect its real close before
+mint/adopt final S and enter runtime-owned bootstrap. Current CompilerWorkTicket::run
+(`termination.rs:430`) discards settled close by returning only .action; using
+that unchanged would advance on Ok(machine) plus Unconfirmed END. Use the
+existing actual run_with_close result and inspect authoritative close; unknown
+must not adopt, execute bootstrap or publish the machine registry. A borrowed
+inner NotStarted is not a substitute for outer close. Preserve primary factory
+failure separately from cleanup uncertainty. No factory replay is needed.
+
+Program root preparation (`resident_workbench.rs:12642`) already owns a live
+session and mints final S immediately before the authored root entry; adopt at
+that actual issuer and execute the entry ONCE under the runtime owner. Do not
+run it as preparation and then replay it in a source phase. Workbench root
+provisioning has no authored entry before boot. Child remint uses parent context
+(`10055`), then await_launch resolves checkpoint/fallback/new-machine scope before
+transfer_mailbox_value (`child_launch.rs:532`). Same-session rehome is the first
+own-child World with_machine at that stage; adopt final S before that transfer.
+Cross-session import uses raw with_host_machine and cannot infer source authority
+from placement. Descriptor World and directory reservation exist earlier while
+scope is provisional/ROOT; neither may trigger automatic canonical adoption.
+
+Concrete recovery hazard remains important: runner
+transfer_recovered_root_public_owner (`resident_workbench.rs:9412`) ITSELF enters
+with_machine with the root's own BootstrapWorld BEFORE performing the public
+owner epoch transfer. Generic checkout auto-adoption would therefore retain a
+stale canonical lease. Host transfer (`actor_host.rs:2158`), confirmed readiness/
+finish_binding, then release_root_startup (`2213`) provide the actual post-transfer,
+pre-authored interval. Keep pre-transfer checkout as private observation/placement
+context with no source permission; explicitly attach the final lease afterward.
+Fresh scope identity is not an authorization factory.
+
+Transferred callbacks retain source A while executing in recipient B. The final
+owner validates the strong lease's ORIGINAL owner/epoch and separately validates
+recipient physical custody; it may not require equality with B's admission owner
+or current actor generation. Strong source lease custody survives old generation
+wrapper drop, from_context with absent snapshot, generation-None SourceCallback,
+and startup-to-behavior handoff. Open is checked lazily at actual source work;
+fenced/retired source plus live physical custody still supports neutral progress.
+The first-publication canonical C fence remains closed through visibility/ack
+without any self-C publisher claim; metadata observation must not earn a compiler
+claim or recreate a gate.
+
+Test/oracle truth at this base: migrated public facade tests use real SessionLib,
+retained notebook lease and public producers, so they are honest issuer tests;
+they must now enter the final actual runtime transaction owner. Current joined
+Sleep→bind test uses the real old actor wrapper but manually constructs a
+BootstrapWorld separately from its scope and injects aggregate Unconfirmed after
+resume. It does not establish canonical WorldC/same-lower-C issuance, physical
+END loss or final runtime collector custody. New Generation/root/typed bootstrap
+controls must obtain context/world/strong lease through the production issuer
+(or the same private production constructor), invoke the actual runtime owner
+ONCE, observe its actual earned lower claim after hidden binding and before its
+outer close, then verify retention on Unknown/panic/abandon. Keep aggregate-injected
+Unknown labelled separately from actual post-resume physical GHC END uncertainty.
+Pure continuation and empty/unchanged selection must leave the actual collector
+empty; refusal must precede files/compiler/registry/commit effects. Unknown
+factory preparation must prevent the second phase without replay.
+
+Disposition: bounded category/contract source search complete. Confirmed checked
+declaration actor bypass and public split/compiler analogues were delivered to
+parent and leaf while implementation proceeds. C6 phase split is feasible at the
+actual production issuers subject to its approved close/custody ordering; no new
+registry, authority factory, framework or actor/runtime dependency inversion is
+needed. No WIP was approved. Only this authorized report changed and source-only
+inspection is not native evidence. Next event/producer: admission leaf supplies
+an exact frozen coherent C6 candidate and owning early compile receipt; parent
+reactivates full exact-candidate/history review. Parent owns current source-frozen
+native gate and its terminal evidence. Yield without periodic polling.
+
+
+Campaign terminal scope instruction received: the exact turn-producer cone is
+accepted and this category search is now CLOSED for this activation. Freeze a
+coherent implementation checkpoint before further analogue expansion. Explicit
+settlement distinction: deferred Cranelift compilation is synchronous native
+CPU work with its own operation completion, not a GHC daemon transaction END.
+Its original snapshot checkout's END cannot authorize or settle a later compile.
+Earn/retain the source claim around that actual deferred operation and refuse
+before fresh compile/cache publication after fencing. GHC renderer/cell/facade
+producers instead retain their claims through the actual owning GHC physical
+END/abandon. Do not fabricate GHC uncertainty for a synchronous Cranelift-only
+control. Confirmed findings, protected actor exceptions, pure observations and
+untested/native boundaries above remain separate. Await exact candidate plus
+early owning compile; no further category search or source change this activation.

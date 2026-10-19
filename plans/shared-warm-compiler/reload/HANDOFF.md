@@ -3,11 +3,12 @@
 Original contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
 `feature/shared-warm/reload`; supervisor `/root/warm_compiler_campaign/reload`.
-Current implementation checkpoint: `ab7246e569`, joining campaign contract
+Current implementation checkpoint: `d9efb188fb1ee27f06901440eca8ccf20c7a72c4`, joining campaign contract
 `923fd554a0` through `aebe74eac5` and reviewed Ready repair
 `4e790ab850f4df886fc185e15a7b28139f6bf530` through `3fcbbb4bfc`.
-This joined successor is not compiled or accepted. Campaign owns shared contracts
-and qualification; this file owns the area continuation.
+The joined `345194431d` production/test configurations compiled. Its bounded
+Ready control passed; full feature acceptance remains withheld. Campaign owns
+shared contracts and qualification; this file owns the area continuation.
 
 ## Current disposition
 
@@ -33,8 +34,12 @@ consumer using Ready metadata's exact lexical scope. Its control proves positive
 installation first, then refusal with unchanged state, then precompiled pure
 completion under the same fenced scope. Public facade fixtures now use real
 PersistentSession/ResidentSession entry points instead of naked private callback
-issuers. These source changes await native execution. `ab7246e569` imports the
-real `minutes` helper into the minimal Sleep fixture; no assertion was relaxed.
+issuers. The Ready control and legacy public facade control now pass natively. The
+certified inherited facade control fails during initial declaration setup before
+its producer. The minimal Sleep fixture now imports the real `minutes` helper
+through the canonical template builder imports argument (`d9efb188fb`); an earlier
+appended import failed the protected insertion-marker contract and remains
+retained failure evidence. No assertion was relaxed.
 
 ## Executed evidence and independent blockers
 
@@ -71,6 +76,27 @@ and consolidated `foundation-counted-receipt.json`. Real Sleep/bind/facade work
 plus injected aggregate Unconfirmed does not establish a real post-resume GHC END
 fault. Current public-owner uncertainty/panic controls remain pending.
 
+Subsequent joined native evidence (separate from the original foundation):
+
+- Exact `345194431d9f8407a7b7e7c4c273eafbce90bfc0`: all four runtime/actor
+  production and cfg(test) targets compile, exit 0, 26 local actions. Receipt
+  `ready-sleep-four-target-receipt.json`; no tests executed by that build.
+- Same source: runtime focus selects/executes 3, passes 2, fails 1. Ready's real
+  install/refusal/unchanged-state/pure control and legacy public facade pass.
+  Certified inherited facade fails at `facade.rs:442`, initial define_scoped_in
+  returning StaleStagedDeclaration before facade production. The fixture changed
+  ROOT to a newly minted isolated notebook; investigate actual capture/source
+  initialization rather than relaxing exact-context/native validation. Failed
+  case diagnostics are incomplete, compiler cleanup not_observed, inputs retained.
+  Receipt `ready-facade-counted-receipt.json` and `ready-facade-focus/`.
+- Exact `d9efb188fb1ee27f06901440eca8ccf20c7a72c4`: corrected Sleep selector
+  selects/executes/passes 1, exit 0. Actual resumed Sleep then hidden binding runs
+  Generation/rootBootstrap/typedBootstrap variants, with pure/refusal controls.
+  The aggregate Unconfirmed is injected; this is not a physical post-resume GHC
+  END fault. Process cleanup is confirmed, compiler cleanup not_observed and
+  diagnostics_complete false. Receipt `sleep-binding-counted-receipt.json` and
+  `sleep-binding-focus02/`. Preserve these limits despite the behavioral pass.
+
 The std-only protocol generator, generated mirror refresh and snapshot check
 passed earlier (tests executed: 0); receipt `protocol-generator-receipt.json`.
 Generated consumers still require their owning gates. Pinned format/source-map
@@ -103,8 +129,13 @@ check Open lazily at actual fresh source work. Supplemental hooks can restrict
 but never supply missing lease authority. The entry reuses existing
 `settle_compiler_transaction_cancellable_for_workload`; lower concrete source
 claims settle at its SAME real physical outer END/abandon. Make stacked source
-setter/claim-transfer helpers private. Public PersistentSession/ResidentSession
-facade producers require the actual owning entry or typed refusal. Foreign/raw
+setter/claim-transfer helpers private. For off-checkout/static producers the same private runner lends a concrete
+RuntimeSourceCompilerTransaction capability, issued only inside that real owner
+entry. It binds the original lease and actual origin and cannot escape or remain
+usable after END (borrowed lifetime/closed state); no public constructor or test
+factory exists. Session wrappers delegate to this same runner. Public
+PersistentSession/ResidentSession facade producers require the actual owning
+entry or typed refusal. Foreign/raw
 nested transactions refuse; borrowed inner NotStarted never settles outer holds.
 Pure continuations and empty/unchanged facade paths remain claim-free.
 
@@ -145,13 +176,22 @@ prepared,facade}.rs`; actor `termination.rs`,
 recovery issuers in `resident_workbench.rs`, `start.rs`, `mount.rs`, `local_actor.rs`
 and their direct constructor consumers. Coordinate host introspection query
 admission with host_inputs; provider-world/capsule ownership is not eligibility.
+The bounded analogue review additionally confirmed actual retained checked-cell
+declaration adoption through begin_prepared_cell_item, plus public split
+stage/render/validate/adopt/commitReceipt fronts. Gate actual fresh side effects
+and commits through the SAME owner, including retained artifacts; rendering
+without durable identity allocation can stay pure. Exact turn.rs renderer and
+prepare/compile_cell_program_admitted producers likewise require actual source
+owner capability, not raw CompilerTransactionOrigin. These exact additions are
+approved; category search is frozen before the core checkpoint/early compile.
 No broad registration/drain scope is authorized in this primary repair.
 
 Include confirmed adjacent deferred compiler owners in the SAME repair:
 PendingPreparedInstall/Source currently lacks provenance at actual off-checkout
 Cranelift compile; retain exact source capability and refuse before fresh compile
-or registry mutation after fence. Separate cache reuse from new compilation and
-final install. Public host-value materialization compiles before its later install
+or registry mutation after fence. Its fresh synchronous Cranelift claim lasts
+through actual compilation completion, not a fictitious GHC END or an earlier
+snapshot checkout END. Separate cache reuse from new compilation and final install. Public host-value materialization compiles before its later install
 gate; legacy carrier writes before later admission. Close at actual fresh producer,
 not another test-local check. Already installed precompiled execution stays neutral.
 
@@ -168,25 +208,35 @@ Two retained descendants, both `gpt-6.1-sol`, high, fork none; original starts
 2026-10-19 07:52 UTC, no descendant capacity:
 
 - `generation_admission`: isolated admission checkout, source terminal
-  `4e790ab850f4df886fc185e15a7b28139f6bf530`, reserved implementation owner for
-  the approved primary repair on this joined base. Area sends exact reactivation.
+  `4e790ab850f4df886fc185e15a7b28139f6bf530`, now ACTIVE implementing approved
+  C6 on joined `345194431d`, with the area Sleep fix `d9efb188fb` supplied. It
+  sends a coherent frozen core/direct-caller checkpoint before native admission.
 - `authority_review`: report-only `REVIEW-BASE.md` owner, completed independent
-  cumulative foundation and bounded Ready review. Reserved for exact new owner
-  candidate full-history review, including issuer timing and missed analogues.
+  cumulative foundation, bounded Ready and exact `345194431d` C6 analogue review.
+  Dormant after terminal category report, reserved for exact new owner candidate
+  full-history review, including issuer timing and actual control entry points.
 
-Area owns next native Ready/Sleep controls independently. Qualification/campaign
+Area collected terminal Ready/Sleep results and released its active native lane.
+Qualification/campaign
 own baseline discrimination for preserved context/native-original failures.
 Host_inputs owns optimized PublicModule query consumer and receives the final
 fresh source admission API before consuming it. No source/native command is
 running at this handoff update; no orphan command observer exists.
 
 The owned bind mount and pinned --tests tools are realized; no browser gate yet.
+Latest refreshed admitted projection was 60.92 GiB with only qualification
+baseline actor and reload both budgeted at 14 GiB. Earlier stale-scope rejection
+(93.1 GiB) remains retained and superseded by producer-confirmed admission, not
+bypassed. All area native jobs are now terminal; idle daemon memory stays in
+global Current and does not represent an active reservation.
 Latest measured build cgroup peak 13,410,226,176 bytes exceeded the initial 12 GiB
 estimate; future compile allowance is 14 GiB, 32 GiB prospective growth. Before
 launch refresh build.slice current plus remaining per-scope budgets (subtract
 actual currents already included), keep below 80 GiB and disk >=100 GiB+growth.
-Campaign's test lane released; qualification 24 GiB, host index 8 GiB and owned
-baseline 12 GiB may remain active. Never infer fresh admission from stale totals.
+Campaign's test lane and qualification Persona are terminal; at the latest
+producer receipt only qualification baseline actor (14 GiB) remained active.
+Host/owned/warm successors were source-only, not admitted native lanes. Refresh
+producer receipts and actual scopes before any next launch.
 Installed swarm-build storage flags remain unsupported. Use supported wrapper,
 local-only repository commands; no daemon restart/cleanup or ambient compiler.
 
