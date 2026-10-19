@@ -579,9 +579,13 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         0 => graph["native_groups"].as_array_mut().unwrap().clear(),
                         1 => {
                             let groups = graph["native_groups"].as_array_mut().unwrap();
-                            let mut unissued: NativeGroupBinding =
-                                serde_json::from_value(groups[0].clone()).unwrap();
-                            prop_assert_eq!(unissued.original_ordinal, ORDINALS[initial]);
+                            let roots = groups.iter().map(|group|
+                                serde_json::from_value::<NativeGroupBinding>(group.clone()).unwrap())
+                                .filter(|group| group.binding.artifact() == root.descriptor.id
+                                    && group.original_ordinal == ORDINALS[initial])
+                                .collect::<Vec<_>>();
+                            prop_assert_eq!(roots.len(), 1, "mutation names the exact selected Root, independently of helper row order");
+                            let mut unissued = roots[0];
                             unissued.original_ordinal = ORDINALS[(initial + 1) % ORDINALS.len()];
                             groups.push(serde_json::to_value(unissued).unwrap());
                         }
