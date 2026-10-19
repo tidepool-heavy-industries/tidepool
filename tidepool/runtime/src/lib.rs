@@ -926,15 +926,20 @@ mod tests {
 
     fn prepare_target_control(
         owner: &session::RuntimeSourceCompilerTransaction,
-        source: &str,
+        expression: &str,
         report: &mut dyn FnMut(CompilerTransactionClose),
     ) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
+        let source = session::assemble_expression_module(
+            "{-# LANGUAGE DataKinds #-}\nmodule PreparedTargetsControl where\nimport Control.Monad.Freer (Eff)\n",
+            "result", "'[]", expression, session::ExpressionLift::Effectful,
+        );
+        let include = [tidepool_testing::eval_harness::prelude_path()];
         prepare_runtime_targets_in_context(
             owner,
             &artifacts::CompileInvocation {
-                source,
-                targets: &["result"],
-                include: &[],
+                source: &source,
+                targets: &[session::PREPARED_SCAFFOLD_TARGET],
+                include: &include,
                 fallback_module_name: "PreparedTargetsControl",
             },
             Arc::new(
@@ -949,8 +954,7 @@ mod tests {
         )
     }
 
-    const PREPARED_TARGET_CONTROL: &str =
-        "module PreparedTargetsControl where\nresult = 42 :: Int\n";
+    const PREPARED_TARGET_CONTROL: &str = "pure (42 :: Int)";
 
     #[test]
     fn prepared_targets_reject_foreign_settlement_and_retired_original() {
@@ -999,7 +1003,7 @@ mod tests {
         assert_eq!(
             prepared
                 .run(
-                    "result",
+                    session::PREPARED_SCAFFOLD_TARGET,
                     DEFAULT_NURSERY_SIZE,
                     &mut frunk::HNil,
                     &(),
@@ -1017,7 +1021,7 @@ mod tests {
             .unwrap();
         let mut entered = false;
         let refused = prepared.run(
-            "result",
+            session::PREPARED_SCAFFOLD_TARGET,
             DEFAULT_NURSERY_SIZE,
             &mut frunk::HNil,
             &(),
@@ -1043,7 +1047,7 @@ mod tests {
             let settled = source.with_source_compiler_transaction(
                 artifacts::CompileWorkload::Foreground, CompilerTransactionCancellation::new(), None, |_| {},
                 |owner, report| {
-                    let source = if action_fails { "module PreparedTargetsControl where\nresult = missingTargetName\n" } else { PREPARED_TARGET_CONTROL };
+                    let source = if action_fails { "missingTargetName" } else { PREPARED_TARGET_CONTROL };
                     let result = prepare_target_control(owner, source, report);
                     assert_eq!(result.is_err(), action_fails);
                     // Aggregate injection is not a physical GHC END fault.
