@@ -1024,6 +1024,27 @@ mod tests {
         )
     }
 
+    fn issued_context() -> ToolInvocationContext {
+        ToolInvocationContext::original(exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::External {
+                thread_id: "embedded-run".into(),
+            },
+            request_id: "request-1".into(),
+            call_id: "call-1".into(),
+        })
+    }
+
+    fn issued_value(response: &Value) -> &Value {
+        assert_eq!(response["nativeResult"]["version"], 1, "{response}");
+        assert_eq!(response["nativeResult"]["kind"], "value", "{response}");
+        assert_eq!(
+            response["nativeResult"]["operation"],
+            serde_json::to_value(issued_context().model_operation().unwrap()).unwrap(),
+            "{response}"
+        );
+        &response["nativeResult"]["body"]
+    }
+
     #[test]
     fn installed_context_authority_follows_pinned_effects_and_schedule() {
         use exomonad_tool::{ToolEffectKey, ToolImplementation, ToolScheduling};
@@ -1241,13 +1262,13 @@ mod tests {
                 .dispatch(
                     "haskell".into(),
                     ToolArguments::Raw("1".into()),
-                    context(),
+                    issued_context(),
                     None,
                     None,
                 )
                 .await
                 .unwrap();
-            assert_eq!(result["marker"], expected);
+            assert_eq!(issued_value(&result)["marker"], expected);
         }
     }
 
@@ -1294,11 +1315,11 @@ mod tests {
                         let projected = snapshot.tools().iter().find(|entry| entry["name"] == tool.name()).unwrap();
                         proptest::prop_assert_eq!(&projected["async"], &json!(tool.scheduling() == exomonad_tool::ToolScheduling::Async));
                         let value = if *integer { json!(17) } else { json!("retained") };
-                        let result = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":value})), context(), None, None)).unwrap();
-                        proptest::prop_assert_eq!(&result["marker"], &json!(marker));
-                        proptest::prop_assert_eq!(&result["arguments"]["structured"]["value"], &value);
-                        let null = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":null})), context(), None, None)).unwrap();
-                        proptest::prop_assert_eq!(&null["arguments"]["structured"], &if *integer { json!({"value":null}) } else { json!({}) });
+                        let result = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":value})), issued_context(), None, None)).unwrap();
+                        proptest::prop_assert_eq!(&issued_value(&result)["marker"], &json!(marker));
+                        proptest::prop_assert_eq!(&issued_value(&result)["arguments"]["structured"]["value"], &value);
+                        let null = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":null})), issued_context(), None, None)).unwrap();
+                        proptest::prop_assert_eq!(&issued_value(&null)["arguments"]["structured"], &if *integer { json!({"value":null}) } else { json!({}) });
                         // Primitive value validation belongs to the typed actor endpoint;
                         // this transport owner preserves its advertised type and null projection.
                         let value_schema = &projected["parameters"]["properties"]["value"];
@@ -1398,13 +1419,13 @@ mod tests {
                                 ToolArguments::Structured(
                                     json!({(field):null,"operation":null,"after":null}),
                                 ),
-                                context(),
+                                issued_context(),
                                 None,
                                 None,
                             )
                             .await
                             .unwrap();
-                        assert_eq!(result["arguments"]["structured"], json!({}));
+                        assert_eq!(issued_value(&result)["arguments"]["structured"], json!({}));
                     }
                     let bash = snapshot
                         .tools()
@@ -1503,13 +1524,13 @@ mod tests {
             .dispatch(
                 "haskell".into(),
                 ToolArguments::Raw("retained".into()),
-                context(),
+                issued_context(),
                 None,
                 None,
             )
             .await
             .unwrap();
-        assert_eq!(old["marker"], "A");
+        assert_eq!(issued_value(&old)["marker"], "A");
     }
 
     #[tokio::test]
@@ -1540,7 +1561,7 @@ mod tests {
                 .dispatch(
                     "ambiguous".into(),
                     ToolArguments::Structured(json!({"choice":{"value":null}})),
-                    context(),
+                    issued_context(),
                     None,
                     None
                 )
@@ -1564,14 +1585,14 @@ mod tests {
             .dispatch(
                 "haskell".into(),
                 ToolArguments::Raw("1".into()),
-                context(),
+                issued_context(),
                 None,
                 None,
             )
             .await
             .unwrap();
-        assert_eq!(result["marker"], "issued-handler");
-        assert_eq!(result["name"], "haskell");
+        assert_eq!(issued_value(&result)["marker"], "issued-handler");
+        assert_eq!(issued_value(&result)["name"], "haskell");
     }
 
     #[tokio::test]
@@ -1587,15 +1608,15 @@ mod tests {
             .dispatch(
                 "haskell".into(),
                 ToolArguments::Raw("λ = 1".into()),
-                context(),
+                issued_context(),
                 None,
                 None,
             )
             .await
             .unwrap();
         assert_eq!(
-            raw,
-            json!({
+            issued_value(&raw),
+            &json!({
                 "marker": "first", "name": "haskell", "context": "call-1",
                 "arguments": {"raw": "λ = 1"},
             })
@@ -1604,15 +1625,15 @@ mod tests {
             .dispatch(
                 "lookup".into(),
                 ToolArguments::Structured(json!({"key": "x"})),
-                context(),
+                issued_context(),
                 None,
                 None,
             )
             .await
             .unwrap();
         assert_eq!(
-            structured,
-            json!({
+            issued_value(&structured),
+            &json!({
                 "marker": "second", "name": "lookup", "context": "call-1",
                 "arguments": {"structured": {"key": "x"}},
             })
@@ -1622,12 +1643,12 @@ mod tests {
                 .dispatch(
                     "haskell".into(),
                     ToolArguments::Raw("again".into()),
-                    context(),
+                    issued_context(),
                     None,
                     None,
                 )
                 .await,
-            Ok(value) if value["marker"] == "first"
+            Ok(value) if issued_value(&value)["marker"] == "first"
         ));
     }
 }
