@@ -13236,7 +13236,7 @@ pub(crate) mod tests {
                         let required_row = input.native_availability(entries[2].descriptor.id);
                         for ordinal in [7, 9001] {
                             assert_eq!(
-                                required_row.is_some_and(|row| row.permits(ordinal)),
+                                required_row.as_ref().is_some_and(|row| row.permits(ordinal)),
                                 grant_full || selected == Some(ordinal)
                             );
                         }
