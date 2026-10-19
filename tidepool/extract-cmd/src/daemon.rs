@@ -2013,21 +2013,10 @@ pub(crate) fn serve(
     if let Some(configuration) =
         crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?
     {
-        let owner = std::env::var_os(crate::package_source::OWNER_ENV).ok_or_else(|| {
-            FrontendError::Daemon(
-                "rooted standalone daemon lacks the complete-retirement owner".into(),
-            )
-        })?;
-        let owner = PathBuf::from(owner);
-        crate::frontend::require_owned_source_parent().map_err(FrontendError::Io)?;
-        if !owner.is_absolute() || !owner.is_dir() {
-            return Err(FrontendError::Daemon(
-                "invalid owned service control directory".into(),
-            ));
-        }
+        let owner = crate::frontend::read_owned_service_startup().map_err(FrontendError::Io)?;
         prepared.service_source = Some(
             configuration
-                .acquire(epoch, &owner)
+                .acquire(epoch, owner)
                 .map_err(FrontendError::Io)?,
         );
     }

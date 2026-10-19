@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const CONFIG_ENV: &str = "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG";
 pub(crate) const CONFIG_SHA_ENV: &str = "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256";
-pub(crate) const OWNER_ENV: &str = "TIDEPOOL_COMPILER_SERVICE_OWNER_DIRECTORY";
 pub(crate) const BOOT_ENV: [&str; 6] = [
     "TIDEPOOL_COMPILER_PACKAGE_PROFILE",
     "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256",
@@ -236,7 +235,7 @@ impl ConfiguredSource {
     pub(crate) fn acquire(
         self: &Arc<Self>,
         epoch: [u8; 32],
-        owner: &Path,
+        owner: crate::frontend::OwnedServiceStartup,
     ) -> io::Result<Arc<ServicePackageSource>> {
         for key in ["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
             if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {
@@ -259,18 +258,27 @@ impl ConfiguredSource {
             .arg("--service-epoch")
             .arg(crate::endpoint::hex(&epoch))
             .arg("--owner-directory")
-            .arg(owner)
+            .arg(owner.directory())
             .output()?;
         if !output.status.success() {
             return Err(invalid(format!(
                 "compiler source acquisition failed: {}; retained owner {}",
                 output.status,
-                owner.display()
+                owner.directory().display()
             )));
         }
-        let source = self.decode_receipt(&output.stdout, epoch)?;
-        tidepool_atomic_write::write_durable(&owner.join(HANDOFF), &output.stdout)
-            .map_err(io::Error::other)?;
+        let mut source = self.decode_receipt(&output.stdout, epoch)?;
+        source._owner = Some(Arc::new(owner));
+        tidepool_atomic_write::write_durable(
+            &source
+                ._owner
+                .as_ref()
+                .expect("actual owner")
+                .directory()
+                .join(HANDOFF),
+            &output.stdout,
+        )
+        .map_err(io::Error::other)?;
         Ok(Arc::new(source))
     }
 
@@ -328,6 +336,7 @@ impl ConfiguredSource {
             profile_path,
             profile_sha,
             commitment: digest(facts),
+            _owner: None,
         })
     }
 
@@ -378,6 +387,7 @@ pub(crate) struct ServicePackageSource {
     profile_path: PathBuf,
     profile_sha: [u8; 32],
     commitment: [u8; 32],
+    _owner: Option<Arc<crate::frontend::OwnedServiceStartup>>,
 }
 
 impl ServicePackageSource {
@@ -502,6 +512,7 @@ mod tests {
             profile_path: "/unused/profile".into(),
             profile_sha: [7; 32],
             commitment: [8; 32],
+            _owner: None,
         })
     }
 
