@@ -39,6 +39,7 @@ import Tidepool.Effects.Core (Notifications)
 import Tidepool.Effects.Core (Reflect)
 import Tidepool.Effects.Core (RepoEvent)
 import Tidepool.Effects.Core (ResourceScopes)
+import Tidepool.Effects.Core (RuntimeInfo)
 import Tidepool.Effects.Core (Sleep)
 import Tidepool.Effects.Core (Source)
 import Tidepool.Effects.Core (SpawnAgent)
@@ -102,6 +103,7 @@ instance KnownEffect (Reflect) where effectWitness = EffectWitness EffectReflect
 instance KnownEffect (Lookup) where effectWitness = EffectWitness EffectLookup
 instance KnownEffect (RepoEvent) where effectWitness = EffectWitness EffectRepoEvent
 instance KnownEffect (Source) where effectWitness = EffectWitness EffectSource
+instance KnownEffect (RuntimeInfo) where effectWitness = EffectWitness EffectRuntimeInfo
 instance KnownEffect (Journal) where effectWitness = EffectWitness EffectJournal
 instance KnownEffect (Web) where effectWitness = EffectWitness EffectWeb
 instance KnownEffect (FsRead) where effectWitness = EffectWitness EffectFsRead

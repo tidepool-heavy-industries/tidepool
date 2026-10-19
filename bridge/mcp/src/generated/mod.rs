@@ -29,6 +29,7 @@ pub mod reflect;
 pub mod reload;
 pub mod repo_event;
 pub mod resource_scopes;
+pub mod runtime_info;
 pub mod sleep;
 pub mod source;
 pub mod spawn_agent;
@@ -67,6 +68,7 @@ pub use reflect::*;
 pub use reload::*;
 pub use repo_event::*;
 pub use resource_scopes::*;
+pub use runtime_info::*;
 pub use sleep::*;
 pub use source::*;
 pub use spawn_agent::*;
@@ -118,6 +120,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         agent_session_decl(),
         reflect_decl(),
         source_decl(),
+        runtime_info_decl(),
         reload_decl(),
         model_call_decl(),
         context_read_write_decl(),
@@ -615,6 +618,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "EffectLookup",
             "EffectRepoEvent",
             "EffectSource",
+            "EffectRuntimeInfo",
             "EffectJournal",
             "EffectWeb",
             "EffectFsRead",

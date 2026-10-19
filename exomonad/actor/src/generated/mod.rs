@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod reflect;
 pub mod reload;
 pub mod resource_scopes;
+pub mod runtime_info;
 pub mod sleep;
 pub mod source;
 pub mod spawn_agent;

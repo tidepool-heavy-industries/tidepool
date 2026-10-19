@@ -74,6 +74,8 @@ pub enum ActorEffectKeyWire {
     EffectSpawnAgentArgon,
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectSpawnAgentDeepSeek,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectRuntimeInfo,
 }
 
 impl ActorEffectKeyWire {
@@ -110,6 +112,7 @@ impl ActorEffectKeyWire {
         Self::EffectLookup,
         Self::EffectRepoEvent,
         Self::EffectSource,
+        Self::EffectRuntimeInfo,
         Self::EffectJournal,
         Self::EffectWeb,
         Self::EffectFsRead,
@@ -154,6 +157,7 @@ impl ActorEffectKeyWire {
             Self::EffectSpawnAgentOpenAI => "EffectSpawnAgentOpenAI",
             Self::EffectSpawnAgentArgon => "EffectSpawnAgentArgon",
             Self::EffectSpawnAgentDeepSeek => "EffectSpawnAgentDeepSeek",
+            Self::EffectRuntimeInfo => "EffectRuntimeInfo",
         }
     }
 }
@@ -197,6 +201,7 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectSpawnAgentOpenAI => Self::SpawnAgentOpenAI,
             ActorEffectKeyWire::EffectSpawnAgentArgon => Self::SpawnAgentArgon,
             ActorEffectKeyWire::EffectSpawnAgentDeepSeek => Self::SpawnAgentDeepSeek,
+            ActorEffectKeyWire::EffectRuntimeInfo => Self::RuntimeInfo,
         }
     }
 }

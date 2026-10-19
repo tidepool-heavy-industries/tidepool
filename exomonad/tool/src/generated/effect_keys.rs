@@ -122,6 +122,8 @@ pub enum ActorEffectKey {
     SpawnAgentArgon,
     #[serde(rename = "SpawnAgent.DeepSeek")]
     SpawnAgentDeepSeek,
+    #[serde(rename = "RuntimeInfo")]
+    RuntimeInfo,
 }
 
 impl ActorEffectKey {
@@ -158,6 +160,7 @@ impl ActorEffectKey {
         Self::Lookup,
         Self::RepoEvent,
         Self::Source,
+        Self::RuntimeInfo,
         Self::Journal,
         Self::Web,
         Self::FsRead,
@@ -203,6 +206,7 @@ impl ActorEffectKey {
             Self::SpawnAgentOpenAI => "SpawnAgent",
             Self::SpawnAgentArgon => "SpawnAgent",
             Self::SpawnAgentDeepSeek => "SpawnAgent",
+            Self::RuntimeInfo => "RuntimeInfo",
         }
     }
 
@@ -240,6 +244,7 @@ impl ActorEffectKey {
             Self::Lookup => "Lookup",
             Self::RepoEvent => "RepoEvent",
             Self::Source => "Source",
+            Self::RuntimeInfo => "RuntimeInfo",
             Self::Journal => "Journal",
             Self::Web => "Web",
             Self::FsRead => "FsRead",
@@ -287,6 +292,7 @@ impl ActorEffectKey {
             Self::SpawnAgentOpenAI => "SpawnAgent.OpenAI",
             Self::SpawnAgentArgon => "SpawnAgent.Argon",
             Self::SpawnAgentDeepSeek => "SpawnAgent.DeepSeek",
+            Self::RuntimeInfo => "RuntimeInfo",
         }
     }
 
@@ -324,6 +330,7 @@ impl ActorEffectKey {
             Self::Lookup => Some("Tidepool.Effects.Core"),
             Self::RepoEvent => Some("Tidepool.Effects.Core"),
             Self::Source => Some("Tidepool.Effects.Core"),
+            Self::RuntimeInfo => Some("Tidepool.Effects.Core"),
             Self::Journal => Some("Tidepool.Effects.Core"),
             Self::Web => Some("Tidepool.Effects.Core"),
             Self::FsRead => Some("Tidepool.Effects.Core"),
@@ -366,6 +373,7 @@ impl ActorEffectKey {
             Self::Lookup => Some("EffectLookup"),
             Self::RepoEvent => Some("EffectRepoEvent"),
             Self::Source => Some("EffectSource"),
+            Self::RuntimeInfo => Some("EffectRuntimeInfo"),
             Self::Journal => Some("EffectJournal"),
             Self::Web => Some("EffectWeb"),
             Self::FsRead => Some("EffectFsRead"),
@@ -435,6 +443,7 @@ impl ActorEffectKey {
             Self::Lookup => &[],
             Self::RepoEvent => &[],
             Self::Source => &[],
+            Self::RuntimeInfo => &[],
             Self::Journal => &[],
             Self::Web => &[],
             Self::FsRead => &[],
@@ -538,6 +547,7 @@ impl ToolEffectKey {
         Self::Actor(ActorEffectKey::Lookup),
         Self::Actor(ActorEffectKey::RepoEvent),
         Self::Actor(ActorEffectKey::Source),
+        Self::Actor(ActorEffectKey::RuntimeInfo),
         Self::Actor(ActorEffectKey::Journal),
         Self::Actor(ActorEffectKey::Web),
         Self::Actor(ActorEffectKey::FsRead),
