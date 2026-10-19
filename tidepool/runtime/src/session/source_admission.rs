@@ -39,6 +39,8 @@ pub enum SourceAdmissionError {
     Exhausted,
     #[error("source retirement attempt no longer owns its fence")]
     StaleFence,
+    #[error("source fence settlement did not commit its scoped reopen")]
+    ReopenNotCommitted,
     #[error("source admission for scope {scope:?} retains {count} unconfirmed actions")]
     Unconfirmed { scope: ScopeId, count: usize },
 }
@@ -288,6 +290,40 @@ pub struct RuntimeSourceFence {
     owner: RuntimeSourceAdmission,
     attempt: u64,
 }
+
+/// Evidence that only this own gate reopened. Ancestor gates may still refuse
+/// fresh work; this value grants no source admission.
+#[derive(Debug)]
+pub struct OwnSourceFenceReopened {
+    _private: (),
+}
+
+/// A synchronous view of the existing locked fence. Its owner compares its
+/// publication state before committing, without reacquiring a source gate.
+pub struct RuntimeSourceReopen<'a> {
+    state: &'a mut AdmissionState,
+    committed: &'a mut bool,
+}
+impl RuntimeSourceReopen<'_> {
+    pub fn commit(self) {
+        self.state.phase = SourceAdmissionPhase::Open;
+        *self.committed = true;
+    }
+}
+
+struct ScopedReopen<'a> {
+    state: &'a mut AdmissionState,
+    original: SourceAdmissionPhase,
+    committed: bool,
+    accepted: bool,
+}
+impl Drop for ScopedReopen<'_> {
+    fn drop(&mut self) {
+        if !self.accepted {
+            self.state.phase = self.original;
+        }
+    }
+}
 impl RuntimeSourceFence {
     pub fn unconfirmed_claims(&self) -> usize {
         self.owner.0.state.lock().unconfirmed
@@ -318,6 +354,53 @@ impl RuntimeSourceFence {
     }
     pub fn reopen(self) -> Result<(), SourceAdmissionError> {
         self.settle(SourceAdmissionPhase::Open)
+    }
+    /// Validate exact canonical custody before taking this own gate. The
+    /// callback may hold its actual publication compare guard through commit.
+    /// No issuer/ancestor gate may be acquired inside it. Error, panic or a
+    /// missing commit leaves the fence closed. Commit must be its last action.
+    /// Success reopens only this gate; future work admits the full source chain.
+    pub fn reopen_with<E>(
+        self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
+    ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
+        if !lease.source_admission().same_owner(&self.owner) {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+            let mut state = self.owner.0.state.lock();
+            let original = SourceAdmissionPhase::Fenced {
+                attempt: self.attempt,
+            };
+            if state.phase != original {
+                return Err(SourceAdmissionError::StaleFence);
+            }
+            if state.unconfirmed != 0 {
+                return Err(SourceAdmissionError::Unconfirmed {
+                    scope: self.owner.0.scope,
+                    count: state.unconfirmed,
+                });
+            }
+            let mut scoped = ScopedReopen {
+                state: &mut state,
+                original,
+                committed: false,
+                accepted: false,
+            };
+            let result = settle(RuntimeSourceReopen {
+                state: &mut *scoped.state,
+                committed: &mut scoped.committed,
+            });
+            match result {
+                Ok(()) if scoped.committed => {
+                    scoped.accepted = true;
+                    Ok(Ok(OwnSourceFenceReopened { _private: () }))
+                }
+                Ok(_) => Err(SourceAdmissionError::ReopenNotCommitted),
+                Err(error) => Ok(Err(error)),
+            }
+        })
     }
     pub fn retire(self, successor: NotebookGenerationId) -> Result<(), SourceAdmissionError> {
         self.settle(SourceAdmissionPhase::Retired { successor })
@@ -353,6 +436,116 @@ mod tests {
     use super::*;
     use crate::session::{PersistentSession, SessionError};
     use proptest::prelude::*;
+
+    #[test]
+    fn conditional_reopen_commits_under_compare_guard_but_preserves_parent_fence() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_notebook_scope_with_lease(None).unwrap();
+        let child = session
+            .mint_notebook_scope_with_lease(Some(parent.clone()))
+            .unwrap();
+        let parent_fence = parent.source_admission().fence().unwrap();
+        let child_fence = child.source_admission().fence().unwrap();
+        let selected = Mutex::new(false);
+        let _own_only = child_fence
+            .reopen_with(&child, |reopen| {
+                let mut current = selected.lock();
+                *current = true;
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(*selected.lock());
+        assert!(matches!(
+            child.admit_source(),
+            Err(SourceAdmissionError::Closed { .. })
+        ));
+        parent_fence.reopen().unwrap();
+        child.admit_source().unwrap();
+    }
+
+    #[test]
+    fn conditional_reopen_missing_commit_error_and_unwind_keep_fence_closed() {
+        let mut session = PersistentSession::new(None, 1024);
+        for outcome in 0..4 {
+            let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+            let fence = scope.source_admission().fence().unwrap();
+            let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fence.reopen_with(&scope, |reopen| {
+                    if outcome != 0 {
+                        reopen.commit();
+                    }
+                    match outcome {
+                        0 => Ok(()),
+                        1 => Err("owner refused"),
+                        2 => panic!("owner unwound after commit"),
+                        _ => Ok(()),
+                    }
+                })
+            }));
+            match outcome {
+                0 => assert!(matches!(
+                    observed.unwrap(),
+                    Err(SourceAdmissionError::ReopenNotCommitted)
+                )),
+                1 => assert!(matches!(observed.unwrap(), Ok(Err("owner refused")))),
+                2 => assert!(observed.is_err()),
+                _ => assert!(observed.unwrap().unwrap().is_ok()),
+            }
+            assert_eq!(scope.admit_source().is_ok(), outcome == 3);
+        }
+    }
+
+    #[test]
+    fn conditional_reopen_refuses_wrong_canonical_owner_and_retired_issuer() {
+        let mut session = PersistentSession::new(None, 1024);
+        let first = session.mint_notebook_scope_with_lease(None).unwrap();
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = first.source_admission().fence().unwrap();
+        let called = std::cell::Cell::new(false);
+        assert!(matches!(
+            fence.reopen_with(&other, |reopen| {
+                called.set(true);
+                reopen.commit();
+                Ok::<_, ()>(())
+            }),
+            Err(SourceAdmissionError::StaleFence)
+        ));
+        assert!(!called.get());
+        assert!(first.admit_source().is_err());
+        let fence = other.source_admission().fence().unwrap();
+        drop(session);
+        assert!(matches!(
+            fence.reopen_with(&other, |reopen| {
+                called.set(true);
+                reopen.commit();
+                Ok::<_, ()>(())
+            }),
+            Err(SourceAdmissionError::StaleSourceLease)
+        ));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn conditional_reopen_cannot_discard_unconfirmed_source_work() {
+        let mut session = PersistentSession::new(None, 1024);
+        let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let claim = scope.admit_source().unwrap();
+        let fence = scope.source_admission().fence().unwrap();
+        claim.retain_unconfirmed();
+        let called = std::cell::Cell::new(false);
+        assert!(matches!(
+            fence.reopen_with(&scope, |reopen| {
+                called.set(true);
+                reopen.commit();
+                Ok::<_, ()>(())
+            }),
+            Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
+        ));
+        assert!(!called.get());
+        assert!(scope.admit_source().is_err());
+    }
 
     #[test]
     fn fencing_source_refuses_late_binding_without_retiring_custody() {
