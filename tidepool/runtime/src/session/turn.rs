@@ -6231,6 +6231,7 @@ mod tests {
             frontend_path: frontend,
             worker_path: directory.path().join("worker"),
             ghc_libdir: directory.path().join("ghc"),
+            package_source: None,
         };
         std::fs::write(&manifest, serde_json::to_vec(&configuration).unwrap()).unwrap();
         let _configuration = TestEnvGuard::set("TIDEPOOL_COMPILER_DEPLOYMENT", manifest);

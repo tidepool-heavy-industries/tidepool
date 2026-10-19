@@ -1679,6 +1679,7 @@ mod tests {
                 frontend_path: "/configured/frontend".into(),
                 worker_path: "/configured/worker".into(),
                 ghc_libdir: "/configured/ghc".into(),
+                package_source: None,
             };
             let evidence = DependencyEvidence {
                 version: 4,
@@ -1867,6 +1868,7 @@ mod tests {
                 &crate::toolchain::AdmittedCompilerDeployment {
                     producer_identity,
                     consumed_worker_identity: [4; 32],
+                    source: crate::toolchain::AdmittedPackageSource::ObservationOnly,
                 },
                 &prepared,
                 RootPolicy::Fixture,

@@ -1,0 +1,11 @@
+# Compiler service source implementation
+
+Task `/root/warm_compiler_campaign/owned_inputs/rows`, branch `feature/shared-warm/service-source`, base923fd554a08ae208833e6bdd9b88a11d54e227ca. Existing owned-rows real checkout/mount/daemon reused; old `feature/shared-warm/owned-rows` remains clean5113d9c962. Controlling packet SHA256a18cf40809765dbdbbfb3d01eab2e02d5ec03940c7c3dc30723588f9495a0688 and DEMAND-SERVICE Package source decision.
+
+This branch owns qualifier provider/declared-resource/freeze adapter, package BUCK target, toolchain schema2 expected-source admission and bounded necessary callers/tests/README. Warm owns all extract-cmd/Haskell codec/boot/lifecycle edits. Host owns its two preflight caller migrations. No new agent/registry/launcher or public rooted test constructor.
+
+Initial API checkpoint: `CompilerDeploymentConfiguration::admit(&CompilerEndpoint)` and `admit_service_preflight(&CompilerIdentity)` share one private checker. Schema1 stays ObservationOnly; schema2 requires the actual privately issued service association, with matching configured source/profile and nonempty service epoch/boot commitment. This is service readiness, not the post-BEGIN actual worker realization. Admitted deployment keeps association private; raw digest tests exercise refusal only. Warm's exact exported association types/accessors are a compile dependency, not locally stubbed proof.
+
+Source implementation in progress. Provider partial-acquisition plan must precede Nix side effects; immutable profile body excludes source/epoch/receipt and is authenticated after Nix add. Explicit complete-parent receipt release precedes private directory cleanup; uncertainty retains exact roots/receipt. Actual service acquisition owns one rootset, clients/slots/END own none. First PublicModule and joined boot/lifetime controls are required; provider-only code is not completion.
+
+Compilation and execution pending, no new native lane launched. Provisional8GiB memory/16GiB growth only with fresh build.slice/current+remaining increments below80GiB and100GiB disk reserve. Exact codec/source-profile contract agreed with warm; implementation candidate/source review/commands/counts/artifact/resource reports will be added as observed.
